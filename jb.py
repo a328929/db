@@ -44,6 +44,7 @@ class AppConfig:
 
     db_name: str
     target_group: str
+    scan_existing_chats: int
 
     dedup_mode: str
     dedup_threshold: int
@@ -63,6 +64,7 @@ class AppConfig:
 
             db_name=_env_str("TG_DB_NAME", "tg_data.db"),
             target_group=_env_str("TG_TARGET_GROUP", "向晚严选【Cosplay涩涩】"),
+            scan_existing_chats=_env_int("TG_SCAN_DB_CHATS", 0),
 
             dedup_mode=_env_str("TG_DEDUP_MODE", "PURGE_ALL").upper(),
             dedup_threshold=_env_int("TG_DEDUP_THRESHOLD", 2),
@@ -76,6 +78,10 @@ class AppConfig:
 
 
 CFG = AppConfig.load()
+
+
+def _is_enabled(v: int) -> bool:
+    return int(v) == 1
 
 
 # =========================
@@ -1327,6 +1333,54 @@ def resolve_target_entity(client: TelegramClient, target: str):
     return None
 
 
+def get_existing_chat_ids(conn: sqlite3.Connection) -> List[int]:
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id FROM chats ORDER BY last_seen_at DESC, first_seen_at DESC")
+    out: List[int] = []
+    for row in cur.fetchall():
+        try:
+            out.append(int(row["chat_id"]))
+        except Exception:
+            continue
+    return out
+
+
+def collect_target_entities(conn: sqlite3.Connection, client: TelegramClient, cfg: AppConfig) -> List[Any]:
+    entities: List[Any] = []
+    seen_chat_ids: Set[int] = set()
+
+    def _append_entity(ent: Any):
+        if not ent:
+            return
+        try:
+            cid = int(getattr(ent, "id", 0))
+        except Exception:
+            cid = 0
+        if cid and cid in seen_chat_ids:
+            return
+        if cid:
+            seen_chat_ids.add(cid)
+        entities.append(ent)
+
+    if _is_enabled(cfg.scan_existing_chats):
+        chat_ids = get_existing_chat_ids(conn)
+        logging.info(f"参数 TG_SCAN_DB_CHATS=1，尝试扫描数据库已有会话数: {len(chat_ids)}")
+        for cid in chat_ids:
+            try:
+                _append_entity(client.get_entity(cid))
+            except Exception as e:
+                logging.warning(f"跳过 chat_id={cid}（无法解析实体）: {e}")
+
+    if cfg.target_group.strip():
+        entity = resolve_target_entity(client, cfg.target_group)
+        if entity:
+            _append_entity(entity)
+        elif not entities:
+            logging.error("❌ 未找到该群组/频道，请检查名称 / 用户名 / 链接")
+
+    return entities
+
+
 def build_msg_link(entity, msg_id: int) -> str:
     username = getattr(entity, "username", None)
     if username:
@@ -1980,191 +2034,194 @@ def run_harvest():
 
     try:
         with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash) as client:
-            logging.info(f"正在接入 Telegram，目标：{CFG.target_group}")
-            entity = resolve_target_entity(client, CFG.target_group)
-            if not entity:
-                logging.error("❌ 未找到该群组/频道，请检查名称 / 用户名 / 链接")
+            entities = collect_target_entities(conn, client, CFG)
+            if not entities:
+                logging.error("❌ 无可处理的群组/频道（可检查 TG_TARGET_GROUP 或将 TG_SCAN_DB_CHATS 设为 1）")
                 return
 
-            chat_id = int(getattr(entity, "id", 0))
-            chat_title = getattr(entity, "title", CFG.target_group) or CFG.target_group
-            chat_username = getattr(entity, "username", None)
-            is_public = 1 if chat_username else 0
-            chat_type = entity.__class__.__name__
+            logging.info(f"本轮待处理群组/频道数: {len(entities)}")
 
-            upsert_chat(conn, (chat_id, chat_title, chat_username, is_public, chat_type))
+            for idx, entity in enumerate(entities, start=1):
+                chat_id = int(getattr(entity, "id", 0))
+                chat_title = getattr(entity, "title", CFG.target_group) or CFG.target_group
+                chat_username = getattr(entity, "username", None)
+                is_public = 1 if chat_username else 0
+                chat_type = entity.__class__.__name__
 
-            last_id = get_last_message_id(conn, chat_id)
-            first_sync = (last_id == 0)
-            scan_from_id = max(last_id - CFG.rescan_tail_ids, 0)
+                logging.info(f"[{idx}/{len(entities)}] 正在处理: {chat_title} (chat_id={chat_id})")
+                upsert_chat(conn, (chat_id, chat_title, chat_username, is_public, chat_type))
 
-            if first_sync:
-                logging.info("首次同步，开始全量抓取...")
-            else:
-                logging.info(f"增量同步：last_id={last_id}，回扫到 > {scan_from_id}")
+                last_id = get_last_message_id(conn, chat_id)
+                first_sync = (last_id == 0)
+                scan_from_id = max(last_id - CFG.rescan_tail_ids, 0)
 
-            count_seen = 0
-            count_written = 0
-            msg_rows: List[tuple] = []
-            media_rows: List[tuple] = []
-            touched_group_ids: Set[int] = set()
+                if first_sync:
+                    logging.info("首次同步，开始全量抓取...")
+                else:
+                    logging.info(f"增量同步：last_id={last_id}，回扫到 > {scan_from_id}")
 
-            iterator = iter(client.iter_messages(entity, min_id=scan_from_id, reverse=True))
+                count_seen = 0
+                count_written = 0
+                msg_rows: List[tuple] = []
+                media_rows: List[tuple] = []
+                touched_group_ids: Set[int] = set()
 
-            while True:
-                try:
-                    message = next(iterator)
-                except StopIteration:
-                    break
-                except FloodWaitError as e:
-                    wait_s = int(getattr(e, "seconds", 5))
-                    logging.warning(f"⏳ FloodWait，等待 {wait_s}s")
-                    time.sleep(wait_s)
-                    continue
-                except RPCError as e:
-                    logging.warning(f"Telegram RPC 错误：{e}")
-                    time.sleep(2)
-                    continue
-                except Exception as e:
-                    logging.warning(f"消息迭代异常：{e}")
-                    time.sleep(1)
-                    continue
+                iterator = iter(client.iter_messages(entity, min_id=scan_from_id, reverse=True))
 
-                count_seen += 1
-
-                try:
-                    dt = getattr(message, "date", None)
-                    if dt is None:
+                while True:
+                    try:
+                        message = next(iterator)
+                    except StopIteration:
+                        break
+                    except FloodWaitError as e:
+                        wait_s = int(getattr(e, "seconds", 5))
+                        logging.warning(f"⏳ FloodWait，等待 {wait_s}s")
+                        time.sleep(wait_s)
+                        continue
+                    except RPCError as e:
+                        logging.warning(f"Telegram RPC 错误：{e}")
+                        time.sleep(2)
+                        continue
+                    except Exception as e:
+                        logging.warning(f"消息迭代异常：{e}")
+                        time.sleep(1)
                         continue
 
-                    msg_date_ts = int(dt.timestamp())
-                    msg_date_text = dt.strftime("%Y-%m-%d %H:%M:%S")
+                    count_seen += 1
 
-                    msg_type = classify_msg_type(message)
-                    has_media = 0 if msg_type == "TEXT" else 1
-
-                    content = extract_message_text(message)
-
-                    msg_id = int(getattr(message, "id"))
-                    sender_id = getattr(message, "sender_id", None)
                     try:
-                        sender_id = int(sender_id) if sender_id is not None else None
-                    except Exception:
-                        sender_id = None
+                        dt = getattr(message, "date", None)
+                        if dt is None:
+                            continue
 
-                    grouped_id = getattr(message, "grouped_id", None)
-                    try:
-                        grouped_id = int(grouped_id) if grouped_id is not None else None
-                    except Exception:
-                        grouped_id = None
+                        msg_date_ts = int(dt.timestamp())
+                        msg_date_text = dt.strftime("%Y-%m-%d %H:%M:%S")
 
-                    if grouped_id is not None:
-                        touched_group_ids.add(grouped_id)
+                        msg_type = classify_msg_type(message)
+                        has_media = 0 if msg_type == "TEXT" else 1
 
-                    link = build_msg_link(entity, msg_id)
+                        content = extract_message_text(message)
 
-                    # 媒体元信息先抽出来（dedupe_hash 可能要用到 media_fingerprint）
-                    mmeta = extract_media_meta(message, msg_type) if has_media else None
+                        msg_id = int(getattr(message, "id"))
+                        sender_id = getattr(message, "sender_id", None)
+                        try:
+                            sender_id = int(sender_id) if sender_id is not None else None
+                        except Exception:
+                            sender_id = None
 
-                    features = build_single_promo_features(
-                        content,
-                        msg_type=msg_type,
-                        has_media=bool(has_media),
-                        cfg=CFG
-                    )
+                        grouped_id = getattr(message, "grouped_id", None)
+                        try:
+                            grouped_id = int(grouped_id) if grouped_id is not None else None
+                        except Exception:
+                            grouped_id = None
 
-                    message_dedupe_hash = build_message_dedupe_hash(
-                        text_pure_hash=features["pure_hash"],
-                        has_media=bool(has_media),
-                        media_fingerprint=(mmeta or {}).get("media_fingerprint")
-                    )
+                        if grouped_id is not None:
+                            touched_group_ids.add(grouped_id)
 
-                    msg_rows.append((
-                        chat_id, msg_id, msg_date_text, msg_date_ts, sender_id,
-                        content, features["content_norm"], features["pure_hash"], message_dedupe_hash,
-                        msg_type, grouped_id, link, has_media,
-                        int(features["is_promo"]), int(features["promo_score"]), _safe_json(features["promo_reasons"]),
-                        int(features["dedupe_eligible"]), features["guard_reason"], int(features["text_len"])
-                    ))
+                        link = build_msg_link(entity, msg_id)
 
-                    if has_media and mmeta is not None:
-                        media_rows.append((
-                            chat_id, msg_id,
-                            mmeta["media_kind"], mmeta["file_unique_id"], mmeta["file_name"], mmeta["file_ext"],
-                            mmeta["mime_type"], mmeta["file_size"], mmeta["width"], mmeta["height"], mmeta["duration_sec"],
-                            grouped_id, mmeta["media_fingerprint"], mmeta["meta_json"]
+                        # 媒体元信息先抽出来（dedupe_hash 可能要用到 media_fingerprint）
+                        mmeta = extract_media_meta(message, msg_type) if has_media else None
+
+                        features = build_single_promo_features(
+                            content,
+                            msg_type=msg_type,
+                            has_media=bool(has_media),
+                            cfg=CFG
+                        )
+
+                        message_dedupe_hash = build_message_dedupe_hash(
+                            text_pure_hash=features["pure_hash"],
+                            has_media=bool(has_media),
+                            media_fingerprint=(mmeta or {}).get("media_fingerprint")
+                        )
+
+                        msg_rows.append((
+                            chat_id, msg_id, msg_date_text, msg_date_ts, sender_id,
+                            content, features["content_norm"], features["pure_hash"], message_dedupe_hash,
+                            msg_type, grouped_id, link, has_media,
+                            int(features["is_promo"]), int(features["promo_score"]), _safe_json(features["promo_reasons"]),
+                            int(features["dedupe_eligible"]), features["guard_reason"], int(features["text_len"])
                         ))
 
-                    if len(msg_rows) >= CFG.batch_size:
-                        batch_upsert(conn, msg_rows, media_rows)
-                        count_written += len(msg_rows)
-                        msg_rows.clear()
-                        media_rows.clear()
+                        if has_media and mmeta is not None:
+                            media_rows.append((
+                                chat_id, msg_id,
+                                mmeta["media_kind"], mmeta["file_unique_id"], mmeta["file_name"], mmeta["file_ext"],
+                                mmeta["mime_type"], mmeta["file_size"], mmeta["width"], mmeta["height"], mmeta["duration_sec"],
+                                grouped_id, mmeta["media_fingerprint"], mmeta["meta_json"]
+                            ))
 
-                        if count_seen % CFG.log_every == 0:
-                            logging.info(f"扫描 {count_seen} | 写入/更新 {count_written}")
+                        if len(msg_rows) >= CFG.batch_size:
+                            batch_upsert(conn, msg_rows, media_rows)
+                            count_written += len(msg_rows)
+                            msg_rows.clear()
+                            media_rows.clear()
 
-                except Exception as e:
-                    logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
+                            if count_seen % CFG.log_every == 0:
+                                logging.info(f"扫描 {count_seen} | 写入/更新 {count_written}")
 
-            # 扫尾写入
-            if msg_rows or media_rows:
-                batch_upsert(conn, msg_rows, media_rows)
-                count_written += len(msg_rows)
-                msg_rows.clear()
-                media_rows.clear()
+                    except Exception as e:
+                        logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
 
-            # 刷新媒体组聚合
-            if first_sync:
-                logging.info("刷新 media_groups（全量）...")
-                refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=None)
-            else:
-                logging.info(f"刷新 media_groups（增量，涉及组数={len(touched_group_ids)}）...")
-                refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=touched_group_ids)
+                # 扫尾写入
+                if msg_rows or media_rows:
+                    batch_upsert(conn, msg_rows, media_rows)
+                    count_written += len(msg_rows)
+                    msg_rows.clear()
+                    media_rows.clear()
 
-            # 数据库级去重（单条 + 相册）
-            logging.info("执行数据库级去重（硬删除，含媒体组广告去重）...")
-            deduped_count, dup_hash_solo, dup_hash_group_txt, dup_hash_group_med, affected_group_ids = dedupe_promotional_duplicates(
-                conn,
-                chat_id=chat_id,
-                mode=CFG.dedup_mode,
-                threshold=CFG.dedup_threshold
-            )
+                # 刷新媒体组聚合
+                if first_sync:
+                    logging.info("刷新 media_groups（全量）...")
+                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=None)
+                else:
+                    logging.info(f"刷新 media_groups（增量，涉及组数={len(touched_group_ids)}）...")
+                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=touched_group_ids)
 
-            # 去重后刷新受影响媒体组（item_count 会变化）
-            if affected_group_ids:
-                refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=affected_group_ids)
+                # 数据库级去重（单条 + 相册）
+                logging.info("执行数据库级去重（硬删除，含媒体组广告去重）...")
+                deduped_count, dup_hash_solo, dup_hash_group_txt, dup_hash_group_med, affected_group_ids = dedupe_promotional_duplicates(
+                    conn,
+                    chat_id=chat_id,
+                    mode=CFG.dedup_mode,
+                    threshold=CFG.dedup_threshold
+                )
 
-            # 统计
-            stats = get_chat_stats(conn, chat_id)
+                # 去重后刷新受影响媒体组（item_count 会变化）
+                if affected_group_ids:
+                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=affected_group_ids)
 
-            # SQLite 优化
-            cur = conn.cursor()
-            try:
-                cur.execute("PRAGMA optimize;")
-            except Exception:
-                pass
-            try:
-                cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
-            except Exception:
-                pass
-            conn.commit()
+                # 统计
+                stats = get_chat_stats(conn, chat_id)
 
-            logging.info("✅ 处理完成")
-            logging.info(f"群组: {chat_title} (chat_id={chat_id})")
-            logging.info(f"本轮扫描消息: {count_seen}")
-            logging.info(f"本轮写入/更新: {count_written}")
-            logging.info(f"命中重复模板(单条): {dup_hash_solo}")
-            logging.info(f"命中重复模板(媒体组-文案): {dup_hash_group_txt}")
-            logging.info(f"命中重复模板(媒体组-媒体签名): {dup_hash_group_med}")
-            logging.info(f"本轮硬删除条数: {deduped_count}")
-            logging.info(f"数据库总记录: {stats['total_messages']}")
-            logging.info(f"媒体消息: {stats['media_messages']}")
-            logging.info(
-                f"引流候选消息: {stats['promo_messages']}（可自动去重: {stats['promo_dedupe_eligible_messages']} | 受保护: {stats['promo_guarded_messages']}）"
-            )
-            logging.info(f"媒体组总数: {stats['media_groups']}")
-            logging.info(f"引流候选媒体组: {stats['promo_media_groups']}（受保护: {stats['guarded_media_groups']}）")
+                # SQLite 优化
+                cur = conn.cursor()
+                try:
+                    cur.execute("PRAGMA optimize;")
+                except Exception:
+                    pass
+                try:
+                    cur.execute("PRAGMA wal_checkpoint(TRUNCATE);")
+                except Exception:
+                    pass
+                conn.commit()
+
+                logging.info("✅ 处理完成")
+                logging.info(f"群组: {chat_title} (chat_id={chat_id})")
+                logging.info(f"本轮扫描消息: {count_seen}")
+                logging.info(f"本轮写入/更新: {count_written}")
+                logging.info(f"命中重复模板(单条): {dup_hash_solo}")
+                logging.info(f"命中重复模板(媒体组-文案): {dup_hash_group_txt}")
+                logging.info(f"命中重复模板(媒体组-媒体签名): {dup_hash_group_med}")
+                logging.info(f"本轮硬删除条数: {deduped_count}")
+                logging.info(f"数据库总记录: {stats['total_messages']}")
+                logging.info(f"媒体消息: {stats['media_messages']}")
+                logging.info(
+                    f"引流候选消息: {stats['promo_messages']}（可自动去重: {stats['promo_dedupe_eligible_messages']} | 受保护: {stats['promo_guarded_messages']}）"
+                )
+                logging.info(f"媒体组总数: {stats['media_groups']}")
+                logging.info(f"引流候选媒体组: {stats['promo_media_groups']}（受保护: {stats['guarded_media_groups']}）")
 
     finally:
         conn.close()
