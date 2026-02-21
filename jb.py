@@ -9,7 +9,7 @@ import hashlib
 import logging
 import unicodedata
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Optional, Tuple, List, Dict, Any, Iterable, Set
 from collections import defaultdict
 
@@ -1501,7 +1501,13 @@ def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
 
 
 def upsert_chat(conn: sqlite3.Connection, row: tuple):
-    conn.execute(UPSERT_CHAT_SQL, row)
+    # 使用独立游标并在提交前显式关闭，避免 "SQL statements in progress"
+    # （某些 SQLite/Python 组合在连接级 execute + 立刻 commit 时会触发）。
+    cur = conn.cursor()
+    try:
+        cur.execute(UPSERT_CHAT_SQL, row)
+    finally:
+        cur.close()
     conn.commit()
 
 
@@ -1677,7 +1683,7 @@ def dedupe_promotional_duplicates(
     返回：
     (处理条数, 单条重复模板数, 媒体组文本模板数, 媒体组媒体签名数, 受影响grouped_id集合)
     """
-    batch_id = datetime.utcnow().strftime("dedupe_%Y%m%d_%H%M%S")
+    batch_id = datetime.now(UTC).strftime("dedupe_%Y%m%d_%H%M%S")
     cur = conn.cursor()
     mode = (mode or "PURGE_ALL").upper()
 
