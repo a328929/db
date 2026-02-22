@@ -4,8 +4,9 @@ import re
 import sqlite3
 import unicodedata
 import os
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
 
@@ -28,6 +29,22 @@ TYPE_FALLBACK_TITLE = {
     "FILE": "[无文案文件]",
     "TEXT": "[无文本内容]",
 }
+
+FROM_SQL = """
+    FROM messages m
+    LEFT JOIN chats c ON c.chat_id = m.chat_id
+    LEFT JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+"""
+
+
+@dataclass
+class SearchParams:
+    raw_query: str
+    search_type: str
+    sort_by_req: str
+    order_req: str
+    page: int
+    chat_id: Optional[int]
 
 
 def get_conn() -> sqlite3.Connection:
@@ -86,26 +103,54 @@ def to_fts_match(raw_query: str) -> str:
     tokens = tokenize_query(raw_query)
     if not tokens:
         return ""
+
     parts: List[str] = []
+    deferred_not_terms: List[str] = []
     prev_was_term = False
     pending_not = False
+    positive_terms = 0
+
     for kind, value in tokens:
         if kind in {"TERM", "PHRASE"}:
-            if pending_not and prev_was_term:
-                parts.append("NOT")
-            elif prev_was_term:
+            quoted = f'"{value.replace(chr(34), "")}"'
+            if pending_not:
+                if prev_was_term:
+                    parts.append("NOT")
+                    parts.append(quoted)
+                else:
+                    # 前置负词（如 -bar foo）先挂起，后续有正向词时再拼接 NOT。
+                    deferred_not_terms.append(quoted)
+                    pending_not = False
+                    prev_was_term = False
+                    continue
+                pending_not = False
+                prev_was_term = True
+                continue
+
+            if prev_was_term:
                 parts.append("AND")
-            pending_not = False
-            parts.append(f'"{value.replace(chr(34), "")}"')
+            parts.append(quoted)
+            positive_terms += 1
             prev_was_term = True
             continue
+
         if value == "+" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
             parts.append("AND")
+            prev_was_term = False
         elif value == "|" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
             parts.append("OR")
+            prev_was_term = False
         elif value == "-":
             pending_not = True
-        prev_was_term = False
+
+    # 纯负词查询（如 -bar）不走 FTS，交给 LIKE fallback。
+    if positive_terms == 0:
+        return ""
+
+    for term in deferred_not_terms:
+        parts.append("NOT")
+        parts.append(term)
+
     while parts and parts[-1] in {"AND", "OR", "NOT"}:
         parts.pop()
     return " ".join(parts)
@@ -167,6 +212,155 @@ def build_result_title(row: sqlite3.Row) -> str:
     return TYPE_FALLBACK_TITLE.get((row["msg_type"] or "TEXT").upper(), "[无文本内容]")
 
 
+def _parse_search_params(data: Dict[str, Any]) -> SearchParams:
+    raw_query = str(data.get("query", "") or "")
+    search_type = str(data.get("search_type", "all") or "all").lower()
+    sort_by_req = str(data.get("sort_by", "time") or "time").lower()
+    order_req = str(data.get("order", "desc") or "desc").lower()
+
+    page = max(int(data.get("page", 1) or 1), 1)
+    chat_id_raw = data.get("chat_id", "all")
+    chat_id = None if str(chat_id_raw).lower() == "all" else int(chat_id_raw)
+
+    return SearchParams(
+        raw_query=raw_query,
+        search_type=search_type,
+        sort_by_req=sort_by_req,
+        order_req=order_req,
+        page=page,
+        chat_id=chat_id,
+    )
+
+
+def _build_search_filters(params: SearchParams, fts_enabled: bool) -> Tuple[str, List[Any], str]:
+    where_parts: List[str] = ["1=1"]
+    sql_params: List[Any] = []
+    match_query = to_fts_match(params.raw_query)
+
+    if match_query and fts_enabled:
+        where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+        sql_params.append(match_query)
+    elif params.raw_query.strip():
+        includes, excludes = split_positive_negative_terms(params.raw_query)
+        for term in includes:
+            where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
+            sql_params.append(f"%{term.lower()}%")
+        for term in excludes:
+            where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
+            sql_params.append(f"%{term.lower()}%")
+
+    if params.chat_id is not None:
+        where_parts.append("m.chat_id = ?")
+        sql_params.append(params.chat_id)
+
+    type_clause, type_params = make_type_clause(params.search_type)
+    if type_clause:
+        where_parts.append(type_clause)
+        sql_params.extend(type_params)
+
+    return " AND ".join(where_parts), sql_params, match_query
+
+
+def _build_search_sql(where_sql: str, search_type: str, sort_by_req: str, order_req: str) -> Tuple[str, str, str, str, str]:
+    order_expr, effective_sort, effective_order = choose_sort(search_type, sort_by_req, order_req)
+    count_sql = f"SELECT COUNT(*) AS c FROM (SELECT m.pk {FROM_SQL} WHERE {where_sql} LIMIT ?)"
+    query_sql = f"""
+        SELECT m.pk,m.chat_id,c.chat_title,m.message_id,m.msg_date_text,m.msg_date_ts,m.msg_type,m.link,m.content,m.grouped_id,
+               mm.file_name,mm.file_size,mm.mime_type,mm.media_kind
+        {FROM_SQL}
+        WHERE {where_sql}
+        ORDER BY {order_expr} {effective_order}, m.msg_date_ts {effective_order}, m.pk {effective_order}
+        LIMIT ? OFFSET ?
+    """
+    return count_sql, query_sql, order_expr, effective_sort, effective_order
+
+
+def _run_search_query(
+    conn: sqlite3.Connection,
+    count_sql: str,
+    query_sql: str,
+    sql_params: List[Any],
+    page: int,
+) -> Tuple[List[sqlite3.Row], int, int, bool, int]:
+    cur = conn.cursor()
+    cur.execute(count_sql, sql_params + [MAX_COUNT + 1])
+    counted = int(cur.fetchone()["c"] or 0)
+    total_is_capped = counted > MAX_COUNT
+    total = min(counted, MAX_COUNT)
+    total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
+
+    effective_page = page
+    if total_pages > 0 and effective_page > total_pages:
+        effective_page = total_pages
+
+    offset = (effective_page - 1) * PAGE_SIZE if total_pages > 0 else 0
+    cur.execute(query_sql, sql_params + [PAGE_SIZE, offset])
+    rows = cur.fetchall()
+
+    return rows, total, total_pages, total_is_capped, effective_page
+
+
+def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
+    items: List[Dict[str, Any]] = []
+    for r in rows:
+        file_size = int(r["file_size"]) if r["file_size"] is not None else None
+        items.append({
+            "pk": int(r["pk"]),
+            "chat_id": int(r["chat_id"]),
+            "chat_title": r["chat_title"] or "",
+            "message_id": int(r["message_id"]),
+            "msg_date_text": r["msg_date_text"] or "",
+            "msg_type": r["msg_type"] or "TEXT",
+            "link": r["link"] or "",
+            "content": r["content"] or "",
+            "file_name": r["file_name"] or "",
+            "file_size": file_size,
+            "title": build_result_title(r),
+        })
+    return items
+
+
+def _build_meta_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
+    cur = conn.cursor()
+    cur.execute("SELECT chat_id, chat_title FROM chats ORDER BY LOWER(chat_title) ASC, chat_id ASC")
+    chats = [{"chat_id": int(r["chat_id"]), "chat_title": (r["chat_title"] or f"Chat {r['chat_id']}").strip()} for r in cur.fetchall()]
+    return {"ok": True, "chats": chats, "page_size": PAGE_SIZE}
+
+
+def _search_payload(params: SearchParams) -> Dict[str, Any]:
+    with get_conn() as conn:
+        fts_enabled = has_fts(conn)
+        where_sql, sql_params, match_query = _build_search_filters(params, fts_enabled)
+        count_sql, query_sql, _, effective_sort, effective_order = _build_search_sql(
+            where_sql,
+            params.search_type,
+            params.sort_by_req,
+            params.order_req,
+        )
+        rows, total, total_pages, total_is_capped, effective_page = _run_search_query(
+            conn,
+            count_sql,
+            query_sql,
+            sql_params,
+            params.page,
+        )
+
+    items = _map_search_items(rows)
+    return {
+        "ok": True,
+        "query": params.raw_query,
+        "fts_query": match_query,
+        "page": effective_page,
+        "page_size": PAGE_SIZE,
+        "total": total,
+        "total_pages": total_pages,
+        "total_is_capped": total_is_capped,
+        "effective_sort": effective_sort,
+        "effective_order": effective_order.lower(),
+        "items": items,
+    }
+
+
 def create_app() -> Flask:
     app = Flask(__name__, template_folder="templates", static_folder="static")
 
@@ -182,10 +376,8 @@ def create_app() -> Flask:
             return jsonify({"ok": False, "error": "数据库不存在"}), 500
         try:
             with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute("SELECT chat_id, chat_title FROM chats ORDER BY LOWER(chat_title) ASC, chat_id ASC")
-                chats = [{"chat_id": int(r["chat_id"]), "chat_title": (r["chat_title"] or f"Chat {r['chat_id']}").strip()} for r in cur.fetchall()]
-            return jsonify({"ok": True, "chats": chats, "page_size": PAGE_SIZE})
+                payload = _build_meta_payload(conn)
+            return jsonify(payload)
         except sqlite3.Error as e:
             return jsonify({"ok": False, "error": f"读取群列表失败: {e}"}), 500
 
@@ -194,81 +386,9 @@ def create_app() -> Flask:
         if not DB_PATH.exists():
             return jsonify({"ok": False, "error": "数据库不存在"}), 500
         data = request.get_json(silent=True) or {}
-        raw_query = str(data.get("query", "") or "")
-        search_type = str(data.get("search_type", "all") or "all").lower()
-        sort_by_req = str(data.get("sort_by", "time") or "time").lower()
-        order_req = str(data.get("order", "desc") or "desc").lower()
         try:
-            page = max(int(data.get("page", 1) or 1), 1)
-            chat_id_raw = data.get("chat_id", "all")
-            chat_id = None if str(chat_id_raw).lower() == "all" else int(chat_id_raw)
-            match_query = to_fts_match(raw_query)
-
-            where_parts: List[str] = ["1=1"]
-            params: List[Any] = []
-            with get_conn() as conn:
-                fts_enabled = has_fts(conn)
-            if match_query and fts_enabled:
-                where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
-                params.append(match_query)
-            elif raw_query.strip():
-                includes, excludes = split_positive_negative_terms(raw_query)
-                for term in includes:
-                    where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
-                    params.append(f"%{term.lower()}%")
-                for term in excludes:
-                    where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
-                    params.append(f"%{term.lower()}%")
-            if chat_id is not None:
-                where_parts.append("m.chat_id = ?")
-                params.append(chat_id)
-            type_clause, type_params = make_type_clause(search_type)
-            if type_clause:
-                where_parts.append(type_clause)
-                params.extend(type_params)
-
-            where_sql = " AND ".join(where_parts)
-            order_expr, effective_sort, effective_order = choose_sort(search_type, sort_by_req, order_req)
-            from_sql = """
-                FROM messages m
-                LEFT JOIN chats c ON c.chat_id = m.chat_id
-                LEFT JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
-            """
-            count_sql = f"SELECT COUNT(*) AS c FROM (SELECT m.pk {from_sql} WHERE {where_sql} LIMIT ?)"
-            query_sql = f"""
-                SELECT m.pk,m.chat_id,c.chat_title,m.message_id,m.msg_date_text,m.msg_date_ts,m.msg_type,m.link,m.content,m.grouped_id,
-                       mm.file_name,mm.file_size,mm.mime_type,mm.media_kind
-                {from_sql}
-                WHERE {where_sql}
-                ORDER BY {order_expr} {effective_order}, m.msg_date_ts {effective_order}, m.pk {effective_order}
-                LIMIT ? OFFSET ?
-            """
-            with get_conn() as conn:
-                cur = conn.cursor()
-                cur.execute(count_sql, params + [MAX_COUNT + 1])
-                counted = int(cur.fetchone()["c"] or 0)
-                total_is_capped = counted > MAX_COUNT
-                total = min(counted, MAX_COUNT)
-                total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
-                if total_pages > 0 and page > total_pages:
-                    page = total_pages
-                offset = (page - 1) * PAGE_SIZE if total_pages > 0 else 0
-                cur.execute(query_sql, params + [PAGE_SIZE, offset])
-                rows = cur.fetchall()
-
-            items = []
-            for r in rows:
-                file_size = int(r["file_size"]) if r["file_size"] is not None else None
-                items.append({
-                    "pk": int(r["pk"]), "chat_id": int(r["chat_id"]), "chat_title": r["chat_title"] or "", "message_id": int(r["message_id"]),
-                    "msg_date_text": r["msg_date_text"] or "", "msg_type": r["msg_type"] or "TEXT", "link": r["link"] or "", "content": r["content"] or "",
-                    "file_name": r["file_name"] or "", "file_size": file_size, "title": build_result_title(r),
-                })
-            return jsonify({
-                "ok": True, "query": raw_query, "fts_query": match_query, "page": page, "page_size": PAGE_SIZE,
-                "total": total, "total_pages": total_pages, "total_is_capped": total_is_capped,
-                "effective_sort": effective_sort, "effective_order": effective_order.lower(), "items": items,
-            })
+            params = _parse_search_params(data)
+            return jsonify(_search_payload(params))
         except ValueError:
             return jsonify({"ok": False, "error": "参数格式错误"}), 400
         except sqlite3.Error as e:
