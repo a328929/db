@@ -404,15 +404,13 @@ def resolve_db_path(raw_name: str) -> str:
     return str((Path(__file__).resolve().parent.parent / p).resolve())
 
 
-def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
-    """
-    统一的数据库连接入口，应用最佳实践配置（WAL, mmap, etc.）
-    """
+def _open_connection(db_name: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_name, timeout=60)  # 增加默认超时
     conn.row_factory = sqlite3.Row
+    return conn
 
-    cur = conn.cursor()
 
+def _apply_core_pragmas(cur: sqlite3.Cursor):
     # 性能 / 稳定性（大群友好）
     # 关键优化：WAL 模式防止读写阻塞
     cur.execute("PRAGMA journal_mode=WAL;")
@@ -423,6 +421,8 @@ def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
     cur.execute("PRAGMA busy_timeout=10000;")  # 10s (Web端并发关键)
     cur.execute("PRAGMA wal_autocheckpoint=1000;")  # 稍微频繁一点 checkpoint
 
+
+def _apply_optional_pragmas(cur: sqlite3.Cursor):
     try:
         cur.execute("PRAGMA mmap_size=268435456;")  # 256MB
     except Exception:
@@ -432,9 +432,26 @@ def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
     except Exception:
         pass
 
-    cur.close()
 
-    feats = detect_sqlite_features(conn)
+def _apply_pragmas(conn: sqlite3.Connection):
+    cur = conn.cursor()
+    try:
+        _apply_core_pragmas(cur)
+        _apply_optional_pragmas(cur)
+    finally:
+        cur.close()
+
+
+def _load_sqlite_features(conn: sqlite3.Connection) -> SqliteFeatures:
+    return detect_sqlite_features(conn)
+
+
+def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
+    """
+    统一的数据库连接入口，应用最佳实践配置（WAL, mmap, etc.）
+    """
+    conn = _open_connection(db_name)
+    _apply_pragmas(conn)
+    feats = _load_sqlite_features(conn)
     # logging.info(f"SQLite={feats.version_str} | STRICT={feats.supports_strict} | FTS5={feats.supports_fts5}")
     return conn, feats
-
