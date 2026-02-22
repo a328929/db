@@ -42,7 +42,7 @@ def build_message_dedupe_hash(text_pure_hash: str,
     return ""
 
 
-def _create_dup_hash_tables(cur: sqlite3.Cursor, chat_id: int, threshold: int) -> Tuple[int, int, int]:
+def _create_temp_dup_hashes_solo(cur: sqlite3.Cursor, chat_id: int, threshold: int):
     cur.execute("DROP TABLE IF EXISTS temp_dup_hashes_solo")
     cur.execute(
         """
@@ -55,9 +55,9 @@ def _create_dup_hash_tables(cur: sqlite3.Cursor, chat_id: int, threshold: int) -
         """,
         (chat_id, threshold),
     )
-    cur.execute("SELECT COUNT(*) AS c FROM temp_dup_hashes_solo")
-    solo = int(cur.fetchone()["c"] or 0)
 
+
+def _create_temp_dup_hashes_group_txt(cur: sqlite3.Cursor, chat_id: int, threshold: int):
     cur.execute("DROP TABLE IF EXISTS temp_dup_hashes_group_txt")
     cur.execute(
         """
@@ -70,9 +70,9 @@ def _create_dup_hash_tables(cur: sqlite3.Cursor, chat_id: int, threshold: int) -
         """,
         (chat_id, threshold),
     )
-    cur.execute("SELECT COUNT(*) AS c FROM temp_dup_hashes_group_txt")
-    group_txt = int(cur.fetchone()["c"] or 0)
 
+
+def _create_temp_dup_hashes_group_med(cur: sqlite3.Cursor, chat_id: int, threshold: int):
     cur.execute("DROP TABLE IF EXISTS temp_dup_hashes_group_med")
     cur.execute(
         """
@@ -85,14 +85,30 @@ def _create_dup_hash_tables(cur: sqlite3.Cursor, chat_id: int, threshold: int) -
         """,
         (chat_id, threshold),
     )
-    cur.execute("SELECT COUNT(*) AS c FROM temp_dup_hashes_group_med")
-    group_med = int(cur.fetchone()["c"] or 0)
+
+
+def _count_rows(cur: sqlite3.Cursor, table_name: str) -> int:
+    cur.execute(f"SELECT COUNT(*) AS c FROM {table_name}")
+    return int(cur.fetchone()["c"] or 0)
+
+
+def _create_dup_hash_tables(cur: sqlite3.Cursor, chat_id: int, threshold: int) -> Tuple[int, int, int]:
+    _create_temp_dup_hashes_solo(cur, chat_id, threshold)
+    _create_temp_dup_hashes_group_txt(cur, chat_id, threshold)
+    _create_temp_dup_hashes_group_med(cur, chat_id, threshold)
+
+    solo = _count_rows(cur, "temp_dup_hashes_solo")
+    group_txt = _count_rows(cur, "temp_dup_hashes_group_txt")
+    group_med = _count_rows(cur, "temp_dup_hashes_group_med")
     return solo, group_txt, group_med
 
 
-def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
+def _init_temp_targets(cur: sqlite3.Cursor):
     cur.execute("DROP TABLE IF EXISTS temp_targets")
     cur.execute("CREATE TEMP TABLE temp_targets(pk INTEGER PRIMARY KEY)")
+
+
+def _insert_targets_from_solo_hashes(cur: sqlite3.Cursor, chat_id: int):
     cur.execute(
         """
         INSERT OR IGNORE INTO temp_targets(pk)
@@ -102,20 +118,49 @@ def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
         """,
         (chat_id,),
     )
+
+
+def _create_temp_target_groups_txt(cur: sqlite3.Cursor, chat_id: int):
+    cur.execute("DROP TABLE IF EXISTS temp_target_groups_txt")
+    cur.execute(
+        """
+        CREATE TEMP TABLE temp_target_groups_txt AS
+        SELECT DISTINCT grouped_id
+        FROM media_groups
+        WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+          AND pure_hash IN (SELECT pure_hash FROM temp_dup_hashes_group_txt)
+        """,
+        (chat_id,),
+    )
+
+
+def _create_temp_target_groups_med(cur: sqlite3.Cursor, chat_id: int):
+    cur.execute("DROP TABLE IF EXISTS temp_target_groups_med")
+    cur.execute(
+        """
+        CREATE TEMP TABLE temp_target_groups_med AS
+        SELECT DISTINCT grouped_id
+        FROM media_groups
+        WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+          AND media_sig_hash IN (SELECT media_sig_hash FROM temp_dup_hashes_group_med)
+        """,
+        (chat_id,),
+    )
+
+
+def _merge_temp_target_groups(cur: sqlite3.Cursor):
     cur.execute("DROP TABLE IF EXISTS temp_target_groups")
     cur.execute(
         """
         CREATE TEMP TABLE temp_target_groups AS
-        SELECT DISTINCT grouped_id
-        FROM media_groups
-        WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
-          AND (
-            pure_hash IN (SELECT pure_hash FROM temp_dup_hashes_group_txt)
-            OR media_sig_hash IN (SELECT media_sig_hash FROM temp_dup_hashes_group_med)
-          )
-        """,
-        (chat_id,),
+        SELECT grouped_id FROM temp_target_groups_txt
+        UNION
+        SELECT grouped_id FROM temp_target_groups_med
+        """
     )
+
+
+def _insert_targets_from_group_hashes(cur: sqlite3.Cursor, chat_id: int):
     cur.execute(
         """
         INSERT OR IGNORE INTO temp_targets(pk)
@@ -126,7 +171,16 @@ def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
+def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
+    _init_temp_targets(cur)
+    _insert_targets_from_solo_hashes(cur, chat_id)
+    _create_temp_target_groups_txt(cur, chat_id)
+    _create_temp_target_groups_med(cur, chat_id)
+    _merge_temp_target_groups(cur)
+    _insert_targets_from_group_hashes(cur, chat_id)
+
+
+def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int):
     cur.execute("DROP TABLE IF EXISTS temp_keep_solo")
     cur.execute(
         """
@@ -141,8 +195,9 @@ def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
         """,
         (chat_id,),
     )
-    cur.execute("DELETE FROM temp_targets WHERE pk IN (SELECT pk FROM temp_keep_solo)")
 
+
+def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int):
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_txt")
     cur.execute(
         """
@@ -162,6 +217,8 @@ def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
         (chat_id, chat_id),
     )
 
+
+def _build_keep_first_groups_med(cur: sqlite3.Cursor, chat_id: int):
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_med")
     cur.execute(
         """
@@ -181,6 +238,8 @@ def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
         (chat_id, chat_id),
     )
 
+
+def _build_keep_first_groups_final(cur: sqlite3.Cursor):
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_final")
     cur.execute(
         """
@@ -190,6 +249,10 @@ def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
         SELECT grouped_id FROM temp_keep_groups_med
         """
     )
+
+
+def _prune_temp_targets_with_keep_first(cur: sqlite3.Cursor, chat_id: int):
+    cur.execute("DELETE FROM temp_targets WHERE pk IN (SELECT pk FROM temp_keep_solo)")
     cur.execute(
         """
         DELETE FROM temp_targets
@@ -200,6 +263,102 @@ def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
         )
         """,
         (chat_id,),
+    )
+
+
+def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
+    _build_keep_first_solo(cur, chat_id)
+    _build_keep_first_groups_txt(cur, chat_id)
+    _build_keep_first_groups_med(cur, chat_id)
+    _build_keep_first_groups_final(cur)
+    _prune_temp_targets_with_keep_first(cur, chat_id)
+
+
+def _insert_dedupe_run(
+    cur: sqlite3.Cursor,
+    batch_id: str,
+    chat_id: int,
+    mode: str,
+    threshold: int,
+    promo_score_threshold: int,
+):
+    cur.execute(
+        """
+        INSERT INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
+        VALUES (?, ?, ?, ?, ?, datetime('now'))
+        """,
+        (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)),
+    )
+
+
+def _prepare_dedupe_targets(
+    cur: sqlite3.Cursor,
+    chat_id: int,
+    mode: str,
+    threshold: int,
+) -> Tuple[int, int, int, int]:
+    dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = _create_dup_hash_tables(cur, chat_id, threshold)
+    _fill_temp_targets(cur, chat_id)
+    if mode == "KEEP_FIRST":
+        _apply_keep_first(cur, chat_id)
+
+    cur.execute("SELECT COUNT(*) AS c FROM temp_targets")
+    target_count = int(cur.fetchone()["c"] or 0)
+    return target_count, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med
+
+
+def _insert_dedupe_actions(cur: sqlite3.Cursor, batch_id: str):
+    cur.execute(
+        """
+        INSERT INTO dedupe_actions(batch_id, chat_id, pk, message_id, grouped_id, dedupe_hash, pure_hash, action, reason)
+        SELECT ?, m.chat_id, m.pk, m.message_id, m.grouped_id, m.dedupe_hash, m.pure_hash, 'HARD_DELETE',
+               'DEDUPE_PROMO_HASH_OR_MEDIA_GROUP'
+        FROM messages m
+        WHERE m.pk IN (SELECT pk FROM temp_targets)
+        """,
+        (batch_id,),
+    )
+
+
+def _collect_affected_group_ids(cur: sqlite3.Cursor) -> Set[int]:
+    cur.execute(
+        """
+        SELECT DISTINCT grouped_id
+        FROM messages
+        WHERE pk IN (SELECT pk FROM temp_targets)
+          AND grouped_id IS NOT NULL
+        """
+    )
+    return {int(r["grouped_id"]) for r in cur.fetchall()}
+
+
+def _delete_target_messages(cur: sqlite3.Cursor):
+    cur.execute("DELETE FROM messages WHERE pk IN (SELECT pk FROM temp_targets)")
+
+
+def _record_actions_and_delete_targets(cur: sqlite3.Cursor, batch_id: str) -> Set[int]:
+    _insert_dedupe_actions(cur, batch_id)
+    affected_group_ids = _collect_affected_group_ids(cur)
+    _delete_target_messages(cur)
+    return affected_group_ids
+
+
+def _finish_dedupe_run(
+    cur: sqlite3.Cursor,
+    batch_id: str,
+    dup_hash_count_solo: int,
+    dup_hash_count_group_txt: int,
+    dup_hash_count_group_med: int,
+    target_count: int,
+):
+    cur.execute(
+        """
+        UPDATE dedupe_runs
+        SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=?,
+            finished_at=datetime('now')
+        WHERE batch_id=?
+        """,
+        (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, target_count, batch_id),
     )
 
 
@@ -219,63 +378,30 @@ def dedupe_promotional_duplicates(
         # 去重主流程放在同一事务里，避免出现 run/action/delete/finished_at 的半状态。
         cur.execute("BEGIN IMMEDIATE")
 
-        cur.execute(
-            """
-            INSERT INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-            """,
-            (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)),
+        _insert_dedupe_run(cur, batch_id, chat_id, mode, threshold, promo_score_threshold)
+        target_count, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = _prepare_dedupe_targets(
+            cur, chat_id, mode, threshold
         )
-
-        dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = _create_dup_hash_tables(cur, chat_id, threshold)
-        _fill_temp_targets(cur, chat_id)
-        if mode == "KEEP_FIRST":
-            _apply_keep_first(cur, chat_id)
-
-        cur.execute("SELECT COUNT(*) AS c FROM temp_targets")
-        target_count = int(cur.fetchone()["c"] or 0)
         if target_count == 0:
-            cur.execute(
-                """
-                UPDATE dedupe_runs
-                SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=0,
-                    finished_at=datetime('now')
-                WHERE batch_id=?
-                """,
-                (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, batch_id),
+            _finish_dedupe_run(
+                cur,
+                batch_id,
+                dup_hash_count_solo,
+                dup_hash_count_group_txt,
+                dup_hash_count_group_med,
+                0,
             )
             conn.commit()
             return 0, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, set()
 
-        cur.execute(
-            """
-            INSERT INTO dedupe_actions(batch_id, chat_id, pk, message_id, grouped_id, dedupe_hash, pure_hash, action, reason)
-            SELECT ?, m.chat_id, m.pk, m.message_id, m.grouped_id, m.dedupe_hash, m.pure_hash, 'HARD_DELETE',
-                   'DEDUPE_PROMO_HASH_OR_MEDIA_GROUP'
-            FROM messages m
-            WHERE m.pk IN (SELECT pk FROM temp_targets)
-            """,
-            (batch_id,),
-        )
-        cur.execute(
-            """
-            SELECT DISTINCT grouped_id
-            FROM messages
-            WHERE pk IN (SELECT pk FROM temp_targets)
-              AND grouped_id IS NOT NULL
-            """
-        )
-        affected_group_ids = {int(r["grouped_id"]) for r in cur.fetchall()}
-
-        cur.execute("DELETE FROM messages WHERE pk IN (SELECT pk FROM temp_targets)")
-        cur.execute(
-            """
-            UPDATE dedupe_runs
-            SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=?,
-                finished_at=datetime('now')
-            WHERE batch_id=?
-            """,
-            (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, target_count, batch_id),
+        affected_group_ids = _record_actions_and_delete_targets(cur, batch_id)
+        _finish_dedupe_run(
+            cur,
+            batch_id,
+            dup_hash_count_solo,
+            dup_hash_count_group_txt,
+            dup_hash_count_group_med,
+            target_count,
         )
         conn.commit()
         return target_count, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, affected_group_ids
