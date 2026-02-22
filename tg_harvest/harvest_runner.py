@@ -170,64 +170,68 @@ def run_harvest():
                         time.sleep(1)
                         continue
 
-            counters.seen += 1
+                    counters.seen += 1
 
-            try:
-                dt = getattr(message, "date", None)
-                if dt is not None:
-                    msg_date_text = dt.strftime("%Y-%m-%d %H:%M:%S")
-                msg_date_ts = int(dt.timestamp())
-                msg_id = int(getattr(message, "id", 0) or 0)
-                sender_id = int(getattr(message, "sender_id", 0) or 0)
-                msg_type = classify_msg_type(message)
-                content = extract_message_text(message)
-                has_media = 0 if msg_type == "TEXT" else 1
+                    try:
+                        dt = getattr(message, "date", None)
+                        if dt is None:
+                            continue
+                        msg_date_text = dt.strftime("%Y-%m-%d %H:%M:%S")
+                        msg_date_ts = int(dt.timestamp())
+                        msg_id = int(getattr(message, "id", 0) or 0)
+                        sender_id = int(getattr(message, "sender_id", 0) or 0)
+                        msg_type = classify_msg_type(message)
+                        content = extract_message_text(message)
+                        has_media = 0 if msg_type == "TEXT" else 1
 
-                grouped_id = getattr(message, "grouped_id", None)
-                try:
-                    grouped_id = int(grouped_id) if grouped_id is not None else None
-                except Exception:
-                    grouped_id = None
-                if grouped_id is not None:
-                    touched_group_ids.add(grouped_id)
+                        grouped_id = getattr(message, "grouped_id", None)
+                        try:
+                            grouped_id = int(grouped_id) if grouped_id is not None else None
+                        except Exception:
+                            grouped_id = None
+                        if grouped_id is not None:
+                            touched_group_ids.add(grouped_id)
 
-                link = build_msg_link(entity, msg_id)
-                mmeta = extract_media_meta(message, msg_type) if has_media else None
-                features = build_single_promo_features(content, msg_type=msg_type, has_media=bool(has_media), cfg=CFG)
-                message_dedupe_hash = build_message_dedupe_hash(
-                    text_pure_hash=features["pure_hash"],
-                    has_media=bool(has_media),
-                    media_fingerprint=(mmeta or {}).get("media_fingerprint"),
-                )
+                        link = build_msg_link(entity, msg_id)
+                        mmeta = extract_media_meta(message, msg_type) if has_media else None
+                        features = build_single_promo_features(content, msg_type=msg_type, has_media=bool(has_media), cfg=CFG)
+                        message_dedupe_hash = build_message_dedupe_hash(
+                            text_pure_hash=features["pure_hash"],
+                            has_media=bool(has_media),
+                            media_fingerprint=(mmeta or {}).get("media_fingerprint"),
+                        )
 
-                msg_rows.append((
-                    chat_id, msg_id, msg_date_text, msg_date_ts, sender_id,
-                    content, features["content_norm"], features["pure_hash"], message_dedupe_hash,
-                    msg_type, grouped_id, link, has_media,
-                    int(features["is_promo"]), int(features["promo_score"]), _safe_json(features["promo_reasons"]),
-                    int(features["dedupe_eligible"]), features["guard_reason"], int(features["text_len"]),
-                ))
-                if has_media and mmeta is not None:
-                    media_rows.append((
-                        chat_id, msg_id,
-                        mmeta["media_kind"], mmeta["file_unique_id"], mmeta["file_name"], mmeta["file_ext"],
-                        mmeta["mime_type"], mmeta["file_size"], mmeta["width"], mmeta["height"], mmeta["duration_sec"],
-                        grouped_id, mmeta["media_fingerprint"], mmeta["meta_json"],
-                    ))
+                        msg_rows.append((
+                            chat_id, msg_id, msg_date_text, msg_date_ts, sender_id,
+                            content, features["content_norm"], features["pure_hash"], message_dedupe_hash,
+                            msg_type, grouped_id, link, has_media,
+                            int(features["is_promo"]), int(features["promo_score"]), _safe_json(features["promo_reasons"]),
+                            int(features["dedupe_eligible"]), features["guard_reason"], int(features["text_len"]),
+                        ))
+                        if has_media and mmeta is not None:
+                            media_rows.append((
+                                chat_id, msg_id,
+                                mmeta["media_kind"], mmeta["file_unique_id"], mmeta["file_name"], mmeta["file_ext"],
+                                mmeta["mime_type"], mmeta["file_size"], mmeta["width"], mmeta["height"], mmeta["duration_sec"],
+                                grouped_id, mmeta["media_fingerprint"], mmeta["meta_json"],
+                            ))
 
-            except Exception as e:
-                counters.note_parse_failure(e, message)
-                logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
+                    except Exception as e:
+                        counters.note_parse_failure(e, message)
+                        logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
+                        continue
 
-            if len(msg_rows) >= CFG.batch_size:
-                try:
-                    batch_upsert(conn, msg_rows, media_rows)
-                except Exception as e:
-                    logging.exception(f"批量落库失败（chat_id={chat_id}, batch_size={len(msg_rows)}）: {e}")
-                    raise
-                counters.written += len(msg_rows)
-                msg_rows.clear()
-                media_rows.clear()                # 阶段1：批量落库
+                    if len(msg_rows) >= CFG.batch_size:
+                        try:
+                            batch_upsert(conn, msg_rows, media_rows)
+                        except Exception as e:
+                            logging.exception(f"批量落库失败（chat_id={chat_id}, batch_size={len(msg_rows)}）: {e}")
+                            raise
+                        counters.written += len(msg_rows)
+                        msg_rows.clear()
+                        media_rows.clear()
+
+                # 阶段1：批量落库
                 if msg_rows or media_rows:
                     try:
                         batch_upsert(conn, msg_rows, media_rows)
