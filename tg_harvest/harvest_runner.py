@@ -30,14 +30,17 @@ from .promo import build_single_promo_features
 
 def get_existing_chat_ids(conn: sqlite3.Connection) -> List[int]:
     cur = conn.cursor()
-    cur.execute("SELECT chat_id FROM chats ORDER BY last_seen_at DESC, first_seen_at DESC")
-    out: List[int] = []
-    for row in cur.fetchall():
-        try:
-            out.append(int(row["chat_id"]))
-        except Exception:
-            continue
-    return out
+    try:
+        cur.execute("SELECT chat_id FROM chats ORDER BY last_seen_at DESC, first_seen_at DESC")
+        out: List[int] = []
+        for row in cur.fetchall():
+            try:
+                out.append(int(row["chat_id"]))
+            except Exception:
+                continue
+        return out
+    finally:
+        cur.close()
 
 
 def collect_target_entities(conn: sqlite3.Connection, client: Any, cfg: AppConfig) -> List[Any]:
