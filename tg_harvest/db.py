@@ -127,8 +127,6 @@ def ensure_columns(conn: sqlite3.Connection, table_name: str, cols: Dict[str, st
         if name not in existing:
             logging.info(f"迁移: ALTER TABLE {table_name} ADD COLUMN {name}")
             cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
-    conn.commit()
-
 
 
 
@@ -151,8 +149,7 @@ def set_user_version(conn: sqlite3.Connection, version: int):
 def apply_lightweight_migrations(conn: sqlite3.Connection):
     """
     从无版本或旧版本数据库向当前版本迁移。
-    当前仍以补列策略为主，但通过 user_version 固化状态，
-    避免同代码在未知 schema 状态上运行。
+    迁移步骤统一由 `MIGRATION_STEPS` 驱动，避免分散逻辑与顺序漂移。
     """
     current = get_user_version(conn)
     if current < 1:
