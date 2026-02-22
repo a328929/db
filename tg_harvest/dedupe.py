@@ -211,67 +211,73 @@ def dedupe_promotional_duplicates(
 ) -> Tuple[int, int, int, int, Set[int]]:
     """promo_score_threshold 仅用于审计记录，实际筛选依赖 is_promo/dedupe_eligible。"""
     batch_id = datetime.now(timezone.utc).strftime("dedupe_%Y%m%d_%H%M%S")
-    cur = conn.cursor()
     mode = (mode or "PURGE_ALL").upper()
+    cur = conn.cursor()
 
-    cur.execute(
-        """
-        INSERT OR REPLACE INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
-        VALUES (?, ?, ?, ?, ?, datetime('now'))
-        """,
-        (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)),
-    )
-    conn.commit()
+    try:
+        # 去重主流程放在同一事务里，避免出现 run/action/delete/finished_at 的半状态。
+        cur.execute("BEGIN IMMEDIATE")
 
-    dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = _create_dup_hash_tables(cur, chat_id, threshold)
-    _fill_temp_targets(cur, chat_id)
-    if mode == "KEEP_FIRST":
-        _apply_keep_first(cur, chat_id)
+        cur.execute(
+            """
+            INSERT OR REPLACE INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
+            VALUES (?, ?, ?, ?, ?, datetime('now'))
+            """,
+            (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)),
+        )
 
-    cur.execute("SELECT COUNT(*) AS c FROM temp_targets")
-    target_count = int(cur.fetchone()["c"] or 0)
-    if target_count == 0:
+        dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = _create_dup_hash_tables(cur, chat_id, threshold)
+        _fill_temp_targets(cur, chat_id)
+        if mode == "KEEP_FIRST":
+            _apply_keep_first(cur, chat_id)
+
+        cur.execute("SELECT COUNT(*) AS c FROM temp_targets")
+        target_count = int(cur.fetchone()["c"] or 0)
+        if target_count == 0:
+            cur.execute(
+                """
+                UPDATE dedupe_runs
+                SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=0,
+                    finished_at=datetime('now')
+                WHERE batch_id=?
+                """,
+                (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, batch_id),
+            )
+            conn.commit()
+            return 0, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, set()
+
+        cur.execute(
+            """
+            INSERT INTO dedupe_actions(batch_id, chat_id, pk, message_id, grouped_id, dedupe_hash, pure_hash, action, reason)
+            SELECT ?, m.chat_id, m.pk, m.message_id, m.grouped_id, m.dedupe_hash, m.pure_hash, 'HARD_DELETE',
+                   'DEDUPE_PROMO_HASH_OR_MEDIA_GROUP'
+            FROM messages m
+            WHERE m.pk IN (SELECT pk FROM temp_targets)
+            """,
+            (batch_id,),
+        )
+        cur.execute(
+            """
+            SELECT DISTINCT grouped_id
+            FROM messages
+            WHERE pk IN (SELECT pk FROM temp_targets)
+              AND grouped_id IS NOT NULL
+            """
+        )
+        affected_group_ids = {int(r["grouped_id"]) for r in cur.fetchall()}
+
+        cur.execute("DELETE FROM messages WHERE pk IN (SELECT pk FROM temp_targets)")
         cur.execute(
             """
             UPDATE dedupe_runs
-            SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=0,
+            SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=?,
                 finished_at=datetime('now')
             WHERE batch_id=?
             """,
-            (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, batch_id),
+            (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, target_count, batch_id),
         )
         conn.commit()
-        return 0, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, set()
-
-    cur.execute(
-        """
-        INSERT INTO dedupe_actions(batch_id, chat_id, pk, message_id, grouped_id, dedupe_hash, pure_hash, action, reason)
-        SELECT ?, m.chat_id, m.pk, m.message_id, m.grouped_id, m.dedupe_hash, m.pure_hash, 'HARD_DELETE',
-               'DEDUPE_PROMO_HASH_OR_MEDIA_GROUP'
-        FROM messages m
-        WHERE m.pk IN (SELECT pk FROM temp_targets)
-        """,
-        (batch_id,),
-    )
-    cur.execute(
-        """
-        SELECT DISTINCT grouped_id
-        FROM messages
-        WHERE pk IN (SELECT pk FROM temp_targets)
-          AND grouped_id IS NOT NULL
-        """
-    )
-    affected_group_ids = {int(r["grouped_id"]) for r in cur.fetchall()}
-
-    cur.execute("DELETE FROM messages WHERE pk IN (SELECT pk FROM temp_targets)")
-    cur.execute(
-        """
-        UPDATE dedupe_runs
-        SET dup_hash_count_solo=?, dup_hash_count_group_txt=?, dup_hash_count_group_med=?, target_count=?,
-            finished_at=datetime('now')
-        WHERE batch_id=?
-        """,
-        (dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, target_count, batch_id),
-    )
-    conn.commit()
-    return target_count, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, affected_group_ids
+        return target_count, dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med, affected_group_ids
+    except Exception:
+        conn.rollback()
+        raise

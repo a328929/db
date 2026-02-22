@@ -135,13 +135,34 @@ def chunked(seq: List[Any], n: int) -> Iterable[List[Any]]:
         yield seq[i:i + n]
 
 
-def _rebuild_media_groups_for_ids(conn: sqlite3.Connection, chat_id: int, grouped_ids: List[int], cfg: AppConfig):
+def _normalize_grouped_ids(grouped_ids: Optional[Set[int]]) -> List[int]:
+    if grouped_ids is None:
+        return []
+    return sorted({int(x) for x in grouped_ids if x is not None})
+
+
+def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> List[int]:
+    cur.execute("SELECT DISTINCT grouped_id FROM messages WHERE chat_id=? AND grouped_id IS NOT NULL", (chat_id,))
+    return [int(r["grouped_id"]) for r in cur.fetchall() if r["grouped_id"] is not None]
+
+
+def _delete_media_groups(cur: sqlite3.Cursor, chat_id: int, grouped_ids: Optional[List[int]] = None):
+    if grouped_ids is None:
+        cur.execute("DELETE FROM media_groups WHERE chat_id=?", (chat_id,))
+        return
     if not grouped_ids:
         return
-    cur = conn.cursor()
-    for part in chunked(sorted(set(grouped_ids)), 500):
+    for part in chunked(grouped_ids, 500):
         placeholders = ",".join(["?"] * len(part))
         cur.execute(f"DELETE FROM media_groups WHERE chat_id=? AND grouped_id IN ({placeholders})", [chat_id] + part)
+
+
+def _rebuild_media_groups_for_ids(cur: sqlite3.Cursor, chat_id: int, grouped_ids: List[int], cfg: AppConfig):
+    if not grouped_ids:
+        return
+    for part in chunked(sorted(set(grouped_ids)), 500):
+        placeholders = ",".join(["?"] * len(part))
+        _delete_media_groups(cur, chat_id, grouped_ids=part)
         cur.execute(f"""
             SELECT m.grouped_id, m.message_id, m.msg_date_ts, m.msg_type, COALESCE(m.content, '') AS content, mm.media_fingerprint
             FROM messages m
@@ -188,21 +209,32 @@ def _rebuild_media_groups_for_ids(conn: sqlite3.Connection, chat_id: int, groupe
             ))
         if up_rows:
             cur.executemany(UPSERT_MEDIA_GROUP_SQL, up_rows)
-    conn.commit()
 
 
 def refresh_media_groups_for_chat(conn: sqlite3.Connection, chat_id: int, cfg: AppConfig, grouped_ids: Optional[Set[int]] = None):
+    """
+    grouped_ids=None: 全量刷新（删除 chat 全部聚合，再按 messages 全量重建）
+    grouped_ids=set(...): 按组刷新（仅删除并重建指定 grouped_id）
+    """
     cur = conn.cursor()
-    if grouped_ids is None:
-        cur.execute("SELECT DISTINCT grouped_id FROM messages WHERE chat_id=? AND grouped_id IS NOT NULL", (chat_id,))
-        gids = [int(r["grouped_id"]) for r in cur.fetchall() if r["grouped_id"] is not None]
-        cur.execute("DELETE FROM media_groups WHERE chat_id=?", (chat_id,))
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+
+        if grouped_ids is None:
+            target_ids = _load_all_grouped_ids(cur, chat_id)
+            _delete_media_groups(cur, chat_id, grouped_ids=None)
+            _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+            conn.commit()
+            return
+
+        target_ids = _normalize_grouped_ids(grouped_ids)
+        if target_ids:
+            _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+
         conn.commit()
-        _rebuild_media_groups_for_ids(conn, chat_id, gids, cfg)
-        return
-    gids = [int(x) for x in grouped_ids if x is not None]
-    if gids:
-        _rebuild_media_groups_for_ids(conn, chat_id, gids, cfg)
+    except Exception:
+        conn.rollback()
+        raise
 
 
 def get_chat_stats(conn: sqlite3.Connection, chat_id: int) -> Dict[str, int]:

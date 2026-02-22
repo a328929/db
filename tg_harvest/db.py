@@ -3,11 +3,12 @@ import sqlite3
 import logging
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Tuple, Set, Dict, Optional
+from typing import Tuple
 
 # =========================
 # SQLite 连接 / 能力检测
 # =========================
+
 
 @dataclass
 class SqliteFeatures:
@@ -67,9 +68,9 @@ def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
     """
     统一的数据库连接入口，应用最佳实践配置（WAL, mmap, etc.）
     """
-    conn = sqlite3.connect(db_name, timeout=60) # 增加默认超时
+    conn = sqlite3.connect(db_name, timeout=60)  # 增加默认超时
     conn.row_factory = sqlite3.Row
-    
+
     cur = conn.cursor()
 
     # 性能 / 稳定性（大群友好）
@@ -78,12 +79,12 @@ def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
     cur.execute("PRAGMA synchronous=NORMAL;")
     cur.execute("PRAGMA temp_store=MEMORY;")
     cur.execute("PRAGMA foreign_keys=ON;")
-    cur.execute("PRAGMA cache_size=-64000;")          # ~64MB
-    cur.execute("PRAGMA busy_timeout=10000;")         # 10s (Web端并发关键)
-    cur.execute("PRAGMA wal_autocheckpoint=1000;")    # 稍微频繁一点 checkpoint
+    cur.execute("PRAGMA cache_size=-64000;")  # ~64MB
+    cur.execute("PRAGMA busy_timeout=10000;")  # 10s (Web端并发关键)
+    cur.execute("PRAGMA wal_autocheckpoint=1000;")  # 稍微频繁一点 checkpoint
 
     try:
-        cur.execute("PRAGMA mmap_size=268435456;")    # 256MB
+        cur.execute("PRAGMA mmap_size=268435456;")  # 256MB
     except Exception:
         pass
     try:
@@ -99,156 +100,11 @@ def connect_db(db_name: str) -> Tuple[sqlite3.Connection, SqliteFeatures]:
 
 
 # =========================
-# Schema / 迁移
+# Schema 初始化
 # =========================
 
-def table_exists(conn: sqlite3.Connection, name: str) -> bool:
-    cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1", (name,))
-    return cur.fetchone() is not None
 
-
-def get_table_columns(conn: sqlite3.Connection, table_name: str) -> Set[str]:
-    cur = conn.cursor()
-    cur.execute(f"PRAGMA table_info({table_name})")
-    return {row["name"] for row in cur.fetchall()}
-
-
-def ensure_columns(conn: sqlite3.Connection, table_name: str, cols: Dict[str, str]):
-    """
-    轻量迁移：缺列就补，避免老库直接炸。
-    cols: {"col_name": "TEXT NOT NULL DEFAULT ''", ...}
-    """
-    if not table_exists(conn, table_name):
-        return
-    existing = get_table_columns(conn, table_name)
-    cur = conn.cursor()
-    for name, ddl in cols.items():
-        if name not in existing:
-            logging.info(f"迁移: ALTER TABLE {table_name} ADD COLUMN {name}")
-            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
-
-
-
-SCHEMA_VERSION = 2
-
-
-def get_user_version(conn: sqlite3.Connection) -> int:
-    cur = conn.cursor()
-    cur.execute("PRAGMA user_version")
-    row = cur.fetchone()
-    if row is None:
-        return 0
-    return int(row[0] if not isinstance(row, sqlite3.Row) else row[0])
-
-
-def set_user_version(conn: sqlite3.Connection, version: int):
-    conn.execute(f"PRAGMA user_version={int(version)}")
-
-
-def apply_lightweight_migrations(conn: sqlite3.Connection):
-    """
-    从无版本或旧版本数据库向当前版本迁移。
-    迁移步骤统一由 `MIGRATION_STEPS` 驱动，避免分散逻辑与顺序漂移。
-    """
-    current = get_user_version(conn)
-    if current < 1:
-        ensure_columns(conn, "messages", {
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "text_len": "INTEGER NOT NULL DEFAULT 0",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        })
-        ensure_columns(conn, "message_media", {
-            "grouped_id": "INTEGER",
-            "media_fingerprint": "TEXT",
-            "meta_json": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        })
-        ensure_columns(conn, "media_groups", {
-            "media_sig_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        })
-        set_user_version(conn, 1)
-        conn.commit()
-        current = 1
-
-    if current < 2:
-        ensure_columns(conn, "messages", {
-            "content_norm": "TEXT",
-            "pure_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "text_len": "INTEGER NOT NULL DEFAULT 0",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-            "visual_hash": "TEXT",
-            "visual_hash_algo": "TEXT",
-            "visual_embed_ref": "TEXT",
-        })
-        ensure_columns(conn, "message_media", {
-            "grouped_id": "INTEGER",
-            "file_unique_id": "TEXT",
-            "file_name": "TEXT",
-            "file_ext": "TEXT",
-            "mime_type": "TEXT",
-            "file_size": "INTEGER",
-            "width": "INTEGER",
-            "height": "INTEGER",
-            "duration_sec": "INTEGER",
-            "media_fingerprint": "TEXT",
-            "meta_json": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        })
-        ensure_columns(conn, "media_groups", {
-            "first_message_id": "INTEGER",
-            "first_msg_date_ts": "INTEGER",
-            "last_message_id": "INTEGER",
-            "last_msg_date_ts": "INTEGER",
-            "active_items": "INTEGER NOT NULL DEFAULT 0",
-            "types_csv": "TEXT",
-            "captions_concat": "TEXT",
-            "caption_norm": "TEXT",
-            "pure_hash": "TEXT",
-            "media_sig_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "created_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        })
-        ensure_columns(conn, "dedupe_runs", {
-            "dup_hash_count_group_txt": "INTEGER NOT NULL DEFAULT 0",
-            "dup_hash_count_group_med": "INTEGER NOT NULL DEFAULT 0",
-        })
-        ensure_columns(conn, "dedupe_actions", {
-            "dedupe_hash": "TEXT",
-            "pure_hash": "TEXT",
-        })
-        set_user_version(conn, 2)
-        conn.commit()
-
-
-def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
-    cur = conn.cursor()
-    strict_suffix = " STRICT" if feats.supports_strict else ""
-
+def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     # 聊天信息
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS chats (
@@ -394,12 +250,8 @@ def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
     ){strict_suffix}
     """)
 
-    conn.commit()
-    apply_lightweight_migrations(conn)
 
-    cur = conn.cursor()
-
-    # 索引
+def _create_indexes(cur: sqlite3.Cursor):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_date ON messages(chat_id, msg_date_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_chat_msgid ON messages(chat_id, message_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_grouped ON messages(chat_id, grouped_id) WHERE grouped_id IS NOT NULL")
@@ -426,7 +278,8 @@ def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_dedupe_actions_batch ON dedupe_actions(batch_id)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_dedupe_actions_chat_time ON dedupe_actions(chat_id, created_at DESC)")
 
-    # 视图
+
+def _create_views(cur: sqlite3.Cursor):
     cur.execute("""
     CREATE VIEW IF NOT EXISTS v_messages_enriched AS
     SELECT
@@ -445,56 +298,75 @@ def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
       ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
     """)
 
-    # FTS
-    if feats.supports_fts5:
-        cur.execute("""
-        CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
-        USING fts5(
-            content,
-            content='messages',
-            content_rowid='pk',
-            tokenize='unicode61 remove_diacritics 2'
-        )
-        """)
-        cur.execute("""
-        CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-            INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
-        END;
-        """)
-        cur.execute("""
-        CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
-        END;
-        """)
-        cur.execute("""
-        CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF content ON messages BEGIN
-            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
-            INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
-        END;
-        """)
 
-        # ----------------------------------------------------------------------
-        # P0 级优化：增强 FTS 自愈逻辑
-        # 旧逻辑：仅当 messages_fts count=0 时才 rebuild
-        # 新逻辑：检查行数是否一致，不一致则 rebuild
-        # ----------------------------------------------------------------------
-        cur.execute("SELECT COUNT(*) AS c FROM messages")
-        total_msgs = int(cur.fetchone()["c"] or 0)
-        
-        if total_msgs > 0:
-            cur.execute("SELECT COUNT(*) AS c FROM messages_fts")
-            total_fts = int(cur.fetchone()["c"] or 0)
-            
-            # 如果偏差超过一定比例（比如 > 0）或 FTS 为 0，就应当修复
-            # 为稳健起见，只要不等就 rebuild，因为 FTS 必须准确
-            if total_fts != total_msgs:
-                logging.warning(f"检测到 FTS 索引不一致 (messages={total_msgs}, fts={total_fts})，正在重建 FTS...")
-                # fts5 rebuild 命令: INSERT INTO ... VALUES('rebuild')
-                cur.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
-                logging.info("FTS 重建完成")
-            else:
-                # 即使数量相等，也要防范 content 不一致的情况（虽然比较少见，但数量检查是最快的第一道防线）
-                # 深度检查太慢，暂不执行
-                pass
+def _create_fts_schema(cur: sqlite3.Cursor):
+    cur.execute("""
+    CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
+    USING fts5(
+        content,
+        content='messages',
+        content_rowid='pk',
+        tokenize='unicode61 remove_diacritics 2'
+    )
+    """)
+    cur.execute("""
+    CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
+        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
+    END;
+    """)
+    cur.execute("""
+    CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
+    END;
+    """)
+    cur.execute("""
+    CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF content ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
+        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
+    END;
+    """)
+
+
+def _heal_fts_if_needed(cur: sqlite3.Cursor):
+    # ----------------------------------------------------------------------
+    # P0 级优化：增强 FTS 自愈逻辑
+    # 旧逻辑：仅当 messages_fts count=0 时才 rebuild
+    # 新逻辑：检查行数是否一致，不一致则 rebuild
+    # ----------------------------------------------------------------------
+    cur.execute("SELECT COUNT(*) AS c FROM messages")
+    total_msgs = int(cur.fetchone()["c"] or 0)
+
+    if total_msgs > 0:
+        cur.execute("SELECT COUNT(*) AS c FROM messages_fts")
+        total_fts = int(cur.fetchone()["c"] or 0)
+
+        # 如果偏差超过一定比例（比如 > 0）或 FTS 为 0，就应当修复
+        # 为稳健起见，只要不等就 rebuild，因为 FTS 必须准确
+        if total_fts != total_msgs:
+            logging.warning(f"检测到 FTS 索引不一致 (messages={total_msgs}, fts={total_fts})，正在重建 FTS...")
+            # fts5 rebuild 命令: INSERT INTO ... VALUES('rebuild')
+            cur.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+            logging.info("FTS 重建完成")
+        else:
+            # 即使数量相等，也要防范 content 不一致的情况（虽然比较少见，但数量检查是最快的第一道防线）
+            # 深度检查太慢，暂不执行
+            pass
+
+
+def _create_fts_if_supported(cur: sqlite3.Cursor, feats: SqliteFeatures):
+    if not feats.supports_fts5:
+        return
+    _create_fts_schema(cur)
+    _heal_fts_if_needed(cur)
+
+
+def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
+    cur = conn.cursor()
+    strict_suffix = " STRICT" if feats.supports_strict else ""
+
+    _create_tables(cur, strict_suffix)
+    _create_indexes(cur)
+    _create_views(cur)
+    _create_fts_if_supported(cur, feats)
 
     conn.commit()
