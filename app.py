@@ -86,31 +86,28 @@ def to_fts_match(raw_query: str) -> str:
     tokens = tokenize_query(raw_query)
     if not tokens:
         return ""
-
-    parsed_terms: List[Tuple[bool, str]] = []
+    parts: List[str] = []
+    prev_was_term = False
     pending_not = False
     for kind, value in tokens:
         if kind in {"TERM", "PHRASE"}:
-            parsed_terms.append((pending_not, value))
+            if pending_not and prev_was_term:
+                parts.append("NOT")
+            elif prev_was_term:
+                parts.append("AND")
             pending_not = False
+            parts.append(f'"{value.replace(chr(34), "")}"')
+            prev_was_term = True
             continue
-        if value == "-":
+        if value == "+" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
+            parts.append("AND")
+        elif value == "|" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
+            parts.append("OR")
+        elif value == "-":
             pending_not = True
-        elif value in {"+", "|"}:
-            pending_not = False
-
-    positives = [v for is_not, v in parsed_terms if not is_not]
-    negatives = [v for is_not, v in parsed_terms if is_not]
-
-    # 纯排除查询（如 -广告）不走 FTS，交给 fallback 以保持可预期语义。
-    if not positives:
-        return ""
-
-    parts: List[str] = [f'"{positives[0].replace(chr(34), "")}"']
-    for term in positives[1:]:
-        parts.extend(["AND", f'"{term.replace(chr(34), "")}"'])
-    for term in negatives:
-        parts.extend(["NOT", f'"{term.replace(chr(34), "")}"'])
+        prev_was_term = False
+    while parts and parts[-1] in {"AND", "OR", "NOT"}:
+        parts.pop()
     return " ".join(parts)
 
 
@@ -217,11 +214,11 @@ def create_app() -> Flask:
             elif raw_query.strip():
                 includes, excludes = split_positive_negative_terms(raw_query)
                 for term in includes:
-                    where_parts.append("COALESCE(m.content_norm, '') LIKE ?")
-                    params.append(f"%{term}%")
+                    where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
+                    params.append(f"%{term.lower()}%")
                 for term in excludes:
-                    where_parts.append("COALESCE(m.content_norm, '') NOT LIKE ?")
-                    params.append(f"%{term}%")
+                    where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
+                    params.append(f"%{term.lower()}%")
             if chat_id is not None:
                 where_parts.append("m.chat_id = ?")
                 params.append(chat_id)
