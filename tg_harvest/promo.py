@@ -1,6 +1,8 @@
 # -*- coding: utf-8 -*-
+import json
 import re
 import unicodedata
+from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 
 from .config import AppConfig
@@ -11,36 +13,54 @@ from .normalize import (
 )
 
 # =========================
-# 引流关键词 / 强特征（可继续扩充）
+# 引流规则（支持 JSON 外置）
 # =========================
 
-PROMO_KEYWORDS = [
-    # 中文
-    "防失联", "失联", "备用", "车队", "备份群", "满足你的", "备用群", "新群", "新频道", "频道", "频道号", "频道链接",
-    "永久地址", "最新地址", "发布页", "导航", "进群", "加群", "拉群", "群主",
-    "私聊", "联系", "引擎", "联系方式", "联系客服", "客服", "商务", "酒馆", "体验", "商务合作", "合作", "代理", "推广",
-    "资源群", "福利群", "免费进群", "搜索", "入口", "加我", "找我", "金品", "咨询", "群里见", "搜群",
-    "飞机", "电报", "纸飞机", "telegram", "tg", "channel", "group", "join", "contact",
-    "wechat", "whatsapp", "business", "support",
-    "微信", "微 信", "vx", "wx", "QQ", "qq", "q群", "qq群", "飞机号", "频道号",
-    "JISOU帮你精准找到",
-]
+_DEFAULT_PROMO_RULES = {
+    "promo_keywords": [
+        "防失联", "失联", "备用", "车队", "备份群", "满足你的", "备用群", "新群", "新频道", "频道", "频道号", "频道链接",
+        "永久地址", "最新地址", "发布页", "导航", "进群", "加群", "拉群", "群主", "私聊", "联系", "引擎", "联系方式",
+        "联系客服", "客服", "商务", "酒馆", "体验", "商务合作", "合作", "代理", "推广", "资源群", "福利群", "免费进群",
+        "搜索", "入口", "加我", "找我", "金品", "咨询", "群里见", "搜群", "飞机", "电报", "纸飞机", "telegram", "tg",
+        "channel", "group", "join", "contact", "wechat", "whatsapp", "business", "support", "微信", "微 信", "vx", "wx",
+        "QQ", "qq", "q群", "qq群", "飞机号", "频道号", "JISOU帮你精准找到",
+    ],
+    "hard_promo_markers": [
+        "t.me/", "telegram.me", "joinchat", "/+", "私聊", "联系客服", "联系我", "加群", "进群", "vx", "wx", "微信",
+        "wechat", "qq", "@", "频道链接", "发布页", "导航", "jiso",
+    ],
+    "cta_words": [
+        "点击", "加入", "进群", "加群", "私信", "联系我", "车队", "酒馆", "体验", "联系客服", "搜索", "满足你的", "引擎", "合作",
+        "进入", "JISOU帮你精准找到", "查看", "金品", "复制", "搜索", "加我", "咨询", "订阅", "关注", "打开", "扫码",
+    ],
+    "compact_markers": ["tme", "telegramme", "joinchat", "vx", "wx", "wechat", "微信", "qq群", "q群", "客服", "加群", "进群", "发布页", "导航"],
+}
 
-HARD_PROMO_MARKERS = [
-    "t.me/", "telegram.me", "joinchat", "/+",
-    "私聊", "联系客服", "联系我", "加群", "进群",
-    "vx", "wx", "微信", "wechat", "qq", "@", "频道链接", "发布页", "导航", "jiso",
-]
 
-CTA_WORDS = [
-    "点击", "加入", "进群", "加群", "私信", "联系我", "车队", "酒馆", "体验", "联系客服", "搜索", "满足你的", "引擎", "合作",
-    "进入", "JISOU帮你精准找到", "查看", "金品", "复制", "搜索", "加我", "咨询", "订阅", "关注", "打开", "扫码",
-]
+def _load_promo_rules() -> Dict[str, List[str]]:
+    rules_file = Path(__file__).resolve().with_name("promo_rules.json")
+    if not rules_file.exists():
+        return _DEFAULT_PROMO_RULES
+    try:
+        raw = json.loads(rules_file.read_text(encoding="utf-8"))
+        merged = dict(_DEFAULT_PROMO_RULES)
+        for key in merged.keys():
+            value = raw.get(key)
+            if isinstance(value, list):
+                merged[key] = [str(x) for x in value if str(x).strip()]
+        return merged
+    except Exception:
+        return _DEFAULT_PROMO_RULES
 
-# 用于“压缩串”匹配（去掉分隔符后的关键词）
+
+_PROMO_RULES = _load_promo_rules()
+PROMO_KEYWORDS = _PROMO_RULES["promo_keywords"]
+HARD_PROMO_MARKERS = _PROMO_RULES["hard_promo_markers"]
+CTA_WORDS = _PROMO_RULES["cta_words"]
+COMPACT_MARKERS = _PROMO_RULES["compact_markers"]
+
 PROMO_KEYWORDS_COMPACT = sorted({re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", k).lower()) for k in PROMO_KEYWORDS if k.strip()})
 CTA_WORDS_COMPACT = sorted({re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", k).lower()) for k in CTA_WORDS if k.strip()})
-
 
 def contains_hard_promo_markers(text: str) -> bool:
     if not text:
@@ -53,8 +73,7 @@ def contains_hard_promo_markers(text: str) -> bool:
         return True
 
     # 压缩串标记（抗插符号/拆字）
-    compact_markers = ["tme", "telegramme", "joinchat", "vx", "wx", "wechat", "微信", "qq群", "q群", "客服", "加群", "进群", "发布页", "导航"]
-    if any(m in compact for m in compact_markers):
+    if any(m in compact for m in COMPACT_MARKERS):
         return True
 
     # 宽松 regex

@@ -1,0 +1,222 @@
+# -*- coding: utf-8 -*-
+import logging
+import re
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional
+
+from .dedupe import build_media_fingerprint
+from .normalize import _safe_json
+
+
+def setup_logging():
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s | %(levelname)s | %(message)s",
+        datefmt="%H:%M:%S",
+    )
+
+
+def classify_msg_type(message) -> str:
+    try:
+        if getattr(message, "sticker", None):
+            return "STICKER"
+        if getattr(message, "gif", None):
+            return "GIF"
+        if getattr(message, "voice", None):
+            return "VOICE"
+        if getattr(message, "video_note", None):
+            return "VIDEO_NOTE"
+        if getattr(message, "audio", None):
+            return "AUDIO"
+        if getattr(message, "video", None):
+            return "VIDEO"
+        if getattr(message, "photo", None):
+            return "PHOTO"
+        if getattr(message, "document", None):
+            return "FILE"
+        if getattr(message, "poll", None):
+            return "POLL"
+        if getattr(message, "contact", None):
+            return "CONTACT"
+        if getattr(message, "geo", None):
+            return "GEO"
+        return "TEXT"
+    except Exception:
+        return "TEXT"
+
+
+def extract_message_text(message) -> str:
+    for attr in ("raw_text", "message", "text"):
+        try:
+            v = getattr(message, attr, None)
+            if v:
+                return str(v).strip()
+        except Exception:
+            continue
+    return ""
+
+
+def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
+    out = {
+        "media_kind": msg_type if msg_type != "TEXT" else None,
+        "file_unique_id": None,
+        "file_name": None,
+        "file_ext": None,
+        "mime_type": None,
+        "file_size": None,
+        "width": None,
+        "height": None,
+        "duration_sec": None,
+        "media_fingerprint": None,
+        "meta_json": None,
+    }
+    if msg_type == "TEXT":
+        return out
+
+    extra = {}
+    try:
+        f = getattr(message, "file", None)
+        if f is not None:
+            for k in ("id", "name", "ext", "mime_type", "size", "width", "height", "duration", "title", "performer", "emoji"):
+                try:
+                    v = getattr(f, k, None)
+                except Exception:
+                    v = None
+                if v is None:
+                    continue
+                if k == "id":
+                    out["file_unique_id"] = str(v)
+                elif k == "name":
+                    out["file_name"] = str(v)
+                elif k == "ext":
+                    out["file_ext"] = str(v)
+                elif k == "mime_type":
+                    out["mime_type"] = str(v)
+                elif k == "size":
+                    try:
+                        out["file_size"] = int(v)
+                    except Exception:
+                        pass
+                elif k == "width":
+                    try:
+                        out["width"] = int(v)
+                    except Exception:
+                        pass
+                elif k == "height":
+                    try:
+                        out["height"] = int(v)
+                    except Exception:
+                        pass
+                elif k == "duration":
+                    try:
+                        out["duration_sec"] = int(v)
+                    except Exception:
+                        pass
+                else:
+                    extra[k] = v
+    except Exception as e:
+        extra["file_wrapper_error"] = str(e)
+
+    if not out["file_unique_id"]:
+        try:
+            p = getattr(message, "photo", None)
+            if p is not None and hasattr(p, "id"):
+                out["file_unique_id"] = str(getattr(p, "id"))
+        except Exception:
+            pass
+    if not out["file_unique_id"]:
+        try:
+            d = getattr(message, "document", None)
+            if d is not None and hasattr(d, "id"):
+                out["file_unique_id"] = str(getattr(d, "id"))
+        except Exception:
+            pass
+
+    try:
+        extra["views"] = getattr(message, "views", None)
+        extra["forwards"] = getattr(message, "forwards", None)
+        extra["edit_date"] = str(getattr(message, "edit_date", None)) if getattr(message, "edit_date", None) else None
+    except Exception:
+        pass
+
+    extra = {k: v for k, v in extra.items() if v is not None}
+    out["meta_json"] = _safe_json(extra) if extra else None
+    out["media_fingerprint"] = build_media_fingerprint(
+        file_unique_id=out["file_unique_id"],
+        mime_type=out["mime_type"],
+        file_size=out["file_size"],
+        width=out["width"],
+        height=out["height"],
+        duration_sec=out["duration_sec"],
+    )
+    return out
+
+
+def resolve_target_entity(client: Any, target: str):
+    t = (target or "").strip()
+    try:
+        cleaned = t.replace("https://t.me/", "").replace("http://t.me/", "").strip("/")
+        if cleaned.startswith("@"):
+            cleaned = cleaned.lstrip("@")
+        if cleaned and (cleaned != t or t.startswith("@") or re.fullmatch(r"-?\d+", t)):
+            return client.get_entity(cleaned)
+    except Exception:
+        pass
+
+    try:
+        exact_match = None
+        partial_match = None
+        for d in client.get_dialogs():
+            title = (d.title or "")
+            if title.strip() == t:
+                exact_match = d.entity
+                break
+            if t and partial_match is None and t in title:
+                partial_match = d.entity
+        return exact_match or partial_match
+    except Exception:
+        return None
+
+
+def build_msg_link(entity, msg_id: int) -> str:
+    username = getattr(entity, "username", None)
+    if username:
+        return f"https://t.me/{username}/{msg_id}"
+    raw_id = str(getattr(entity, "id", ""))
+    if raw_id.startswith("-100"):
+        raw_id = raw_id[4:]
+    else:
+        raw_id = raw_id.lstrip("-")
+    return f"https://t.me/c/{raw_id}/{msg_id}"
+
+
+@dataclass
+class HarvestCounters:
+    seen: int = 0
+    written: int = 0
+    parse_failures: int = 0
+    parse_failure_samples: Optional[List[str]] = None
+    parse_failures_by_type: Optional[Dict[str, int]] = None
+
+    def __post_init__(self):
+        if self.parse_failure_samples is None:
+            self.parse_failure_samples = []
+        if self.parse_failures_by_type is None:
+            self.parse_failures_by_type = {}
+
+    def note_parse_failure(self, err: Exception, message: Any = None):
+        self.parse_failures += 1
+        key = err.__class__.__name__
+        self.parse_failures_by_type[key] = self.parse_failures_by_type.get(key, 0) + 1
+        if len(self.parse_failure_samples) >= 5:
+            return
+        msg_id = getattr(message, "id", None)
+        self.parse_failure_samples.append(f"id={msg_id}, err={key}: {err}")
+
+
+def log_parse_failure_summary(counters: HarvestCounters):
+    if counters.parse_failures == 0:
+        return
+    logging.warning("解析失败统计: total=%s by_type=%s", counters.parse_failures, counters.parse_failures_by_type)
+    for sample in counters.parse_failure_samples:
+        logging.warning("解析失败样例: %s", sample)

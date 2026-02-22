@@ -8,8 +8,6 @@
     sort_by: "time",
     order: "desc",
     page: 1,
-    total_pages: 0,
-    last_result_count: 0,
   };
 
   const els = {
@@ -143,8 +141,6 @@
     const totalPages = Number(payload.total_pages || 0);
     const effectiveSort = payload.effective_sort || "time";
 
-    state.total_pages = totalPages;
-    state.last_result_count = items.length;
 
     if (total === 0) {
       setStatus("未找到匹配内容。");
