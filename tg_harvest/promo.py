@@ -37,18 +37,30 @@ _DEFAULT_PROMO_RULES = {
 }
 
 
+def _promo_rules_file_path() -> Path:
+    return Path(__file__).resolve().with_name("promo_rules.json")
+
+
+def _read_promo_rules_json(rules_file: Path) -> Dict[str, Any]:
+    return json.loads(rules_file.read_text(encoding="utf-8"))
+
+
+def _merge_promo_rules_with_defaults(raw: Dict[str, Any]) -> Dict[str, List[str]]:
+    merged = dict(_DEFAULT_PROMO_RULES)
+    for key in merged.keys():
+        value = raw.get(key)
+        if isinstance(value, list):
+            merged[key] = [str(x) for x in value if str(x).strip()]
+    return merged
+
+
 def _load_promo_rules() -> Dict[str, List[str]]:
-    rules_file = Path(__file__).resolve().with_name("promo_rules.json")
+    rules_file = _promo_rules_file_path()
     if not rules_file.exists():
         return _DEFAULT_PROMO_RULES
     try:
-        raw = json.loads(rules_file.read_text(encoding="utf-8"))
-        merged = dict(_DEFAULT_PROMO_RULES)
-        for key in merged.keys():
-            value = raw.get(key)
-            if isinstance(value, list):
-                merged[key] = [str(x) for x in value if str(x).strip()]
-        return merged
+        raw = _read_promo_rules_json(rules_file)
+        return _merge_promo_rules_with_defaults(raw)
     except Exception:
         return _DEFAULT_PROMO_RULES
 
@@ -101,14 +113,7 @@ def _count_compact_keyword_hits(compact: str, keywords_compact: List[str]) -> in
     return hits
 
 
-def _score_promo_signals(text: str) -> Tuple[int, List[str], Dict[str, int]]:
-    """
-    广告打分（增强版）
-    同时看：
-    - 原文（raw）
-    - 轻归一化（light）
-    - 压缩串（compact，抗插符号/拆字）
-    """
+def _extract_promo_hits(text: str) -> Dict[str, int]:
     raw = text or ""
     s = _light_normalize(raw)
     compact = _compact_for_detection(raw)
@@ -135,9 +140,43 @@ def _score_promo_signals(text: str) -> Tuple[int, List[str], Dict[str, int]]:
     if re.search(r"(?:v[\s\W_]*x|w[\s\W_]*x|t[\s\W_]*\.?[\s\W_]*m[\s\W_]*\.?[\s\W_]*e)", s, re.I):
         obfuscation_hits += 1
 
+    return {
+        "url_hits": url_hits,
+        "obf_tg_hits": obf_tg_hits,
+        "invite_hits": invite_hits,
+        "mention_hits": mention_hits,
+        "wechat_hits": wechat_hits,
+        "qq_hits": qq_hits,
+        "phone_hits": phone_hits,
+        "contact_id_hits": contact_id_hits,
+        "kw_hits": kw_hits,
+        "cta_hits": cta_hits,
+        "compact_tg": compact_tg,
+        "compact_wechat": compact_wechat,
+        "compact_qq": compact_qq,
+        "obfuscation_hits": obfuscation_hits,
+    }
+
+
+def _score_from_promo_hits(hits: Dict[str, int]) -> Tuple[int, List[str]]:
     # 链接/联系方式强信号
     score = 0
     reasons: List[str] = []
+
+    url_hits = hits["url_hits"]
+    obf_tg_hits = hits["obf_tg_hits"]
+    invite_hits = hits["invite_hits"]
+    mention_hits = hits["mention_hits"]
+    wechat_hits = hits["wechat_hits"]
+    qq_hits = hits["qq_hits"]
+    phone_hits = hits["phone_hits"]
+    contact_id_hits = hits["contact_id_hits"]
+    kw_hits = hits["kw_hits"]
+    cta_hits = hits["cta_hits"]
+    compact_tg = hits["compact_tg"]
+    compact_wechat = hits["compact_wechat"]
+    compact_qq = hits["compact_qq"]
+    obfuscation_hits = hits["obfuscation_hits"]
 
     if url_hits:
         score += 3 + min(url_hits - 1, 2)
@@ -204,23 +243,89 @@ def _score_promo_signals(text: str) -> Tuple[int, List[str], Dict[str, int]]:
         score += 1
         reasons.append("combo:kw+contact")
 
-    stats = {
-        "url_hits": url_hits,
-        "obf_tg_hits": obf_tg_hits,
-        "invite_hits": invite_hits,
-        "mention_hits": mention_hits,
-        "wechat_hits": wechat_hits,
-        "qq_hits": qq_hits,
-        "phone_hits": phone_hits,
-        "contact_id_hits": contact_id_hits,
-        "kw_hits": kw_hits,
-        "cta_hits": cta_hits,
-        "compact_tg": compact_tg,
-        "compact_wechat": compact_wechat,
-        "compact_qq": compact_qq,
-        "obfuscation_hits": obfuscation_hits,
+    return score, reasons
+
+
+def _build_promo_stats(hits: Dict[str, int]) -> Dict[str, int]:
+    return {
+        "url_hits": hits["url_hits"],
+        "obf_tg_hits": hits["obf_tg_hits"],
+        "invite_hits": hits["invite_hits"],
+        "mention_hits": hits["mention_hits"],
+        "wechat_hits": hits["wechat_hits"],
+        "qq_hits": hits["qq_hits"],
+        "phone_hits": hits["phone_hits"],
+        "contact_id_hits": hits["contact_id_hits"],
+        "kw_hits": hits["kw_hits"],
+        "cta_hits": hits["cta_hits"],
+        "compact_tg": hits["compact_tg"],
+        "compact_wechat": hits["compact_wechat"],
+        "compact_qq": hits["compact_qq"],
+        "obfuscation_hits": hits["obfuscation_hits"],
     }
+
+
+def _score_promo_signals(text: str) -> Tuple[int, List[str], Dict[str, int]]:
+    """
+    广告打分（增强版）
+    同时看：
+    - 原文（raw）
+    - 轻归一化（light）
+    - 压缩串（compact，抗插符号/拆字）
+    """
+    hits = _extract_promo_hits(text)
+    score, reasons = _score_from_promo_hits(hits)
+    stats = _build_promo_stats(hits)
     return score, reasons, stats
+
+
+def _prepare_media_caption_text(text: str) -> Tuple[str, str]:
+    s = (text or "").strip()
+    low = _light_normalize(s)
+    return s, low
+
+
+def _has_hard_contact_signals(low: str, promo_stats: Optional[Dict[str, int]]) -> bool:
+    has_hard = bool(
+        URL_RE.search(low) or OBF_TME_RE.search(low) or INVITE_RE.search(low) or
+        WECHAT_RE.search(low) or QQ_RE.search(low) or PHONE_RE.search(low) or CONTACT_ID_RE.search(low)
+    )
+
+    if promo_stats is not None:
+        if (
+            promo_stats["url_hits"] + promo_stats["obf_tg_hits"] + promo_stats["invite_hits"] +
+            promo_stats["wechat_hits"] + promo_stats["qq_hits"] + promo_stats["phone_hits"] +
+            promo_stats["contact_id_hits"]
+        ) > 0:
+            has_hard = True
+    return has_hard
+
+
+def _is_short_generic_caption(s: str,
+                              low: str,
+                              promo_stats: Optional[Dict[str, int]],
+                              guard_len: int,
+                              has_hard: bool) -> bool:
+    if len(s) <= guard_len and not has_hard:
+        kw_hits = 0
+        if promo_stats is not None:
+            kw_hits = int(promo_stats.get("kw_hits", 0))
+        else:
+            kw_hits = _count_compact_keyword_hits(_compact_for_detection(low), PROMO_KEYWORDS_COMPACT)
+
+        mention_hits = int((promo_stats or {}).get("mention_hits", len(MENTION_RE.findall(low))))
+        if kw_hits <= 1 and mention_hits <= 1 and not contains_hard_promo_markers(s):
+            return True
+    return False
+
+
+def _is_short_media_title(msg_type: str, s: str) -> bool:
+    # 很短标题保护（比如“第12集”“预告”“花絮”）
+    if msg_type in {"PHOTO", "VIDEO", "GIF", "AUDIO", "FILE"} and not contains_hard_promo_markers(s):
+        plain = normalize_text_for_hash(s)
+        if 0 < len(plain) <= 12:
+            return True
+    return False
 
 
 def is_generic_media_caption(text: str,
@@ -237,50 +342,31 @@ def is_generic_media_caption(text: str,
     if not has_media:
         return False
 
-    s = (text or "").strip()
+    s, low = _prepare_media_caption_text(text)
     if not s:
         return True  # 纯媒体无caption，默认不参与文本去重（防误杀）
 
-    low = _light_normalize(s)
+    has_hard = _has_hard_contact_signals(low, promo_stats)
 
-    has_hard = bool(
-        URL_RE.search(low) or OBF_TME_RE.search(low) or INVITE_RE.search(low) or
-        WECHAT_RE.search(low) or QQ_RE.search(low) or PHONE_RE.search(low) or CONTACT_ID_RE.search(low)
-    )
+    if _is_short_generic_caption(s=s, low=low, promo_stats=promo_stats, guard_len=guard_len, has_hard=has_hard):
+        return True
 
-    if promo_stats is not None:
-        if (
-            promo_stats["url_hits"] + promo_stats["obf_tg_hits"] + promo_stats["invite_hits"] +
-            promo_stats["wechat_hits"] + promo_stats["qq_hits"] + promo_stats["phone_hits"] +
-            promo_stats["contact_id_hits"]
-        ) > 0:
-            has_hard = True
-
-    if len(s) <= guard_len and not has_hard:
-        kw_hits = 0
-        if promo_stats is not None:
-            kw_hits = int(promo_stats.get("kw_hits", 0))
-        else:
-            kw_hits = _count_compact_keyword_hits(_compact_for_detection(low), PROMO_KEYWORDS_COMPACT)
-
-        mention_hits = int((promo_stats or {}).get("mention_hits", len(MENTION_RE.findall(low))))
-        if kw_hits <= 1 and mention_hits <= 1 and not contains_hard_promo_markers(s):
-            return True
-
-    # 很短标题保护（比如“第12集”“预告”“花絮”）
-    if msg_type in {"PHOTO", "VIDEO", "GIF", "AUDIO", "FILE"} and not contains_hard_promo_markers(s):
-        plain = normalize_text_for_hash(s)
-        if 0 < len(plain) <= 12:
-            return True
+    if _is_short_media_title(msg_type, s):
+        return True
 
     return False
 
 
-def build_single_promo_features(text: str, msg_type: str, has_media: bool, cfg: AppConfig) -> Dict[str, Any]:
-    score, reasons, stats = _score_promo_signals(text)
-    raw = text or ""
+def _resolve_single_promo_text(text: str) -> str:
+    return text or ""
 
-    is_promo = 1 if score >= cfg.promo_score_threshold else 0
+
+def _decide_single_promo_guard(raw: str,
+                               msg_type: str,
+                               has_media: bool,
+                               stats: Dict[str, int],
+                               is_promo: int,
+                               cfg: AppConfig) -> Tuple[int, Optional[str]]:
     guard_reason = None
     dedupe_eligible = 0
 
@@ -297,9 +383,17 @@ def build_single_promo_features(text: str, msg_type: str, has_media: bool, cfg: 
     else:
         dedupe_eligible = 0
 
+    return dedupe_eligible, guard_reason
+
+
+def _build_single_promo_result(raw: str,
+                               is_promo: int,
+                               score: int,
+                               reasons: List[str],
+                               dedupe_eligible: int,
+                               guard_reason: Optional[str]) -> Dict[str, Any]:
     norm_for_hash = normalize_text_for_hash(raw)
     pure_hash = make_hash(norm_for_hash) if norm_for_hash else ""
-
     return {
         "is_promo": is_promo,
         "promo_score": score,
@@ -312,31 +406,53 @@ def build_single_promo_features(text: str, msg_type: str, has_media: bool, cfg: 
     }
 
 
-def build_group_promo_features(captions_concat: str,
-                               item_count: int,
-                               types_csv: str,
-                               media_sig_hash: str,
-                               cfg: AppConfig) -> Dict[str, Any]:
-    """
-    媒体组级广告识别（解决“相册广告”）
-    """
-    raw = (captions_concat or "").strip()
+def build_single_promo_features(text: str, msg_type: str, has_media: bool, cfg: AppConfig) -> Dict[str, Any]:
+    score, reasons, stats = _score_promo_signals(text)
+    raw = _resolve_single_promo_text(text)
+    is_promo = 1 if score >= cfg.promo_score_threshold else 0
 
-    # caption 可能为空，但媒体组仍可有媒体签名
-    if not raw:
-        return {
-            "is_promo": 0,
-            "promo_score": 0,
-            "promo_reasons": [],
-            "dedupe_eligible": 0,
-            "guard_reason": "EMPTY_MEDIA_GROUP_CAPTION",
-            "caption_norm": "",
-            "pure_hash": "",
-            "dedupe_hash": "",
-        }
+    dedupe_eligible, guard_reason = _decide_single_promo_guard(
+        raw=raw,
+        msg_type=msg_type,
+        has_media=has_media,
+        stats=stats,
+        is_promo=is_promo,
+        cfg=cfg,
+    )
 
-    score, reasons, stats = _score_promo_signals(raw)
+    result = _build_single_promo_result(
+        raw=raw,
+        is_promo=is_promo,
+        score=score,
+        reasons=reasons,
+        dedupe_eligible=dedupe_eligible,
+        guard_reason=guard_reason,
+    )
+    return result
 
+
+def _prepare_group_promo_text(captions_concat: str) -> str:
+    return (captions_concat or "").strip()
+
+
+def _build_empty_group_promo_result() -> Dict[str, Any]:
+    return {
+        "is_promo": 0,
+        "promo_score": 0,
+        "promo_reasons": [],
+        "dedupe_eligible": 0,
+        "guard_reason": "EMPTY_MEDIA_GROUP_CAPTION",
+        "caption_norm": "",
+        "pure_hash": "",
+        "dedupe_hash": "",
+    }
+
+
+def _apply_group_bonus(raw: str,
+                       item_count: int,
+                       score: int,
+                       reasons: List[str],
+                       stats: Dict[str, int]) -> int:
     # 多媒体组 + 明显导流特征，加一点权重
     if item_count >= 2 and (
         contains_hard_promo_markers(raw)
@@ -349,8 +465,13 @@ def build_group_promo_features(captions_concat: str,
     ):
         score += 1
         reasons.append(f"group_bonus:{item_count}")
+    return score
 
-    is_promo = 1 if score >= cfg.promo_score_threshold else 0
+
+def _decide_group_guard(raw: str,
+                        is_promo: int,
+                        stats: Dict[str, int],
+                        cfg: AppConfig) -> Tuple[int, Optional[str]]:
     guard_reason = None
     dedupe_eligible = 0
 
@@ -371,6 +492,16 @@ def build_group_promo_features(captions_concat: str,
         else:
             dedupe_eligible = 1
 
+    return dedupe_eligible, guard_reason
+
+
+def _build_group_promo_result(raw: str,
+                              media_sig_hash: str,
+                              is_promo: int,
+                              score: int,
+                              reasons: List[str],
+                              dedupe_eligible: int,
+                              guard_reason: Optional[str]) -> Dict[str, Any]:
     caption_norm = normalize_text_light(raw)
     pure_hash = make_hash(normalize_text_for_hash(raw)) if raw else ""
 
@@ -392,3 +523,34 @@ def build_group_promo_features(captions_concat: str,
         "pure_hash": pure_hash,
         "dedupe_hash": dedupe_hash,
     }
+
+
+def build_group_promo_features(captions_concat: str,
+                               item_count: int,
+                               types_csv: str,
+                               media_sig_hash: str,
+                               cfg: AppConfig) -> Dict[str, Any]:
+    """
+    媒体组级广告识别（解决“相册广告”）
+    """
+    raw = _prepare_group_promo_text(captions_concat)
+
+    # caption 可能为空，但媒体组仍可有媒体签名
+    if not raw:
+        return _build_empty_group_promo_result()
+
+    score, reasons, stats = _score_promo_signals(raw)
+    score = _apply_group_bonus(raw=raw, item_count=item_count, score=score, reasons=reasons, stats=stats)
+
+    is_promo = 1 if score >= cfg.promo_score_threshold else 0
+    dedupe_eligible, guard_reason = _decide_group_guard(raw=raw, is_promo=is_promo, stats=stats, cfg=cfg)
+
+    return _build_group_promo_result(
+        raw=raw,
+        media_sig_hash=media_sig_hash,
+        is_promo=is_promo,
+        score=score,
+        reasons=reasons,
+        dedupe_eligible=dedupe_eligible,
+        guard_reason=guard_reason,
+    )
