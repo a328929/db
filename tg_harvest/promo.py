@@ -355,7 +355,7 @@ def build_group_promo_features(captions_concat: str,
     caption_norm = normalize_text_light(raw)
     pure_hash = make_hash(normalize_text_for_hash(raw)) if raw else ""
 
-    # 组主 dedupe 键：文本模板优先，空文案则回退媒体签名
+    # 组主 dedupe 键：当前仅在有文案时使用文本模板（空文案由上游保守处理）
     if pure_hash:
         dedupe_hash = pure_hash
     elif media_sig_hash:
