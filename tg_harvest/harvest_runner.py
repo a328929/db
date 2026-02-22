@@ -2,7 +2,7 @@
 import logging
 import sqlite3
 import time
-from typing import Any, List, Set
+from typing import Any, List, Set, Tuple
 
 from .config import AppConfig, CFG, _is_enabled
 from .db import connect_db, create_schema
@@ -74,6 +74,45 @@ def collect_target_entities(conn: sqlite3.Connection, client: Any, cfg: AppConfi
             logging.error("❌ 未找到该群组/频道，请检查名称 / 用户名 / 链接")
 
     return entities
+
+
+def _refresh_groups_before_dedupe(conn: sqlite3.Connection, chat_id: int, first_sync: bool, touched_group_ids: Set[int]):
+    """阶段2：先刷新 media_groups，给 dedupe 提供稳定的组视图。"""
+    if first_sync:
+        refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=None)
+        return
+    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=touched_group_ids)
+
+
+def _run_dedupe_phase(conn: sqlite3.Connection, chat_id: int) -> Tuple[int, int, int, int, Set[int]]:
+    """阶段3：执行 dedupe，返回删除统计与受影响 grouped_id。"""
+    return dedupe_promotional_duplicates(
+        conn,
+        chat_id=chat_id,
+        mode=CFG.dedup_mode,
+        threshold=CFG.dedup_threshold,
+        promo_score_threshold=CFG.promo_score_threshold,
+    )
+
+
+def _refresh_groups_after_dedupe(conn: sqlite3.Connection, chat_id: int, affected_group_ids: Set[int]):
+    """阶段4：去重后仅刷新受影响组，确保 media_groups 一致性。"""
+    if not affected_group_ids:
+        return
+    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=affected_group_ids)
+
+
+def _run_group_refresh_and_dedupe_pipeline(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    first_sync: bool,
+    touched_group_ids: Set[int],
+) -> Tuple[int, int, int, int, Set[int]]:
+    """固定流程：首次聚合 -> dedupe -> 去重后一致性修复。"""
+    _refresh_groups_before_dedupe(conn, chat_id, first_sync=first_sync, touched_group_ids=touched_group_ids)
+    dedupe_result = _run_dedupe_phase(conn, chat_id)
+    _refresh_groups_after_dedupe(conn, chat_id, dedupe_result[4])
+    return dedupe_result
 
 
 def run_harvest():
@@ -185,25 +224,24 @@ def run_harvest():
                         counters.note_parse_failure(e, message)
                         logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
 
+                # 阶段1：批量落库
                 if msg_rows or media_rows:
                     batch_upsert(conn, msg_rows, media_rows)
                     counters.written += len(msg_rows)
 
-                if first_sync:
-                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=None)
-                else:
-                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=touched_group_ids)
+                # 阶段2~4：首次聚合 -> dedupe -> 去重后一致性修复
+                try:
+                    deduped_count, dup_hash_solo, dup_hash_group_txt, dup_hash_group_med, _ = _run_group_refresh_and_dedupe_pipeline(
+                        conn,
+                        chat_id=chat_id,
+                        first_sync=first_sync,
+                        touched_group_ids=touched_group_ids,
+                    )
+                except Exception as e:
+                    logging.exception(f"群组处理失败（chat_id={chat_id}，阶段=media_groups/dedupe）: {e}")
+                    raise
 
-                deduped_count, dup_hash_solo, dup_hash_group_txt, dup_hash_group_med, affected_group_ids = dedupe_promotional_duplicates(
-                    conn,
-                    chat_id=chat_id,
-                    mode=CFG.dedup_mode,
-                    threshold=CFG.dedup_threshold,
-                    promo_score_threshold=CFG.promo_score_threshold,
-                )
-                if affected_group_ids:
-                    refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=affected_group_ids)
-
+                # 阶段5：汇总统计/日志输出
                 stats = get_chat_stats(conn, chat_id)
                 log_parse_failure_summary(counters)
                 logging.info(f"群组: {chat_title} (chat_id={chat_id}) | 扫描={counters.seen} 写入={counters.written} 删除={deduped_count}")
