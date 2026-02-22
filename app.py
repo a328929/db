@@ -239,20 +239,37 @@ def _parse_search_params(data: Dict[str, Any]) -> SearchParams:
 def _build_search_filters(params: SearchParams, fts_enabled: bool) -> Tuple[str, List[Any], str]:
     where_parts: List[str] = ["1=1"]
     sql_params: List[Any] = []
-    match_query = to_fts_match(params.raw_query)
 
+    match_query = _append_text_search_filters(where_parts, sql_params, params.raw_query, fts_enabled)
+    _append_scope_filters(where_parts, sql_params, params)
+
+    return " AND ".join(where_parts), sql_params, match_query
+
+
+def _append_text_search_filters(
+    where_parts: List[str],
+    sql_params: List[Any],
+    raw_query: str,
+    fts_enabled: bool,
+) -> str:
+    match_query = to_fts_match(raw_query)
     if match_query and fts_enabled:
         where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
         sql_params.append(match_query)
-    elif params.raw_query.strip():
-        includes, excludes = split_positive_negative_terms(params.raw_query)
+        return match_query
+
+    if raw_query.strip():
+        includes, excludes = split_positive_negative_terms(raw_query)
         for term in includes:
             where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
             sql_params.append(f"%{term.lower()}%")
         for term in excludes:
             where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
             sql_params.append(f"%{term.lower()}%")
+    return match_query
 
+
+def _append_scope_filters(where_parts: List[str], sql_params: List[Any], params: SearchParams) -> None:
     if params.chat_id is not None:
         where_parts.append("m.chat_id = ?")
         sql_params.append(params.chat_id)
@@ -261,8 +278,6 @@ def _build_search_filters(params: SearchParams, fts_enabled: bool) -> Tuple[str,
     if type_clause:
         where_parts.append(type_clause)
         sql_params.extend(type_params)
-
-    return " AND ".join(where_parts), sql_params, match_query
 
 
 def _build_search_sql(where_sql: str, search_type: str, sort_by_req: str, order_req: str) -> Tuple[str, str, str, str, str]:
@@ -279,6 +294,32 @@ def _build_search_sql(where_sql: str, search_type: str, sort_by_req: str, order_
     return count_sql, query_sql, order_expr, effective_sort, effective_order
 
 
+def _execute_count_query(cur: sqlite3.Cursor, count_sql: str, sql_params: List[Any]) -> Tuple[int, bool, int]:
+    cur.execute(count_sql, sql_params + [MAX_COUNT + 1])
+    counted = int(cur.fetchone()["c"] or 0)
+    total_is_capped = counted > MAX_COUNT
+    total = min(counted, MAX_COUNT)
+    total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
+    return total, total_is_capped, total_pages
+
+
+def _execute_rows_query(
+    cur: sqlite3.Cursor,
+    query_sql: str,
+    sql_params: List[Any],
+    page: int,
+    total_pages: int,
+) -> Tuple[List[sqlite3.Row], int]:
+    effective_page = page
+    if total_pages > 0 and effective_page > total_pages:
+        effective_page = total_pages
+
+    offset = (effective_page - 1) * PAGE_SIZE if total_pages > 0 else 0
+    cur.execute(query_sql, sql_params + [PAGE_SIZE, offset])
+    rows = cur.fetchall()
+    return rows, effective_page
+
+
 def _run_search_query(
     conn: sqlite3.Connection,
     count_sql: str,
@@ -288,42 +329,41 @@ def _run_search_query(
 ) -> Tuple[List[sqlite3.Row], int, int, bool, int]:
     cur = conn.cursor()
     try:
-        cur.execute(count_sql, sql_params + [MAX_COUNT + 1])
-        counted = int(cur.fetchone()["c"] or 0)
-        total_is_capped = counted > MAX_COUNT
-        total = min(counted, MAX_COUNT)
-        total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
-
-        effective_page = page
-        if total_pages > 0 and effective_page > total_pages:
-            effective_page = total_pages
-
-        offset = (effective_page - 1) * PAGE_SIZE if total_pages > 0 else 0
-        cur.execute(query_sql, sql_params + [PAGE_SIZE, offset])
-        rows = cur.fetchall()
-
+        total, total_is_capped, total_pages = _execute_count_query(cur, count_sql, sql_params)
+        rows, effective_page = _execute_rows_query(cur, query_sql, sql_params, page, total_pages)
         return rows, total, total_pages, total_is_capped, effective_page
     finally:
         cur.close()
 
 
+def _build_search_display_fields(row: sqlite3.Row) -> Dict[str, Any]:
+    return {
+        "content": row["content"] or "",
+        "file_name": row["file_name"] or "",
+        "title": build_result_title(row),
+    }
+
+
+def _map_search_row(row: sqlite3.Row) -> Dict[str, Any]:
+    file_size = int(row["file_size"]) if row["file_size"] is not None else None
+    item = {
+        "pk": int(row["pk"]),
+        "chat_id": int(row["chat_id"]),
+        "chat_title": row["chat_title"] or "",
+        "message_id": int(row["message_id"]),
+        "msg_date_text": row["msg_date_text"] or "",
+        "msg_type": row["msg_type"] or "TEXT",
+        "link": row["link"] or "",
+        "file_size": file_size,
+    }
+    item.update(_build_search_display_fields(row))
+    return item
+
+
 def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
-    for r in rows:
-        file_size = int(r["file_size"]) if r["file_size"] is not None else None
-        items.append({
-            "pk": int(r["pk"]),
-            "chat_id": int(r["chat_id"]),
-            "chat_title": r["chat_title"] or "",
-            "message_id": int(r["message_id"]),
-            "msg_date_text": r["msg_date_text"] or "",
-            "msg_type": r["msg_type"] or "TEXT",
-            "link": r["link"] or "",
-            "content": r["content"] or "",
-            "file_name": r["file_name"] or "",
-            "file_size": file_size,
-            "title": build_result_title(r),
-        })
+    for row in rows:
+        items.append(_map_search_row(row))
     return items
 
 
