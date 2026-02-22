@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Telegram 数据库搜索</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page" id="app">
+    <header class="page-header">
+      <h1>数据库搜索</h1>
+      <p class="subtle">支持 +（与）、-（非）、|（或）、"精确短语"</p>
+    </header>
+
+    <!-- 1.1 搜索区域 -->
+    <section class="panel" aria-labelledby="searchTitle">
+      <h2 id="searchTitle" class="sr-only">搜索区域</h2>
+      <div class="search-row">
+        <label for="queryInput" class="sr-only">搜索关键词</label>
+        <textarea
+          id="queryInput"
+          class="query-input"
+          rows="2"
+          placeholder="输入关键词，例如：女孩+白袜-广告 或 &quot;C++&quot; | 福利"
+          aria-label="搜索关键词输入框（支持多行）"
+        ></textarea>
+
+        <button id="searchBtn" class="btn primary" type="button" aria-label="执行搜索">
+          搜索
+        </button>
+      </div>
+    </section>
+
+    <!-- 1.2 配置区域 -->
+    <section class="panel" aria-labelledby="configTitle">
+      <h2 id="configTitle" class="sr-only">搜索配置区域</h2>
+
+      <div class="config-grid">
+        <div class="field">
+          <label for="scopeSelect">搜索范围</label>
+          <select id="scopeSelect" aria-label="选择搜索范围">
+            <option value="all">搜索全部</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="typeSelect">搜索类型</label>
+          <select id="typeSelect" aria-label="选择搜索类型">
+            <option value="all">全部</option>
+            <option value="text">文本</option>
+            <option value="audio">音频</option>
+            <option value="video">视频</option>
+            <option value="image">图片</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="sortSelect">排序</label>
+          <select id="sortSelect" aria-label="选择排序方式">
+            <option value="time">时间</option>
+            <option value="size">大小</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="orderSelect">顺序</label>
+          <select id="orderSelect" aria-label="选择排序顺序">
+            <option value="desc" selected>倒序</option>
+            <option value="asc">正序</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <!-- 1.3 结果区域 -->
+    <section class="panel results-panel" aria-labelledby="resultTitle">
+      <h2 id="resultTitle" class="sr-only">搜索结果</h2>
+
+      <div id="statusLine" class="status-line" role="status" aria-live="polite">
+        结果区域为空，点击“搜索”后显示结果。
+      </div>
+
+      <div id="results" class="results-list" aria-label="搜索结果列表"></div>
+
+      <!-- 1.4 分页 -->
+      <nav id="pagination" class="pagination" aria-label="搜索结果分页"></nav>
+    </section>
+  </main>
+
+  <script>
+    window.APP_PAGE_SIZE = {{ page_size|int }};
+  </script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
