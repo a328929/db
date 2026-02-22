@@ -129,98 +129,8 @@ def ensure_columns(conn: sqlite3.Connection, table_name: str, cols: Dict[str, st
             cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {name} {ddl}")
 
 
+
 SCHEMA_VERSION = 2
-
-
-MIGRATION_STEPS: Dict[int, Dict[str, Dict[str, str]]] = {
-    1: {
-        "messages": {
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "text_len": "INTEGER NOT NULL DEFAULT 0",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        },
-        "message_media": {
-            "grouped_id": "INTEGER",
-            "media_fingerprint": "TEXT",
-            "meta_json": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        },
-        "media_groups": {
-            "media_sig_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        },
-    },
-    2: {
-        "messages": {
-            "content_norm": "TEXT",
-            "pure_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "text_len": "INTEGER NOT NULL DEFAULT 0",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-            "visual_hash": "TEXT",
-            "visual_hash_algo": "TEXT",
-            "visual_embed_ref": "TEXT",
-        },
-        "message_media": {
-            "grouped_id": "INTEGER",
-            "file_unique_id": "TEXT",
-            "file_name": "TEXT",
-            "file_ext": "TEXT",
-            "mime_type": "TEXT",
-            "file_size": "INTEGER",
-            "width": "INTEGER",
-            "height": "INTEGER",
-            "duration_sec": "INTEGER",
-            "media_fingerprint": "TEXT",
-            "meta_json": "TEXT",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        },
-        "media_groups": {
-            "first_message_id": "INTEGER",
-            "first_msg_date_ts": "INTEGER",
-            "last_message_id": "INTEGER",
-            "last_msg_date_ts": "INTEGER",
-            "active_items": "INTEGER NOT NULL DEFAULT 0",
-            "types_csv": "TEXT",
-            "captions_concat": "TEXT",
-            "caption_norm": "TEXT",
-            "pure_hash": "TEXT",
-            "media_sig_hash": "TEXT",
-            "dedupe_hash": "TEXT",
-            "is_promo": "INTEGER NOT NULL DEFAULT 0",
-            "promo_score": "INTEGER NOT NULL DEFAULT 0",
-            "promo_reasons": "TEXT",
-            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
-            "guard_reason": "TEXT",
-            "created_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
-        },
-        "dedupe_runs": {
-            "dup_hash_count_group_txt": "INTEGER NOT NULL DEFAULT 0",
-            "dup_hash_count_group_med": "INTEGER NOT NULL DEFAULT 0",
-        },
-        "dedupe_actions": {
-            "dedupe_hash": "TEXT",
-            "pure_hash": "TEXT",
-        },
-    },
-}
 
 
 def get_user_version(conn: sqlite3.Connection) -> int:
@@ -242,17 +152,98 @@ def apply_lightweight_migrations(conn: sqlite3.Connection):
     迁移步骤统一由 `MIGRATION_STEPS` 驱动，避免分散逻辑与顺序漂移。
     """
     current = get_user_version(conn)
-    if current >= SCHEMA_VERSION:
-        return
-
-    for version in sorted(MIGRATION_STEPS):
-        if current >= version:
-            continue
-        for table_name, columns in MIGRATION_STEPS[version].items():
-            ensure_columns(conn, table_name, columns)
-        set_user_version(conn, version)
+    if current < 1:
+        ensure_columns(conn, "messages", {
+            "dedupe_hash": "TEXT",
+            "is_promo": "INTEGER NOT NULL DEFAULT 0",
+            "promo_score": "INTEGER NOT NULL DEFAULT 0",
+            "promo_reasons": "TEXT",
+            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "guard_reason": "TEXT",
+            "text_len": "INTEGER NOT NULL DEFAULT 0",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+        })
+        ensure_columns(conn, "message_media", {
+            "grouped_id": "INTEGER",
+            "media_fingerprint": "TEXT",
+            "meta_json": "TEXT",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+        })
+        ensure_columns(conn, "media_groups", {
+            "media_sig_hash": "TEXT",
+            "dedupe_hash": "TEXT",
+            "is_promo": "INTEGER NOT NULL DEFAULT 0",
+            "promo_score": "INTEGER NOT NULL DEFAULT 0",
+            "promo_reasons": "TEXT",
+            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "guard_reason": "TEXT",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+        })
+        set_user_version(conn, 1)
         conn.commit()
-        current = version
+        current = 1
+
+    if current < 2:
+        ensure_columns(conn, "messages", {
+            "content_norm": "TEXT",
+            "pure_hash": "TEXT",
+            "dedupe_hash": "TEXT",
+            "is_promo": "INTEGER NOT NULL DEFAULT 0",
+            "promo_score": "INTEGER NOT NULL DEFAULT 0",
+            "promo_reasons": "TEXT",
+            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "guard_reason": "TEXT",
+            "text_len": "INTEGER NOT NULL DEFAULT 0",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+            "visual_hash": "TEXT",
+            "visual_hash_algo": "TEXT",
+            "visual_embed_ref": "TEXT",
+        })
+        ensure_columns(conn, "message_media", {
+            "grouped_id": "INTEGER",
+            "file_unique_id": "TEXT",
+            "file_name": "TEXT",
+            "file_ext": "TEXT",
+            "mime_type": "TEXT",
+            "file_size": "INTEGER",
+            "width": "INTEGER",
+            "height": "INTEGER",
+            "duration_sec": "INTEGER",
+            "media_fingerprint": "TEXT",
+            "meta_json": "TEXT",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+        })
+        ensure_columns(conn, "media_groups", {
+            "first_message_id": "INTEGER",
+            "first_msg_date_ts": "INTEGER",
+            "last_message_id": "INTEGER",
+            "last_msg_date_ts": "INTEGER",
+            "active_items": "INTEGER NOT NULL DEFAULT 0",
+            "types_csv": "TEXT",
+            "captions_concat": "TEXT",
+            "caption_norm": "TEXT",
+            "pure_hash": "TEXT",
+            "media_sig_hash": "TEXT",
+            "dedupe_hash": "TEXT",
+            "is_promo": "INTEGER NOT NULL DEFAULT 0",
+            "promo_score": "INTEGER NOT NULL DEFAULT 0",
+            "promo_reasons": "TEXT",
+            "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+            "guard_reason": "TEXT",
+            "created_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+            "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+        })
+        ensure_columns(conn, "dedupe_runs", {
+            "dup_hash_count_group_txt": "INTEGER NOT NULL DEFAULT 0",
+            "dup_hash_count_group_med": "INTEGER NOT NULL DEFAULT 0",
+        })
+        ensure_columns(conn, "dedupe_actions", {
+            "dedupe_hash": "TEXT",
+            "pure_hash": "TEXT",
+        })
+        set_user_version(conn, 2)
+        conn.commit()
+
 
 def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
     cur = conn.cursor()
