@@ -130,6 +130,65 @@ def ensure_columns(conn: sqlite3.Connection, table_name: str, cols: Dict[str, st
     conn.commit()
 
 
+
+
+SCHEMA_VERSION = 1
+
+
+def get_user_version(conn: sqlite3.Connection) -> int:
+    cur = conn.cursor()
+    cur.execute("PRAGMA user_version")
+    row = cur.fetchone()
+    if row is None:
+        return 0
+    return int(row[0] if not isinstance(row, sqlite3.Row) else row[0])
+
+
+def set_user_version(conn: sqlite3.Connection, version: int):
+    conn.execute(f"PRAGMA user_version={int(version)}")
+
+
+def apply_lightweight_migrations(conn: sqlite3.Connection):
+    """
+    从无版本或旧版本数据库向当前版本迁移。
+    当前仍以补列策略为主，但通过 user_version 固化状态，
+    避免同代码在未知 schema 状态上运行。
+    """
+    current = get_user_version(conn)
+    if current >= SCHEMA_VERSION:
+        return
+
+    ensure_columns(conn, "messages", {
+        "dedupe_hash": "TEXT",
+        "is_promo": "INTEGER NOT NULL DEFAULT 0",
+        "promo_score": "INTEGER NOT NULL DEFAULT 0",
+        "promo_reasons": "TEXT",
+        "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+        "guard_reason": "TEXT",
+        "text_len": "INTEGER NOT NULL DEFAULT 0",
+        "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+    })
+    ensure_columns(conn, "message_media", {
+        "grouped_id": "INTEGER",
+        "media_fingerprint": "TEXT",
+        "meta_json": "TEXT",
+        "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+    })
+    ensure_columns(conn, "media_groups", {
+        "media_sig_hash": "TEXT",
+        "dedupe_hash": "TEXT",
+        "is_promo": "INTEGER NOT NULL DEFAULT 0",
+        "promo_score": "INTEGER NOT NULL DEFAULT 0",
+        "promo_reasons": "TEXT",
+        "dedupe_eligible": "INTEGER NOT NULL DEFAULT 0",
+        "guard_reason": "TEXT",
+        "updated_at": "TEXT NOT NULL DEFAULT (datetime('now'))",
+    })
+
+    set_user_version(conn, SCHEMA_VERSION)
+    conn.commit()
+
+
 def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
     cur = conn.cursor()
     strict_suffix = " STRICT" if feats.supports_strict else ""
@@ -424,4 +483,5 @@ def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
                 # 深度检查太慢，暂不执行
                 pass
 
+    apply_lightweight_migrations(conn)
     conn.commit()
