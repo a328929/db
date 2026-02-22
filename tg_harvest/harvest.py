@@ -240,7 +240,7 @@ def get_existing_chat_ids(conn: sqlite3.Connection) -> List[int]:
     return out
 
 
-def collect_target_entities(conn: sqlite3.Connection, client: TelegramClient, cfg: AppConfig) -> List[Any]:
+def collect_target_entities(conn: sqlite3.Connection, client: Any, cfg: AppConfig) -> List[Any]:
     entities: List[Any] = []
     seen_chat_ids: Set[int] = set()
 
