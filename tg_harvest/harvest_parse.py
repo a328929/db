@@ -46,18 +46,45 @@ def classify_msg_type(message) -> str:
 
 
 def extract_message_text(message) -> str:
-    for attr in ("raw_text", "message", "text"):
-        try:
-            v = getattr(message, attr, None)
-            if v:
-                return str(v).strip()
-        except Exception:
+    for attr in _text_source_attrs():
+        v = _read_text_attr(message, attr)
+        if v is None:
             continue
+        normalized = _normalize_text(v)
+        if normalized:
+            return normalized
     return ""
 
 
+def _text_source_attrs() -> tuple:
+    return ("raw_text", "message", "text")
+
+
+def _read_text_attr(message, attr: str):
+    try:
+        return getattr(message, attr, None)
+    except Exception:
+        return None
+
+
+def _normalize_text(value) -> str:
+    return str(value).strip()
+
+
 def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
-    out = {
+    out = _init_media_meta(msg_type)
+    if msg_type == "TEXT":
+        return out
+
+    extra = _extract_file_wrapper_fields(message, out)
+    _fill_fallback_file_unique_id(message, out)
+    _append_message_level_meta(message, extra)
+    _finalize_media_meta(out, extra)
+    return out
+
+
+def _init_media_meta(msg_type: str) -> Dict[str, Any]:
+    return {
         "media_kind": msg_type if msg_type != "TEXT" else None,
         "file_unique_id": None,
         "file_name": None,
@@ -70,10 +97,10 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
         "media_fingerprint": None,
         "meta_json": None,
     }
-    if msg_type == "TEXT":
-        return out
 
-    extra = {}
+
+def _extract_file_wrapper_fields(message, out: Dict[str, Any]) -> Dict[str, Any]:
+    extra: Dict[str, Any] = {}
     try:
         f = getattr(message, "file", None)
         if f is not None:
@@ -116,7 +143,10 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
                     extra[k] = v
     except Exception as e:
         extra["file_wrapper_error"] = str(e)
+    return extra
 
+
+def _fill_fallback_file_unique_id(message, out: Dict[str, Any]):
     if not out["file_unique_id"]:
         try:
             p = getattr(message, "photo", None)
@@ -132,6 +162,8 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
         except Exception:
             pass
 
+
+def _append_message_level_meta(message, extra: Dict[str, Any]):
     try:
         extra["views"] = getattr(message, "views", None)
         extra["forwards"] = getattr(message, "forwards", None)
@@ -139,6 +171,8 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
     except Exception:
         pass
 
+
+def _finalize_media_meta(out: Dict[str, Any], extra: Dict[str, Any]):
     extra = {k: v for k, v in extra.items() if v is not None}
     out["meta_json"] = _safe_json(extra) if extra else None
     out["media_fingerprint"] = build_media_fingerprint(
@@ -149,7 +183,6 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
         height=out["height"],
         duration_sec=out["duration_sec"],
     )
-    return out
 
 
 def resolve_target_entity(client: Any, target: str):
