@@ -10,6 +10,7 @@ import logging
 import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Iterable, Set
 
 from telethon.sync import TelegramClient
@@ -33,6 +34,13 @@ def _env_int(name: str, default: int) -> int:
         return int(v.strip())
     except Exception:
         return int(default)
+
+
+def _resolve_db_path(raw_name: str) -> str:
+    p = Path(raw_name or "tg_data.db")
+    if p.is_absolute():
+        return str(p)
+    return str((Path(__file__).resolve().parent.parent / p).resolve())
 
 
 @dataclass
@@ -61,7 +69,7 @@ class AppConfig:
             api_hash=_env_str("TG_API_HASH", "b18441a1ff607e10a989891a5462e627"),
             session_name=_env_str("TG_SESSION_NAME", "my_session"),
 
-            db_name=_env_str("TG_DB_NAME", "tg_data.db"),
+            db_name=_resolve_db_path(_env_str("TG_DB_NAME", "tg_data.db")),
             target_group=_env_str("TG_TARGET_GROUP", "顶级萝莉内部群"),
             scan_existing_chats=_env_int("TG_SCAN_DB_CHATS", 0),
 
@@ -1670,7 +1678,8 @@ def dedupe_promotional_duplicates(
     conn: sqlite3.Connection,
     chat_id: int,
     mode: str = "PURGE_ALL",
-    threshold: int = 2
+    threshold: int = 2,
+    promo_score_threshold: int = 3,
 ) -> Tuple[int, int, int, int, Set[int]]:
     """
     双通道去重（硬删除）：
@@ -1689,7 +1698,7 @@ def dedupe_promotional_duplicates(
     cur.execute("""
         INSERT OR REPLACE INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
         VALUES (?, ?, ?, ?, ?, datetime('now'))
-    """, (batch_id, chat_id, mode, int(threshold), int(CFG.promo_score_threshold)))
+    """, (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)))
     conn.commit()
 
     # ========== A) 单条消息（非媒体组）重复模板 ==========
@@ -1789,14 +1798,21 @@ def dedupe_promotional_duplicates(
         cur.execute("DROP TABLE IF EXISTS temp_keep_solo")
         cur.execute("""
             CREATE TEMP TABLE temp_keep_solo AS
-            SELECT MIN(pk) AS pk
-            FROM messages
-            WHERE chat_id = ?
-              AND grouped_id IS NULL
-              AND is_promo = 1
-              AND dedupe_eligible = 1
-              AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
-            GROUP BY dedupe_hash
+            SELECT pk
+            FROM (
+                SELECT pk,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY dedupe_hash
+                           ORDER BY msg_date_ts ASC, message_id ASC, pk ASC
+                       ) AS rn
+                FROM messages
+                WHERE chat_id = ?
+                  AND grouped_id IS NULL
+                  AND is_promo = 1
+                  AND dedupe_eligible = 1
+                  AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
+            )
+            WHERE rn = 1
         """, (chat_id,))
         cur.execute("DELETE FROM temp_targets WHERE pk IN (SELECT pk FROM temp_keep_solo)")
 
@@ -2108,7 +2124,8 @@ def run_harvest():
                     conn,
                     chat_id=chat_id,
                     mode=CFG.dedup_mode,
-                    threshold=CFG.dedup_threshold
+                    threshold=CFG.dedup_threshold,
+                    promo_score_threshold=CFG.promo_score_threshold,
                 )
 
                 # 去重后刷新受影响媒体组（item_count 会变化）

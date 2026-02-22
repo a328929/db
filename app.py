@@ -3,12 +3,21 @@ import math
 import re
 import sqlite3
 import unicodedata
+import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
 
-DB_PATH = Path(__file__).resolve().with_name("tg_data.db")
+def resolve_db_path() -> Path:
+    raw = (os.getenv("TG_DB_NAME", "tg_data.db") or "tg_data.db").strip()
+    db = Path(raw)
+    if db.is_absolute():
+        return db
+    return Path(__file__).resolve().parent / db
+
+
+DB_PATH = resolve_db_path()
 PAGE_SIZE = 100
 MAX_COUNT = 50000
 
@@ -83,20 +92,30 @@ def create_app() -> Flask:
                 tokens.append(("TERM", term))
         return tokens
 
+    def fts_quote(value: str) -> str:
+        # 统一用双引号包裹，避免 FTS5 特殊字符导致语法错误
+        return f'"{value.replace(chr(34), "")}"'
+
     def to_fts_match(raw_query: str) -> str:
         tokens = tokenize_query(raw_query)
         if not tokens:
             return ""
         parts: List[str] = []
         prev_was_term = False
+        pending_not = False
         for kind, value in tokens:
             if kind in {"TERM", "PHRASE"}:
-                if prev_was_term:
-                    parts.append("AND")
-                if kind == "PHRASE":
-                    parts.append(f'"{value.replace(chr(34), "")}"')
+                if pending_not and prev_was_term:
+                    parts.append("NOT")
+                    pending_not = False
                 else:
-                    parts.append(value)
+                    if prev_was_term:
+                        parts.append("AND")
+                    pending_not = False
+                if kind == "PHRASE":
+                    parts.append(fts_quote(value))
+                else:
+                    parts.append(fts_quote(value))
                 prev_was_term = True
                 continue
 
@@ -109,14 +128,31 @@ def create_app() -> Flask:
                     parts.append("OR")
                 prev_was_term = False
             elif value == "-":
-                if prev_was_term:
-                    parts.append("AND")
-                parts.append("NOT")
-                prev_was_term = False
+                pending_not = True
 
         while parts and parts[-1] in {"AND", "OR", "NOT"}:
             parts.pop()
         return " ".join(parts)
+
+    def split_positive_negative_terms(raw_query: str) -> Tuple[List[str], List[str]]:
+        includes: List[str] = []
+        excludes: List[str] = []
+        pending_not = False
+        for kind, value in tokenize_query(raw_query):
+            if kind in {"TERM", "PHRASE"}:
+                (excludes if pending_not else includes).append(value)
+                pending_not = False
+                continue
+            if value == "-":
+                pending_not = True
+            elif value in {"+", "|"}:
+                pending_not = False
+        return includes, excludes
+
+    def has_fts(conn: sqlite3.Connection) -> bool:
+        cur = conn.cursor()
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts' LIMIT 1")
+        return cur.fetchone() is not None
 
     def make_type_clause(search_type: str) -> Tuple[str, List[Any]]:
         st = (search_type or "all").lower()
@@ -190,9 +226,22 @@ def create_app() -> Flask:
 
             where_parts: List[str] = ["1=1"]
             params: List[Any] = []
-            if match_query:
+            with get_conn() as conn:
+                fts_enabled = has_fts(conn)
+
+            if match_query and fts_enabled:
                 where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
                 params.append(match_query)
+            elif raw_query.strip():
+                includes, excludes = split_positive_negative_terms(raw_query)
+                if includes:
+                    for term in includes:
+                        where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
+                        params.append(f"%{term.lower()}%")
+                if excludes:
+                    for term in excludes:
+                        where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
+                        params.append(f"%{term.lower()}%")
             if chat_id is not None:
                 where_parts.append("m.chat_id = ?")
                 params.append(chat_id)
