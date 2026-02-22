@@ -13,10 +13,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional, Tuple, List, Dict, Any, Iterable, Set
 
-from telethon.sync import TelegramClient
-from telethon.errors import FloodWaitError, RPCError
-
-
 from .db import SqliteFeatures, connect_db, create_schema, resolve_db_path
 from .config import AppConfig, CFG, _is_enabled
 from .normalize import _safe_json, make_hash
@@ -196,7 +192,7 @@ def extract_media_meta(message, msg_type: str) -> Dict[str, Any]:
     return out
 
 
-def resolve_target_entity(client: TelegramClient, target: str):
+def resolve_target_entity(client: Any, target: str):
     """
     优先 username / 链接 / id；失败再扫 dialogs 标题
     """
@@ -212,16 +208,20 @@ def resolve_target_entity(client: TelegramClient, target: str):
         pass
 
     try:
+        exact_match = None
+        partial_match = None
         for d in client.get_dialogs():
-            if (d.title or "").strip() == t:
-                return d.entity
-    except Exception:
-        pass
-
-    try:
-        for d in client.get_dialogs():
-            if t and t in (d.title or ""):
-                return d.entity
+            title = (d.title or "")
+            title_stripped = title.strip()
+            if title_stripped == t:
+                exact_match = d.entity
+                break
+            if t and partial_match is None and t in title:
+                partial_match = d.entity
+        if exact_match is not None:
+            return exact_match
+        if partial_match is not None:
+            return partial_match
     except Exception:
         pass
 
@@ -240,7 +240,7 @@ def get_existing_chat_ids(conn: sqlite3.Connection) -> List[int]:
     return out
 
 
-def collect_target_entities(conn: sqlite3.Connection, client: TelegramClient, cfg: AppConfig) -> List[Any]:
+def collect_target_entities(conn: sqlite3.Connection, client: Any, cfg: AppConfig) -> List[Any]:
     entities: List[Any] = []
     seen_chat_ids: Set[int] = set()
 
@@ -565,6 +565,43 @@ def refresh_media_groups_for_chat(conn: sqlite3.Connection, chat_id: int, cfg: A
 # 检索函数（后续做 UI / API 复用）
 # =========================
 
+
+
+@dataclass
+class HarvestCounters:
+    seen: int = 0
+    written: int = 0
+    parse_failures: int = 0
+    parse_failure_samples: List[str] = None
+    parse_failures_by_type: Dict[str, int] = None
+
+    def __post_init__(self):
+        if self.parse_failure_samples is None:
+            self.parse_failure_samples = []
+        if self.parse_failures_by_type is None:
+            self.parse_failures_by_type = {}
+
+    def note_parse_failure(self, err: Exception, message: Any = None):
+        self.parse_failures += 1
+        key = err.__class__.__name__
+        self.parse_failures_by_type[key] = self.parse_failures_by_type.get(key, 0) + 1
+        if len(self.parse_failure_samples) >= 5:
+            return
+        msg_id = getattr(message, "id", None)
+        self.parse_failure_samples.append(f"id={msg_id}, err={key}: {err}")
+
+
+def _log_parse_failure_summary(counters: HarvestCounters):
+    if counters.parse_failures == 0:
+        return
+    logging.warning(
+        "解析失败统计: total=%s by_type=%s",
+        counters.parse_failures,
+        counters.parse_failures_by_type,
+    )
+    for sample in counters.parse_failure_samples:
+        logging.warning("解析失败样例: %s", sample)
+
 def get_chat_stats(conn: sqlite3.Connection, chat_id: int) -> Dict[str, int]:
     cur = conn.cursor()
     out = {}
@@ -601,6 +638,9 @@ def get_chat_stats(conn: sqlite3.Connection, chat_id: int) -> Dict[str, int]:
 # =========================
 
 def run_harvest():
+    from telethon.sync import TelegramClient
+    from telethon.errors import FloodWaitError, RPCError
+
     setup_logging()
     conn, feats = connect_db(CFG.db_name)
     create_schema(conn, feats)
@@ -627,18 +667,12 @@ def run_harvest():
                 last_id = get_last_message_id(conn, chat_id)
                 first_sync = (last_id == 0)
                 scan_from_id = max(last_id - CFG.rescan_tail_ids, 0)
+                logging.info("首次同步，开始全量抓取..." if first_sync else f"增量同步：last_id={last_id}，回扫到 > {scan_from_id}")
 
-                if first_sync:
-                    logging.info("首次同步，开始全量抓取...")
-                else:
-                    logging.info(f"增量同步：last_id={last_id}，回扫到 > {scan_from_id}")
-
-                count_seen = 0
-                count_written = 0
+                counters = HarvestCounters()
                 msg_rows: List[tuple] = []
                 media_rows: List[tuple] = []
                 touched_group_ids: Set[int] = set()
-
                 iterator = iter(client.iter_messages(entity, min_id=scan_from_id, reverse=True))
 
                 while True:
@@ -660,53 +694,34 @@ def run_harvest():
                         time.sleep(1)
                         continue
 
-                    count_seen += 1
-
+                    counters.seen += 1
                     try:
                         dt = getattr(message, "date", None)
                         if dt is None:
                             continue
-
-                        msg_date_ts = int(dt.timestamp())
                         msg_date_text = dt.strftime("%Y-%m-%d %H:%M:%S")
-
+                        msg_date_ts = int(dt.timestamp())
+                        msg_id = int(getattr(message, "id", 0) or 0)
+                        sender_id = int(getattr(message, "sender_id", 0) or 0)
                         msg_type = classify_msg_type(message)
-                        has_media = 0 if msg_type == "TEXT" else 1
-
                         content = extract_message_text(message)
-
-                        msg_id = int(getattr(message, "id"))
-                        sender_id = getattr(message, "sender_id", None)
-                        try:
-                            sender_id = int(sender_id) if sender_id is not None else None
-                        except Exception:
-                            sender_id = None
+                        has_media = 0 if msg_type == "TEXT" else 1
 
                         grouped_id = getattr(message, "grouped_id", None)
                         try:
                             grouped_id = int(grouped_id) if grouped_id is not None else None
                         except Exception:
                             grouped_id = None
-
                         if grouped_id is not None:
                             touched_group_ids.add(grouped_id)
 
                         link = build_msg_link(entity, msg_id)
-
-                        # 媒体元信息先抽出来（dedupe_hash 可能要用到 media_fingerprint）
                         mmeta = extract_media_meta(message, msg_type) if has_media else None
-
-                        features = build_single_promo_features(
-                            content,
-                            msg_type=msg_type,
-                            has_media=bool(has_media),
-                            cfg=CFG
-                        )
-
+                        features = build_single_promo_features(content, msg_type=msg_type, has_media=bool(has_media), cfg=CFG)
                         message_dedupe_hash = build_message_dedupe_hash(
                             text_pure_hash=features["pure_hash"],
                             has_media=bool(has_media),
-                            media_fingerprint=(mmeta or {}).get("media_fingerprint")
+                            media_fingerprint=(mmeta or {}).get("media_fingerprint"),
                         )
 
                         msg_rows.append((
@@ -727,24 +742,19 @@ def run_harvest():
 
                         if len(msg_rows) >= CFG.batch_size:
                             batch_upsert(conn, msg_rows, media_rows)
-                            count_written += len(msg_rows)
+                            counters.written += len(msg_rows)
                             msg_rows.clear()
                             media_rows.clear()
-
-                            if count_seen % CFG.log_every == 0:
-                                logging.info(f"扫描 {count_seen} | 写入/更新 {count_written}")
-
+                            if counters.seen % CFG.log_every == 0:
+                                logging.info(f"扫描 {counters.seen} | 写入/更新 {counters.written}")
                     except Exception as e:
+                        counters.note_parse_failure(e, message)
                         logging.warning(f"⚠️ 跳过一条消息（解析失败）: {e}")
 
-                # 扫尾写入
                 if msg_rows or media_rows:
                     batch_upsert(conn, msg_rows, media_rows)
-                    count_written += len(msg_rows)
-                    msg_rows.clear()
-                    media_rows.clear()
+                    counters.written += len(msg_rows)
 
-                # 刷新媒体组聚合
                 if first_sync:
                     logging.info("刷新 media_groups（全量）...")
                     refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=None)
@@ -752,7 +762,6 @@ def run_harvest():
                     logging.info(f"刷新 media_groups（增量，涉及组数={len(touched_group_ids)}）...")
                     refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=touched_group_ids)
 
-                # 数据库级去重（单条 + 相册）
                 logging.info("执行数据库级去重（硬删除，含媒体组广告去重）...")
                 deduped_count, dup_hash_solo, dup_hash_group_txt, dup_hash_group_med, affected_group_ids = dedupe_promotional_duplicates(
                     conn,
@@ -761,15 +770,10 @@ def run_harvest():
                     threshold=CFG.dedup_threshold,
                     promo_score_threshold=CFG.promo_score_threshold,
                 )
-
-                # 去重后刷新受影响媒体组（item_count 会变化）
                 if affected_group_ids:
                     refresh_media_groups_for_chat(conn, chat_id, cfg=CFG, grouped_ids=affected_group_ids)
 
-                # 统计
                 stats = get_chat_stats(conn, chat_id)
-
-                # SQLite 优化
                 try:
                     conn.execute("PRAGMA optimize;").fetchall()
                 except Exception:
@@ -781,8 +785,9 @@ def run_harvest():
 
                 logging.info("✅ 处理完成")
                 logging.info(f"群组: {chat_title} (chat_id={chat_id})")
-                logging.info(f"本轮扫描消息: {count_seen}")
-                logging.info(f"本轮写入/更新: {count_written}")
+                logging.info(f"本轮扫描消息: {counters.seen}")
+                logging.info(f"本轮写入/更新: {counters.written}")
+                _log_parse_failure_summary(counters)
                 logging.info(f"命中重复模板(单条): {dup_hash_solo}")
                 logging.info(f"命中重复模板(媒体组-文案): {dup_hash_group_txt}")
                 logging.info(f"命中重复模板(媒体组-媒体签名): {dup_hash_group_med}")
@@ -794,7 +799,6 @@ def run_harvest():
                 )
                 logging.info(f"媒体组总数: {stats['media_groups']}")
                 logging.info(f"引流候选媒体组: {stats['promo_media_groups']}（受保护: {stats['guarded_media_groups']}）")
-
     finally:
         conn.close()
 
