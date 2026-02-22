@@ -2,6 +2,7 @@
 import sqlite3
 from typing import List, Optional, Tuple, Set
 from datetime import datetime, timezone
+import uuid
 from .normalize import make_hash
 
 
@@ -210,7 +211,7 @@ def dedupe_promotional_duplicates(
     promo_score_threshold: int = 3,
 ) -> Tuple[int, int, int, int, Set[int]]:
     """promo_score_threshold 仅用于审计记录，实际筛选依赖 is_promo/dedupe_eligible。"""
-    batch_id = datetime.now(timezone.utc).strftime("dedupe_%Y%m%d_%H%M%S")
+    batch_id = f"dedupe_{chat_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
     mode = (mode or "PURGE_ALL").upper()
     cur = conn.cursor()
 
@@ -220,7 +221,7 @@ def dedupe_promotional_duplicates(
 
         cur.execute(
             """
-            INSERT OR REPLACE INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
+            INSERT INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
             VALUES (?, ?, ?, ?, ?, datetime('now'))
             """,
             (batch_id, chat_id, mode, int(threshold), int(promo_score_threshold)),

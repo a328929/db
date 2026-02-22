@@ -191,10 +191,10 @@ def normalize_text_for_hash(text: str) -> str:
     s = _safe_lower_nfkc(text)
     s = _clean_visual_noise(s)
 
-    # 先替换强信号（顺序重要）
+    # 先替换强信号（顺序重要：先具体再通用）
     s = OBF_TME_RE.sub(" TG_LINK ", s)
-    s = URL_RE.sub(" URL ", s)
     s = INVITE_RE.sub(" TG_INVITE ", s)
+    s = URL_RE.sub(" URL ", s)
 
     s = MENTION_RE.sub(" MENTION ", s)
     s = WECHAT_RE.sub(" WECHAT_ID ", s)

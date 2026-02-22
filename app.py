@@ -4,6 +4,7 @@ import re
 import sqlite3
 import unicodedata
 import os
+from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -174,8 +175,11 @@ def split_positive_negative_terms(raw_query: str) -> Tuple[List[str], List[str]]
 
 def has_fts(conn: sqlite3.Connection) -> bool:
     cur = conn.cursor()
-    cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts' LIMIT 1")
-    return cur.fetchone() is not None
+    try:
+        cur.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts' LIMIT 1")
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
 
 
 def make_type_clause(search_type: str) -> Tuple[str, List[Any]]:
@@ -283,21 +287,24 @@ def _run_search_query(
     page: int,
 ) -> Tuple[List[sqlite3.Row], int, int, bool, int]:
     cur = conn.cursor()
-    cur.execute(count_sql, sql_params + [MAX_COUNT + 1])
-    counted = int(cur.fetchone()["c"] or 0)
-    total_is_capped = counted > MAX_COUNT
-    total = min(counted, MAX_COUNT)
-    total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
+    try:
+        cur.execute(count_sql, sql_params + [MAX_COUNT + 1])
+        counted = int(cur.fetchone()["c"] or 0)
+        total_is_capped = counted > MAX_COUNT
+        total = min(counted, MAX_COUNT)
+        total_pages = math.ceil(total / PAGE_SIZE) if total > 0 else 0
 
-    effective_page = page
-    if total_pages > 0 and effective_page > total_pages:
-        effective_page = total_pages
+        effective_page = page
+        if total_pages > 0 and effective_page > total_pages:
+            effective_page = total_pages
 
-    offset = (effective_page - 1) * PAGE_SIZE if total_pages > 0 else 0
-    cur.execute(query_sql, sql_params + [PAGE_SIZE, offset])
-    rows = cur.fetchall()
+        offset = (effective_page - 1) * PAGE_SIZE if total_pages > 0 else 0
+        cur.execute(query_sql, sql_params + [PAGE_SIZE, offset])
+        rows = cur.fetchall()
 
-    return rows, total, total_pages, total_is_capped, effective_page
+        return rows, total, total_pages, total_is_capped, effective_page
+    finally:
+        cur.close()
 
 
 def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
@@ -322,13 +329,16 @@ def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
 
 def _build_meta_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
     cur = conn.cursor()
-    cur.execute("SELECT chat_id, chat_title FROM chats ORDER BY LOWER(chat_title) ASC, chat_id ASC")
-    chats = [{"chat_id": int(r["chat_id"]), "chat_title": (r["chat_title"] or f"Chat {r['chat_id']}").strip()} for r in cur.fetchall()]
-    return {"ok": True, "chats": chats, "page_size": PAGE_SIZE}
+    try:
+        cur.execute("SELECT chat_id, chat_title FROM chats ORDER BY LOWER(chat_title) ASC, chat_id ASC")
+        chats = [{"chat_id": int(r["chat_id"]), "chat_title": (r["chat_title"] or f"Chat {r['chat_id']}").strip()} for r in cur.fetchall()]
+        return {"ok": True, "chats": chats, "page_size": PAGE_SIZE}
+    finally:
+        cur.close()
 
 
 def _search_payload(params: SearchParams) -> Dict[str, Any]:
-    with get_conn() as conn:
+    with closing(get_conn()) as conn:
         fts_enabled = has_fts(conn)
         where_sql, sql_params, match_query = _build_search_filters(params, fts_enabled)
         count_sql, query_sql, _, effective_sort, effective_order = _build_search_sql(
@@ -375,7 +385,7 @@ def create_app() -> Flask:
         if not DB_PATH.exists():
             return jsonify({"ok": False, "error": "数据库不存在"}), 500
         try:
-            with get_conn() as conn:
+            with closing(get_conn()) as conn:
                 payload = _build_meta_payload(conn)
             return jsonify(payload)
         except sqlite3.Error as e:

@@ -43,7 +43,7 @@ class AppConfig:
 
     @classmethod
     def load(cls) -> "AppConfig":
-        return cls(
+        cfg = cls(
             api_id=_env_int("TG_API_ID", 2040),
             api_hash=_env_str("TG_API_HASH", "b18441a1ff607e10a989891a5462e627"),
             session_name=_env_str("TG_SESSION_NAME", "my_session"),
@@ -61,6 +61,21 @@ class AppConfig:
             promo_score_threshold=_env_int("TG_PROMO_SCORE_THRESHOLD", 3),
             log_every=_env_int("TG_LOG_EVERY", 1000),
         )
+
+        # 统一配置收口（防止环境变量误配）
+        cfg.scan_existing_chats = 1 if int(cfg.scan_existing_chats) == 1 else 0
+
+        if cfg.dedup_mode not in {"PURGE_ALL", "KEEP_FIRST"}:
+            cfg.dedup_mode = "PURGE_ALL"
+
+        cfg.dedup_threshold = max(2, int(cfg.dedup_threshold))
+        cfg.batch_size = max(1, int(cfg.batch_size))
+        cfg.rescan_tail_ids = max(0, int(cfg.rescan_tail_ids))
+        cfg.media_caption_guard_len = max(0, int(cfg.media_caption_guard_len))
+        cfg.promo_score_threshold = max(0, int(cfg.promo_score_threshold))
+        cfg.log_every = max(1, int(cfg.log_every))
+
+        return cfg
 
 
 CFG = AppConfig.load()
