@@ -62,11 +62,20 @@ def _admin_now_iso() -> str:
 
 
 def _admin_job_trim_locked() -> None:
+    # 仅裁剪终态任务（done/error），避免误删 queued/running 导致轮询中途 404。
+    terminal_statuses = {"done", "error"}
     while len(ADMIN_JOBS) > ADMIN_JOB_MAX_COUNT:
-        oldest_job_id = next(iter(ADMIN_JOBS), None)
-        if oldest_job_id is None:
+        removable_job_id = None
+        for job_id, job in ADMIN_JOBS.items():
+            status = str((job or {}).get("status") or "").lower()
+            if status in terminal_statuses:
+                removable_job_id = job_id
+                break
+
+        if removable_job_id is None:
+            # 当前超上限但无可删终态任务：保护 active 任务，暂不裁剪。
             return
-        ADMIN_JOBS.pop(oldest_job_id, None)
+        ADMIN_JOBS.pop(removable_job_id, None)
 
 
 def _admin_job_append_log_locked(job: Dict[str, Any], message: str) -> Dict[str, Any]:
