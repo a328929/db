@@ -132,10 +132,86 @@
     });
 
     document.addEventListener('keydown', function (event) {
+      if (!elements || !elements.dialog) {
+        return;
+      }
+
+      if (event.key === 'Tab' && !elements.dialog.hidden) {
+        trapDialogFocus(elements, event);
+        return;
+      }
+
       if (event.key === 'Escape' && !elements.dialog.hidden) {
         closeDialog(elements);
       }
     });
+  }
+
+  function getDialogFocusableElements(elements) {
+    var dialog = elements && elements.dialog;
+    if (!dialog || dialog.hidden) {
+      return [];
+    }
+
+    var selector = [
+      'a[href]',
+      'button',
+      'input',
+      'select',
+      'textarea',
+      '[tabindex]'
+    ].join(', ');
+
+    var nodes = Array.prototype.slice.call(dialog.querySelectorAll(selector));
+    return nodes.filter(function (node) {
+      if (!node || node.disabled) {
+        return false;
+      }
+      if (node.hidden) {
+        return false;
+      }
+      if (node.getAttribute('aria-hidden') === 'true') {
+        return false;
+      }
+      if (node.getAttribute('tabindex') === '-1') {
+        return false;
+      }
+      return node.getClientRects().length > 0;
+    });
+  }
+
+  function trapDialogFocus(elements, event) {
+    if (!event || !elements || !elements.dialog || elements.dialog.hidden) {
+      return;
+    }
+
+    var focusable = getDialogFocusableElements(elements);
+    if (!focusable.length) {
+      event.preventDefault();
+      return;
+    }
+
+    var activeElement = document.activeElement;
+    var first = focusable[0];
+    var last = focusable[focusable.length - 1];
+    var isShift = !!event.shiftKey;
+
+    if (focusable.indexOf(activeElement) === -1) {
+      event.preventDefault();
+      (isShift ? last : first).focus();
+      return;
+    }
+
+    if (!isShift && activeElement === last) {
+      event.preventDefault();
+      first.focus();
+      return;
+    }
+
+    if (isShift && activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    }
   }
 
   async function loadInitialReadOnlyData(elements) {
@@ -221,21 +297,82 @@
     }
   }
 
+  async function refreshReadOnlyDataAfterJob(elements) {
+    if (!elements || !elements.scopeSelect) {
+      return;
+    }
+
+    var previousSelection = String(elements.scopeSelect.value || 'none');
+
+    try {
+      await loadChatsIntoSelect(elements);
+    } catch (error) {
+      appendLog(elements, '刷新群组列表失败：' + error.message);
+      return;
+    }
+
+    var selectElement = elements.scopeSelect;
+    var hasPreviousOption = Array.prototype.some.call(selectElement.options, function (option) {
+      return option && String(option.value) === previousSelection;
+    });
+    selectElement.value = hasPreviousOption ? previousSelection : 'none';
+
+    updateControlVisibility(elements);
+
+    try {
+      await loadStatsByCurrentSelection(elements);
+    } catch (error) {
+      appendLog(elements, '刷新统计失败：' + error.message);
+    }
+  }
+
+  function setStatsLineText(valueElement, prefixText, suffixText) {
+    if (!valueElement || !valueElement.parentNode) {
+      return;
+    }
+
+    var parent = valueElement.parentNode;
+    var prefixNode = valueElement.previousSibling;
+    if (!prefixNode || prefixNode.nodeType !== Node.TEXT_NODE) {
+      if (prefixNode && prefixNode.nodeType === Node.ELEMENT_NODE) {
+        prefixNode.textContent = '';
+      }
+      prefixNode = document.createTextNode('');
+      parent.insertBefore(prefixNode, valueElement);
+    }
+
+    var suffixNode = valueElement.nextSibling;
+    if (!suffixNode || suffixNode.nodeType !== Node.TEXT_NODE) {
+      if (suffixNode && suffixNode.nodeType === Node.ELEMENT_NODE) {
+        suffixNode.textContent = '';
+      }
+      suffixNode = document.createTextNode('');
+      parent.insertBefore(suffixNode, valueElement.nextSibling);
+    }
+
+    prefixNode.nodeValue = String(prefixText || '');
+    suffixNode.nodeValue = String(suffixText || '');
+  }
+
   function applyStatsToHeader(elements, payload, selectedChatId) {
     var data = payload && payload.data ? payload.data : payload;
 
     if (selectedChatId && selectedChatId !== 'none') {
-      elements.statScope.textContent = pickFirstText(
+      var targetName = pickFirstText(
         data && data.chat_name,
         data && data.chat_title,
         getSelectedOptionLabel(elements.scopeSelect, selectedChatId),
-        selectedChatId
+        '未知目标'
       );
+      elements.statScope.textContent = targetName || '未知目标';
+      setStatsLineText(elements.statScope, '当前目标：', '');
+
       elements.statMessages.textContent = pickFirstNumber(
         data && data.message_count,
         data && data.msg_count,
-        0
+        '--'
       );
+      setStatsLineText(elements.statMessages, '消息数量 ', '');
       return;
     }
 
@@ -244,15 +381,17 @@
       data && data.scope_count,
       data && data.total_chats,
       data && data.count,
-      0
+      '--'
     );
+    setStatsLineText(elements.statScope, '当前共有 ', ' 个频道/群组');
 
     elements.statMessages.textContent = pickFirstNumber(
       data && data.message_count,
       data && data.total_messages,
       data && data.msg_count,
-      0
+      '--'
     );
+    setStatsLineText(elements.statMessages, '消息数量 ', '');
   }
 
   function getSelectedOptionLabel(selectElement, value) {
@@ -327,7 +466,7 @@
     }
   }
 
-  function handleDeleteDataClick(elements) {
+  async function handleDeleteDataClick(elements) {
     var target = getCurrentTargetInfo(elements);
     if (target.isNone) {
       appendLog(elements, '未选择群组/频道');
@@ -344,9 +483,33 @@
       return;
     }
 
-    appendLog(elements, '开始删除群/频道数据（占位）');
-    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
-    appendLog(elements, '删除任务已提交（占位）');
+    var chatIdNumber = Number(target.chatId);
+    if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
+      appendLog(elements, '当前目标 ID 非法');
+      return;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/delete', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatIdNumber
+        })
+      });
+      var job = payload && payload.job ? payload.job : null;
+      var jobId = job && job.job_id ? String(job.job_id) : '';
+      if (!jobId) {
+        throw new Error('任务创建成功但缺少 job_id');
+      }
+
+      appendLog(elements, '删除任务已创建：' + jobId);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建删除任务失败：' + error.message);
+    }
   }
 
 
@@ -476,6 +639,11 @@
         }
         appendLog(elements, '任务执行完成');
         stopJobPolling(pollToken);
+        try {
+          await refreshReadOnlyDataAfterJob(elements);
+        } catch (refreshError) {
+          appendLog(elements, '刷新统计失败：' + refreshError.message);
+        }
         return;
       }
       if (status === 'error') {
