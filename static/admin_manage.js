@@ -1,6 +1,19 @@
 (function () {
   'use strict';
 
+  var HARVEST_POLL_INTERVAL_MS = 3000;
+  var HARVEST_POLL_MAX_COUNT = 20;
+  var HARVEST_POLL_MAX_DURATION_MS = 60000;
+
+  var harvestPollState = {
+    jobId: '',
+    lastSeq: 0,
+    timerId: null,
+    isPolling: false,
+    startedAt: 0,
+    pollCount: 0
+  };
+
   document.addEventListener('DOMContentLoaded', function () {
     var elements = getElements();
     if (!elements) {
@@ -309,17 +322,25 @@
     var response;
     try {
       response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json'
-        }
+        method: requestOptions.method || 'GET',
+        headers: requestHeaders,
+        body: requestOptions.body
       });
     } catch (networkError) {
       throw new Error('网络请求失败');
     }
 
     if (!response.ok) {
-      throw new Error('HTTP ' + response.status);
+      var errorMessage = 'HTTP ' + response.status;
+      try {
+        var errorPayload = await response.json();
+        if (errorPayload && typeof errorPayload.error === 'string' && errorPayload.error.trim()) {
+          errorMessage += ' ' + errorPayload.error.trim();
+        }
+      } catch (ignoreErrorPayload) {
+        // ignore parse failure, keep HTTP status message.
+      }
+      throw new Error(errorMessage);
     }
 
     try {
