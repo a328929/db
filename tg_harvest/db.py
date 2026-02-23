@@ -268,23 +268,8 @@ def _create_indexes(cur: sqlite3.Cursor):
 
 
 def _create_views(cur: sqlite3.Cursor):
-    cur.execute("""
-    CREATE VIEW IF NOT EXISTS v_messages_enriched AS
-    SELECT
-        m.pk, m.chat_id, m.message_id, m.msg_date_text, m.msg_date_ts, m.sender_id,
-        m.content, m.content_norm, m.pure_hash, m.dedupe_hash,
-        m.msg_type, m.grouped_id, m.link, m.has_media,
-        m.is_promo, m.promo_score, m.promo_reasons, m.dedupe_eligible, m.guard_reason, m.text_len,
-        m.created_at, m.updated_at,
-        c.chat_title, c.chat_username,
-        mm.media_kind, mm.file_unique_id, mm.file_name, mm.file_ext, mm.mime_type,
-        mm.file_size, mm.width, mm.height, mm.duration_sec, mm.media_fingerprint, mm.meta_json
-    FROM messages m
-    LEFT JOIN chats c
-      ON c.chat_id = m.chat_id
-    LEFT JOIN message_media mm
-      ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
-    """)
+    # v_messages_enriched 视图已停用；保留该函数作为 schema 调用链兼容点，便于未来扩展。
+    return
 
 
 def _create_fts_table(cur: sqlite3.Cursor):
@@ -302,18 +287,18 @@ def _create_fts_table(cur: sqlite3.Cursor):
 def _create_fts_triggers(cur: sqlite3.Cursor):
     cur.execute("""
     CREATE TRIGGER IF NOT EXISTS messages_ai AFTER INSERT ON messages BEGIN
-        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
+        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(NULLIF(new.content_norm, ''), new.content, ''));
     END;
     """)
     cur.execute("""
     CREATE TRIGGER IF NOT EXISTS messages_ad AFTER DELETE ON messages BEGIN
-        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(NULLIF(old.content_norm, ''), old.content, ''));
     END;
     """)
     cur.execute("""
-    CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF content ON messages BEGIN
-        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(old.content, ''));
-        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(new.content, ''));
+    CREATE TRIGGER IF NOT EXISTS messages_au AFTER UPDATE OF content, content_norm ON messages BEGIN
+        INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.pk, COALESCE(NULLIF(old.content_norm, ''), old.content, ''));
+        INSERT INTO messages_fts(rowid, content) VALUES (new.pk, COALESCE(NULLIF(new.content_norm, ''), new.content, ''));
     END;
     """)
 
@@ -334,8 +319,12 @@ def _count_messages_fts(cur: sqlite3.Cursor) -> int:
 
 
 def _rebuild_messages_fts(cur: sqlite3.Cursor):
-    # fts5 rebuild 命令: INSERT INTO ... VALUES('rebuild')
-    cur.execute("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+    cur.execute("DELETE FROM messages_fts")
+    cur.execute("""
+    INSERT INTO messages_fts(rowid, content)
+    SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
+    FROM messages
+    """)
 
 
 def _heal_fts_if_needed(cur: sqlite3.Cursor):

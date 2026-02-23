@@ -2,6 +2,7 @@
 import math
 import sqlite3
 import os
+import logging
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +12,17 @@ from flask import Flask, jsonify, render_template, request
 
 from tg_harvest.db import connect_db, resolve_db_path as resolve_db_path_lib
 from tg_harvest.normalize import _safe_lower_nfkc
+
+logger = logging.getLogger(__name__)
+
+
+def _init_logging() -> None:
+    root_logger = logging.getLogger()
+    if not root_logger.handlers:
+        logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+_init_logging()
 
 DB_PATH_STR = resolve_db_path_lib(os.getenv("TG_DB_NAME", "tg_data.db"))
 DB_PATH = Path(DB_PATH_STR)
@@ -455,8 +467,9 @@ def _register_routes(app: Flask) -> None:
             with closing(get_conn()) as conn:
                 payload = _build_meta_payload(conn)
             return jsonify(payload)
-        except sqlite3.Error as e:
-            return jsonify({"ok": False, "error": f"读取群列表失败: {e}"}), 500
+        except sqlite3.Error:
+            logger.exception("读取群列表失败")
+            return jsonify({"ok": False, "error": "读取群列表失败"}), 500
 
     @app.post("/api/search")
     def api_search():
@@ -466,12 +479,14 @@ def _register_routes(app: Flask) -> None:
         try:
             params = _parse_search_params(data)
             return jsonify(_search_payload(params))
-        except ValueError:
+        except (ValueError, TypeError):
             return jsonify({"ok": False, "error": "参数格式错误"}), 400
-        except sqlite3.Error as e:
-            return jsonify({"ok": False, "error": f"查询失败: {e}"}), 500
-        except Exception as e:
-            return jsonify({"ok": False, "error": f"系统异常: {e}"}), 500
+        except sqlite3.Error:
+            logger.exception("查询失败")
+            return jsonify({"ok": False, "error": "查询失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
 
 
 def create_app() -> Flask:
