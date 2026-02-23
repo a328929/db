@@ -136,21 +136,17 @@ def _light_normalize(s: str) -> str:
     return s
 
 
-def _is_noise_token(tok: str) -> bool:
-    """
-    用于 hash 归一化时剔除“随机扰动串”
-    目标：像 a8f3k2m1 / xqzptklllj 这种。
-    """
+def _should_keep_non_noise_token(tok: str) -> Optional[str]:
     if not tok:
-        return False
+        return None
 
     # 含中文通常不算噪音
     if re.search(r"[\u4e00-\u9fff]", tok):
-        return False
+        return None
 
     t = tok.strip().lower()
     if len(t) < 6:
-        return False
+        return None
 
     # 保留可能有意义的常见 token
     whitelist = {
@@ -158,8 +154,12 @@ def _is_noise_token(tok: str) -> bool:
         "tme", "joinchat", "http", "https"
     }
     if t in whitelist:
-        return False
+        return None
 
+    return t
+
+
+def _is_structural_noise_token(t: str) -> bool:
     # 纯字母但像一串辅音轰炸
     if LONG_ALPHA_GIBBERISH_RE.match(t):
         return True
@@ -168,29 +168,37 @@ def _is_noise_token(tok: str) -> bool:
     if LONG_MIXED_TOKEN_RE.match(t):
         return True
 
+    return False
+
+
+def _is_ratio_noise_token(t: str) -> bool:
     # 超长且元音极少
     if re.fullmatch(r"[a-z]{10,}", t):
         vowels = sum(1 for c in t if c in "aeiou")
         if vowels <= 1:
             return True
+    return False
+
+
+def _is_noise_token(tok: str) -> bool:
+    """
+    用于 hash 归一化时剔除“随机扰动串”
+    目标：像 a8f3k2m1 / xqzptklllj 这种。
+    """
+    t = _should_keep_non_noise_token(tok)
+    if t is None:
+        return False
+
+    if _is_structural_noise_token(t):
+        return True
+
+    if _is_ratio_noise_token(t):
+        return True
 
     return False
 
 
-def normalize_text_for_hash(text: str) -> str:
-    """
-    模板识别用“强归一化”：
-    - 抗零宽/全角/emoji/同形字
-    - 去链接/去联系方式/去数字
-    - 去随机噪声 token
-    - 去大部分符号
-    """
-    if not text:
-        return ""
-
-    s = _safe_lower_nfkc(text)
-    s = _clean_visual_noise(s)
-
+def _replace_strong_signals(s: str) -> str:
     # 先替换强信号（顺序重要：先具体再通用）
     s = OBF_TME_RE.sub(" TG_LINK ", s)
     s = INVITE_RE.sub(" TG_INVITE ", s)
@@ -201,7 +209,10 @@ def normalize_text_for_hash(text: str) -> str:
     s = QQ_RE.sub(" QQ_ID ", s)
     s = PHONE_RE.sub(" PHONE ", s)
     s = CONTACT_ID_RE.sub(" CONTACT_ID ", s)
+    return s
 
+
+def _inject_compact_markers(s: str) -> str:
     # 一些被拆开的弱形式再兜一层（压缩串级别）
     compact = _compact_for_detection(s)
     # 如果压缩串里出现明显 tg/wechat/qq 形态，给原串注入占位，增强稳定性
@@ -214,10 +225,10 @@ def normalize_text_for_hash(text: str) -> str:
         marker_tokens.append("QQ")
     if marker_tokens:
         s += " " + " ".join(marker_tokens)
+    return s
 
-    # 统一空白
-    s = MULTISPACE_RE.sub(" ", s).strip()
 
+def _filter_and_denoise_tokens(s: str) -> str:
     # token 级去噪
     tokens = []
     for tok in re.split(r"\s+", s):
@@ -238,12 +249,37 @@ def normalize_text_for_hash(text: str) -> str:
         if t:
             tokens.append(t)
 
-    s = " ".join(tokens)
+    return " ".join(tokens)
 
+
+def _finalize_template_text(s: str) -> str:
     # 最后再做一次“只留字母数字中文”的收缩，形成稳定模板
     s = NON_WORD_CJK_RE.sub("", s)
     s = _collapse_repeats(s)
     return s.strip()
+
+
+def normalize_text_for_hash(text: str) -> str:
+    """
+    模板识别用“强归一化”：
+    - 抗零宽/全角/emoji/同形字
+    - 去链接/去联系方式/去数字
+    - 去随机噪声 token
+    - 去大部分符号
+    """
+    if not text:
+        return ""
+
+    s = _safe_lower_nfkc(text)
+    s = _clean_visual_noise(s)
+
+    s = _replace_strong_signals(s)
+    s = _inject_compact_markers(s)
+
+    # 统一空白
+    s = MULTISPACE_RE.sub(" ", s).strip()
+    s = _filter_and_denoise_tokens(s)
+    return _finalize_template_text(s)
 
 
 def normalize_text_light(text: str) -> str:
