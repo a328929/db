@@ -40,65 +40,85 @@
     if (resetPage) state.page = 1;
   }
 
+  function _decideSortAvailability(typeValue, currentSortValue) {
+    const disableSize = typeValue === "all" || typeValue === "text";
+    return {
+      disableSize,
+      shouldFallback: disableSize && currentSortValue === "size",
+      fallbackValue: "time",
+    };
+  }
+
+  function _applySortAvailabilityUI(sizeOption, sortSelect, decision) {
+    sizeOption.disabled = decision.disableSize;
+
+    // 附加逻辑：当前是大小排序时切回时间
+    if (decision.shouldFallback) {
+      sortSelect.value = decision.fallbackValue;
+    }
+  }
+
   function updateSortAvailability() {
     const typeValue = els.typeSelect.value;
+    const currentSortValue = els.sortSelect.value;
     const sizeOption = els.sortSelect.querySelector('option[value="size"]');
 
     if (!sizeOption) return;
 
-    const shouldDisableSize = typeValue === "all" || typeValue === "text";
+    const decision = _decideSortAvailability(typeValue, currentSortValue);
+    _applySortAvailabilityUI(sizeOption, els.sortSelect, decision);
+  }
 
-    if (shouldDisableSize) {
-      sizeOption.disabled = true;
+  async function _fetchMetaData() {
+    const resp = await fetch("/api/meta", {
+      method: "GET",
+      headers: { "Accept": "application/json" },
+    });
+    return resp.json();
+  }
 
-      // 附加逻辑：当前是大小排序时切回时间
-      if (els.sortSelect.value === "size") {
-        els.sortSelect.value = "time";
-      }
-    } else {
-      sizeOption.disabled = false;
+  function _handleMetaSuccess(data) {
+    if (!data.ok) {
+      setStatus(data.error || "读取群列表失败");
+      return;
     }
+
+    // 刷新群/频道下拉框
+    const currentValue = els.scopeSelect.value || "all";
+    els.scopeSelect.innerHTML = "";
+
+    const allOpt = document.createElement("option");
+    allOpt.value = "all";
+    allOpt.textContent = "搜索全部";
+    els.scopeSelect.appendChild(allOpt);
+
+    for (const chat of data.chats || []) {
+      const opt = document.createElement("option");
+      opt.value = String(chat.chat_id);
+      opt.textContent = chat.chat_title || `Chat ${chat.chat_id}`;
+      els.scopeSelect.appendChild(opt);
+    }
+
+    // 尽量保留刷新前选择
+    if ([...els.scopeSelect.options].some(o => o.value === currentValue)) {
+      els.scopeSelect.value = currentValue;
+    } else {
+      els.scopeSelect.value = "all";
+    }
+
+    setStatus("结果区域为空，点击“搜索”后显示结果。");
+  }
+
+  function _handleMetaFailure(err) {
+    setStatus(`读取群列表失败：${err?.message || err}`);
   }
 
   async function loadMeta() {
     try {
-      const resp = await fetch("/api/meta", {
-        method: "GET",
-        headers: { "Accept": "application/json" },
-      });
-      const data = await resp.json();
-
-      if (!data.ok) {
-        setStatus(data.error || "读取群列表失败");
-        return;
-      }
-
-      // 刷新群/频道下拉框
-      const currentValue = els.scopeSelect.value || "all";
-      els.scopeSelect.innerHTML = "";
-
-      const allOpt = document.createElement("option");
-      allOpt.value = "all";
-      allOpt.textContent = "搜索全部";
-      els.scopeSelect.appendChild(allOpt);
-
-      for (const chat of data.chats || []) {
-        const opt = document.createElement("option");
-        opt.value = String(chat.chat_id);
-        opt.textContent = chat.chat_title || `Chat ${chat.chat_id}`;
-        els.scopeSelect.appendChild(opt);
-      }
-
-      // 尽量保留刷新前选择
-      if ([...els.scopeSelect.options].some(o => o.value === currentValue)) {
-        els.scopeSelect.value = currentValue;
-      } else {
-        els.scopeSelect.value = "all";
-      }
-
-      setStatus("结果区域为空，点击“搜索”后显示结果。");
+      const data = await _fetchMetaData();
+      _handleMetaSuccess(data);
     } catch (err) {
-      setStatus(`读取群列表失败：${err?.message || err}`);
+      _handleMetaFailure(err);
     }
   }
 
@@ -132,6 +152,71 @@
     els.pagination.innerHTML = "";
   }
 
+  function _renderEmptyResults() {
+    setStatus("未找到匹配内容。");
+    const empty = document.createElement("div");
+    empty.className = "empty-box";
+    empty.textContent = "没有匹配结果。你可以换关键词，或调整范围/类型。";
+    els.results.appendChild(empty);
+  }
+
+  function _appendResultLink(container, item) {
+    const a = document.createElement("a");
+    const hasLink = !!(item.link && String(item.link).trim());
+    a.className = "result-link" + (hasLink ? "" : " disabled");
+    a.textContent = hasLink ? "查看原消息" : "无可用链接";
+    a.setAttribute("aria-label", hasLink ? "查看原消息（新标签页打开）" : "无可用链接");
+    if (hasLink) {
+      a.href = item.link;
+      a.target = "_blank";
+      a.rel = "noopener noreferrer";
+    } else {
+      a.href = "#";
+      a.addEventListener("click", (e) => e.preventDefault(), { once: true });
+    }
+    container.appendChild(a);
+  }
+
+  function _buildResultMetaText(item, effectiveSort) {
+    const parts = [];
+    parts.push(item.msg_date_text || "");
+    if (item.chat_title) parts.push(item.chat_title);
+    parts.push(typeToLabel(item.msg_type));
+
+    if (effectiveSort === "size" && item.file_size != null) {
+      const sizeText = formatFileSize(item.file_size);
+      if (sizeText) parts.push(sizeText);
+    }
+
+    return parts.filter(Boolean).join(" | ");
+  }
+
+  function _buildResultItemElement(item, effectiveSort) {
+    const card = document.createElement("div");
+    card.className = "result-item";
+
+    const h3 = document.createElement("h3");
+    h3.className = "result-title";
+    h3.textContent = item.title || "[无文本内容]";
+    card.appendChild(h3);
+
+    _appendResultLink(card, item);
+
+    const meta = document.createElement("p");
+    meta.className = "result-meta";
+    meta.textContent = _buildResultMetaText(item, effectiveSort);
+    card.appendChild(meta);
+
+    return card;
+  }
+
+  function _renderResultList(items, effectiveSort) {
+    for (const item of items) {
+      const card = _buildResultItemElement(item, effectiveSort);
+      els.results.appendChild(card);
+    }
+  }
+
   function renderResults(payload) {
     clearResults();
 
@@ -141,66 +226,14 @@
     const totalPages = Number(payload.total_pages || 0);
     const effectiveSort = payload.effective_sort || "time";
 
-
     if (total === 0) {
-      setStatus("未找到匹配内容。");
-      const empty = document.createElement("div");
-      empty.className = "empty-box";
-      empty.textContent = "没有匹配结果。你可以换关键词，或调整范围/类型。";
-      els.results.appendChild(empty);
+      _renderEmptyResults();
       renderPagination(totalPages, page);
       return;
     }
 
     setStatus(`共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`);
-
-    for (const item of items) {
-      const card = document.createElement("div");
-      card.className = "result-item";
-
-      // 焦点一：标题（h3）
-      const h3 = document.createElement("h3");
-      h3.className = "result-title";
-      h3.textContent = item.title || "[无文本内容]";
-      card.appendChild(h3);
-
-      // 焦点二：链接（a）
-      const a = document.createElement("a");
-      const hasLink = !!(item.link && String(item.link).trim());
-      a.className = "result-link" + (hasLink ? "" : " disabled");
-      a.textContent = hasLink ? "查看原消息" : "无可用链接";
-      a.setAttribute("aria-label", hasLink ? "查看原消息（新标签页打开）" : "无可用链接");
-      if (hasLink) {
-        a.href = item.link;
-        a.target = "_blank";
-        a.rel = "noopener noreferrer";
-      } else {
-        a.href = "#";
-        a.addEventListener("click", (e) => e.preventDefault(), { once: true });
-      }
-      card.appendChild(a);
-
-      // 焦点三：时间与元数据（p）
-      const meta = document.createElement("p");
-      meta.className = "result-meta";
-
-      const parts = [];
-      parts.push(item.msg_date_text || "");
-      if (item.chat_title) parts.push(item.chat_title);
-      parts.push(typeToLabel(item.msg_type));
-
-      // 按大小排序时，补充文件大小（媒体优先）
-      if (effectiveSort === "size" && item.file_size != null) {
-        const sizeText = formatFileSize(item.file_size);
-        if (sizeText) parts.push(sizeText);
-      }
-
-      meta.textContent = parts.filter(Boolean).join(" | ");
-      card.appendChild(meta);
-
-      els.results.appendChild(card);
-    }
-
+    _renderResultList(items, effectiveSort);
     renderPagination(totalPages, page);
   }
 
@@ -215,21 +248,18 @@
     return btn;
   }
 
-  function renderPagination(totalPages, currentPage) {
-    els.pagination.innerHTML = "";
+  function _appendSinglePageSummary() {
+    const info = document.createElement("span");
+    info.className = "page-info";
+    info.textContent = "第 1 / 1 页";
+    els.pagination.appendChild(info);
+  }
 
-    // 无结果或仅一页时，不显示复杂分页，但保留简洁信息
-    if (!totalPages || totalPages <= 1) {
-      if (totalPages === 1) {
-        const info = document.createElement("span");
-        info.className = "page-info";
-        info.textContent = "第 1 / 1 页";
-        els.pagination.appendChild(info);
-      }
-      return;
-    }
+  function _shouldRenderComplexPagination(totalPages) {
+    return !!totalPages && totalPages > 1;
+  }
 
-    // 上一页
+  function _bindPaginationActions(currentPage, totalPages) {
     if (currentPage > 1) {
       els.pagination.appendChild(
         createBtn("上一页", () => doSearch(currentPage - 1), {
@@ -238,7 +268,6 @@
       );
     }
 
-    // 下一页
     if (currentPage < totalPages) {
       els.pagination.appendChild(
         createBtn("下一页", () => doSearch(currentPage + 1), {
@@ -246,13 +275,16 @@
         })
       );
     }
+  }
 
+  function _updatePaginationSummary(currentPage, totalPages) {
     const info = document.createElement("span");
     info.className = "page-info";
     info.textContent = `第 ${currentPage} / ${totalPages} 页`;
     els.pagination.appendChild(info);
+  }
 
-    // 跳页输入
+  function _createJumpPageElements(currentPage, totalPages) {
     const jumpWrap = document.createElement("div");
     jumpWrap.className = "page-jump-wrap";
 
@@ -271,20 +303,100 @@
     input.value = String(currentPage);
     input.setAttribute("aria-label", `输入页码，范围 1 到 ${totalPages}`);
 
-    const jumpBtn = createBtn("跳转", () => {
-      let p = Number(input.value);
-      if (!Number.isFinite(p)) p = currentPage;
-      p = Math.max(1, Math.min(totalPages, Math.trunc(p)));
-      doSearch(p);
-    }, {
+    const jumpBtn = createBtn("跳转", () => {}, {
       ariaLabel: "跳转到指定页码",
     });
+
+    return { jumpWrap, pageLabel, input, jumpBtn };
+  }
+
+  function _normalizeJumpPage(rawValue, currentPage, totalPages) {
+    let p = Number(rawValue);
+    if (!Number.isFinite(p)) p = currentPage;
+    return Math.max(1, Math.min(totalPages, Math.trunc(p)));
+  }
+
+  function _bindJumpPageButtonAction(jumpBtn, input, currentPage, totalPages) {
+    jumpBtn.addEventListener("click", () => {
+      const p = _normalizeJumpPage(input.value, currentPage, totalPages);
+      doSearch(p);
+    });
+  }
+
+  function _bindJumpPageAction(currentPage, totalPages) {
+    const { jumpWrap, pageLabel, input, jumpBtn } = _createJumpPageElements(currentPage, totalPages);
+    _bindJumpPageButtonAction(jumpBtn, input, currentPage, totalPages);
 
     // 这里不拦截 Enter，不做快捷搜索，遵守你的输入习惯
     jumpWrap.appendChild(pageLabel);
     jumpWrap.appendChild(input);
     jumpWrap.appendChild(jumpBtn);
     els.pagination.appendChild(jumpWrap);
+  }
+
+  function renderPagination(totalPages, currentPage) {
+    els.pagination.innerHTML = "";
+
+    if (!_shouldRenderComplexPagination(totalPages)) {
+      if (totalPages === 1) _appendSinglePageSummary();
+      return;
+    }
+
+    _bindPaginationActions(currentPage, totalPages);
+    _updatePaginationSummary(currentPage, totalPages);
+    _bindJumpPageAction(currentPage, totalPages);
+  }
+
+  function _setSearchLoading(isLoading) {
+    setSearching(isLoading);
+    if (isLoading) setStatus("正在搜索...");
+  }
+
+  function _buildSearchRequestPayload() {
+    return {
+      query: state.query,
+      chat_id: state.chat_id,
+      search_type: state.search_type,
+      sort_by: state.sort_by,
+      order: state.order,
+      page: state.page,
+    };
+  }
+
+  async function _fetchSearchResult(payload) {
+    const resp = await fetch("/api/search", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+      },
+      body: JSON.stringify(payload),
+    });
+    return resp.json();
+  }
+
+  function _handleSearchSuccess(data) {
+    if (!data.ok) {
+      clearResults();
+      setStatus(data.error || "搜索失败");
+      const box = document.createElement("div");
+      box.className = "empty-box";
+      box.textContent = data.error || "搜索失败";
+      els.results.appendChild(box);
+      return;
+    }
+
+    renderResults(data);
+  }
+
+  function _handleSearchError(err) {
+    clearResults();
+    const message = `搜索失败：${err?.message || err}`;
+    setStatus(message);
+    const box = document.createElement("div");
+    box.className = "empty-box";
+    box.textContent = message;
+    els.results.appendChild(box);
   }
 
   async function doSearch(targetPage) {
@@ -294,49 +406,17 @@
       state.page = Math.max(1, Math.trunc(targetPage));
     }
 
-    setSearching(true);
-    setStatus("正在搜索...");
+    _setSearchLoading(true);
     // 不清空旧结果，避免读屏/视觉闪烁太大，但你也可以改成先清空
 
     try {
-      const resp = await fetch("/api/search", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Accept": "application/json",
-        },
-        body: JSON.stringify({
-          query: state.query,
-          chat_id: state.chat_id,
-          search_type: state.search_type,
-          sort_by: state.sort_by,
-          order: state.order,
-          page: state.page,
-        }),
-      });
-
-      const data = await resp.json();
-
-      if (!data.ok) {
-        clearResults();
-        setStatus(data.error || "搜索失败");
-        const box = document.createElement("div");
-        box.className = "empty-box";
-        box.textContent = data.error || "搜索失败";
-        els.results.appendChild(box);
-        return;
-      }
-
-      renderResults(data);
+      const payload = _buildSearchRequestPayload();
+      const data = await _fetchSearchResult(payload);
+      _handleSearchSuccess(data);
     } catch (err) {
-      clearResults();
-      setStatus(`搜索失败：${err?.message || err}`);
-      const box = document.createElement("div");
-      box.className = "empty-box";
-      box.textContent = `搜索失败：${err?.message || err}`;
-      els.results.appendChild(box);
+      _handleSearchError(err);
     } finally {
-      setSearching(false);
+      _setSearchLoading(false);
     }
   }
 
