@@ -1,6 +1,19 @@
 (function () {
   'use strict';
 
+  var HARVEST_POLL_INTERVAL_MS = 3000;
+  var HARVEST_POLL_MAX_COUNT = 20;
+  var HARVEST_POLL_MAX_DURATION_MS = 60000;
+
+  var harvestPollState = {
+    jobId: '',
+    lastSeq: 0,
+    timerId: null,
+    isPolling: false,
+    startedAt: 0,
+    pollCount: 0
+  };
+
   document.addEventListener('DOMContentLoaded', function () {
     var elements = getElements();
     if (!elements) {
@@ -89,6 +102,14 @@
       clearLogs(elements);
     });
 
+    elements.startUpdateBtn.addEventListener('click', function () {
+      handleStartUpdateClick(elements);
+    });
+
+    elements.deleteDataBtn.addEventListener('click', function () {
+      handleDeleteDataClick(elements);
+    });
+
     elements.openAddDialogBtn.addEventListener('click', function () {
       openDialog(elements);
     });
@@ -98,6 +119,14 @@
     });
 
     elements.dialogConfirmBtn.addEventListener('click', function () {
+      handleDialogConfirm(elements);
+    });
+
+    elements.dialogInput.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' || elements.dialog.hidden) {
+        return;
+      }
+      event.preventDefault();
       handleDialogConfirm(elements);
     });
 
@@ -232,21 +261,94 @@
     return option ? option.textContent : '';
   }
 
-  async function fetchJSON(url) {
+  function getCurrentTargetInfo(elements) {
+    var selectElement = elements && elements.scopeSelect;
+    var chatId = selectElement ? String(selectElement.value || '') : '';
+    var label = selectElement ? getSelectedOptionLabel(selectElement, chatId) : '';
+    var trimmedLabel = typeof label === 'string' ? label.trim() : '';
+
+    return {
+      chatId: chatId,
+      label: trimmedLabel,
+      isNone: !chatId || chatId === 'none'
+    };
+  }
+
+  function handleStartUpdateClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '未选择群组/频道');
+      return;
+    }
+
+    if (!elements.incrementalCheckbox || !elements.incrementalCheckbox.checked) {
+      appendLog(elements, '未启用增量更新，无法执行更新');
+      return;
+    }
+
+    if (!window.confirm('确认执行增量更新？')) {
+      appendLog(elements, '已取消更新操作');
+      return;
+    }
+
+    appendLog(elements, '开始执行增量更新（占位）');
+    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
+    appendLog(elements, '更新任务已提交（占位）');
+  }
+
+  function handleDeleteDataClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '未选择群组/频道');
+      return;
+    }
+
+    var confirmText = '确认删除该群/频道数据？';
+    if (target.label) {
+      confirmText = '确认删除该群/频道数据：' + target.label + '？';
+    }
+
+    if (!window.confirm(confirmText)) {
+      appendLog(elements, '已取消删除操作');
+      return;
+    }
+
+    appendLog(elements, '开始删除群/频道数据（占位）');
+    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
+    appendLog(elements, '删除任务已提交（占位）');
+  }
+
+  async function fetchJSON(url, options) {
+    var requestOptions = options || {};
+    var requestHeaders = Object.assign(
+      {
+        Accept: 'application/json'
+      },
+      requestOptions.headers || {}
+    );
+
     var response;
     try {
       response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          Accept: 'application/json'
-        }
+        method: requestOptions.method || 'GET',
+        headers: requestHeaders,
+        body: requestOptions.body
       });
     } catch (networkError) {
       throw new Error('网络请求失败');
     }
 
     if (!response.ok) {
-      throw new Error('HTTP ' + response.status);
+      var errorMessage = 'HTTP ' + response.status;
+      try {
+        var errorPayload = await response.json();
+        if (errorPayload && typeof errorPayload.error === 'string' && errorPayload.error.trim()) {
+          errorMessage += ' ' + errorPayload.error.trim();
+        }
+      } catch (ignoreErrorPayload) {
+        // ignore parse failure, keep HTTP status message.
+      }
+      throw new Error(errorMessage);
     }
 
     try {
@@ -353,17 +455,142 @@
     }
   }
 
-  function handleDialogConfirm(elements) {
-    var value = elements.dialogInput.value.trim();
+  function stopHarvestPolling(elements, stopMessage) {
+    if (harvestPollState.timerId !== null) {
+      clearTimeout(harvestPollState.timerId);
+    }
+
+    var wasPolling = harvestPollState.isPolling;
+    harvestPollState.jobId = '';
+    harvestPollState.lastSeq = 0;
+    harvestPollState.timerId = null;
+    harvestPollState.isPolling = false;
+    harvestPollState.startedAt = 0;
+    harvestPollState.pollCount = 0;
+
+    if (wasPolling && stopMessage) {
+      appendLog(elements, stopMessage);
+    }
+  }
+
+  function scheduleHarvestPolling(elements) {
+    if (!harvestPollState.isPolling) {
+      return;
+    }
+
+    harvestPollState.timerId = setTimeout(function () {
+      pollHarvestJobOnce(elements);
+    }, HARVEST_POLL_INTERVAL_MS);
+  }
+
+  async function pollHarvestJobOnce(elements) {
+    if (!harvestPollState.isPolling || !harvestPollState.jobId) {
+      return;
+    }
+
+    harvestPollState.pollCount += 1;
+
+    var elapsedMs = Date.now() - harvestPollState.startedAt;
+    if (harvestPollState.pollCount > HARVEST_POLL_MAX_COUNT || elapsedMs > HARVEST_POLL_MAX_DURATION_MS) {
+      stopHarvestPolling(elements, '轮询已停止（占位任务未结束）');
+      return;
+    }
+
+    var jobId = harvestPollState.jobId;
+    var logsPath = '/api/admin/jobs/' + encodeURIComponent(jobId) + '/logs?after_seq=' + encodeURIComponent(String(harvestPollState.lastSeq));
+
+    try {
+      var logsPayload = await fetchJSON(logsPath);
+      var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
+
+      logs.forEach(function (log) {
+        if (!log || log.message === undefined || log.message === null) {
+          return;
+        }
+        appendLog(elements, String(log.message));
+
+        var seqNum = Number(log.seq);
+        if (Number.isFinite(seqNum) && seqNum > harvestPollState.lastSeq) {
+          harvestPollState.lastSeq = seqNum;
+        }
+      });
+
+      var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
+      var status = snapshotPayload && snapshotPayload.job ? String(snapshotPayload.job.status || '').toLowerCase() : '';
+      if (status === 'done' || status === 'error') {
+        stopHarvestPolling(elements, '任务已结束：' + status);
+        return;
+      }
+
+      scheduleHarvestPolling(elements);
+    } catch (error) {
+      stopHarvestPolling(elements, '日志轮询失败：' + error.message);
+    }
+  }
+
+  function startHarvestPolling(elements, jobId) {
+    var nextJobId = String(jobId || '').trim();
+    if (!nextJobId) {
+      return;
+    }
+
+    if (harvestPollState.isPolling) {
+      stopHarvestPolling(elements, '已停止上一任务日志轮询');
+    }
+
+    harvestPollState.jobId = nextJobId;
+    harvestPollState.lastSeq = 0;
+    harvestPollState.timerId = null;
+    harvestPollState.isPolling = true;
+    harvestPollState.startedAt = Date.now();
+    harvestPollState.pollCount = 0;
+    scheduleHarvestPolling(elements);
+  }
+
+  function buildDialogTargetPreview(value) {
+    var text = String(value || '').trim();
+    if (text.length <= 40) {
+      return text;
+    }
+    return text.slice(0, 40) + '…';
+  }
+
+  async function handleDialogConfirm(elements) {
+    var value = elements && elements.dialogInput ? elements.dialogInput.value.trim() : '';
 
     if (!value) {
       appendLog(elements, '请输入群组名称或链接');
       return;
     }
 
-    appendLog(elements, '已提交抓取请求（占位）：' + value);
-    elements.dialogInput.value = '';
-    closeDialog(elements);
+    var preview = buildDialogTargetPreview(value);
+    if (!window.confirm('确认新增/更新抓取目标：' + preview + '？')) {
+      appendLog(elements, '已取消新增抓取目标');
+      return;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/harvest', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          target: value
+        })
+      });
+      var jobId = payload && payload.job ? String(payload.job.job_id || '') : '';
+      if (!jobId) {
+        throw new Error('响应缺少 job_id');
+      }
+
+      appendLog(elements, '抓取任务已创建：' + jobId);
+      elements.dialogInput.value = '';
+      closeDialog(elements);
+      startHarvestPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建抓取任务失败：' + error.message);
+    }
   }
 
   function setElementHidden(element, hidden) {

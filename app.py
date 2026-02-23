@@ -3,9 +3,13 @@ import math
 import sqlite3
 import os
 import logging
+import threading
+import uuid
+import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
@@ -46,6 +50,134 @@ FROM_SQL = """
     LEFT JOIN chats c ON c.chat_id = m.chat_id
     LEFT JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
 """
+
+ADMIN_JOBS: Dict[str, Dict[str, Any]] = {}
+ADMIN_JOBS_LOCK = threading.Lock()
+ADMIN_JOB_LOG_MAX_LINES = 200
+ADMIN_JOB_MAX_COUNT = 100
+ADMIN_HARVEST_TARGET_MAX_LEN = 300
+
+
+def _admin_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _admin_job_trim_locked() -> None:
+    while len(ADMIN_JOBS) > ADMIN_JOB_MAX_COUNT:
+        oldest_job_id = next(iter(ADMIN_JOBS), None)
+        if oldest_job_id is None:
+            return
+        ADMIN_JOBS.pop(oldest_job_id, None)
+
+
+def _admin_job_append_log_locked(job: Dict[str, Any], message: str) -> Dict[str, Any]:
+    next_seq = int(job.get("next_log_seq", 1))
+    log_item = {
+        "seq": next_seq,
+        "ts": _admin_now_iso(),
+        "message": str(message),
+    }
+    logs = job.setdefault("logs", [])
+    logs.append(log_item)
+    if len(logs) > ADMIN_JOB_LOG_MAX_LINES:
+        del logs[: len(logs) - ADMIN_JOB_LOG_MAX_LINES]
+
+    job["next_log_seq"] = next_seq + 1
+    job["updated_at"] = log_item["ts"]
+    return dict(log_item)
+
+
+def _admin_job_create(job_type: str, target_chat_id: Optional[int] = None, target_label: Optional[str] = None) -> Dict[str, Any]:
+    created_at = _admin_now_iso()
+    job_id = uuid.uuid4().hex
+    job: Dict[str, Any] = {
+        "job_id": job_id,
+        "job_type": str(job_type or "unknown"),
+        "status": "queued",
+        "target_chat_id": target_chat_id,
+        "target_label": (target_label or "").strip() or None,
+        "created_at": created_at,
+        "updated_at": created_at,
+        "logs": [],
+        "next_log_seq": 1,
+    }
+    with ADMIN_JOBS_LOCK:
+        ADMIN_JOBS[job_id] = job
+        _admin_job_trim_locked()
+        _admin_job_append_log_locked(job, "任务已创建（占位）")
+        return _admin_job_get_snapshot_locked(job)
+
+
+def _admin_job_append_log(job_id: str, message: str) -> Optional[Dict[str, Any]]:
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return None
+        return _admin_job_append_log_locked(job, message)
+
+
+def _admin_job_set_status(job_id: str, status: str) -> bool:
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return False
+        job["status"] = str(status or "queued")
+        job["updated_at"] = _admin_now_iso()
+        return True
+
+
+def _admin_harvest_job_runner(job_id: str, target: str) -> None:
+    try:
+        if not _admin_job_set_status(job_id, "running"):
+            return
+
+        _admin_job_append_log(job_id, f"开始处理目标（占位）：{target}")
+        time.sleep(0.25)
+        _admin_job_append_log(job_id, "正在解析目标信息（占位）")
+        time.sleep(0.25)
+        _admin_job_append_log(job_id, "正在准备抓取任务（占位）")
+        time.sleep(0.25)
+        _admin_job_append_log(job_id, "抓取完成（占位）")
+        _admin_job_set_status(job_id, "done")
+    except Exception as exc:
+        _admin_job_append_log(job_id, f"占位执行异常：{exc}")
+        _admin_job_set_status(job_id, "error")
+
+
+def _admin_start_harvest_job_thread(job_id: str, target: str) -> None:
+    thread = threading.Thread(target=_admin_harvest_job_runner, args=(job_id, target), daemon=True)
+    thread.start()
+
+
+def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "job_id": str(job.get("job_id", "")),
+        "job_type": str(job.get("job_type", "unknown")),
+        "status": str(job.get("status", "queued")),
+        "target_chat_id": job.get("target_chat_id"),
+        "target_label": job.get("target_label"),
+        "created_at": str(job.get("created_at", "")),
+        "updated_at": str(job.get("updated_at", "")),
+        "log_count": len(job.get("logs", [])),
+        "last_seq": int(job.get("next_log_seq", 1)) - 1,
+    }
+
+
+def _admin_job_get_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return None
+        return _admin_job_get_snapshot_locked(job)
+
+
+def _admin_job_get_logs(job_id: str, after_seq: int = 0) -> Optional[List[Dict[str, Any]]]:
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return None
+        logs = job.get("logs", [])
+        return [dict(item) for item in logs if int(item.get("seq", 0)) > after_seq]
 
 
 @dataclass
@@ -444,7 +576,10 @@ def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
             {
                 "chat_id": int(row["chat_id"]),
                 "chat_title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
+                "chat_name": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
+                "title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
                 "message_count": int(row["message_count"] or 0),
+                "msg_count": int(row["message_count"] or 0),
             }
             for row in cur.fetchall()
         ]
@@ -619,6 +754,60 @@ def _register_routes(app: Flask) -> None:
         except Exception:
             logger.exception("系统异常")
             return jsonify({"ok": False, "error": "系统异常"}), 500
+
+    @app.get("/api/admin/jobs/<job_id>")
+    def api_admin_job_snapshot(job_id: str):
+        snapshot = _admin_job_get_snapshot(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务不存在"}), 404
+        return jsonify({"ok": True, "job": snapshot})
+
+    @app.get("/api/admin/jobs/<job_id>/logs")
+    def api_admin_job_logs(job_id: str):
+        raw_after_seq = (request.args.get("after_seq") or "").strip()
+        try:
+            after_seq = int(raw_after_seq) if raw_after_seq else 0
+            if after_seq < 0:
+                raise ValueError()
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "error": "after_seq 参数非法"}), 400
+
+        logs = _admin_job_get_logs(job_id, after_seq=after_seq)
+        if logs is None:
+            return jsonify({"ok": False, "error": "任务不存在"}), 404
+        return jsonify({"ok": True, "job_id": job_id, "after_seq": after_seq, "logs": logs})
+
+    @app.post("/api/admin/jobs/harvest")
+    def api_admin_job_create_harvest():
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        raw_target = data.get("target", "")
+        if not isinstance(raw_target, str):
+            return jsonify({"ok": False, "error": "target 参数必须为字符串"}), 400
+
+        target = raw_target.strip()
+        if not target:
+            return jsonify({"ok": False, "error": "target 不能为空"}), 400
+        if len(target) > ADMIN_HARVEST_TARGET_MAX_LEN:
+            return jsonify({"ok": False, "error": f"target 长度不能超过 {ADMIN_HARVEST_TARGET_MAX_LEN}"}), 400
+
+        job = _admin_job_create("harvest", target_chat_id=None, target_label=target)
+        job_id = str(job.get("job_id") or "")
+
+        _admin_job_append_log(job_id, f"已接收抓取目标：{target}")
+        _admin_job_append_log(job_id, "等待执行（占位）")
+        _admin_job_append_log(job_id, "详细抓取日志将在此处输出（占位）")
+        _admin_start_harvest_job_thread(job_id, target)
+
+        snapshot = _admin_job_get_snapshot(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+        return jsonify({"ok": True, "job": snapshot})
 
 
 def create_app() -> Flask:
