@@ -279,7 +279,7 @@ def _create_fts_table(cur: sqlite3.Cursor):
         content,
         content='messages',
         content_rowid='pk',
-        tokenize='unicode61 remove_diacritics 2'
+        tokenize='trigram'
     )
     """)
 
@@ -357,6 +357,7 @@ def _create_fts_if_supported(cur: sqlite3.Cursor, feats: SqliteFeatures):
     _heal_fts_if_needed(cur)
 
 
+
 def _create_core_schema(cur: sqlite3.Cursor, strict_suffix: str):
     _create_tables(cur, strict_suffix)
     _create_indexes(cur)
@@ -372,6 +373,18 @@ def create_schema(conn: sqlite3.Connection, feats: SqliteFeatures):
     try:
         strict_suffix = " STRICT" if feats.supports_strict else ""
         _create_core_schema(cur, strict_suffix)
+        if feats.supports_fts5:
+            cur.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'")
+            row = cur.fetchone()
+            table_sql = (row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row else ""
+            if table_sql and "trigram" not in table_sql.lower():
+                cur.execute("DROP TABLE messages_fts")
+                _create_fts_table(cur)
+                cur.execute("""
+                INSERT INTO messages_fts(rowid, content)
+                SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
+                FROM messages
+                """)
         _create_optional_schema(cur, feats)
         conn.commit()
     finally:
