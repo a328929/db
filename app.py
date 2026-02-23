@@ -1,8 +1,6 @@
 # -*- coding: utf-8 -*-
 import math
-import re
 import sqlite3
-import unicodedata
 import os
 from contextlib import closing
 from dataclasses import dataclass
@@ -12,13 +10,13 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, render_template, request
 
 from tg_harvest.db import connect_db, resolve_db_path as resolve_db_path_lib
+from tg_harvest.normalize import _safe_lower_nfkc
 
 DB_PATH_STR = resolve_db_path_lib(os.getenv("TG_DB_NAME", "tg_data.db"))
 DB_PATH = Path(DB_PATH_STR)
 PAGE_SIZE = 100
 MAX_COUNT = 50000
 
-ZERO_WIDTH_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 CURLY_QUOTES_MAP = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
 TYPE_FALLBACK_TITLE = {
     "PHOTO": "[无文案图片]",
@@ -54,9 +52,7 @@ def get_conn() -> sqlite3.Connection:
 
 
 def norm_for_search(term: str) -> str:
-    s = unicodedata.normalize("NFKC", term or "")
-    s = ZERO_WIDTH_RE.sub("", s)
-    return s.strip().lower()
+    return _safe_lower_nfkc(term or "").strip()
 
 
 def tokenize_query(query: str) -> List[Tuple[str, str]]:
@@ -295,10 +291,10 @@ def _append_like_fallback_filters(where_parts: List[str], sql_params: List[Any],
 
     includes, excludes = split_positive_negative_terms(raw_query)
     for term in includes:
-        where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
+        where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) LIKE ?")
         sql_params.append(f"%{term.lower()}%")
     for term in excludes:
-        where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
+        where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) NOT LIKE ?")
         sql_params.append(f"%{term.lower()}%")
 
 
