@@ -738,16 +738,103 @@ def _append_fts_match_filter(where_parts: List[str], sql_params: List[Any], matc
 
 
 def _append_like_fallback_filters(where_parts: List[str], sql_params: List[Any], raw_query: str) -> None:
-    if not raw_query.strip():
+    like_clause, like_params = _build_like_logic_clause(raw_query)
+    if not like_clause:
         return
+    where_parts.append(like_clause)
+    sql_params.extend(like_params)
 
-    includes, excludes = split_positive_negative_terms(raw_query)
-    for term in includes:
-        where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) LIKE ?")
-        sql_params.append(f"%{term.lower()}%")
-    for term in excludes:
-        where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) NOT LIKE ?")
-        sql_params.append(f"%{term.lower()}%")
+
+def _build_like_logic_clause(raw_query: str) -> Tuple[str, List[Any]]:
+    tokens = tokenize_query(raw_query)
+    if not tokens:
+        return "", []
+
+    stream: List[Tuple[str, str]] = []
+    prev_operand = False
+
+    for kind, value in tokens:
+        if kind in {"TERM", "PHRASE"}:
+            if prev_operand:
+                stream.append(("OP", "AND"))
+            stream.append(("TERM", value))
+            prev_operand = True
+            continue
+
+        if value == "-":
+            if prev_operand:
+                stream.append(("OP", "AND"))
+            stream.append(("OP", "NOT"))
+            prev_operand = False
+            continue
+
+        if value == "+":
+            if prev_operand:
+                stream.append(("OP", "AND"))
+            prev_operand = False
+            continue
+
+        if value == "|":
+            if prev_operand:
+                stream.append(("OP", "OR"))
+            prev_operand = False
+
+    while stream and stream[-1][0] == "OP":
+        stream.pop()
+
+    if not stream:
+        return "", []
+
+    output: List[Tuple[str, str]] = []
+    op_stack: List[str] = []
+    precedence = {"OR": 1, "AND": 2, "NOT": 3}
+    right_assoc = {"NOT"}
+
+    for token_kind, token_value in stream:
+        if token_kind == "TERM":
+            output.append((token_kind, token_value))
+            continue
+
+        while op_stack:
+            top = op_stack[-1]
+            if (top not in right_assoc and precedence[top] >= precedence[token_value]) or (
+                top in right_assoc and precedence[top] > precedence[token_value]
+            ):
+                output.append(("OP", op_stack.pop()))
+                continue
+            break
+        op_stack.append(token_value)
+
+    while op_stack:
+        output.append(("OP", op_stack.pop()))
+
+    expr_stack: List[str] = []
+    expr_params: List[Any] = []
+    content_expr = "LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, ''))"
+
+    for token_kind, token_value in output:
+        if token_kind == "TERM":
+            expr_stack.append(f"({content_expr} LIKE ?)")
+            expr_params.append(f"%{token_value.lower()}%")
+            continue
+
+        if token_value == "NOT":
+            if not expr_stack:
+                return "", []
+            operand = expr_stack.pop()
+            expr_stack.append(f"(NOT {operand})")
+            continue
+
+        if len(expr_stack) < 2:
+            return "", []
+        right = expr_stack.pop()
+        left = expr_stack.pop()
+        expr_stack.append(f"({left} {token_value} {right})")
+
+    if len(expr_stack) != 1:
+        return "", []
+
+    return expr_stack[0], expr_params
 
 
 def _append_scope_filters(where_parts: List[str], sql_params: List[Any], params: SearchParams) -> None:
@@ -996,6 +1083,49 @@ def _search_payload(params: SearchParams) -> Dict[str, Any]:
     }
 
 
+def _search_payload_like_fallback(params: SearchParams) -> Optional[Dict[str, Any]]:
+    like_clause, like_params = _build_like_logic_clause(params.raw_query)
+    if not like_clause:
+        return None
+
+    where_parts: List[str] = ["1=1", like_clause]
+    sql_params: List[Any] = list(like_params)
+    _append_scope_filters(where_parts, sql_params, params)
+    where_sql = " AND ".join(where_parts)
+
+    with closing(get_conn()) as conn:
+        count_sql, query_sql, _, effective_sort, effective_order = _build_search_sql(
+            where_sql,
+            params.search_type,
+            params.sort_by_req,
+            params.order_req,
+        )
+        rows, total, total_pages, total_is_capped, effective_page = _run_search_query(
+            conn,
+            count_sql,
+            query_sql,
+            sql_params,
+            params.page,
+        )
+
+    if total <= 0:
+        return None
+
+    return {
+        "ok": True,
+        "query": params.raw_query,
+        "fts_query": to_fts_match(params.raw_query),
+        "page": effective_page,
+        "page_size": PAGE_SIZE,
+        "total": total,
+        "total_pages": total_pages,
+        "total_is_capped": total_is_capped,
+        "effective_sort": effective_sort,
+        "effective_order": effective_order.lower(),
+        "items": _map_search_items(rows),
+    }
+
+
 def _register_routes(app: Flask) -> None:
     @app.get("/")
     def index():
@@ -1023,7 +1153,12 @@ def _register_routes(app: Flask) -> None:
         data = request.get_json(silent=True) or {}
         try:
             params = _parse_search_params(data)
-            return jsonify(_search_payload(params))
+            payload = _search_payload(params)
+            if int(payload.get("total") or 0) == 0:
+                fallback_payload = _search_payload_like_fallback(params)
+                if fallback_payload is not None:
+                    return jsonify(fallback_payload)
+            return jsonify(payload)
         except (ValueError, TypeError):
             return jsonify({"ok": False, "error": "参数格式错误"}), 400
         except sqlite3.Error:
