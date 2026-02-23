@@ -99,6 +99,12 @@ def _admin_job_create(job_type: str, target_chat_id: Optional[int] = None, targe
         "updated_at": created_at,
         "logs": [],
         "next_log_seq": 1,
+        "progress": {
+            "current": 0,
+            "total": None,
+            "stage": "queued",
+            "last_logged_current": 0,
+        },
     }
     with ADMIN_JOBS_LOCK:
         ADMIN_JOBS[job_id] = job
@@ -115,7 +121,134 @@ def _admin_job_append_log(job_id: str, message: str) -> Optional[Dict[str, Any]]
         return _admin_job_append_log_locked(job, message)
 
 
+def _admin_job_set_status(job_id: str, status: str) -> bool:
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return False
+        job["status"] = str(status or "queued")
+        job["updated_at"] = _admin_now_iso()
+        return True
+
+
+def _admin_job_update_progress(
+    job_id: str,
+    current: int,
+    total: Optional[int] = None,
+    stage: Optional[str] = None,
+    log_step: int = 1000,
+    force_log: bool = False,
+) -> bool:
+    should_log = False
+    log_message: Optional[str] = None
+    with ADMIN_JOBS_LOCK:
+        job = ADMIN_JOBS.get(job_id)
+        if job is None:
+            return False
+
+        safe_current = max(int(current), 0)
+        safe_total = int(total) if isinstance(total, int) and total >= 0 else None
+
+        progress = job.setdefault(
+            "progress",
+            {
+                "current": 0,
+                "total": None,
+                "stage": "queued",
+                "last_logged_current": 0,
+            },
+        )
+        progress["current"] = safe_current
+        if total is not None:
+            progress["total"] = safe_total
+        if stage is not None:
+            progress["stage"] = str(stage)
+        job["updated_at"] = _admin_now_iso()
+
+        progress_total = progress.get("total")
+        last_logged_current = int(progress.get("last_logged_current") or 0)
+        progress_stage = str(progress.get("stage") or "running")
+        if isinstance(log_step, int) and log_step > 0:
+            on_step = safe_current > 0 and safe_current % log_step == 0
+        else:
+            on_step = False
+        is_final = isinstance(progress_total, int) and safe_current >= progress_total
+        should_log = force_log or on_step or is_final
+
+        if should_log and safe_current != last_logged_current:
+            if isinstance(progress_total, int):
+                log_message = f"正在抓取消息（占位）：第 {safe_current}/{progress_total} 条"
+            else:
+                log_message = f"正在抓取消息（占位）：第 {safe_current} 条"
+            progress["last_logged_current"] = safe_current
+        else:
+            should_log = False
+
+    if should_log and log_message:
+        stage_prefix = f"[{progress_stage}] " if progress_stage else ""
+        _admin_job_append_log(job_id, f"{stage_prefix}{log_message}")
+    return True
+
+
+def _admin_harvest_job_runner(job_id: str, target: str) -> None:
+    try:
+        _admin_job_set_status(job_id, "running")
+        _admin_job_append_log(job_id, f"开始抓取目标（占位）：{target}")
+
+        total_messages = 3200
+        _admin_job_update_progress(job_id, 0, total=total_messages, stage="fetching")
+
+        current = 0
+        while current < total_messages:
+            current = min(current + 250, total_messages)
+            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=1000)
+            threading.Event().wait(0.01)
+
+        _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
+        _admin_job_append_log(job_id, "抓取完成（占位）")
+        _admin_job_set_status(job_id, "done")
+    except Exception as exc:
+        _admin_job_append_log(job_id, f"抓取失败（占位）：{exc}")
+        _admin_job_set_status(job_id, "error")
+
+
+def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> None:
+    try:
+        _admin_job_set_status(job_id, "running")
+        mode_label = "增量" if incremental else "全量"
+        _admin_job_append_log(job_id, f"开始{mode_label}更新（占位）：{chat_title} ({chat_id})")
+        _admin_job_append_log(job_id, "读取本地最新进度（占位）")
+        _admin_job_append_log(job_id, "准备拉取新消息（占位）")
+
+        total_messages = 2300
+        _admin_job_update_progress(job_id, 0, total=total_messages, stage="fetching")
+
+        current = 0
+        while current < total_messages:
+            current = min(current + 250, total_messages)
+            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=1000)
+            threading.Event().wait(0.01)
+
+        _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
+        _admin_job_append_log(job_id, "增量更新完成（占位）")
+        _admin_job_set_status(job_id, "done")
+    except Exception as exc:
+        _admin_job_append_log(job_id, f"增量更新失败（占位）：{exc}")
+        _admin_job_set_status(job_id, "error")
+
+
+def _admin_start_update_job_thread(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> threading.Thread:
+    worker = threading.Thread(
+        target=_admin_update_job_runner,
+        args=(job_id, chat_id, chat_title, incremental),
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
 def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
+    progress = dict(job.get("progress") or {})
     return {
         "job_id": str(job.get("job_id", "")),
         "job_type": str(job.get("job_type", "unknown")),
@@ -124,6 +257,11 @@ def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
         "target_label": job.get("target_label"),
         "created_at": str(job.get("created_at", "")),
         "updated_at": str(job.get("updated_at", "")),
+        "progress": {
+            "current": int(progress.get("current") or 0),
+            "total": progress.get("total"),
+            "stage": str(progress.get("stage") or "queued"),
+        },
         "log_count": len(job.get("logs", [])),
         "last_seq": int(job.get("next_log_seq", 1)) - 1,
     }
@@ -606,6 +744,22 @@ def _build_admin_stats_payload(conn: sqlite3.Connection, chat_id: Optional[int])
         cur.close()
 
 
+def _admin_get_chat_brief(conn: sqlite3.Connection, chat_id: int) -> Optional[Dict[str, Any]]:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT chat_id, chat_title FROM chats WHERE chat_id = ? LIMIT 1", (chat_id,))
+        row = cur.fetchone()
+        if row is None:
+            return None
+        actual_chat_id = int(row["chat_id"])
+        return {
+            "chat_id": actual_chat_id,
+            "chat_title": _chat_title_or_fallback(actual_chat_id, row["chat_title"]),
+        }
+    finally:
+        cur.close()
+
+
 def _search_payload(params: SearchParams) -> Dict[str, Any]:
     with closing(get_conn()) as conn:
         fts_enabled = has_fts(conn)
@@ -766,8 +920,56 @@ def _register_routes(app: Flask) -> None:
         job_id = str(job.get("job_id") or "")
 
         _admin_job_append_log(job_id, f"已接收抓取目标：{target}")
-        _admin_job_append_log(job_id, "等待执行（占位）")
-        _admin_job_append_log(job_id, "详细抓取日志将在此处输出（占位）")
+        worker = threading.Thread(target=_admin_harvest_job_runner, args=(job_id, target), daemon=True)
+        worker.start()
+
+        snapshot = _admin_job_get_snapshot(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+        return jsonify({"ok": True, "job": snapshot})
+
+
+    @app.post("/api/admin/jobs/update")
+    def api_admin_job_create_update():
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        raw_chat_id = data.get("chat_id")
+        try:
+            chat_id = int(raw_chat_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+
+        incremental = data.get("incremental", True)
+        if not isinstance(incremental, bool):
+            return jsonify({"ok": False, "error": "incremental 参数必须为布尔值"}), 400
+        if incremental is False:
+            return jsonify({"ok": False, "error": "当前仅支持增量更新"}), 400
+
+        try:
+            with closing(get_conn()) as conn:
+                chat_brief = _admin_get_chat_brief(conn, chat_id)
+        except sqlite3.Error:
+            logger.exception("读取群信息失败")
+            return jsonify({"ok": False, "error": "读取群信息失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
+
+        if chat_brief is None:
+            return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
+
+        chat_title = str(chat_brief["chat_title"])
+        job = _admin_job_create("update", target_chat_id=chat_id, target_label=chat_title)
+        job_id = str(job.get("job_id") or "")
+
+        _admin_job_append_log(job_id, "已接收增量更新请求")
+        _admin_job_append_log(job_id, f"目标群组：{chat_title} ({chat_id})")
+        _admin_start_update_job_thread(job_id, chat_id, chat_title, incremental)
 
         snapshot = _admin_job_get_snapshot(job_id)
         if snapshot is None:

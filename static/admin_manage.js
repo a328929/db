@@ -274,7 +274,7 @@
     };
   }
 
-  function handleStartUpdateClick(elements) {
+  async function handleStartUpdateClick(elements) {
     var target = getCurrentTargetInfo(elements);
     if (target.isNone) {
       appendLog(elements, '未选择群组/频道');
@@ -286,14 +286,44 @@
       return;
     }
 
-    if (!window.confirm('确认执行增量更新？')) {
+    var confirmText = '确认执行增量更新？';
+    if (target.label) {
+      confirmText = '确认执行增量更新：' + target.label + '？';
+    }
+
+    if (!window.confirm(confirmText)) {
       appendLog(elements, '已取消更新操作');
       return;
     }
 
-    appendLog(elements, '开始执行增量更新（占位）');
-    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
-    appendLog(elements, '更新任务已提交（占位）');
+    var chatIdNumber = Number(target.chatId);
+    if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
+      appendLog(elements, '创建增量更新任务失败：chat_id 参数非法');
+      return;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/update', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          chat_id: chatIdNumber,
+          incremental: true
+        })
+      });
+      var job = payload && payload.job ? payload.job : null;
+      var jobId = job && job.job_id ? String(job.job_id) : '';
+      if (!jobId) {
+        throw new Error('任务创建成功但缺少 job_id');
+      }
+
+      appendLog(elements, '增量更新任务已创建：' + jobId);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建增量更新任务失败：' + error.message);
+    }
   }
 
   function handleDeleteDataClick(elements) {
@@ -318,7 +348,95 @@
     appendLog(elements, '删除任务已提交（占位）');
   }
 
-  async function fetchJSON(url) {
+
+  function startJobPolling(elements, jobId) {
+    var normalizedJobId = String(jobId || '').trim();
+    if (!normalizedJobId) {
+      return;
+    }
+
+    stopJobPolling();
+
+    harvestPollState.jobId = normalizedJobId;
+    harvestPollState.lastSeq = 0;
+    harvestPollState.startedAt = Date.now();
+    harvestPollState.pollCount = 0;
+    harvestPollState.isPolling = true;
+
+    pollJobProgress(elements);
+  }
+
+  function stopJobPolling() {
+    if (harvestPollState.timerId) {
+      window.clearTimeout(harvestPollState.timerId);
+    }
+    harvestPollState.timerId = null;
+    harvestPollState.isPolling = false;
+  }
+
+  function scheduleJobPolling(elements) {
+    if (!harvestPollState.isPolling) {
+      return;
+    }
+    harvestPollState.timerId = window.setTimeout(function () {
+      pollJobProgress(elements);
+    }, HARVEST_POLL_INTERVAL_MS);
+  }
+
+  async function pollJobProgress(elements) {
+    if (!harvestPollState.isPolling || !harvestPollState.jobId) {
+      return;
+    }
+
+    harvestPollState.pollCount += 1;
+    var elapsed = Date.now() - harvestPollState.startedAt;
+    if (harvestPollState.pollCount > HARVEST_POLL_MAX_COUNT || elapsed > HARVEST_POLL_MAX_DURATION_MS) {
+      appendLog(elements, '任务日志轮询已停止：达到轮询上限');
+      stopJobPolling();
+      return;
+    }
+
+    var jobId = harvestPollState.jobId;
+    try {
+      var logsPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId) + '/logs?after_seq=' + encodeURIComponent(String(harvestPollState.lastSeq || 0)));
+      var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
+      for (var i = 0; i < logs.length; i += 1) {
+        var line = logs[i];
+        if (!line || typeof line.message !== 'string') {
+          continue;
+        }
+        appendLog(elements, line.message);
+        if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
+          harvestPollState.lastSeq = Math.max(harvestPollState.lastSeq, line.seq);
+        }
+      }
+
+      var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
+      var snapshot = snapshotPayload && snapshotPayload.job ? snapshotPayload.job : null;
+      var status = snapshot && snapshot.status ? String(snapshot.status) : '';
+      if (status === 'done') {
+        appendLog(elements, '任务执行完成');
+        stopJobPolling();
+        return;
+      }
+      if (status === 'error') {
+        appendLog(elements, '任务执行失败，请检查日志');
+        stopJobPolling();
+        return;
+      }
+    } catch (error) {
+      appendLog(elements, '任务日志轮询失败：' + error.message);
+      stopJobPolling();
+      return;
+    }
+
+    scheduleJobPolling(elements);
+  }
+
+  async function fetchJSON(url, options) {
+    var requestOptions = options || {};
+    var requestHeaders = requestOptions.headers || {};
+
     var response;
     try {
       response = await fetch(url, {
