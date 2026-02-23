@@ -418,6 +418,93 @@ def _build_meta_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
         cur.close()
 
 
+def _chat_title_or_fallback(chat_id: int, chat_title: Optional[str]) -> str:
+    title = (chat_title or "").strip()
+    return title if title else f"Chat {chat_id}"
+
+
+def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.chat_title,
+                COUNT(m.pk) AS message_count
+            FROM chats c
+            LEFT JOIN messages m ON m.chat_id = c.chat_id
+            GROUP BY c.chat_id, c.chat_title
+            ORDER BY
+                LOWER(COALESCE(NULLIF(TRIM(c.chat_title), ''), printf('Chat %d', c.chat_id))) ASC,
+                c.chat_id ASC
+            """
+        )
+        chats = [
+            {
+                "chat_id": int(row["chat_id"]),
+                "chat_title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
+                "message_count": int(row["message_count"] or 0),
+            }
+            for row in cur.fetchall()
+        ]
+        return {"ok": True, "chats": chats}
+    finally:
+        cur.close()
+
+
+def _parse_admin_chat_id(raw_chat_id: Optional[str]) -> Optional[int]:
+    value = (raw_chat_id or "").strip()
+    if not value or value.lower() == "none":
+        return None
+    return int(value)
+
+
+def _build_admin_stats_payload(conn: sqlite3.Connection, chat_id: Optional[int]) -> Tuple[Dict[str, Any], int]:
+    cur = conn.cursor()
+    try:
+        if chat_id is None:
+            cur.execute("SELECT COUNT(*) AS chat_count FROM chats")
+            chat_count = int(cur.fetchone()["chat_count"] or 0)
+
+            cur.execute("SELECT COUNT(*) AS message_count FROM messages")
+            message_count = int(cur.fetchone()["message_count"] or 0)
+
+            return {
+                "ok": True,
+                "scope": "all",
+                "chat_count": chat_count,
+                "message_count": message_count,
+            }, 200
+
+        cur.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.chat_title,
+                COUNT(m.pk) AS message_count
+            FROM chats c
+            LEFT JOIN messages m ON m.chat_id = c.chat_id
+            WHERE c.chat_id = ?
+            GROUP BY c.chat_id, c.chat_title
+            """,
+            (chat_id,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return {"ok": False, "error": "chat_id 不存在"}, 404
+
+        return {
+            "ok": True,
+            "scope": "chat",
+            "chat_id": int(row["chat_id"]),
+            "chat_title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
+            "message_count": int(row["message_count"] or 0),
+        }, 200
+    finally:
+        cur.close()
+
+
 def _search_payload(params: SearchParams) -> Dict[str, Any]:
     with closing(get_conn()) as conn:
         fts_enabled = has_fts(conn)
@@ -459,6 +546,12 @@ def _register_routes(app: Flask) -> None:
             return ("未找到 tg_data.db。请把 app.py 放到数据库同一目录后再启动。", 500, {"Content-Type": "text/plain; charset=utf-8"})
         return render_template("index.html", page_size=PAGE_SIZE)
 
+    @app.get("/admin/manage")
+    def admin_manage_page():
+        if not DB_PATH.exists():
+            return ("未找到 tg_data.db。请把 app.py 放到数据库同一目录后再启动。", 500, {"Content-Type": "text/plain; charset=utf-8"})
+        return render_template("admin_manage.html")
+
     @app.get("/api/meta")
     def api_meta():
         if not DB_PATH.exists():
@@ -487,6 +580,42 @@ def _register_routes(app: Flask) -> None:
         except sqlite3.Error:
             logger.exception("查询失败")
             return jsonify({"ok": False, "error": "查询失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
+
+    @app.get("/api/admin/chats")
+    def api_admin_chats():
+        if not DB_PATH.exists():
+            return jsonify({"ok": False, "error": "数据库不存在"}), 500
+        try:
+            with closing(get_conn()) as conn:
+                payload = _build_admin_chats_payload(conn)
+            return jsonify(payload)
+        except sqlite3.Error:
+            logger.exception("读取后台群列表失败")
+            return jsonify({"ok": False, "error": "读取后台群列表失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
+
+    @app.get("/api/admin/stats")
+    def api_admin_stats():
+        if not DB_PATH.exists():
+            return jsonify({"ok": False, "error": "数据库不存在"}), 500
+
+        try:
+            chat_id = _parse_admin_chat_id(request.args.get("chat_id"))
+        except (ValueError, TypeError):
+            return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+
+        try:
+            with closing(get_conn()) as conn:
+                payload, status_code = _build_admin_stats_payload(conn, chat_id)
+            return jsonify(payload), status_code
+        except sqlite3.Error:
+            logger.exception("读取后台统计失败")
+            return jsonify({"ok": False, "error": "读取后台统计失败"}), 500
         except Exception:
             logger.exception("系统异常")
             return jsonify({"ok": False, "error": "系统异常"}), 500
