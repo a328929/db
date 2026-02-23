@@ -89,6 +89,14 @@
       clearLogs(elements);
     });
 
+    elements.startUpdateBtn.addEventListener('click', function () {
+      handleStartUpdateClick(elements);
+    });
+
+    elements.deleteDataBtn.addEventListener('click', function () {
+      handleDeleteDataClick(elements);
+    });
+
     elements.openAddDialogBtn.addEventListener('click', function () {
       openDialog(elements);
     });
@@ -98,6 +106,14 @@
     });
 
     elements.dialogConfirmBtn.addEventListener('click', function () {
+      handleDialogConfirm(elements);
+    });
+
+    elements.dialogInput.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' || elements.dialog.hidden) {
+        return;
+      }
+      event.preventDefault();
       handleDialogConfirm(elements);
     });
 
@@ -232,6 +248,63 @@
     return option ? option.textContent : '';
   }
 
+  function getCurrentTargetInfo(elements) {
+    var selectElement = elements && elements.scopeSelect;
+    var chatId = selectElement ? String(selectElement.value || '') : '';
+    var label = selectElement ? getSelectedOptionLabel(selectElement, chatId) : '';
+    var trimmedLabel = typeof label === 'string' ? label.trim() : '';
+
+    return {
+      chatId: chatId,
+      label: trimmedLabel,
+      isNone: !chatId || chatId === 'none'
+    };
+  }
+
+  function handleStartUpdateClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '未选择群组/频道');
+      return;
+    }
+
+    if (!elements.incrementalCheckbox || !elements.incrementalCheckbox.checked) {
+      appendLog(elements, '未启用增量更新，无法执行更新');
+      return;
+    }
+
+    if (!window.confirm('确认执行增量更新？')) {
+      appendLog(elements, '已取消更新操作');
+      return;
+    }
+
+    appendLog(elements, '开始执行增量更新（占位）');
+    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
+    appendLog(elements, '更新任务已提交（占位）');
+  }
+
+  function handleDeleteDataClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '未选择群组/频道');
+      return;
+    }
+
+    var confirmText = '确认删除该群/频道数据？';
+    if (target.label) {
+      confirmText = '确认删除该群/频道数据：' + target.label + '？';
+    }
+
+    if (!window.confirm(confirmText)) {
+      appendLog(elements, '已取消删除操作');
+      return;
+    }
+
+    appendLog(elements, '开始删除群/频道数据（占位）');
+    appendLog(elements, '目标：' + (target.label || target.chatId) + '（ID: ' + target.chatId + '）');
+    appendLog(elements, '删除任务已提交（占位）');
+  }
+
   async function fetchJSON(url) {
     var response;
     try {
@@ -353,15 +426,31 @@
     }
   }
 
+  function buildDialogTargetPreview(value) {
+    var text = String(value || '').trim();
+    if (text.length <= 40) {
+      return text;
+    }
+    return text.slice(0, 40) + '…';
+  }
+
   function handleDialogConfirm(elements) {
-    var value = elements.dialogInput.value.trim();
+    var value = elements && elements.dialogInput ? elements.dialogInput.value.trim() : '';
 
     if (!value) {
       appendLog(elements, '请输入群组名称或链接');
       return;
     }
 
-    appendLog(elements, '已提交抓取请求（占位）：' + value);
+    var preview = buildDialogTargetPreview(value);
+    if (!window.confirm('确认新增/更新抓取目标：' + preview + '？')) {
+      appendLog(elements, '已取消新增抓取目标');
+      return;
+    }
+
+    appendLog(elements, '已接收抓取目标：' + value);
+    appendLog(elements, '正在创建抓取任务（占位）');
+    appendLog(elements, '详细抓取日志将在此处显示（占位）');
     elements.dialogInput.value = '';
     closeDialog(elements);
   }
