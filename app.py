@@ -14,11 +14,8 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
-from telethon.sync import TelegramClient
 
 from tg_harvest.config import CFG
-from tg_harvest.harvest_parse import resolve_target_entity
-from tg_harvest.harvest_runner import _process_entity
 from tg_harvest.db import connect_db, create_schema, resolve_db_path as resolve_db_path_lib
 from tg_harvest.normalize import normalize_search_term
 
@@ -28,7 +25,9 @@ logger = logging.getLogger(__name__)
 def _init_logging() -> None:
     root_logger = logging.getLogger()
     if not root_logger.handlers:
-        logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+        logging.getLogger("telethon").setLevel(logging.WARNING)
+        logging.getLogger("werkzeug").setLevel(logging.WARNING)
 
 
 _init_logging()
@@ -273,6 +272,10 @@ def _admin_job_update_progress(
 
 
 def _admin_harvest_job_runner(job_id: str, target: str) -> None:
+    from telethon.sync import TelegramClient
+    from tg_harvest.harvest_runner import _process_entity
+    from tg_harvest.harvest_parse import resolve_target_entity
+
     class JobLogHandler(logging.Handler):
         def __init__(self, target_job_id: str) -> None:
             super().__init__()
@@ -292,7 +295,14 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
         _admin_job_set_status(job_id, "running")
         _admin_job_append_log(job_id, f"开始抓取目标：{target}")
         asyncio.set_event_loop(asyncio.new_event_loop())
-        with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash) as client:
+        client = TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash)
+        client.connect()
+        try:
+            if not client.is_user_authorized():
+                _admin_job_append_log(job_id, "Telegram 未登录！请先在终端运行 python jb.py 完成登录授权。")
+                _admin_job_set_status(job_id, "error")
+                return
+
             entity = resolve_target_entity(client, target)
             if entity is None:
                 _admin_job_append_log(job_id, "未找到该群组/频道，请检查名称或链接")
@@ -306,6 +316,8 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
                 _process_entity(conn, client, entity, idx=1, total=1)
             finally:
                 conn.close()
+        finally:
+            client.disconnect()
         _admin_job_set_status(job_id, "done")
     except Exception as exc:
         _admin_job_append_log(job_id, f"抓取失败：{exc}")
@@ -315,6 +327,9 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
 
 
 def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> None:
+    from telethon.sync import TelegramClient
+    from tg_harvest.harvest_runner import _process_entity
+
     class JobLogHandler(logging.Handler):
         def __init__(self, target_job_id: str) -> None:
             super().__init__()
@@ -335,7 +350,14 @@ def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, increme
         mode_label = "增量" if incremental else "全量"
         _admin_job_append_log(job_id, f"开始{mode_label}更新：{chat_title} ({chat_id})")
         asyncio.set_event_loop(asyncio.new_event_loop())
-        with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash) as client:
+        client = TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash)
+        client.connect()
+        try:
+            if not client.is_user_authorized():
+                _admin_job_append_log(job_id, "Telegram 未登录！请先在终端运行 python jb.py 完成登录授权。")
+                _admin_job_set_status(job_id, "error")
+                return
+
             entity = client.get_entity(chat_id)
             entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(chat_id)
             _admin_job_append_log(job_id, f"成功连接并获取实体：{entity_title}")
@@ -344,6 +366,8 @@ def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, increme
                 _process_entity(conn, client, entity, idx=1, total=1)
             finally:
                 conn.close()
+        finally:
+            client.disconnect()
         _admin_job_set_status(job_id, "done")
     except Exception as exc:
         _admin_job_append_log(job_id, f"更新失败：{exc}")
@@ -1197,12 +1221,11 @@ def _register_routes(app: Flask) -> None:
 
 
 def _ensure_db() -> None:
-    if not DB_PATH.exists():
-        conn, feats = connect_db(str(DB_PATH))
-        try:
-            create_schema(conn, feats)
-        finally:
-            conn.close()
+    conn, feats = connect_db(str(DB_PATH))
+    try:
+        create_schema(conn, feats)
+    finally:
+        conn.close()
 
 
 def create_app() -> Flask:
