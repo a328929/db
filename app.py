@@ -257,25 +257,52 @@ def _admin_start_update_job_thread(job_id: str, chat_id: int, chat_title: str, i
 
 
 def _admin_delete_job_runner(job_id: str, chat_id: int, chat_title: str) -> None:
+    conn: Optional[sqlite3.Connection] = None
     try:
         _admin_job_set_status(job_id, "running")
-        _admin_job_append_log(job_id, f"开始删除（占位）：{chat_title} ({chat_id})")
-        threading.Event().wait(0.2)
+        _admin_job_append_log(job_id, f"开始删除目标：{chat_title} ({chat_id})")
 
-        _admin_job_append_log(job_id, "正在校验删除范围（占位）")
-        threading.Event().wait(0.2)
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            _admin_job_append_log(job_id, "统计待删除消息数量")
+            cur.execute("SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = ?", (chat_id,))
+            count_row = cur.fetchone()
+            message_count = int((count_row["cnt"] if count_row and "cnt" in count_row.keys() else 0) or 0)
+            _admin_job_append_log(job_id, f"待删除消息数量：{message_count}")
 
-        _admin_job_append_log(job_id, "正在删除消息数据（占位）")
-        threading.Event().wait(0.2)
+            _admin_job_append_log(job_id, "删除 messages 表数据")
+            cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
+            deleted_messages = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"messages 删除行数：{deleted_messages}")
 
-        _admin_job_append_log(job_id, "正在清理关联统计（占位）")
-        threading.Event().wait(0.2)
+            _admin_job_append_log(job_id, "删除 chats 表记录")
+            cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+            deleted_chats = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"chats 删除行数：{deleted_chats}")
 
-        _admin_job_append_log(job_id, "删除完成（占位）")
-        _admin_job_set_status(job_id, "done")
+            if deleted_chats != 1:
+                raise RuntimeError(f"chats 删除异常，预期 1 行，实际 {deleted_chats} 行")
+
+            conn.commit()
+            _admin_job_append_log(job_id, "事务已提交")
+            _admin_job_append_log(job_id, f"删除完成：消息 {deleted_messages} 条，chat 记录删除 {deleted_chats} 条")
+            _admin_job_set_status(job_id, "done")
+        finally:
+            cur.close()
     except Exception as exc:
-        _admin_job_append_log(job_id, f"删除失败（占位）：{exc}")
+        if conn is not None:
+            try:
+                conn.rollback()
+                _admin_job_append_log(job_id, "删除失败，事务已回滚")
+            except Exception as rollback_exc:
+                _admin_job_append_log(job_id, f"删除失败，回滚异常：{rollback_exc}")
+
+        _admin_job_append_log(job_id, f"删除失败：{exc}")
         _admin_job_set_status(job_id, "error")
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def _admin_start_delete_job_thread(job_id: str, chat_id: int, chat_title: str) -> threading.Thread:
