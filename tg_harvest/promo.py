@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 
 from .normalize import (
     _safe_lower_nfkc, _compact_for_detection, _light_normalize, normalize_text_for_hash,
-    normalize_text_light, make_hash, _safe_json,
+    normalize_text_light, make_hash,
     URL_RE, INVITE_RE, OBF_TME_RE, MENTION_RE, WECHAT_RE, QQ_RE, PHONE_RE, CONTACT_ID_RE
 )
 
