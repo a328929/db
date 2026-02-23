@@ -292,10 +292,10 @@ def _append_like_fallback_filters(where_parts: List[str], sql_params: List[Any],
     includes, excludes = split_positive_negative_terms(raw_query)
     for term in includes:
         where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) LIKE ?")
-        sql_params.append(f"%{term.lower()}%")
+        sql_params.append(f"%{norm_for_search(term)}%")
     for term in excludes:
         where_parts.append("LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) NOT LIKE ?")
-        sql_params.append(f"%{term.lower()}%")
+        sql_params.append(f"%{norm_for_search(term)}%")
 
 
 def _append_scope_filters(where_parts: List[str], sql_params: List[Any], params: SearchParams) -> None:
