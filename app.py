@@ -5,6 +5,7 @@ import os
 import logging
 import threading
 import uuid
+import importlib
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,19 @@ ADMIN_JOB_LOG_MAX_LINES = 200
 ADMIN_JOB_MAX_COUNT = 100
 ADMIN_HARVEST_TARGET_MAX_LEN = 300
 ADMIN_JOB_ALLOWED_STATUSES = {"queued", "running", "done", "error"}
+ADMIN_PROGRESS_LOG_STEP_FALLBACK = 1000
+
+
+def _admin_get_progress_log_step() -> int:
+    try:
+        config_module = importlib.import_module("tg_harvest.config")
+        cfg = getattr(config_module, "CFG", None)
+        step = int(getattr(cfg, "log_every", ADMIN_PROGRESS_LOG_STEP_FALLBACK))
+        if step > 0:
+            return step
+    except Exception:
+        pass
+    return ADMIN_PROGRESS_LOG_STEP_FALLBACK
 
 
 def _admin_now_iso() -> str:
@@ -249,6 +263,8 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
     try:
         _admin_job_set_status(job_id, "running")
         _admin_job_append_log(job_id, f"开始抓取目标（占位）：{target}")
+        log_step = _admin_get_progress_log_step()
+        _admin_job_append_log(job_id, f"本次进度日志步长：{log_step}（来自 TG_LOG_EVERY）")
 
         total_messages = 3200
         _admin_job_update_progress(job_id, 0, total=total_messages, stage="fetching")
@@ -256,7 +272,7 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
         current = 0
         while current < total_messages:
             current = min(current + 250, total_messages)
-            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=1000)
+            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=log_step)
             threading.Event().wait(0.01)
 
         _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
@@ -270,8 +286,10 @@ def _admin_harvest_job_runner(job_id: str, target: str) -> None:
 def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> None:
     try:
         _admin_job_set_status(job_id, "running")
+        log_step = _admin_get_progress_log_step()
         mode_label = "增量" if incremental else "全量"
         _admin_job_append_log(job_id, f"开始{mode_label}更新（占位）：{chat_title} ({chat_id})")
+        _admin_job_append_log(job_id, f"本次进度日志步长：{log_step}（来自 TG_LOG_EVERY）")
         _admin_job_append_log(job_id, "读取本地最新进度（占位）")
         _admin_job_append_log(job_id, "准备拉取新消息（占位）")
 
@@ -281,7 +299,7 @@ def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, increme
         current = 0
         while current < total_messages:
             current = min(current + 250, total_messages)
-            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=1000)
+            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=log_step)
             threading.Event().wait(0.01)
 
         _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
