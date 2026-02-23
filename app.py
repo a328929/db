@@ -113,37 +113,58 @@ def to_fts_match(raw_query: str) -> str:
 
     for kind, value in tokens:
         if kind in {"TERM", "PHRASE"}:
-            quoted = f'"{value.replace(chr(34), "")}"'
-            if pending_not:
-                if prev_was_term:
-                    parts.append("NOT")
-                    parts.append(quoted)
-                else:
-                    # 前置负词（如 -bar foo）先挂起，后续有正向词时再拼接 NOT。
-                    deferred_not_terms.append(quoted)
-                    pending_not = False
-                    prev_was_term = False
-                    continue
-                pending_not = False
-                prev_was_term = True
-                continue
-
-            if prev_was_term:
-                parts.append("AND")
-            parts.append(quoted)
-            positive_terms += 1
-            prev_was_term = True
+            prev_was_term, pending_not, positive_terms = _handle_fts_term_or_phrase(
+                value,
+                parts,
+                deferred_not_terms,
+                prev_was_term,
+                pending_not,
+                positive_terms,
+            )
             continue
 
-        if value == "+" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
-            parts.append("AND")
-            prev_was_term = False
-        elif value == "|" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
-            parts.append("OR")
-            prev_was_term = False
-        elif value == "-":
-            pending_not = True
+        prev_was_term, pending_not = _handle_fts_op_token(value, parts, prev_was_term, pending_not)
 
+    return _finalize_fts_match(parts, deferred_not_terms, positive_terms)
+
+
+def _handle_fts_term_or_phrase(
+    term_value: str,
+    parts: List[str],
+    deferred_not_terms: List[str],
+    prev_was_term: bool,
+    pending_not: bool,
+    positive_terms: int,
+) -> Tuple[bool, bool, int]:
+    quoted = f'"{term_value.replace(chr(34), "")}"'
+    if pending_not:
+        if prev_was_term:
+            parts.append("NOT")
+            parts.append(quoted)
+            return True, False, positive_terms
+        # 前置负词（如 -bar foo）先挂起，后续有正向词时再拼接 NOT。
+        deferred_not_terms.append(quoted)
+        return False, False, positive_terms
+
+    if prev_was_term:
+        parts.append("AND")
+    parts.append(quoted)
+    return True, False, positive_terms + 1
+
+
+def _handle_fts_op_token(op_value: str, parts: List[str], prev_was_term: bool, pending_not: bool) -> Tuple[bool, bool]:
+    if op_value == "+" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
+        parts.append("AND")
+        return False, pending_not
+    if op_value == "|" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
+        parts.append("OR")
+        return False, pending_not
+    if op_value == "-":
+        return prev_was_term, True
+    return prev_was_term, pending_not
+
+
+def _finalize_fts_match(parts: List[str], deferred_not_terms: List[str], positive_terms: int) -> str:
     # 纯负词查询（如 -bar）不走 FTS，交给 LIKE fallback。
     if positive_terms == 0:
         return ""
@@ -253,20 +274,32 @@ def _append_text_search_filters(
     fts_enabled: bool,
 ) -> str:
     match_query = to_fts_match(raw_query)
-    if match_query and fts_enabled:
-        where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
-        sql_params.append(match_query)
+    if _append_fts_match_filter(where_parts, sql_params, match_query, fts_enabled):
         return match_query
 
-    if raw_query.strip():
-        includes, excludes = split_positive_negative_terms(raw_query)
-        for term in includes:
-            where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
-            sql_params.append(f"%{term.lower()}%")
-        for term in excludes:
-            where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
-            sql_params.append(f"%{term.lower()}%")
+    _append_like_fallback_filters(where_parts, sql_params, raw_query)
     return match_query
+
+
+def _append_fts_match_filter(where_parts: List[str], sql_params: List[Any], match_query: str, fts_enabled: bool) -> bool:
+    if not (match_query and fts_enabled):
+        return False
+    where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+    sql_params.append(match_query)
+    return True
+
+
+def _append_like_fallback_filters(where_parts: List[str], sql_params: List[Any], raw_query: str) -> None:
+    if not raw_query.strip():
+        return
+
+    includes, excludes = split_positive_negative_terms(raw_query)
+    for term in includes:
+        where_parts.append("LOWER(COALESCE(m.content, '')) LIKE ?")
+        sql_params.append(f"%{term.lower()}%")
+    for term in excludes:
+        where_parts.append("LOWER(COALESCE(m.content, '')) NOT LIKE ?")
+        sql_params.append(f"%{term.lower()}%")
 
 
 def _append_scope_filters(where_parts: List[str], sql_params: List[Any], params: SearchParams) -> None:
@@ -411,9 +444,7 @@ def _search_payload(params: SearchParams) -> Dict[str, Any]:
     }
 
 
-def create_app() -> Flask:
-    app = Flask(__name__, template_folder="templates", static_folder="static")
-
+def _register_routes(app: Flask) -> None:
     @app.get("/")
     def index():
         if not DB_PATH.exists():
@@ -446,6 +477,10 @@ def create_app() -> Flask:
         except Exception as e:
             return jsonify({"ok": False, "error": f"系统异常: {e}"}), 500
 
+
+def create_app() -> Flask:
+    app = Flask(__name__, template_folder="templates", static_folder="static")
+    _register_routes(app)
     return app
 
 
