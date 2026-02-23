@@ -289,6 +289,10 @@ def normalize_text_light(text: str) -> str:
     return s
 
 
+def normalize_search_term(text: str) -> str:
+    return _safe_lower_nfkc(text or "").strip()
+
+
 def make_hash(text: str) -> str:
     if not text:
         return ""

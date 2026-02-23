@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from flask import Flask, jsonify, render_template, request
 
 from tg_harvest.db import connect_db, resolve_db_path as resolve_db_path_lib
-from tg_harvest.normalize import _safe_lower_nfkc
+from tg_harvest.normalize import normalize_search_term
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ def get_conn() -> sqlite3.Connection:
 
 
 def norm_for_search(term: str) -> str:
-    return _safe_lower_nfkc(term or "").strip()
+    return normalize_search_term(term)
 
 
 def tokenize_query(query: str) -> List[Tuple[str, str]]:
@@ -470,6 +470,9 @@ def _register_routes(app: Flask) -> None:
         except sqlite3.Error:
             logger.exception("读取群列表失败")
             return jsonify({"ok": False, "error": "读取群列表失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
 
     @app.post("/api/search")
     def api_search():
