@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
 import json
+import logging
 import re
 import unicodedata
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional, Any
 
 from .config import AppConfig
+logger = logging.getLogger(__name__)
+
 from .normalize import (
     _safe_lower_nfkc, _compact_for_detection, _light_normalize, normalize_text_for_hash,
     normalize_text_light, make_hash, _safe_json,
@@ -61,7 +64,8 @@ def _load_promo_rules() -> Dict[str, List[str]]:
     try:
         raw = _read_promo_rules_json(rules_file)
         return _merge_promo_rules_with_defaults(raw)
-    except Exception:
+    except Exception as exc:
+        logger.warning("Failed to load promo rules from %s: %s", rules_file, exc)
         return _DEFAULT_PROMO_RULES
 
 
