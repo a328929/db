@@ -2,8 +2,8 @@
   'use strict';
 
   var JOB_POLL_INTERVAL_MS = 3000;
-  var JOB_POLL_MAX_COUNT = 20;
-  var JOB_POLL_MAX_DURATION_MS = 60000;
+  var JOB_POLL_MAX_COUNT = 28800;
+  var JOB_POLL_MAX_DURATION_MS = 86400000;
 
   var jobPollState = {
     jobId: '',
