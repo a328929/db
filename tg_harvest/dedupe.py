@@ -182,19 +182,27 @@ def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
 
 def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int):
     cur.execute("DROP TABLE IF EXISTS temp_keep_solo")
-    cur.execute(
-        """
-        CREATE TEMP TABLE temp_keep_solo AS
-        SELECT pk FROM (
-            SELECT pk,
-                   ROW_NUMBER() OVER (PARTITION BY dedupe_hash ORDER BY msg_date_ts ASC, message_id ASC, pk ASC) AS rn
-            FROM messages
-            WHERE chat_id = ? AND grouped_id IS NULL AND is_promo = 1 AND dedupe_eligible = 1
-              AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
-        ) WHERE rn = 1
-        """,
-        (chat_id,),
-    )
+    try:
+        cur.execute(
+            """
+            CREATE TEMP TABLE temp_keep_solo AS
+            SELECT pk FROM (
+                SELECT pk,
+                       ROW_NUMBER() OVER (PARTITION BY dedupe_hash ORDER BY msg_date_ts ASC, message_id ASC, pk ASC) AS rn
+                FROM messages
+                WHERE chat_id = ? AND grouped_id IS NULL AND is_promo = 1 AND dedupe_eligible = 1
+                  AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
+            ) WHERE rn = 1
+            """,
+            (chat_id,),
+        )
+    except sqlite3.Error as e:
+        msg = str(e).lower()
+        if "row_number" in msg or "over" in msg or "window" in msg:
+            raise sqlite3.OperationalError(
+                "SQLite 版本过低或未启用窗口函数支持，无法执行去重 KEEP_FIRST（ROW_NUMBER/OVER）。"
+            ) from e
+        raise
 
 
 def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int):
