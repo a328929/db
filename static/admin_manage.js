@@ -1,11 +1,11 @@
 (function () {
   'use strict';
 
-  var HARVEST_POLL_INTERVAL_MS = 3000;
-  var HARVEST_POLL_MAX_COUNT = 20;
-  var HARVEST_POLL_MAX_DURATION_MS = 60000;
+  var JOB_POLL_INTERVAL_MS = 3000;
+  var JOB_POLL_MAX_COUNT = 20;
+  var JOB_POLL_MAX_DURATION_MS = 60000;
 
-  var harvestPollState = {
+  var jobPollState = {
     jobId: '',
     lastSeq: 0,
     timerId: null,
@@ -84,6 +84,7 @@
 
   function initializeUI(elements) {
     updateControlVisibility(elements);
+    setAdminControlsBusy(elements, false);
     ensurePlaceholder(elements.logContainer);
     elements.clearLogsBtn.hidden = true;
     closeDialog(elements, { skipFocusRestore: true });
@@ -519,63 +520,65 @@
       return;
     }
 
-    stopJobPolling();
+    stopJobPolling(undefined, elements);
 
-    harvestPollState.pollToken += 1;
-    harvestPollState.jobId = normalizedJobId;
-    harvestPollState.lastSeq = 0;
-    harvestPollState.startedAt = Date.now();
-    harvestPollState.pollCount = 0;
-    harvestPollState.isPolling = true;
+    jobPollState.pollToken += 1;
+    jobPollState.jobId = normalizedJobId;
+    jobPollState.lastSeq = 0;
+    jobPollState.startedAt = Date.now();
+    jobPollState.pollCount = 0;
+    jobPollState.isPolling = true;
+    setAdminControlsBusy(elements, true);
 
     pollJobProgress(elements);
   }
 
-  function stopJobPolling(expectedToken) {
-    if (typeof expectedToken === 'number' && harvestPollState.pollToken !== expectedToken) {
+  function stopJobPolling(expectedToken, elements) {
+    if (typeof expectedToken === 'number' && jobPollState.pollToken !== expectedToken) {
       return;
     }
-    if (harvestPollState.timerId) {
-      window.clearTimeout(harvestPollState.timerId);
+    if (jobPollState.timerId) {
+      window.clearTimeout(jobPollState.timerId);
     }
-    harvestPollState.timerId = null;
-    harvestPollState.isPolling = false;
+    jobPollState.timerId = null;
+    jobPollState.isPolling = false;
+    setAdminControlsBusy(elements, false);
   }
 
   function isPollContextActive(jobId, pollToken) {
-    return harvestPollState.isPolling
-      && harvestPollState.jobId === jobId
-      && harvestPollState.pollToken === pollToken;
+    return jobPollState.isPolling
+      && jobPollState.jobId === jobId
+      && jobPollState.pollToken === pollToken;
   }
 
   function scheduleJobPolling(elements, jobId, pollToken) {
     if (!isPollContextActive(jobId, pollToken)) {
       return;
     }
-    harvestPollState.timerId = window.setTimeout(function () {
+    jobPollState.timerId = window.setTimeout(function () {
       pollJobProgress(elements);
-    }, HARVEST_POLL_INTERVAL_MS);
+    }, JOB_POLL_INTERVAL_MS);
   }
 
   async function pollJobProgress(elements) {
-    if (!harvestPollState.isPolling || !harvestPollState.jobId) {
+    if (!jobPollState.isPolling || !jobPollState.jobId) {
       return;
     }
 
-    var jobId = harvestPollState.jobId;
-    var pollToken = harvestPollState.pollToken;
+    var jobId = jobPollState.jobId;
+    var pollToken = jobPollState.pollToken;
     if (!isPollContextActive(jobId, pollToken)) {
       return;
     }
 
-    harvestPollState.pollCount += 1;
-    var elapsed = Date.now() - harvestPollState.startedAt;
-    if (harvestPollState.pollCount > HARVEST_POLL_MAX_COUNT || elapsed > HARVEST_POLL_MAX_DURATION_MS) {
+    jobPollState.pollCount += 1;
+    var elapsed = Date.now() - jobPollState.startedAt;
+    if (jobPollState.pollCount > JOB_POLL_MAX_COUNT || elapsed > JOB_POLL_MAX_DURATION_MS) {
       if (!isPollContextActive(jobId, pollToken)) {
         return;
       }
       appendLog(elements, '任务日志轮询已停止：达到轮询上限');
-      stopJobPolling(pollToken);
+      stopJobPolling(pollToken, elements);
       return;
     }
 
@@ -583,7 +586,7 @@
       if (!isPollContextActive(jobId, pollToken)) {
         return;
       }
-      var logsPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId) + '/logs?after_seq=' + encodeURIComponent(String(harvestPollState.lastSeq || 0)));
+      var logsPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId) + '/logs?after_seq=' + encodeURIComponent(String(jobPollState.lastSeq || 0)));
       if (!isPollContextActive(jobId, pollToken)) {
         return;
       }
@@ -599,7 +602,7 @@
         }
         appendLog(elements, line.message);
         if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
-          harvestPollState.lastSeq = Math.max(harvestPollState.lastSeq, line.seq);
+          jobPollState.lastSeq = Math.max(jobPollState.lastSeq, line.seq);
         }
       }
 
@@ -620,7 +623,7 @@
           return;
         }
         appendLog(elements, '任务状态响应异常，已停止轮询');
-        stopJobPolling(pollToken);
+        stopJobPolling(pollToken, elements);
         return;
       }
 
@@ -629,7 +632,7 @@
           return;
         }
         appendLog(elements, '任务状态异常：' + status + '，已停止轮询');
-        stopJobPolling(pollToken);
+        stopJobPolling(pollToken, elements);
         return;
       }
 
@@ -638,7 +641,7 @@
           return;
         }
         appendLog(elements, '任务执行完成');
-        stopJobPolling(pollToken);
+        stopJobPolling(pollToken, elements);
         try {
           await refreshReadOnlyDataAfterJob(elements);
         } catch (refreshError) {
@@ -651,7 +654,7 @@
           return;
         }
         appendLog(elements, '任务执行失败，请检查日志');
-        stopJobPolling(pollToken);
+        stopJobPolling(pollToken, elements);
         return;
       }
     } catch (error) {
@@ -659,7 +662,7 @@
         return;
       }
       appendLog(elements, '任务日志轮询失败：' + error.message);
-      stopJobPolling(pollToken);
+      stopJobPolling(pollToken, elements);
       return;
     }
 
@@ -736,11 +739,38 @@
     if (!hasSelectedTarget) {
       elements.startUpdateBtn.hidden = true;
       elements.deleteDataBtn.hidden = true;
+      setAdminControlsBusy(elements, jobPollState.isPolling);
       return;
     }
 
     elements.deleteDataBtn.hidden = false;
     elements.startUpdateBtn.hidden = !elements.incrementalCheckbox.checked;
+    setAdminControlsBusy(elements, jobPollState.isPolling);
+  }
+
+  function setElementDisabled(element, disabled) {
+    if (!element || typeof element.disabled === 'undefined') {
+      return;
+    }
+    element.disabled = !!disabled;
+  }
+
+  function setAdminControlsBusy(elements, isBusy) {
+    if (!elements) {
+      return;
+    }
+
+    var disabled = !!isBusy;
+    setElementDisabled(elements.scopeSelect, disabled);
+    setElementDisabled(elements.incrementalCheckbox, disabled);
+    setElementDisabled(elements.startUpdateBtn, disabled);
+    setElementDisabled(elements.deleteDataBtn, disabled);
+    setElementDisabled(elements.openAddDialogBtn, disabled);
+    setElementDisabled(elements.dialogConfirmBtn, disabled);
+
+    if (elements.logContainer && typeof elements.logContainer.setAttribute === 'function') {
+      elements.logContainer.setAttribute('aria-busy', disabled ? 'true' : 'false');
+    }
   }
 
   function appendLog(elements, message) {
