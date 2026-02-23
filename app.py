@@ -5,7 +5,6 @@ import os
 import logging
 import threading
 import uuid
-import time
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
@@ -114,39 +113,6 @@ def _admin_job_append_log(job_id: str, message: str) -> Optional[Dict[str, Any]]
         if job is None:
             return None
         return _admin_job_append_log_locked(job, message)
-
-
-def _admin_job_set_status(job_id: str, status: str) -> bool:
-    with ADMIN_JOBS_LOCK:
-        job = ADMIN_JOBS.get(job_id)
-        if job is None:
-            return False
-        job["status"] = str(status or "queued")
-        job["updated_at"] = _admin_now_iso()
-        return True
-
-
-def _admin_harvest_job_runner(job_id: str, target: str) -> None:
-    try:
-        if not _admin_job_set_status(job_id, "running"):
-            return
-
-        _admin_job_append_log(job_id, f"开始处理目标（占位）：{target}")
-        time.sleep(0.25)
-        _admin_job_append_log(job_id, "正在解析目标信息（占位）")
-        time.sleep(0.25)
-        _admin_job_append_log(job_id, "正在准备抓取任务（占位）")
-        time.sleep(0.25)
-        _admin_job_append_log(job_id, "抓取完成（占位）")
-        _admin_job_set_status(job_id, "done")
-    except Exception as exc:
-        _admin_job_append_log(job_id, f"占位执行异常：{exc}")
-        _admin_job_set_status(job_id, "error")
-
-
-def _admin_start_harvest_job_thread(job_id: str, target: str) -> None:
-    thread = threading.Thread(target=_admin_harvest_job_runner, args=(job_id, target), daemon=True)
-    thread.start()
 
 
 def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
@@ -802,7 +768,6 @@ def _register_routes(app: Flask) -> None:
         _admin_job_append_log(job_id, f"已接收抓取目标：{target}")
         _admin_job_append_log(job_id, "等待执行（占位）")
         _admin_job_append_log(job_id, "详细抓取日志将在此处输出（占位）")
-        _admin_start_harvest_job_thread(job_id, target)
 
         snapshot = _admin_job_get_snapshot(job_id)
         if snapshot is None:

@@ -318,15 +318,7 @@
     appendLog(elements, '删除任务已提交（占位）');
   }
 
-  async function fetchJSON(url, options) {
-    var requestOptions = options || {};
-    var requestHeaders = Object.assign(
-      {
-        Accept: 'application/json'
-      },
-      requestOptions.headers || {}
-    );
-
+  async function fetchJSON(url) {
     var response;
     try {
       response = await fetch(url, {
@@ -455,98 +447,6 @@
     }
   }
 
-  function stopHarvestPolling(elements, stopMessage) {
-    if (harvestPollState.timerId !== null) {
-      clearTimeout(harvestPollState.timerId);
-    }
-
-    var wasPolling = harvestPollState.isPolling;
-    harvestPollState.jobId = '';
-    harvestPollState.lastSeq = 0;
-    harvestPollState.timerId = null;
-    harvestPollState.isPolling = false;
-    harvestPollState.startedAt = 0;
-    harvestPollState.pollCount = 0;
-
-    if (wasPolling && stopMessage) {
-      appendLog(elements, stopMessage);
-    }
-  }
-
-  function scheduleHarvestPolling(elements) {
-    if (!harvestPollState.isPolling) {
-      return;
-    }
-
-    harvestPollState.timerId = setTimeout(function () {
-      pollHarvestJobOnce(elements);
-    }, HARVEST_POLL_INTERVAL_MS);
-  }
-
-  async function pollHarvestJobOnce(elements) {
-    if (!harvestPollState.isPolling || !harvestPollState.jobId) {
-      return;
-    }
-
-    harvestPollState.pollCount += 1;
-
-    var elapsedMs = Date.now() - harvestPollState.startedAt;
-    if (harvestPollState.pollCount > HARVEST_POLL_MAX_COUNT || elapsedMs > HARVEST_POLL_MAX_DURATION_MS) {
-      stopHarvestPolling(elements, '轮询已停止（占位任务未结束）');
-      return;
-    }
-
-    var jobId = harvestPollState.jobId;
-    var logsPath = '/api/admin/jobs/' + encodeURIComponent(jobId) + '/logs?after_seq=' + encodeURIComponent(String(harvestPollState.lastSeq));
-
-    try {
-      var logsPayload = await fetchJSON(logsPath);
-      var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
-
-      logs.forEach(function (log) {
-        if (!log || log.message === undefined || log.message === null) {
-          return;
-        }
-        appendLog(elements, String(log.message));
-
-        var seqNum = Number(log.seq);
-        if (Number.isFinite(seqNum) && seqNum > harvestPollState.lastSeq) {
-          harvestPollState.lastSeq = seqNum;
-        }
-      });
-
-      var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
-      var status = snapshotPayload && snapshotPayload.job ? String(snapshotPayload.job.status || '').toLowerCase() : '';
-      if (status === 'done' || status === 'error') {
-        stopHarvestPolling(elements, '任务已结束：' + status);
-        return;
-      }
-
-      scheduleHarvestPolling(elements);
-    } catch (error) {
-      stopHarvestPolling(elements, '日志轮询失败：' + error.message);
-    }
-  }
-
-  function startHarvestPolling(elements, jobId) {
-    var nextJobId = String(jobId || '').trim();
-    if (!nextJobId) {
-      return;
-    }
-
-    if (harvestPollState.isPolling) {
-      stopHarvestPolling(elements, '已停止上一任务日志轮询');
-    }
-
-    harvestPollState.jobId = nextJobId;
-    harvestPollState.lastSeq = 0;
-    harvestPollState.timerId = null;
-    harvestPollState.isPolling = true;
-    harvestPollState.startedAt = Date.now();
-    harvestPollState.pollCount = 0;
-    scheduleHarvestPolling(elements);
-  }
-
   function buildDialogTargetPreview(value) {
     var text = String(value || '').trim();
     if (text.length <= 40) {
@@ -555,7 +455,7 @@
     return text.slice(0, 40) + '…';
   }
 
-  async function handleDialogConfirm(elements) {
+  function handleDialogConfirm(elements) {
     var value = elements && elements.dialogInput ? elements.dialogInput.value.trim() : '';
 
     if (!value) {
@@ -569,28 +469,11 @@
       return;
     }
 
-    try {
-      var payload = await fetchJSON('/api/admin/jobs/harvest', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          target: value
-        })
-      });
-      var jobId = payload && payload.job ? String(payload.job.job_id || '') : '';
-      if (!jobId) {
-        throw new Error('响应缺少 job_id');
-      }
-
-      appendLog(elements, '抓取任务已创建：' + jobId);
-      elements.dialogInput.value = '';
-      closeDialog(elements);
-      startHarvestPolling(elements, jobId);
-    } catch (error) {
-      appendLog(elements, '创建抓取任务失败：' + error.message);
-    }
+    appendLog(elements, '已接收抓取目标：' + value);
+    appendLog(elements, '正在创建抓取任务（占位）');
+    appendLog(elements, '详细抓取日志将在此处显示（占位）');
+    elements.dialogInput.value = '';
+    closeDialog(elements);
   }
 
   function setElementHidden(element, hidden) {
