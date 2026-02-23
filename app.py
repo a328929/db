@@ -55,6 +55,7 @@ ADMIN_JOBS_LOCK = threading.Lock()
 ADMIN_JOB_LOG_MAX_LINES = 200
 ADMIN_JOB_MAX_COUNT = 100
 ADMIN_HARVEST_TARGET_MAX_LEN = 300
+ADMIN_JOB_ALLOWED_STATUSES = {"queued", "running", "done", "error"}
 
 
 def _admin_now_iso() -> str:
@@ -176,7 +177,11 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
         job = ADMIN_JOBS.get(job_id)
         if job is None:
             return False
-        job["status"] = str(status or "queued")
+        # 后端状态契约收口，避免非法状态破坏前端轮询白名单逻辑。
+        normalized_status = str(status or "queued").strip().lower()
+        if normalized_status not in ADMIN_JOB_ALLOWED_STATUSES:
+            normalized_status = "error"
+        job["status"] = normalized_status
         job["updated_at"] = _admin_now_iso()
         return True
 
