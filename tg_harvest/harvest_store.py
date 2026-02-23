@@ -209,7 +209,7 @@ def _build_media_group_upsert_rows(rows: List[sqlite3.Row], chat_id: int, cfg: A
         types_csv = ",".join(sorted(set([x for x in b["types"] if x])))
         captions_concat = "\n".join([c for c in b["captions"] if c]).strip()
         media_sig_hash = make_media_group_signature(b["media_fingerprints"], b["types"], int(b["item_count"]))
-        features = build_group_promo_features(captions_concat, int(b["item_count"]), types_csv, media_sig_hash, cfg)
+        features = build_group_promo_features(captions_concat, int(b["item_count"]), media_sig_hash, cfg)
         up_rows.append((
             chat_id, gid,
             b["first_message_id"], b["first_msg_date_ts"], b["last_message_id"], b["last_msg_date_ts"],

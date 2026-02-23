@@ -531,7 +531,6 @@ def _build_group_promo_result(raw: str,
 
 def build_group_promo_features(captions_concat: str,
                                item_count: int,
-                               types_csv: str,
                                media_sig_hash: str,
                                cfg: AppConfig) -> Dict[str, Any]:
     """
