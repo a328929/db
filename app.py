@@ -256,6 +256,38 @@ def _admin_start_update_job_thread(job_id: str, chat_id: int, chat_title: str, i
     return worker
 
 
+def _admin_delete_job_runner(job_id: str, chat_id: int, chat_title: str) -> None:
+    try:
+        _admin_job_set_status(job_id, "running")
+        _admin_job_append_log(job_id, f"开始删除（占位）：{chat_title} ({chat_id})")
+        threading.Event().wait(0.2)
+
+        _admin_job_append_log(job_id, "正在校验删除范围（占位）")
+        threading.Event().wait(0.2)
+
+        _admin_job_append_log(job_id, "正在删除消息数据（占位）")
+        threading.Event().wait(0.2)
+
+        _admin_job_append_log(job_id, "正在清理关联统计（占位）")
+        threading.Event().wait(0.2)
+
+        _admin_job_append_log(job_id, "删除完成（占位）")
+        _admin_job_set_status(job_id, "done")
+    except Exception as exc:
+        _admin_job_append_log(job_id, f"删除失败（占位）：{exc}")
+        _admin_job_set_status(job_id, "error")
+
+
+def _admin_start_delete_job_thread(job_id: str, chat_id: int, chat_title: str) -> threading.Thread:
+    worker = threading.Thread(
+        target=_admin_delete_job_runner,
+        args=(job_id, chat_id, chat_title),
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
 def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
     progress = dict(job.get("progress") or {})
     return {
@@ -979,6 +1011,47 @@ def _register_routes(app: Flask) -> None:
         _admin_job_append_log(job_id, "已接收增量更新请求")
         _admin_job_append_log(job_id, f"目标群组：{chat_title} ({chat_id})")
         _admin_start_update_job_thread(job_id, chat_id, chat_title, incremental)
+
+        snapshot = _admin_job_get_snapshot(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+        return jsonify({"ok": True, "job": snapshot})
+
+    @app.post("/api/admin/jobs/delete")
+    def api_admin_job_create_delete():
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        raw_chat_id = data.get("chat_id")
+        try:
+            chat_id = int(raw_chat_id)
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+
+        try:
+            with closing(get_conn()) as conn:
+                chat_brief = _admin_get_chat_brief(conn, chat_id)
+        except sqlite3.Error:
+            logger.exception("读取群信息失败")
+            return jsonify({"ok": False, "error": "读取群信息失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
+
+        if chat_brief is None:
+            return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
+
+        chat_title = str(chat_brief["chat_title"])
+        job = _admin_job_create("delete", target_chat_id=chat_id, target_label=chat_title)
+        job_id = str(job.get("job_id") or "")
+
+        _admin_job_append_log(job_id, "已接收删除请求")
+        _admin_job_append_log(job_id, f"目标群组：{chat_title} ({chat_id})")
+        _admin_start_delete_job_thread(job_id, chat_id, chat_title)
 
         snapshot = _admin_job_get_snapshot(job_id)
         if snapshot is None:
