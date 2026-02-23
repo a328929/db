@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import math
+import asyncio
 import sqlite3
 import os
 import logging
@@ -13,8 +14,12 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
+from telethon.sync import TelegramClient
 
-from tg_harvest.db import connect_db, resolve_db_path as resolve_db_path_lib
+from tg_harvest.config import CFG
+from tg_harvest.harvest_parse import resolve_target_entity
+from tg_harvest.harvest_runner import _process_entity
+from tg_harvest.db import connect_db, create_schema, resolve_db_path as resolve_db_path_lib
 from tg_harvest.normalize import normalize_search_term
 
 logger = logging.getLogger(__name__)
@@ -173,6 +178,14 @@ def _admin_create_chat_job_if_absent(job_type: str, chat_id: int, target_label: 
         return created_job, None
 
 
+def _admin_has_any_active_job() -> bool:
+    with ADMIN_JOBS_LOCK:
+        for job in ADMIN_JOBS.values():
+            if isinstance(job, dict) and str(job.get("status") or "").lower() in {"queued", "running"}:
+                return True
+    return False
+
+
 def _admin_find_active_chat_job(chat_id: int) -> Optional[Dict[str, Any]]:
     with ADMIN_JOBS_LOCK:
         return _admin_find_active_chat_job_locked(chat_id)
@@ -260,54 +273,83 @@ def _admin_job_update_progress(
 
 
 def _admin_harvest_job_runner(job_id: str, target: str) -> None:
+    class JobLogHandler(logging.Handler):
+        def __init__(self, target_job_id: str) -> None:
+            super().__init__()
+            self._target_job_id = target_job_id
+            self._thread_id = threading.get_ident()
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if threading.get_ident() != self._thread_id:
+                return
+            message = record.getMessage()
+            _admin_job_append_log(self._target_job_id, message)
+
+    root_logger = logging.getLogger()
+    job_log_handler = JobLogHandler(job_id)
+    root_logger.addHandler(job_log_handler)
     try:
         _admin_job_set_status(job_id, "running")
-        _admin_job_append_log(job_id, f"开始抓取目标（占位）：{target}")
-        log_step = _admin_get_progress_log_step()
-        _admin_job_append_log(job_id, f"本次进度日志步长：{log_step}（来自 TG_LOG_EVERY）")
+        _admin_job_append_log(job_id, f"开始抓取目标：{target}")
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash) as client:
+            entity = resolve_target_entity(client, target)
+            if entity is None:
+                _admin_job_append_log(job_id, "未找到该群组/频道，请检查名称或链接")
+                _admin_job_set_status(job_id, "error")
+                return
 
-        total_messages = 3200
-        _admin_job_update_progress(job_id, 0, total=total_messages, stage="fetching")
-
-        current = 0
-        while current < total_messages:
-            current = min(current + 250, total_messages)
-            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=log_step)
-            threading.Event().wait(0.01)
-
-        _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
-        _admin_job_append_log(job_id, "抓取完成（占位）")
+            entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(target)
+            _admin_job_append_log(job_id, f"成功解析目标：{entity_title}")
+            conn = get_conn()
+            try:
+                _process_entity(conn, client, entity, idx=1, total=1)
+            finally:
+                conn.close()
         _admin_job_set_status(job_id, "done")
     except Exception as exc:
-        _admin_job_append_log(job_id, f"抓取失败（占位）：{exc}")
+        _admin_job_append_log(job_id, f"抓取失败：{exc}")
         _admin_job_set_status(job_id, "error")
+    finally:
+        root_logger.removeHandler(job_log_handler)
 
 
 def _admin_update_job_runner(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> None:
+    class JobLogHandler(logging.Handler):
+        def __init__(self, target_job_id: str) -> None:
+            super().__init__()
+            self._target_job_id = target_job_id
+            self._thread_id = threading.get_ident()
+
+        def emit(self, record: logging.LogRecord) -> None:
+            if threading.get_ident() != self._thread_id:
+                return
+            message = record.getMessage()
+            _admin_job_append_log(self._target_job_id, message)
+
+    root_logger = logging.getLogger()
+    job_log_handler = JobLogHandler(job_id)
+    root_logger.addHandler(job_log_handler)
     try:
         _admin_job_set_status(job_id, "running")
-        log_step = _admin_get_progress_log_step()
         mode_label = "增量" if incremental else "全量"
-        _admin_job_append_log(job_id, f"开始{mode_label}更新（占位）：{chat_title} ({chat_id})")
-        _admin_job_append_log(job_id, f"本次进度日志步长：{log_step}（来自 TG_LOG_EVERY）")
-        _admin_job_append_log(job_id, "读取本地最新进度（占位）")
-        _admin_job_append_log(job_id, "准备拉取新消息（占位）")
-
-        total_messages = 2300
-        _admin_job_update_progress(job_id, 0, total=total_messages, stage="fetching")
-
-        current = 0
-        while current < total_messages:
-            current = min(current + 250, total_messages)
-            _admin_job_update_progress(job_id, current, total=total_messages, stage="fetching", log_step=log_step)
-            threading.Event().wait(0.01)
-
-        _admin_job_update_progress(job_id, total_messages, total=total_messages, stage="done", force_log=True)
-        _admin_job_append_log(job_id, "增量更新完成（占位）")
+        _admin_job_append_log(job_id, f"开始{mode_label}更新：{chat_title} ({chat_id})")
+        asyncio.set_event_loop(asyncio.new_event_loop())
+        with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash) as client:
+            entity = client.get_entity(chat_id)
+            entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(chat_id)
+            _admin_job_append_log(job_id, f"成功连接并获取实体：{entity_title}")
+            conn = get_conn()
+            try:
+                _process_entity(conn, client, entity, idx=1, total=1)
+            finally:
+                conn.close()
         _admin_job_set_status(job_id, "done")
     except Exception as exc:
-        _admin_job_append_log(job_id, f"增量更新失败（占位）：{exc}")
+        _admin_job_append_log(job_id, f"更新失败：{exc}")
         _admin_job_set_status(job_id, "error")
+    finally:
+        root_logger.removeHandler(job_log_handler)
 
 
 def _admin_start_update_job_thread(job_id: str, chat_id: int, chat_title: str, incremental: bool) -> threading.Thread:
@@ -334,6 +376,12 @@ def _admin_delete_job_runner(job_id: str, chat_id: int, chat_title: str) -> None
             count_row = cur.fetchone()
             message_count = int((count_row["cnt"] if count_row and "cnt" in count_row.keys() else 0) or 0)
             _admin_job_append_log(job_id, f"待删除消息数量：{message_count}")
+
+            cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM dedupe_runs WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))
+            cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
+            _admin_job_append_log(job_id, "清理关联表数据完成")
 
             _admin_job_append_log(job_id, "删除 messages 表数据")
             cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
@@ -927,20 +975,14 @@ def _search_payload(params: SearchParams) -> Dict[str, Any]:
 def _register_routes(app: Flask) -> None:
     @app.get("/")
     def index():
-        if not DB_PATH.exists():
-            return ("未找到 tg_data.db。请把 app.py 放到数据库同一目录后再启动。", 500, {"Content-Type": "text/plain; charset=utf-8"})
         return render_template("index.html", page_size=PAGE_SIZE)
 
     @app.get("/admin/manage")
     def admin_manage_page():
-        if not DB_PATH.exists():
-            return ("未找到 tg_data.db。请把 app.py 放到数据库同一目录后再启动。", 500, {"Content-Type": "text/plain; charset=utf-8"})
         return render_template("admin_manage.html")
 
     @app.get("/api/meta")
     def api_meta():
-        if not DB_PATH.exists():
-            return jsonify({"ok": False, "error": "数据库不存在"}), 500
         try:
             with closing(get_conn()) as conn:
                 payload = _build_meta_payload(conn)
@@ -954,8 +996,6 @@ def _register_routes(app: Flask) -> None:
 
     @app.post("/api/search")
     def api_search():
-        if not DB_PATH.exists():
-            return jsonify({"ok": False, "error": "数据库不存在"}), 500
         data = request.get_json(silent=True) or {}
         try:
             params = _parse_search_params(data)
@@ -971,8 +1011,6 @@ def _register_routes(app: Flask) -> None:
 
     @app.get("/api/admin/chats")
     def api_admin_chats():
-        if not DB_PATH.exists():
-            return jsonify({"ok": False, "error": "数据库不存在"}), 500
         try:
             with closing(get_conn()) as conn:
                 payload = _build_admin_chats_payload(conn)
@@ -986,9 +1024,6 @@ def _register_routes(app: Flask) -> None:
 
     @app.get("/api/admin/stats")
     def api_admin_stats():
-        if not DB_PATH.exists():
-            return jsonify({"ok": False, "error": "数据库不存在"}), 500
-
         try:
             chat_id = _parse_admin_chat_id(request.args.get("chat_id"))
         except (ValueError, TypeError):
@@ -1036,6 +1071,9 @@ def _register_routes(app: Flask) -> None:
         if not isinstance(data, dict):
             return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
 
+        if _admin_has_any_active_job():
+            return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
+
         raw_target = data.get("target", "")
         if not isinstance(raw_target, str):
             return jsonify({"ok": False, "error": "target 参数必须为字符串"}), 400
@@ -1067,6 +1105,9 @@ def _register_routes(app: Flask) -> None:
         data = request.get_json(silent=True)
         if not isinstance(data, dict):
             return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        if _admin_has_any_active_job():
+            return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
 
         raw_chat_id = data.get("chat_id")
         try:
@@ -1117,6 +1158,9 @@ def _register_routes(app: Flask) -> None:
         if not isinstance(data, dict):
             return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
 
+        if _admin_has_any_active_job():
+            return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
+
         raw_chat_id = data.get("chat_id")
         try:
             chat_id = int(raw_chat_id)
@@ -1152,7 +1196,17 @@ def _register_routes(app: Flask) -> None:
         return jsonify({"ok": True, "job": snapshot})
 
 
+def _ensure_db() -> None:
+    if not DB_PATH.exists():
+        conn, feats = connect_db(str(DB_PATH))
+        try:
+            create_schema(conn, feats)
+        finally:
+            conn.close()
+
+
 def create_app() -> Flask:
+    _ensure_db()
     app = Flask(__name__, template_folder="templates", static_folder="static")
     _register_routes(app)
     return app
