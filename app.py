@@ -95,7 +95,7 @@ def _admin_job_append_log_locked(job: Dict[str, Any], message: str) -> Dict[str,
     return dict(log_item)
 
 
-def _admin_job_create(job_type: str, target_chat_id: Optional[int] = None, target_label: Optional[str] = None) -> Dict[str, Any]:
+def _admin_job_create_locked(job_type: str, target_chat_id: Optional[int] = None, target_label: Optional[str] = None) -> Dict[str, Any]:
     created_at = _admin_now_iso()
     job_id = uuid.uuid4().hex
     job: Dict[str, Any] = {
@@ -115,11 +115,52 @@ def _admin_job_create(job_type: str, target_chat_id: Optional[int] = None, targe
             "last_logged_current": 0,
         },
     }
+    ADMIN_JOBS[job_id] = job
+    _admin_job_trim_locked()
+    _admin_job_append_log_locked(job, "任务已创建（占位）")
+    return _admin_job_get_snapshot_locked(job)
+
+
+def _admin_job_create(job_type: str, target_chat_id: Optional[int] = None, target_label: Optional[str] = None) -> Dict[str, Any]:
     with ADMIN_JOBS_LOCK:
-        ADMIN_JOBS[job_id] = job
-        _admin_job_trim_locked()
-        _admin_job_append_log_locked(job, "任务已创建（占位）")
-        return _admin_job_get_snapshot_locked(job)
+        return _admin_job_create_locked(job_type=job_type, target_chat_id=target_chat_id, target_label=target_label)
+
+
+def _admin_find_active_chat_job_locked(chat_id: int) -> Optional[Dict[str, Any]]:
+    active_statuses = {"queued", "running"}
+    guarded_job_types = {"update", "delete"}
+    for job in ADMIN_JOBS.values():
+        if not isinstance(job, dict):
+            continue
+        if job.get("target_chat_id") != chat_id:
+            continue
+        job_type = str(job.get("job_type") or "").lower()
+        if job_type not in guarded_job_types:
+            continue
+        status = str(job.get("status") or "").lower()
+        if status not in active_statuses:
+            continue
+        return {
+            "job_id": str(job.get("job_id") or ""),
+            "job_type": job_type,
+            "status": status,
+        }
+    return None
+
+
+# 防止同一 chat_id 同时存在并发 update/delete 活跃任务（queued/running）。
+def _admin_create_chat_job_if_absent(job_type: str, chat_id: int, target_label: Optional[str] = None) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    with ADMIN_JOBS_LOCK:
+        existing_job = _admin_find_active_chat_job_locked(chat_id)
+        if existing_job is not None:
+            return None, existing_job
+        created_job = _admin_job_create_locked(job_type=job_type, target_chat_id=chat_id, target_label=target_label)
+        return created_job, None
+
+
+def _admin_find_active_chat_job(chat_id: int) -> Optional[Dict[str, Any]]:
+    with ADMIN_JOBS_LOCK:
+        return _admin_find_active_chat_job_locked(chat_id)
 
 
 def _admin_job_append_log(job_id: str, message: str) -> Optional[Dict[str, Any]]:
@@ -744,14 +785,12 @@ def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
                 c.chat_id ASC
             """
         )
+        # /api/admin/chats 主字段契约为 chat_id/chat_title/message_count；冗余别名字段已移除（前端兼容在 JS 内处理）。
         chats = [
             {
                 "chat_id": int(row["chat_id"]),
                 "chat_title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
-                "chat_name": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
-                "title": _chat_title_or_fallback(int(row["chat_id"]), row["chat_title"]),
                 "message_count": int(row["message_count"] or 0),
-                "msg_count": int(row["message_count"] or 0),
             }
             for row in cur.fetchall()
         ]
@@ -1032,7 +1071,9 @@ def _register_routes(app: Flask) -> None:
             return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
 
         chat_title = str(chat_brief["chat_title"])
-        job = _admin_job_create("update", target_chat_id=chat_id, target_label=chat_title)
+        job, existing_job = _admin_create_chat_job_if_absent("update", chat_id=chat_id, target_label=chat_title)
+        if existing_job is not None:
+            return jsonify({"ok": False, "error": "该目标已有进行中的任务", "existing_job": existing_job}), 409
         job_id = str(job.get("job_id") or "")
 
         _admin_job_append_log(job_id, "已接收增量更新请求")
@@ -1073,7 +1114,9 @@ def _register_routes(app: Flask) -> None:
             return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
 
         chat_title = str(chat_brief["chat_title"])
-        job = _admin_job_create("delete", target_chat_id=chat_id, target_label=chat_title)
+        job, existing_job = _admin_create_chat_job_if_absent("delete", chat_id=chat_id, target_label=chat_title)
+        if existing_job is not None:
+            return jsonify({"ok": False, "error": "该目标已有进行中的任务", "existing_job": existing_job}), 409
         job_id = str(job.get("job_id") or "")
 
         _admin_job_append_log(job_id, "已接收删除请求")

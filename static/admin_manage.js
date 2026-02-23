@@ -231,14 +231,54 @@
   }
 
   function normalizeChats(payload) {
+    // 主字段契约：chat_title/message_count；兼容字段仅兜底，后续可移除。
+    function normalizeChatItem(chat) {
+      if (!chat || typeof chat !== 'object') {
+        return null;
+      }
+
+      var chatId = chat.chat_id;
+      if (chatId === undefined || chatId === null) {
+        return null;
+      }
+
+      var chatTitle = '';
+      if (typeof chat.chat_title === 'string' && chat.chat_title.trim()) {
+        chatTitle = chat.chat_title.trim();
+      } else if (typeof chat.chat_name === 'string' && chat.chat_name.trim()) {
+        chatTitle = chat.chat_name.trim();
+      } else if (typeof chat.title === 'string' && chat.title.trim()) {
+        chatTitle = chat.title.trim();
+      } else {
+        chatTitle = String(chatId);
+      }
+
+      var messageCount = chat.message_count;
+      if (messageCount === undefined || messageCount === null) {
+        messageCount = chat.msg_count;
+      }
+
+      return {
+        chat_id: chatId,
+        chat_title: chatTitle,
+        message_count: messageCount
+      };
+    }
+
+    function normalizeChatList(items) {
+      return items.map(normalizeChatItem).filter(function (item) {
+        return !!item;
+      });
+    }
+
     if (Array.isArray(payload)) {
-      return payload;
+      return normalizeChatList(payload);
     }
     if (payload && Array.isArray(payload.items)) {
-      return payload.items;
+      return normalizeChatList(payload.items);
     }
     if (payload && Array.isArray(payload.chats)) {
-      return payload.chats;
+      return normalizeChatList(payload.chats);
     }
     return [];
   }
@@ -265,19 +305,10 @@
   }
 
   function buildChatOptionText(chat, fallbackId) {
-    var title = '';
-    if (typeof chat.chat_name === 'string' && chat.chat_name.trim()) {
-      title = chat.chat_name.trim();
-    } else if (typeof chat.title === 'string' && chat.title.trim()) {
-      title = chat.title.trim();
-    } else {
-      title = fallbackId;
-    }
-
+    var title = (typeof chat.chat_title === 'string' && chat.chat_title.trim())
+      ? chat.chat_title.trim()
+      : fallbackId;
     var count = chat.message_count;
-    if (count === undefined || count === null) {
-      count = chat.msg_count;
-    }
 
     return (count === undefined || count === null) ? title : title + '（' + String(count) + '）';
   }
