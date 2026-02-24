@@ -516,7 +516,7 @@ def tokenize_query(query: str) -> List[Tuple[str, str]]:
         if ch.isspace():
             i += 1
             continue
-        if ch in "+-|":
+        if ch in "+-/":
             tokens.append(("OP", ch))
             i += 1
             continue
@@ -539,7 +539,7 @@ def tokenize_query(query: str) -> List[Tuple[str, str]]:
                 tokens.append(("PHRASE", term))
             continue
         buf = []
-        while i < n and (not q[i].isspace()) and q[i] not in '+-|"':
+        while i < n and (not q[i].isspace()) and q[i] not in '+-/"':
             buf.append(q[i])
             i += 1
         term = norm_for_search("".join(buf))
@@ -604,7 +604,7 @@ def _handle_fts_op_token(op_value: str, parts: List[str], prev_was_term: bool, p
     if op_value == "+" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
         parts.append("AND")
         return False, pending_not
-    if op_value == "|" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
+    if op_value == "/" and parts and parts[-1] not in {"AND", "OR", "NOT"}:
         parts.append("OR")
         return False, pending_not
     if op_value == "-":
@@ -637,7 +637,7 @@ def split_positive_negative_terms(raw_query: str) -> Tuple[List[str], List[str]]
             continue
         if value == "-":
             pending_not = True
-        elif value in {"+", "|"}:
+        elif value in {"+", "/"}:
             pending_not = False
     return includes, excludes
 
@@ -774,7 +774,7 @@ def _build_like_logic_clause(raw_query: str) -> Tuple[str, List[Any]]:
             prev_operand = False
             continue
 
-        if value == "|":
+        if value == "/":
             if prev_operand:
                 stream.append(("OP", "OR"))
             prev_operand = False
