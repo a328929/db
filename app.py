@@ -61,6 +61,7 @@ ADMIN_JOBS_LOCK = threading.Lock()
 ADMIN_JOB_LOG_MAX_LINES = 200
 ADMIN_JOB_MAX_COUNT = 100
 ADMIN_HARVEST_TARGET_MAX_LEN = 300
+ADMIN_CLEANUP_KEYWORD_MAX_LEN = 120
 ADMIN_JOB_ALLOWED_STATUSES = {"queued", "running", "done", "error"}
 ADMIN_PROGRESS_LOG_STEP_FALLBACK = 1000
 
@@ -446,6 +447,352 @@ def _admin_start_delete_job_thread(job_id: str, chat_id: int, chat_title: str) -
     worker = threading.Thread(
         target=_admin_delete_job_runner,
         args=(job_id, chat_id, chat_title),
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
+def _admin_cleanup_job_runner(
+    job_id: str,
+    keyword: str,
+    scope: str,
+    chat_id: Optional[int],
+    target_label: str,
+) -> None:
+    conn: Optional[sqlite3.Connection] = None
+    try:
+        _admin_job_set_status(job_id, "running")
+        _admin_job_append_log(job_id, f"开始垃圾清理任务：范围={scope} 目标={target_label}")
+
+        like_pattern = f"%{keyword}%"
+        scope_filter_sql = ""
+        scope_filter_params: Tuple[Any, ...] = tuple()
+        if scope == "chat" and isinstance(chat_id, int):
+            scope_filter_sql = " AND m.chat_id = ?"
+            scope_filter_params = (chat_id,)
+
+        conn = get_conn()
+        cur = conn.cursor()
+        try:
+            _admin_job_append_log(job_id, "构建待清理消息集合")
+            cur.execute("DROP TABLE IF EXISTS temp_cleanup_targets")
+            cur.execute(
+                """
+                CREATE TEMP TABLE temp_cleanup_targets (
+                    chat_id INTEGER NOT NULL,
+                    pk INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    grouped_id INTEGER
+                )
+                """
+            )
+
+            target_insert_sql = (
+                """
+                INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                FROM messages m
+                WHERE COALESCE(m.content_norm, m.content, '') LIKE ?
+                """
+                + scope_filter_sql
+            )
+            cur.execute(target_insert_sql, (like_pattern, *scope_filter_params))
+
+            cur.execute("SELECT COUNT(*) AS cnt FROM temp_cleanup_targets")
+            target_count = int(cur.fetchone()["cnt"] or 0)
+            _admin_job_append_log(job_id, f"命中待清理消息数量：{target_count}")
+
+            if target_count == 0:
+                conn.commit()
+                _admin_job_append_log(job_id, "未命中任何消息，无需清理")
+                _admin_job_set_status(job_id, "done")
+                return
+
+            cur.execute(
+                """
+                DELETE FROM dedupe_actions
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM temp_cleanup_targets t
+                    WHERE t.chat_id = dedupe_actions.chat_id
+                      AND (t.pk = dedupe_actions.pk OR t.message_id = dedupe_actions.message_id)
+                )
+                """
+            )
+            deleted_actions = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"dedupe_actions 删除行数：{deleted_actions}")
+
+            cur.execute(
+                """
+                DELETE FROM message_media
+                WHERE EXISTS (
+                    SELECT 1
+                    FROM temp_cleanup_targets t
+                    WHERE t.chat_id = message_media.chat_id
+                      AND t.message_id = message_media.message_id
+                )
+                """
+            )
+            deleted_media = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"message_media 删除行数：{deleted_media}")
+
+            cur.execute(
+                """
+                DELETE FROM messages
+                WHERE pk IN (SELECT pk FROM temp_cleanup_targets)
+                """
+            )
+            deleted_messages = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"messages 删除行数：{deleted_messages}")
+
+            media_group_scope_sql = ""
+            media_group_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                media_group_scope_sql = "WHERE mg.chat_id = ?"
+                media_group_scope_params = (chat_id,)
+
+            cur.execute(
+                f"""
+                DELETE FROM media_groups AS mg
+                {media_group_scope_sql}
+                AND NOT EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.chat_id = mg.chat_id
+                      AND m.grouped_id = mg.grouped_id
+                      AND m.grouped_id IS NOT NULL
+                )
+                """ if media_group_scope_sql else """
+                DELETE FROM media_groups AS mg
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM messages m
+                    WHERE m.chat_id = mg.chat_id
+                      AND m.grouped_id = mg.grouped_id
+                      AND m.grouped_id IS NOT NULL
+                )
+                """,
+                media_group_scope_params,
+            )
+            deleted_groups = int(cur.rowcount or 0)
+            _admin_job_append_log(job_id, f"media_groups 清理行数：{deleted_groups}")
+
+            cur.execute("DROP TABLE IF EXISTS temp_cleanup_empty_chats")
+            cur.execute("CREATE TEMP TABLE temp_cleanup_empty_chats (chat_id INTEGER PRIMARY KEY)")
+            if scope == "chat" and isinstance(chat_id, int):
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO temp_cleanup_empty_chats (chat_id)
+                    SELECT c.chat_id
+                    FROM chats c
+                    WHERE c.chat_id = ?
+                      AND NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.chat_id)
+                    """,
+                    (chat_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT OR IGNORE INTO temp_cleanup_empty_chats (chat_id)
+                    SELECT c.chat_id
+                    FROM chats c
+                    WHERE NOT EXISTS (SELECT 1 FROM messages m WHERE m.chat_id = c.chat_id)
+                    """
+                )
+
+            cur.execute(
+                "DELETE FROM dedupe_actions WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)"
+            )
+            deleted_actions_empty_chat = int(cur.rowcount or 0)
+
+            cur.execute(
+                "DELETE FROM dedupe_runs WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)"
+            )
+            deleted_runs_empty_chat = int(cur.rowcount or 0)
+
+            cur.execute(
+                "DELETE FROM media_groups WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)"
+            )
+            deleted_groups_empty_chat = int(cur.rowcount or 0)
+
+            cur.execute("DELETE FROM chats WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)")
+            deleted_empty_chats = int(cur.rowcount or 0)
+            _admin_job_append_log(
+                job_id,
+                "空 chat 清理："
+                f"dedupe_actions {deleted_actions_empty_chat} 行，"
+                f"dedupe_runs {deleted_runs_empty_chat} 行，"
+                f"media_groups {deleted_groups_empty_chat} 行，"
+                f"chats {deleted_empty_chats} 行",
+            )
+
+            verify_scope_sql = ""
+            verify_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                verify_scope_sql = " AND m.chat_id = ?"
+                verify_scope_params = (chat_id,)
+
+            _admin_job_append_log(job_id, "执行彻底性校验：关键字残留")
+            cur.execute(
+                (
+                    "SELECT COUNT(*) AS cnt FROM messages m "
+                    "WHERE COALESCE(m.content, '') LIKE ?"
+                    + verify_scope_sql
+                ),
+                (like_pattern, *verify_scope_params),
+            )
+            remaining_matches = int(cur.fetchone()["cnt"] or 0)
+            if remaining_matches != 0:
+                raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条 content LIKE 命中消息")
+
+            orphan_media_scope_sql = ""
+            orphan_media_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                orphan_media_scope_sql = " AND mm.chat_id = ?"
+                orphan_media_scope_params = (chat_id,)
+
+            _admin_job_append_log(job_id, "执行彻底性校验：message_media 孤儿")
+            cur.execute(
+                (
+                    "SELECT COUNT(*) AS cnt FROM message_media mm "
+                    "LEFT JOIN messages m ON m.chat_id = mm.chat_id AND m.message_id = mm.message_id "
+                    "WHERE m.pk IS NULL"
+                    + orphan_media_scope_sql
+                ),
+                orphan_media_scope_params,
+            )
+            orphan_media = int(cur.fetchone()["cnt"] or 0)
+            if orphan_media != 0:
+                raise RuntimeError(f"清理校验失败：message_media 存在 {orphan_media} 条孤立记录")
+
+            orphan_groups_scope_sql = ""
+            orphan_groups_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                orphan_groups_scope_sql = " AND mg.chat_id = ?"
+                orphan_groups_scope_params = (chat_id,)
+
+            _admin_job_append_log(job_id, "执行彻底性校验：media_groups 孤儿")
+            cur.execute(
+                (
+                    "SELECT COUNT(*) AS cnt FROM media_groups mg "
+                    "WHERE NOT EXISTS ("
+                    "SELECT 1 FROM messages m "
+                    "WHERE m.chat_id = mg.chat_id "
+                    "AND m.grouped_id = mg.grouped_id "
+                    "AND m.grouped_id IS NOT NULL"
+                    ")"
+                    + orphan_groups_scope_sql
+                ),
+                orphan_groups_scope_params,
+            )
+            orphan_groups = int(cur.fetchone()["cnt"] or 0)
+            if orphan_groups != 0:
+                raise RuntimeError(f"清理校验失败：media_groups 存在 {orphan_groups} 条孤立记录")
+
+            dedupe_scope_sql = ""
+            dedupe_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                dedupe_scope_sql = " AND da.chat_id = ?"
+                dedupe_scope_params = (chat_id,)
+
+            _admin_job_append_log(job_id, "执行彻底性校验：dedupe_actions 无效引用")
+            cur.execute(
+                (
+                    "SELECT COUNT(*) AS cnt FROM dedupe_actions da "
+                    "LEFT JOIN chats c ON c.chat_id = da.chat_id "
+                    "LEFT JOIN messages m ON m.pk = da.pk "
+                    "WHERE (c.chat_id IS NULL OR m.pk IS NULL OR m.chat_id <> da.chat_id OR m.message_id <> da.message_id)"
+                    + dedupe_scope_sql
+                ),
+                dedupe_scope_params,
+            )
+            invalid_dedupe_actions = int(cur.fetchone()["cnt"] or 0)
+            if invalid_dedupe_actions != 0:
+                raise RuntimeError(f"清理校验失败：dedupe_actions 存在 {invalid_dedupe_actions} 条无效引用")
+
+            _admin_job_append_log(job_id, "执行彻底性校验：dedupe_runs 无效引用")
+            if scope == "chat" and isinstance(chat_id, int):
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM dedupe_runs dr
+                    LEFT JOIN chats c ON c.chat_id = dr.chat_id
+                    WHERE c.chat_id IS NULL
+                      AND dr.chat_id = ?
+                    """,
+                    (chat_id,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT COUNT(*) AS cnt
+                    FROM dedupe_runs dr
+                    LEFT JOIN chats c ON c.chat_id = dr.chat_id
+                    WHERE c.chat_id IS NULL
+                    """
+                )
+            invalid_dedupe_runs = int(cur.fetchone()["cnt"] or 0)
+            if invalid_dedupe_runs != 0:
+                raise RuntimeError(f"清理校验失败：dedupe_runs 存在 {invalid_dedupe_runs} 条无效引用")
+
+            if has_fts(conn):
+                _admin_job_append_log(job_id, "执行 FTS 一致性校验")
+                cur.execute("SELECT COUNT(*) AS cnt FROM messages")
+                total_messages = int(cur.fetchone()["cnt"] or 0)
+                cur.execute("SELECT COUNT(*) AS cnt FROM messages_fts")
+                total_fts = int(cur.fetchone()["cnt"] or 0)
+                if total_messages != total_fts:
+                    _admin_job_append_log(
+                        job_id,
+                        f"FTS 检测到漂移（messages={total_messages}, messages_fts={total_fts}），执行重建",
+                    )
+                    cur.execute("DELETE FROM messages_fts")
+                    cur.execute(
+                        """
+                        INSERT INTO messages_fts(rowid, content)
+                        SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
+                        FROM messages
+                        """
+                    )
+                    cur.execute("SELECT COUNT(*) AS cnt FROM messages_fts")
+                    rebuilt_fts = int(cur.fetchone()["cnt"] or 0)
+                    if rebuilt_fts != total_messages:
+                        raise RuntimeError(
+                            f"清理校验失败：FTS 重建后仍不一致（messages={total_messages}, messages_fts={rebuilt_fts}）"
+                        )
+
+            conn.commit()
+            _admin_job_append_log(
+                job_id,
+                f"垃圾清理完成：messages {deleted_messages}，message_media {deleted_media}，"
+                f"dedupe_actions {deleted_actions}，media_groups {deleted_groups}，chats {deleted_empty_chats}",
+            )
+            _admin_job_set_status(job_id, "done")
+        finally:
+            cur.close()
+    except Exception as exc:
+        if conn is not None:
+            try:
+                conn.rollback()
+                _admin_job_append_log(job_id, "垃圾清理失败，事务已回滚")
+            except Exception as rollback_exc:
+                _admin_job_append_log(job_id, f"垃圾清理失败，回滚异常：{rollback_exc}")
+        _admin_job_append_log(job_id, f"垃圾清理任务执行失败：{exc}")
+        _admin_job_set_status(job_id, "error")
+    finally:
+        if conn is not None:
+            conn.close()
+
+
+def _admin_start_cleanup_job_thread(
+    job_id: str,
+    keyword: str,
+    scope: str,
+    chat_id: Optional[int],
+    target_label: str,
+) -> threading.Thread:
+    worker = threading.Thread(
+        target=_admin_cleanup_job_runner,
+        args=(job_id, keyword, scope, chat_id, target_label),
         daemon=True,
     )
     worker.start()
@@ -1388,6 +1735,90 @@ def _register_routes(app: Flask) -> None:
         if snapshot is None:
             return jsonify({"ok": False, "error": "任务创建失败"}), 500
         return jsonify({"ok": True, "job": snapshot})
+
+    @app.post("/api/admin/jobs/cleanup")
+    def api_admin_job_create_cleanup():
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        if _admin_has_any_active_job():
+            return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
+
+        raw_keyword = data.get("keyword")
+        if not isinstance(raw_keyword, str):
+            return jsonify({"ok": False, "error": "keyword 参数必须为字符串"}), 400
+
+        keyword = raw_keyword.strip()
+        if not keyword:
+            return jsonify({"ok": False, "error": "keyword 不能为空"}), 400
+        if len(keyword) > ADMIN_CLEANUP_KEYWORD_MAX_LEN:
+            return jsonify({"ok": False, "error": f"keyword 长度不能超过 {ADMIN_CLEANUP_KEYWORD_MAX_LEN}"}), 400
+
+        raw_scope = data.get("scope", "")
+        scope = str(raw_scope or "").strip().lower()
+        if scope not in {"all", "chat"}:
+            return jsonify({"ok": False, "error": "scope 参数必须为 all 或 chat"}), 400
+
+        chat_id: Optional[int] = None
+        target_label = "全部数据"
+
+        if scope == "chat":
+            raw_chat_id = data.get("chat_id")
+            try:
+                chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+
+            try:
+                with closing(get_conn()) as conn:
+                    chat_brief = _admin_get_chat_brief(conn, chat_id)
+            except sqlite3.Error:
+                logger.exception("读取群信息失败")
+                return jsonify({"ok": False, "error": "读取群信息失败"}), 500
+            except Exception:
+                logger.exception("系统异常")
+                return jsonify({"ok": False, "error": "系统异常"}), 500
+
+            if chat_brief is None:
+                return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
+
+            target_label = str(chat_brief["chat_title"])
+
+        job = _admin_job_create("cleanup", target_chat_id=chat_id, target_label=target_label)
+        job_id = str(job.get("job_id") or "")
+
+        _admin_job_append_log(job_id, "已接收垃圾清理请求")
+        _admin_job_append_log(job_id, f"作用范围：{scope}")
+        chat_suffix = '' if chat_id is None else f' ({chat_id})'
+        _admin_job_append_log(job_id, f"目标：{target_label}{chat_suffix}")
+        _admin_job_append_log(job_id, f"关键字：{keyword}")
+        _admin_start_cleanup_job_thread(
+            job_id=job_id,
+            keyword=keyword,
+            scope=scope,
+            chat_id=chat_id,
+            target_label=target_label,
+        )
+
+        snapshot = _admin_job_get_snapshot(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+
+        return jsonify({
+            "ok": True,
+            "job": snapshot,
+            "request": {
+                "scope": scope,
+                "chat_id": chat_id,
+                "target_label": target_label,
+                "keyword": keyword,
+            },
+        })
+
 
 
 def _ensure_db() -> None:
