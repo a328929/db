@@ -224,6 +224,7 @@ def _harvest_messages_for_entity(conn: sqlite3.Connection, client: Any, entity: 
     media_rows: List[tuple] = []
     touched_group_ids: Set[int] = set()
     iterator = iter(client.iter_messages(entity, min_id=scan_from_id, reverse=True))
+    progress_step = max(int(getattr(CFG, "log_every", 1000) or 1000), 1)
 
     while True:
         try:
@@ -246,6 +247,15 @@ def _harvest_messages_for_entity(conn: sqlite3.Connection, client: Any, entity: 
 
         counters.seen += 1
 
+        if counters.seen % progress_step == 0:
+            buffered_count = len(msg_rows)
+            logging.info(
+                "抓取进度：已扫描=%s，已写入=%s，待写入缓存=%s",
+                counters.seen,
+                counters.written,
+                buffered_count,
+            )
+
         try:
             msg_row, media_row = _parse_message_rows(entity, message, chat_id, touched_group_ids)
             if msg_row is None:
@@ -260,8 +270,10 @@ def _harvest_messages_for_entity(conn: sqlite3.Connection, client: Any, entity: 
 
         if len(msg_rows) >= CFG.batch_size:
             _flush_harvest_batch(conn, chat_id, msg_rows, media_rows, counters, final_flush=False)
+            logging.info("批量写入完成：累计写入=%s", counters.written)
 
     _flush_harvest_batch(conn, chat_id, msg_rows, media_rows, counters, final_flush=True)
+    logging.info("消息抓取阶段完成：扫描=%s，写入=%s", counters.seen, counters.written)
 
     return counters, touched_group_ids, first_sync
 
