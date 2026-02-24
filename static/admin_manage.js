@@ -44,6 +44,11 @@
       deleteDataBtn: document.getElementById('admin-delete-data-btn'),
       logContainer: document.getElementById('admin-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-logs-btn'),
+      openCleanupDialogBtn: document.getElementById('admin-open-cleanup-dialog-btn'),
+      cleanupDialog: document.getElementById('admin-cleanup-dialog'),
+      cleanupInput: document.getElementById('admin-cleanup-input'),
+      cleanupCancelBtn: document.getElementById('admin-cleanup-cancel-btn'),
+      cleanupConfirmBtn: document.getElementById('admin-cleanup-confirm-btn'),
       openAddDialogBtn: document.getElementById('admin-open-add-dialog-btn'),
       dialog: document.getElementById('admin-add-target-dialog'),
       dialogInput: document.getElementById('admin-target-input'),
@@ -61,6 +66,11 @@
       'deleteDataBtn',
       'logContainer',
       'clearLogsBtn',
+      'openCleanupDialogBtn',
+      'cleanupDialog',
+      'cleanupInput',
+      'cleanupCancelBtn',
+      'cleanupConfirmBtn',
       'openAddDialogBtn',
       'dialog',
       'dialogInput',
@@ -87,7 +97,8 @@
     setAdminControlsBusy(elements, false);
     ensurePlaceholder(elements.logContainer);
     elements.clearLogsBtn.hidden = true;
-    closeDialog(elements, { skipFocusRestore: true });
+    closeAddDialog(elements, { skipFocusRestore: true });
+    closeCleanupDialog(elements, { skipFocusRestore: true });
   }
 
   function bindEvents(elements) {
@@ -112,12 +123,32 @@
       handleDeleteDataClick(elements);
     });
 
+    elements.openCleanupDialogBtn.addEventListener('click', function () {
+      openCleanupDialog(elements);
+    });
+
+    elements.cleanupCancelBtn.addEventListener('click', function () {
+      closeCleanupDialog(elements);
+    });
+
+    elements.cleanupConfirmBtn.addEventListener('click', function () {
+      handleCleanupDialogConfirm(elements);
+    });
+
+    elements.cleanupInput.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter' || elements.cleanupDialog.hidden) {
+        return;
+      }
+      event.preventDefault();
+      handleCleanupDialogConfirm(elements);
+    });
+
     elements.openAddDialogBtn.addEventListener('click', function () {
-      openDialog(elements);
+      openAddDialog(elements);
     });
 
     elements.dialogCancelBtn.addEventListener('click', function () {
-      closeDialog(elements);
+      closeAddDialog(elements);
     });
 
     elements.dialogConfirmBtn.addEventListener('click', function () {
@@ -137,20 +168,34 @@
         return;
       }
 
-      if (event.key === 'Tab' && !elements.dialog.hidden) {
+      if (event.key === 'Tab' && isAnyDialogOpen(elements)) {
         trapDialogFocus(elements, event);
         return;
       }
 
-      if (event.key === 'Escape' && !elements.dialog.hidden) {
-        closeDialog(elements);
+      if (event.key === 'Escape' && isAnyDialogOpen(elements)) {
+        closeActiveDialog(elements);
       }
     });
   }
 
+  function getActiveDialog(elements) {
+    if (elements && elements.cleanupDialog && !elements.cleanupDialog.hidden) {
+      return elements.cleanupDialog;
+    }
+    if (elements && elements.dialog && !elements.dialog.hidden) {
+      return elements.dialog;
+    }
+    return null;
+  }
+
+  function isAnyDialogOpen(elements) {
+    return !!getActiveDialog(elements);
+  }
+
   function getDialogFocusableElements(elements) {
-    var dialog = elements && elements.dialog;
-    if (!dialog || dialog.hidden) {
+    var dialog = getActiveDialog(elements);
+    if (!dialog) {
       return [];
     }
 
@@ -182,7 +227,7 @@
   }
 
   function trapDialogFocus(elements, event) {
-    if (!event || !elements || !elements.dialog || elements.dialog.hidden) {
+    if (!event || !elements || !isAnyDialogOpen(elements)) {
       return;
     }
 
@@ -286,11 +331,16 @@
   function renderChatOptions(selectElement, chats) {
     selectElement.innerHTML = '';
 
-    var defaultOption = document.createElement('option');
-    defaultOption.value = 'none';
-    defaultOption.textContent = '无';
-    defaultOption.selected = true;
-    selectElement.appendChild(defaultOption);
+    var noneOption = document.createElement('option');
+    noneOption.value = 'none';
+    noneOption.textContent = '无';
+    selectElement.appendChild(noneOption);
+
+    var allOption = document.createElement('option');
+    allOption.value = 'all';
+    allOption.textContent = '全部';
+    allOption.selected = true;
+    selectElement.appendChild(allOption);
 
     chats.forEach(function (chat) {
       if (!chat || chat.chat_id === undefined || chat.chat_id === null) {
@@ -317,7 +367,7 @@
     var selectedChatId = elements.scopeSelect.value;
     var statsPath = '/api/admin/stats';
 
-    if (selectedChatId && selectedChatId !== 'none') {
+    if (isChatScopeValue(selectedChatId)) {
       statsPath += '?chat_id=' + encodeURIComponent(selectedChatId);
     }
 
@@ -334,7 +384,7 @@
       return;
     }
 
-    var previousSelection = String(elements.scopeSelect.value || 'none');
+    var previousSelection = String(elements.scopeSelect.value || 'all');
 
     try {
       await loadChatsIntoSelect(elements);
@@ -347,7 +397,7 @@
     var hasPreviousOption = Array.prototype.some.call(selectElement.options, function (option) {
       return option && String(option.value) === previousSelection;
     });
-    selectElement.value = hasPreviousOption ? previousSelection : 'none';
+    selectElement.value = hasPreviousOption ? previousSelection : 'all';
 
     updateControlVisibility(elements);
 
@@ -389,7 +439,7 @@
   function applyStatsToHeader(elements, payload, selectedChatId) {
     var data = payload && payload.data ? payload.data : payload;
 
-    if (selectedChatId && selectedChatId !== 'none') {
+    if (isChatScopeValue(selectedChatId)) {
       var targetName = pickFirstText(
         data && data.chat_name,
         data && data.chat_title,
@@ -433,23 +483,97 @@
     return option ? option.textContent : '';
   }
 
+  function isAllScopeValue(value) {
+    return String(value || '').trim() === 'all';
+  }
+
+  function isNoneScopeValue(value) {
+    return String(value || '').trim() === 'none';
+  }
+
+  function isChatScopeValue(value) {
+    var normalized = String(value || '').trim();
+    return !!normalized && normalized !== 'none' && normalized !== 'all';
+  }
+
   function getCurrentTargetInfo(elements) {
     var selectElement = elements && elements.scopeSelect;
-    var chatId = selectElement ? String(selectElement.value || '') : '';
-    var label = selectElement ? getSelectedOptionLabel(selectElement, chatId) : '';
+    var scopeValue = selectElement ? String(selectElement.value || '') : '';
+    var label = selectElement ? getSelectedOptionLabel(selectElement, scopeValue) : '';
     var trimmedLabel = typeof label === 'string' ? label.trim() : '';
 
     return {
-      chatId: chatId,
+      scopeValue: scopeValue,
+      chatId: isChatScopeValue(scopeValue) ? scopeValue : '',
       label: trimmedLabel,
-      isNone: !chatId || chatId === 'none'
+      isNone: isNoneScopeValue(scopeValue),
+      isAll: isAllScopeValue(scopeValue),
+      isChat: isChatScopeValue(scopeValue)
     };
+  }
+
+  async function handleCleanupDialogConfirm(elements) {
+    var keyword = (elements.cleanupInput.value || '').trim();
+    if (!keyword) {
+      appendLog(elements, '请输入需要清理的字段');
+      elements.cleanupInput.focus();
+      return;
+    }
+
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '请选择“全部”或某一个群组后再执行垃圾清理');
+      return;
+    }
+
+    var scopeLabel = target.isAll ? '全部数据' : (target.label || target.chatId);
+    var confirmText = '确认执行垃圾清理？关键字：' + keyword + '；范围：' + scopeLabel + '。';
+    if (!window.confirm(confirmText)) {
+      appendLog(elements, '已取消垃圾清理操作');
+      return;
+    }
+
+    var requestPayload = {
+      keyword: keyword,
+      scope: target.isAll ? 'all' : 'chat'
+    };
+
+    if (!target.isAll) {
+      var chatIdNumber = Number(target.chatId);
+      if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
+        appendLog(elements, '创建垃圾清理任务失败：chat_id 参数非法');
+        return;
+      }
+      requestPayload.chat_id = chatIdNumber;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/cleanup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestPayload)
+      });
+      var job = payload && payload.job ? payload.job : null;
+      var jobId = job && job.job_id ? String(job.job_id) : '';
+      if (!jobId) {
+        throw new Error('任务创建成功但缺少 job_id');
+      }
+
+      appendLog(elements, '垃圾清理任务已创建：' + jobId + '，范围：' + scopeLabel);
+      elements.cleanupInput.value = '';
+      closeCleanupDialog(elements);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建垃圾清理任务失败：' + error.message);
+    }
   }
 
   async function handleStartUpdateClick(elements) {
     var target = getCurrentTargetInfo(elements);
-    if (target.isNone) {
-      appendLog(elements, '未选择群组/频道');
+    if (!target.isChat) {
+      appendLog(elements, '请选择具体群组/频道后再执行更新');
       return;
     }
 
@@ -500,8 +624,8 @@
 
   async function handleDeleteDataClick(elements) {
     var target = getCurrentTargetInfo(elements);
-    if (target.isNone) {
-      appendLog(elements, '未选择群组/频道');
+    if (!target.isChat) {
+      appendLog(elements, '请选择具体群组/频道后再执行删除');
       return;
     }
 
@@ -762,20 +886,17 @@
   }
 
   function updateControlVisibility(elements) {
-    var hasSelectedTarget = elements.scopeSelect.value !== 'none';
+    var scopeValue = String(elements.scopeSelect.value || 'none');
+    var hasSelectedTarget = !isNoneScopeValue(scopeValue);
+    var hasChatTarget = isChatScopeValue(scopeValue);
 
-    setElementHidden(elements.incrementalCheckbox, !hasSelectedTarget);
-    setElementHidden(elements.incrementalLabel, !hasSelectedTarget);
+    setElementHidden(elements.incrementalCheckbox, !hasChatTarget);
+    setElementHidden(elements.incrementalLabel, !hasChatTarget);
 
-    if (!hasSelectedTarget) {
-      elements.startUpdateBtn.hidden = true;
-      elements.deleteDataBtn.hidden = true;
-      setAdminControlsBusy(elements, jobPollState.isPolling);
-      return;
-    }
+    elements.deleteDataBtn.hidden = !hasChatTarget;
+    elements.startUpdateBtn.hidden = !hasChatTarget || !elements.incrementalCheckbox.checked;
+    elements.openCleanupDialogBtn.hidden = !hasSelectedTarget;
 
-    elements.deleteDataBtn.hidden = false;
-    elements.startUpdateBtn.hidden = !elements.incrementalCheckbox.checked;
     setAdminControlsBusy(elements, jobPollState.isPolling);
   }
 
@@ -796,6 +917,8 @@
     setElementDisabled(elements.incrementalCheckbox, disabled);
     setElementDisabled(elements.startUpdateBtn, disabled);
     setElementDisabled(elements.deleteDataBtn, disabled);
+    setElementDisabled(elements.openCleanupDialogBtn, disabled);
+    setElementDisabled(elements.cleanupConfirmBtn, disabled);
     setElementDisabled(elements.openAddDialogBtn, disabled);
     setElementDisabled(elements.dialogConfirmBtn, disabled);
 
@@ -845,17 +968,41 @@
     }
   }
 
-  function openDialog(elements) {
+  function openAddDialog(elements) {
     elements.dialog.hidden = false;
     elements.dialogInput.focus();
   }
 
-  function closeDialog(elements, options) {
+  function closeAddDialog(elements, options) {
     var opts = options || {};
     elements.dialog.hidden = true;
 
     if (!opts.skipFocusRestore) {
       elements.openAddDialogBtn.focus();
+    }
+  }
+
+  function openCleanupDialog(elements) {
+    elements.cleanupDialog.hidden = false;
+    elements.cleanupInput.focus();
+  }
+
+  function closeCleanupDialog(elements, options) {
+    var opts = options || {};
+    elements.cleanupDialog.hidden = true;
+
+    if (!opts.skipFocusRestore) {
+      elements.openCleanupDialogBtn.focus();
+    }
+  }
+
+  function closeActiveDialog(elements) {
+    if (elements && elements.cleanupDialog && !elements.cleanupDialog.hidden) {
+      closeCleanupDialog(elements);
+      return;
+    }
+    if (elements && elements.dialog && !elements.dialog.hidden) {
+      closeAddDialog(elements);
     }
   }
 
@@ -899,7 +1046,7 @@
 
       appendLog(elements, '抓取任务已创建：' + jobId);
       elements.dialogInput.value = '';
-      closeDialog(elements);
+      closeAddDialog(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
       appendLog(elements, '创建抓取任务失败：' + error.message);

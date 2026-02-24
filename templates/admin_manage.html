@@ -33,7 +33,8 @@
       <div>
         <label for="admin-scope-select">选择操作目标</label>
         <select id="admin-scope-select" aria-label="选择操作目标">
-          <option value="none" selected>无</option>
+          <option value="none">无</option>
+          <option value="all" selected>全部</option>
         </select>
       </div>
 
@@ -80,6 +81,9 @@
     <!-- 区域4：底部更新数据按钮 -->
     <footer class="panel" aria-label="底部操作区">
       <div id="admin-bottom-action-bar" aria-label="更新数据按钮容器">
+        <button id="admin-open-cleanup-dialog-btn" type="button" aria-label="垃圾清理">
+          垃圾清理
+        </button>
         <button id="admin-open-add-dialog-btn" type="button" aria-label="更新数据">
           更新数据
         </button>
@@ -90,6 +94,7 @@
   <!-- 同页弹层：新增抓取对象 -->
   <section
     id="admin-add-target-dialog"
+    class="admin-dialog"
     role="dialog"
     aria-modal="true"
     aria-labelledby="adminAddDialogTitle"
@@ -109,6 +114,33 @@
     <div aria-label="弹层操作按钮组">
       <button id="admin-dialog-cancel-btn" type="button" aria-label="取消新增抓取对象">取消</button>
       <button id="admin-dialog-confirm-btn" type="button" aria-label="确定新增抓取对象">确定</button>
+    </div>
+  </section>
+
+  <!-- 同页弹层：垃圾清理 -->
+  <section
+    id="admin-cleanup-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCleanupDialogTitle"
+    hidden
+  >
+    <h2 id="adminCleanupDialogTitle">垃圾清理</h2>
+    <p class="subtle">输入需要清理的字段（支持包含匹配，例如输入 ai 将匹配包含 ai 的内容）。</p>
+    <div>
+      <label for="admin-cleanup-input">清理字段</label>
+      <input
+        id="admin-cleanup-input"
+        name="admin-cleanup-input"
+        type="text"
+        placeholder="请输入要清理的字段"
+        aria-label="清理字段"
+      />
+    </div>
+    <div aria-label="垃圾清理弹层操作按钮组">
+      <button id="admin-cleanup-cancel-btn" type="button" aria-label="取消垃圾清理">取消</button>
+      <button id="admin-cleanup-confirm-btn" type="button" aria-label="确定垃圾清理">确定</button>
     </div>
   </section>
 

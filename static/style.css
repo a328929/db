@@ -55,6 +55,67 @@ body {
   margin-bottom: 14px;
 }
 
+#admin-bottom-action-bar {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#admin-bottom-action-bar button {
+  min-height: 42px;
+}
+
+#admin-open-cleanup-dialog-btn {
+  border: 1px solid #d8b4a0;
+  background: #fff8f4;
+  color: #8e3a12;
+}
+
+#admin-open-cleanup-dialog-btn:hover {
+  background: #ffefe6;
+}
+
+.admin-dialog {
+  position: fixed;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  width: min(520px, calc(100vw - 24px));
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.2);
+  padding: 14px;
+  z-index: 1001;
+}
+
+.admin-dialog[hidden] {
+  display: none;
+}
+
+.admin-dialog::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 20, 30, 0.45);
+  z-index: -1;
+}
+
+.admin-dialog > div + div {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.admin-dialog input {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-size: 0.95rem;
+}
+
 .search-row {
   display: grid;
   grid-template-columns: 1fr auto;
