@@ -503,6 +503,31 @@ def _admin_cleanup_job_runner(
             target_count = int(cur.fetchone()["cnt"] or 0)
             _admin_job_append_log(job_id, f"命中待清理消息数量：{target_count}")
 
+            # 历史数据可能在外键未开启时期写入，先清理孤儿记录，避免后续校验误报导致整体回滚。
+            orphan_media_scope_sql = ""
+            orphan_media_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                orphan_media_scope_sql = " AND mm.chat_id = ?"
+                orphan_media_scope_params = (chat_id,)
+
+            cur.execute(
+                (
+                    "DELETE FROM message_media "
+                    "WHERE EXISTS ("
+                    "SELECT 1 FROM message_media mm "
+                    "LEFT JOIN messages m ON m.chat_id = mm.chat_id AND m.message_id = mm.message_id "
+                    "WHERE mm.chat_id = message_media.chat_id "
+                    "AND mm.message_id = message_media.message_id "
+                    "AND m.pk IS NULL"
+                    + orphan_media_scope_sql
+                    + ")"
+                ),
+                orphan_media_scope_params,
+            )
+            deleted_orphan_media = int(cur.rowcount or 0)
+            if deleted_orphan_media > 0:
+                _admin_job_append_log(job_id, f"历史孤儿 message_media 清理行数：{deleted_orphan_media}")
+
             if target_count == 0:
                 conn.commit()
                 _admin_job_append_log(job_id, "未命中任何消息，无需清理")
@@ -605,6 +630,11 @@ def _admin_cleanup_job_runner(
             deleted_actions_empty_chat = int(cur.rowcount or 0)
 
             cur.execute(
+                "DELETE FROM message_media WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)"
+            )
+            deleted_media_empty_chat = int(cur.rowcount or 0)
+
+            cur.execute(
                 "DELETE FROM dedupe_runs WHERE chat_id IN (SELECT chat_id FROM temp_cleanup_empty_chats)"
             )
             deleted_runs_empty_chat = int(cur.rowcount or 0)
@@ -620,6 +650,7 @@ def _admin_cleanup_job_runner(
                 job_id,
                 "空 chat 清理："
                 f"dedupe_actions {deleted_actions_empty_chat} 行，"
+                f"message_media {deleted_media_empty_chat} 行，"
                 f"dedupe_runs {deleted_runs_empty_chat} 行，"
                 f"media_groups {deleted_groups_empty_chat} 行，"
                 f"chats {deleted_empty_chats} 行",
@@ -643,12 +674,6 @@ def _admin_cleanup_job_runner(
             remaining_matches = int(cur.fetchone()["cnt"] or 0)
             if remaining_matches != 0:
                 raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条 content LIKE 命中消息")
-
-            orphan_media_scope_sql = ""
-            orphan_media_scope_params: Tuple[Any, ...] = tuple()
-            if scope == "chat" and isinstance(chat_id, int):
-                orphan_media_scope_sql = " AND mm.chat_id = ?"
-                orphan_media_scope_params = (chat_id,)
 
             _admin_job_append_log(job_id, "执行彻底性校验：message_media 孤儿")
             cur.execute(
