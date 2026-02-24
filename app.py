@@ -18,14 +18,12 @@ from tg_harvest.admin_jobs_runners import (
 )
 from tg_harvest.admin_jobs_core import (
     _admin_create_chat_job_if_absent,
-    _admin_get_progress_log_step,
     _admin_has_any_active_job,
     _admin_job_append_log,
     _admin_job_create,
     _admin_job_get_logs,
     _admin_job_get_snapshot,
     _admin_job_set_status,
-    _admin_job_update_progress,
     _admin_make_job_log_handler,
 )
 from tg_harvest.db import connect_db, create_schema, resolve_db_path as resolve_db_path_lib
@@ -55,43 +53,6 @@ MAX_COUNT = 50000
 
 ADMIN_HARVEST_TARGET_MAX_LEN = 300
 ADMIN_CLEANUP_KEYWORD_MAX_LEN = 120
-
-
-def _admin_job_get_snapshot_locked(job: Dict[str, Any]) -> Dict[str, Any]:
-    progress = dict(job.get("progress") or {})
-    return {
-        "job_id": str(job.get("job_id", "")),
-        "job_type": str(job.get("job_type", "unknown")),
-        "status": str(job.get("status", "queued")),
-        "target_chat_id": job.get("target_chat_id"),
-        "target_label": job.get("target_label"),
-        "created_at": str(job.get("created_at", "")),
-        "updated_at": str(job.get("updated_at", "")),
-        "progress": {
-            "current": int(progress.get("current") or 0),
-            "total": progress.get("total"),
-            "stage": str(progress.get("stage") or "queued"),
-        },
-        "log_count": len(job.get("logs", [])),
-        "last_seq": int(job.get("next_log_seq", 1)) - 1,
-    }
-
-
-def _admin_job_get_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
-    with ADMIN_JOBS_LOCK:
-        job = ADMIN_JOBS.get(job_id)
-        if job is None:
-            return None
-        return _admin_job_get_snapshot_locked(job)
-
-
-def _admin_job_get_logs(job_id: str, after_seq: int = 0) -> Optional[List[Dict[str, Any]]]:
-    with ADMIN_JOBS_LOCK:
-        job = ADMIN_JOBS.get(job_id)
-        if job is None:
-            return None
-        logs = job.get("logs", [])
-        return [dict(item) for item in logs if int(item.get("seq", 0)) > after_seq]
 
 
 def get_conn() -> sqlite3.Connection:

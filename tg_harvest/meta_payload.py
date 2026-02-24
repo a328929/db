@@ -1,7 +1,10 @@
 import sqlite3
 from typing import Any, Dict, Optional, Tuple
 
-from pypinyin import lazy_pinyin
+try:
+    from pypinyin import lazy_pinyin as _lazy_pinyin
+except Exception:
+    _lazy_pinyin = None
 
 
 def _chat_title_or_fallback(chat_id: int, chat_title: Optional[str]) -> str:
@@ -33,7 +36,10 @@ def _chat_sort_key(chat_title: str, chat_id: int) -> Tuple[int, str, str, int]:
         lexical_key = normalized_title.casefold()
     elif _is_cjk_char(first_char):
         category = 1
-        lexical_key = "".join(lazy_pinyin(normalized_title)).casefold()
+        if _lazy_pinyin is not None:
+            lexical_key = "".join(_lazy_pinyin(normalized_title)).casefold()
+        else:
+            lexical_key = normalized_title.casefold()
     elif first_char.isascii() and first_char.isalpha():
         category = 2
         lexical_key = normalized_title.casefold()
