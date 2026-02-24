@@ -713,12 +713,6 @@ def _admin_cleanup_job_runner(
             if orphan_groups != 0:
                 raise RuntimeError(f"清理校验失败：media_groups 存在 {orphan_groups} 条孤立记录")
 
-            dedupe_scope_sql = ""
-            dedupe_scope_params: Tuple[Any, ...] = tuple()
-            if scope == "chat" and isinstance(chat_id, int):
-                dedupe_scope_sql = " AND da.chat_id = ?"
-                dedupe_scope_params = (chat_id,)
-
             _admin_job_append_log(job_id, "执行彻底性校验：dedupe_actions 无效引用")
             cur.execute(
                 (
