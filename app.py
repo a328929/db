@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from flask import Flask, jsonify, render_template, request
+from pypinyin import lazy_pinyin
 
 from tg_harvest.config import CFG
 from tg_harvest.db import connect_db, create_schema, resolve_db_path as resolve_db_path_lib
@@ -938,8 +939,9 @@ def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
 def _build_meta_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
     cur = conn.cursor()
     try:
-        cur.execute("SELECT chat_id, chat_title FROM chats ORDER BY LOWER(chat_title) ASC, chat_id ASC")
-        chats = [{"chat_id": int(r["chat_id"]), "chat_title": (r["chat_title"] or f"Chat {r['chat_id']}").strip()} for r in cur.fetchall()]
+        cur.execute("SELECT chat_id, chat_title FROM chats")
+        chats = [{"chat_id": int(r["chat_id"]), "chat_title": _chat_title_or_fallback(int(r["chat_id"]), r["chat_title"])} for r in cur.fetchall()]
+        chats.sort(key=lambda item: _chat_sort_key(item["chat_title"], int(item["chat_id"])))
         return {"ok": True, "chats": chats, "page_size": PAGE_SIZE}
     finally:
         cur.close()
@@ -948,6 +950,41 @@ def _build_meta_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
 def _chat_title_or_fallback(chat_id: int, chat_title: Optional[str]) -> str:
     title = (chat_title or "").strip()
     return title if title else f"Chat {chat_id}"
+
+
+def _is_cjk_char(ch: str) -> bool:
+    if not ch:
+        return False
+    codepoint = ord(ch)
+    return (
+        0x4E00 <= codepoint <= 0x9FFF
+        or 0x3400 <= codepoint <= 0x4DBF
+        or 0x20000 <= codepoint <= 0x2A6DF
+        or 0x2A700 <= codepoint <= 0x2B73F
+        or 0x2B740 <= codepoint <= 0x2B81F
+        or 0x2B820 <= codepoint <= 0x2CEAF
+        or 0xF900 <= codepoint <= 0xFAFF
+    )
+
+
+def _chat_sort_key(chat_title: str, chat_id: int) -> Tuple[int, str, str, int]:
+    normalized_title = (chat_title or "").strip() or f"Chat {chat_id}"
+    first_char = normalized_title[0]
+
+    if first_char.isdigit():
+        category = 0
+        lexical_key = normalized_title.casefold()
+    elif _is_cjk_char(first_char):
+        category = 1
+        lexical_key = "".join(lazy_pinyin(normalized_title)).casefold()
+    elif first_char.isascii() and first_char.isalpha():
+        category = 2
+        lexical_key = normalized_title.casefold()
+    else:
+        category = 3
+        lexical_key = normalized_title.casefold()
+
+    return category, lexical_key, normalized_title.casefold(), chat_id
 
 
 def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -962,9 +999,6 @@ def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
             FROM chats c
             LEFT JOIN messages m ON m.chat_id = c.chat_id
             GROUP BY c.chat_id, c.chat_title
-            ORDER BY
-                LOWER(COALESCE(NULLIF(TRIM(c.chat_title), ''), printf('Chat %d', c.chat_id))) ASC,
-                c.chat_id ASC
             """
         )
         # /api/admin/chats 主字段契约为 chat_id/chat_title/message_count；冗余别名字段已移除（前端兼容在 JS 内处理）。
@@ -976,6 +1010,7 @@ def _build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
             }
             for row in cur.fetchall()
         ]
+        chats.sort(key=lambda item: _chat_sort_key(item["chat_title"], int(item["chat_id"])))
         return {"ok": True, "chats": chats}
     finally:
         cur.close()
