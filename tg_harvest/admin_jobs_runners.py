@@ -199,6 +199,12 @@ def _admin_cleanup_job_runner(
         conn = get_conn_fn()
         cur = conn.cursor()
         try:
+            dedupe_scope_sql = ""
+            dedupe_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                dedupe_scope_sql = " AND da.chat_id = ?"
+                dedupe_scope_params = (chat_id,)
+
             admin_job_append_log_fn(job_id, "构建待清理消息集合")
             cur.execute("DROP TABLE IF EXISTS temp_cleanup_targets")
             cur.execute(
@@ -386,12 +392,6 @@ def _admin_cleanup_job_runner(
                 verify_scope_sql = " AND m.chat_id = ?"
                 verify_scope_params = (chat_id,)
 
-            dedupe_scope_sql = ""
-            dedupe_scope_params: Tuple[Any, ...] = tuple()
-            if scope == "chat" and isinstance(chat_id, int):
-                dedupe_scope_sql = " AND da.chat_id = ?"
-                dedupe_scope_params = (chat_id,)
-
             admin_job_append_log_fn(job_id, "执行彻底性校验：关键字残留")
             cur.execute(
                 (
@@ -443,6 +443,23 @@ def _admin_cleanup_job_runner(
             if orphan_groups != 0:
                 raise RuntimeError(f"清理校验失败：media_groups 存在 {orphan_groups} 条孤立记录")
 
+            admin_job_append_log_fn(job_id, "清理历史无效 dedupe_actions")
+            cur.execute(
+                (
+                    "DELETE FROM dedupe_actions "
+                    "WHERE rowid IN ("
+                    "SELECT da.rowid FROM dedupe_actions da "
+                    "LEFT JOIN chats c ON c.chat_id = da.chat_id "
+                    "LEFT JOIN messages m ON m.pk = da.pk "
+                    "WHERE (c.chat_id IS NULL OR m.pk IS NULL OR m.chat_id <> da.chat_id OR m.message_id <> da.message_id)"
+                    + dedupe_scope_sql
+                    + ")"
+                ),
+                dedupe_scope_params,
+            )
+            deleted_invalid_dedupe_actions = int(cur.rowcount or 0)
+            admin_job_append_log_fn(job_id, f"历史无效 dedupe_actions 清理行数：{deleted_invalid_dedupe_actions}")
+
             admin_job_append_log_fn(job_id, "执行彻底性校验：dedupe_actions 无效引用")
             cur.execute(
                 (
@@ -455,6 +472,7 @@ def _admin_cleanup_job_runner(
                 dedupe_scope_params,
             )
             invalid_dedupe_actions = int(cur.fetchone()["cnt"] or 0)
+            admin_job_append_log_fn(job_id, f"dedupe_actions 无效引用剩余：{invalid_dedupe_actions}")
             if invalid_dedupe_actions != 0:
                 raise RuntimeError(f"清理校验失败：dedupe_actions 存在 {invalid_dedupe_actions} 条无效引用")
 
