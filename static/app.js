@@ -372,6 +372,20 @@
       },
       body: JSON.stringify(payload),
     });
+
+    if (!resp.ok) {
+      let errorMessage = `HTTP ${resp.status}`;
+      try {
+        const errorPayload = await resp.json();
+        if (errorPayload && typeof errorPayload.error === "string" && errorPayload.error.trim()) {
+          errorMessage += ` ${errorPayload.error.trim()}`;
+        }
+      } catch (_ignored) {
+        // ignore parse failure and keep HTTP status.
+      }
+      throw new Error(errorMessage);
+    }
+
     return resp.json();
   }
 
