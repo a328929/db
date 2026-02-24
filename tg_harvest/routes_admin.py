@@ -139,10 +139,13 @@ def register_admin_routes(
             return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
 
         raw_chat_id = data.get("chat_id")
-        try:
-            chat_id = int(raw_chat_id)
-        except (TypeError, ValueError):
-            return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+        is_all_scope = isinstance(raw_chat_id, str) and raw_chat_id.strip().lower() == "all"
+        chat_id: Optional[int] = None
+        if not is_all_scope:
+            try:
+                chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
 
         incremental = data.get("incremental", True)
         if not isinstance(incremental, bool):
@@ -150,38 +153,55 @@ def register_admin_routes(
         if incremental is False:
             return jsonify({"ok": False, "error": "当前仅支持增量更新"}), 400
 
-        try:
-            with closing(get_conn_fn()) as conn:
-                chat_brief = admin_get_chat_brief_fn(conn, chat_id)
-        except sqlite3.Error:
-            logger.exception("读取群信息失败")
-            return jsonify({"ok": False, "error": "读取群信息失败"}), 500
-        except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+        if is_all_scope:
+            job = admin_job_create_fn("update", target_chat_id=None, target_label="全部群聊")
+            job_id = str(job.get("job_id") or "")
+            admin_job_append_log_fn(job_id, "已接收增量更新请求")
+            admin_job_append_log_fn(job_id, "目标范围：全部群聊")
+            admin_start_update_job_thread_fn(
+                job_id,
+                "all",
+                "全部群聊",
+                incremental,
+                cfg=cfg,
+                get_conn_fn=get_conn_fn,
+                admin_make_job_log_handler_fn=admin_make_job_log_handler_fn,
+                admin_job_set_status_fn=admin_job_set_status_fn,
+                admin_job_append_log_fn=admin_job_append_log_fn,
+            )
+        else:
+            try:
+                with closing(get_conn_fn()) as conn:
+                    chat_brief = admin_get_chat_brief_fn(conn, chat_id)
+            except sqlite3.Error:
+                logger.exception("读取群信息失败")
+                return jsonify({"ok": False, "error": "读取群信息失败"}), 500
+            except Exception:
+                logger.exception("系统异常")
+                return jsonify({"ok": False, "error": "系统异常"}), 500
 
-        if chat_brief is None:
-            return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
+            if chat_brief is None:
+                return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
 
-        chat_title = str(chat_brief["chat_title"])
-        job, existing_job = admin_create_chat_job_if_absent_fn("update", chat_id=chat_id, target_label=chat_title)
-        if existing_job is not None:
-            return jsonify({"ok": False, "error": "该目标已有进行中的任务", "existing_job": existing_job}), 409
-        job_id = str(job.get("job_id") or "")
+            chat_title = str(chat_brief["chat_title"])
+            job, existing_job = admin_create_chat_job_if_absent_fn("update", chat_id=chat_id, target_label=chat_title)
+            if existing_job is not None:
+                return jsonify({"ok": False, "error": "该目标已有进行中的任务", "existing_job": existing_job}), 409
+            job_id = str(job.get("job_id") or "")
 
-        admin_job_append_log_fn(job_id, "已接收增量更新请求")
-        admin_job_append_log_fn(job_id, f"目标群组：{chat_title} ({chat_id})")
-        admin_start_update_job_thread_fn(
-            job_id,
-            chat_id,
-            chat_title,
-            incremental,
-            cfg=cfg,
-            get_conn_fn=get_conn_fn,
-            admin_make_job_log_handler_fn=admin_make_job_log_handler_fn,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-            admin_job_append_log_fn=admin_job_append_log_fn,
-        )
+            admin_job_append_log_fn(job_id, "已接收增量更新请求")
+            admin_job_append_log_fn(job_id, f"目标群组：{chat_title} ({chat_id})")
+            admin_start_update_job_thread_fn(
+                job_id,
+                chat_id,
+                chat_title,
+                incremental,
+                cfg=cfg,
+                get_conn_fn=get_conn_fn,
+                admin_make_job_log_handler_fn=admin_make_job_log_handler_fn,
+                admin_job_set_status_fn=admin_job_set_status_fn,
+                admin_job_append_log_fn=admin_job_append_log_fn,
+            )
 
         snapshot = admin_job_get_snapshot_fn(job_id)
         if snapshot is None:
