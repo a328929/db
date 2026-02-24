@@ -572,18 +572,20 @@
 
   async function handleStartUpdateClick(elements) {
     var target = getCurrentTargetInfo(elements);
-    if (!target.isChat) {
+    if (!target.isChat && !target.isAll) {
       appendLog(elements, '请选择具体群组/频道后再执行更新');
       return;
     }
 
-    if (!elements.incrementalCheckbox || !elements.incrementalCheckbox.checked) {
+    if (target.isChat && (!elements.incrementalCheckbox || !elements.incrementalCheckbox.checked)) {
       appendLog(elements, '未启用增量更新，无法执行更新');
       return;
     }
 
     var confirmText = '确认执行增量更新？';
-    if (target.label) {
+    if (target.isAll) {
+      confirmText = '确认执行增量更新全部群聊？';
+    } else if (target.label) {
       confirmText = '确认执行增量更新：' + target.label + '？';
     }
 
@@ -592,10 +594,18 @@
       return;
     }
 
-    var chatIdNumber = Number(target.chatId);
-    if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
-      appendLog(elements, '创建增量更新任务失败：chat_id 参数非法');
-      return;
+    var requestPayload = {
+      chat_id: 'all',
+      incremental: true
+    };
+
+    if (!target.isAll) {
+      var chatIdNumber = Number(target.chatId);
+      if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
+        appendLog(elements, '创建增量更新任务失败：chat_id 参数非法');
+        return;
+      }
+      requestPayload.chat_id = chatIdNumber;
     }
 
     try {
@@ -604,10 +614,7 @@
         headers: {
           'Content-Type': 'application/json'
         },
-        body: JSON.stringify({
-          chat_id: chatIdNumber,
-          incremental: true
-        })
+        body: JSON.stringify(requestPayload)
       });
       var job = payload && payload.job ? payload.job : null;
       var jobId = job && job.job_id ? String(job.job_id) : '';
@@ -889,12 +896,14 @@
     var scopeValue = String(elements.scopeSelect.value || 'none');
     var hasSelectedTarget = !isNoneScopeValue(scopeValue);
     var hasChatTarget = isChatScopeValue(scopeValue);
+    var hasAllTarget = isAllScopeValue(scopeValue);
 
     setElementHidden(elements.incrementalCheckbox, !hasChatTarget);
     setElementHidden(elements.incrementalLabel, !hasChatTarget);
 
     elements.deleteDataBtn.hidden = !hasChatTarget;
-    elements.startUpdateBtn.hidden = !hasChatTarget || !elements.incrementalCheckbox.checked;
+    elements.startUpdateBtn.hidden = (!hasChatTarget && !hasAllTarget) || (hasChatTarget && !elements.incrementalCheckbox.checked);
+    elements.startUpdateBtn.textContent = hasAllTarget ? '增量更新全部群聊' : '增量更新当前群聊';
     elements.openCleanupDialogBtn.hidden = !hasSelectedTarget;
 
     setAdminControlsBusy(elements, jobPollState.isPolling);

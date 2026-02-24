@@ -59,9 +59,48 @@ def _admin_harvest_job_runner(
 
 
 
+def _admin_process_single_chat_update(
+    *,
+    job_id: str,
+    client: Any,
+    get_conn_fn: Callable[[], Any],
+    admin_job_append_log_fn: Callable[[str, str], Any],
+    chat_id: int,
+    chat_title: str,
+    idx: int,
+    total: int,
+) -> None:
+    from tg_harvest.harvest_runner import _process_entity
+
+    entity = client.get_entity(chat_id)
+    entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(chat_id)
+    admin_job_append_log_fn(job_id, f"[{idx}/{total}] 成功连接并获取实体：{entity_title}")
+
+    conn = get_conn_fn()
+    try:
+        _process_entity(conn, client, entity, idx=idx, total=total)
+    finally:
+        conn.close()
+
+
+def _admin_get_chat_message_count(get_conn_fn: Callable[[], Any], chat_id: int) -> int:
+    conn = get_conn_fn()
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = ?", (chat_id,))
+        row = cur.fetchone()
+        if row is None:
+            return 0
+        if isinstance(row, sqlite3.Row):
+            return int((row["cnt"] or 0))
+        return int((row[0] or 0))
+    finally:
+        conn.close()
+
+
 def _admin_update_job_runner(
     job_id: str,
-    chat_id: int,
+    chat_id: Any,
     chat_title: str,
     incremental: bool,
     *,
@@ -72,7 +111,6 @@ def _admin_update_job_runner(
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
     from telethon.sync import TelegramClient
-    from tg_harvest.harvest_runner import _process_entity
 
     root_logger = logging.getLogger()
     job_log_handler = admin_make_job_log_handler_fn(job_id)
@@ -80,7 +118,12 @@ def _admin_update_job_runner(
     try:
         admin_job_set_status_fn(job_id, "running")
         mode_label = "增量" if incremental else "全量"
-        admin_job_append_log_fn(job_id, f"开始{mode_label}更新：{chat_title} ({chat_id})")
+        is_all_scope = isinstance(chat_id, str) and chat_id.strip().lower() == "all"
+        if is_all_scope:
+            admin_job_append_log_fn(job_id, f"开始{mode_label}更新：全部群聊")
+        else:
+            admin_job_append_log_fn(job_id, f"开始{mode_label}更新：{chat_title} ({chat_id})")
+
         asyncio.set_event_loop(asyncio.new_event_loop())
         client = TelegramClient(cfg.session_name, cfg.api_id, cfg.api_hash)
         client.connect()
@@ -90,14 +133,76 @@ def _admin_update_job_runner(
                 admin_job_set_status_fn(job_id, "error")
                 return
 
-            entity = client.get_entity(chat_id)
-            entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(chat_id)
-            admin_job_append_log_fn(job_id, f"成功连接并获取实体：{entity_title}")
-            conn = get_conn_fn()
-            try:
-                _process_entity(conn, client, entity, idx=1, total=1)
-            finally:
-                conn.close()
+            if is_all_scope:
+                conn = get_conn_fn()
+                try:
+                    cur = conn.cursor()
+                    cur.execute(
+                        """
+                        SELECT chat_id, chat_title
+                        FROM chats
+                        ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC
+                        """
+                    )
+                    rows = cur.fetchall()
+                finally:
+                    conn.close()
+
+                if not rows:
+                    admin_job_append_log_fn(job_id, "当前无可更新群聊，任务结束")
+                    admin_job_set_status_fn(job_id, "done")
+                    return
+
+                total = len(rows)
+                success_count = 0
+                failed_count = 0
+                total_added_messages = 0
+                admin_job_append_log_fn(job_id, f"读取到 {total} 个群聊，开始逐个增量更新")
+                for idx, row in enumerate(rows, start=1):
+                    current_chat_id = int(row["chat_id"])
+                    current_chat_title = str(row["chat_title"] or current_chat_id)
+                    try:
+                        before_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
+                        _admin_process_single_chat_update(
+                            job_id=job_id,
+                            client=client,
+                            get_conn_fn=get_conn_fn,
+                            admin_job_append_log_fn=admin_job_append_log_fn,
+                            chat_id=current_chat_id,
+                            chat_title=current_chat_title,
+                            idx=idx,
+                            total=total,
+                        )
+                        after_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
+                        added_count = max(0, after_count - before_count)
+                        total_added_messages += added_count
+                        success_count += 1
+                        admin_job_append_log_fn(
+                            job_id,
+                            f"[{idx}/{total}] {current_chat_title} 新增 {added_count} 条消息",
+                        )
+                    except Exception as chat_exc:
+                        failed_count += 1
+                        admin_job_append_log_fn(
+                            job_id,
+                            f"[{idx}/{total}] 更新失败：{current_chat_title} ({current_chat_id})，错误：{chat_exc}",
+                        )
+
+                admin_job_append_log_fn(
+                    job_id,
+                    f"全部群聊增量更新完成：成功 {success_count} 个，失败 {failed_count} 个，总计 {total} 个，本次共新增 {total_added_messages} 条消息",
+                )
+            else:
+                _admin_process_single_chat_update(
+                    job_id=job_id,
+                    client=client,
+                    get_conn_fn=get_conn_fn,
+                    admin_job_append_log_fn=admin_job_append_log_fn,
+                    chat_id=int(chat_id),
+                    chat_title=chat_title,
+                    idx=1,
+                    total=1,
+                )
         finally:
             client.disconnect()
         admin_job_set_status_fn(job_id, "done")
