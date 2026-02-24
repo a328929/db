@@ -662,11 +662,17 @@ def _admin_cleanup_job_runner(
                 verify_scope_sql = " AND m.chat_id = ?"
                 verify_scope_params = (chat_id,)
 
+            dedupe_scope_sql = ""
+            dedupe_scope_params: Tuple[Any, ...] = tuple()
+            if scope == "chat" and isinstance(chat_id, int):
+                dedupe_scope_sql = " AND da.chat_id = ?"
+                dedupe_scope_params = (chat_id,)
+
             _admin_job_append_log(job_id, "执行彻底性校验：关键字残留")
             cur.execute(
                 (
                     "SELECT COUNT(*) AS cnt FROM messages m "
-                    "WHERE COALESCE(m.content, '') LIKE ?"
+                    "WHERE COALESCE(m.content_norm, m.content, '') LIKE ?"
                     + verify_scope_sql
                 ),
                 (like_pattern, *verify_scope_params),
