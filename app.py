@@ -528,36 +528,6 @@ def _admin_cleanup_job_runner(
             if deleted_orphan_media > 0:
                 _admin_job_append_log(job_id, f"历史孤儿 message_media 清理行数：{deleted_orphan_media}")
 
-            dedupe_scope_sql = ""
-            dedupe_scope_params: Tuple[Any, ...] = tuple()
-            if scope == "chat" and isinstance(chat_id, int):
-                dedupe_scope_sql = " AND da.chat_id = ?"
-                dedupe_scope_params = (chat_id,)
-
-            # 历史数据可能存在无效 dedupe_actions（引用了已删除消息/群组），先做收敛清理避免误触发全量回滚。
-            cur.execute(
-                (
-                    "DELETE FROM dedupe_actions "
-                    "WHERE id IN ("
-                    "SELECT da.id FROM dedupe_actions da "
-                    "LEFT JOIN chats c ON c.chat_id = da.chat_id "
-                    "LEFT JOIN messages m ON m.pk = da.pk "
-                    "WHERE c.chat_id IS NULL "
-                    "OR m.pk IS NULL "
-                    "OR m.chat_id <> da.chat_id "
-                    "OR m.message_id <> da.message_id"
-                    + dedupe_scope_sql
-                    + ")"
-                ),
-                dedupe_scope_params,
-            )
-            deleted_invalid_dedupe_actions = int(cur.rowcount or 0)
-            if deleted_invalid_dedupe_actions > 0:
-                _admin_job_append_log(
-                    job_id,
-                    f"历史无效 dedupe_actions 清理行数：{deleted_invalid_dedupe_actions}",
-                )
-
             if target_count == 0:
                 conn.commit()
                 _admin_job_append_log(job_id, "未命中任何消息，无需清理")
