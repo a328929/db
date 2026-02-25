@@ -335,17 +335,41 @@ def _admin_cleanup_job_runner(
             )
 
             if mode == "empty_media":
+                # 1) 清理孤立空消息（无 grouped_id，且文本为空；可包含媒体或非媒体）。
                 target_insert_sql = (
                     """
                     INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
                     SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
                     FROM messages m
-                    WHERE m.has_media = 1
+                    WHERE m.grouped_id IS NULL
                       AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = ''
                     """
                     + scope_filter_sql
                 )
                 cur.execute(target_insert_sql, scope_filter_params)
+
+                # 2) 仅当整个媒体组都无文本时，才将该 grouped_id 全组纳入删除。
+                target_group_insert_sql = (
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    WHERE m.grouped_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM messages m2
+                          WHERE m2.chat_id = m.chat_id
+                            AND m2.grouped_id = m.grouped_id
+                            AND COALESCE(NULLIF(m2.content_norm, ''), NULLIF(m2.content, ''), '') <> ''
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM temp_cleanup_targets t
+                          WHERE t.chat_id = m.chat_id
+                            AND t.pk = m.pk
+                      )
+                    """
+                    + scope_filter_sql
+                )
+                cur.execute(target_group_insert_sql, scope_filter_params)
             else:
                 target_insert_sql = (
                     """
@@ -358,32 +382,32 @@ def _admin_cleanup_job_runner(
                 )
                 cur.execute(target_insert_sql, (like_pattern, *scope_filter_params))
 
-            # 关键词命中的消息如果属于媒体组，则级联纳入同组全部消息，避免仅删文案导致无文案媒体残留。
-            cur.execute("DROP TABLE IF EXISTS temp_cleanup_grouped_ids")
-            cur.execute(
-                """
-                CREATE TEMP TABLE temp_cleanup_grouped_ids AS
-                SELECT DISTINCT chat_id, grouped_id
-                FROM temp_cleanup_targets
-                WHERE grouped_id IS NOT NULL
-                """
-            )
-            cur.execute(
-                """
-                INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
-                SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
-                FROM messages m
-                JOIN temp_cleanup_grouped_ids g
-                  ON g.chat_id = m.chat_id
-                 AND g.grouped_id = m.grouped_id
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM temp_cleanup_targets t
-                    WHERE t.chat_id = m.chat_id
-                      AND t.pk = m.pk
+                # 关键词命中若属于媒体组，需级联纳入整组，避免残留无文案媒体。
+                cur.execute("DROP TABLE IF EXISTS temp_cleanup_grouped_ids")
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE temp_cleanup_grouped_ids AS
+                    SELECT DISTINCT chat_id, grouped_id
+                    FROM temp_cleanup_targets
+                    WHERE grouped_id IS NOT NULL
+                    """
                 )
-                """
-            )
+                cur.execute(
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    JOIN temp_cleanup_grouped_ids g
+                      ON g.chat_id = m.chat_id
+                     AND g.grouped_id = m.grouped_id
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM temp_cleanup_targets t
+                        WHERE t.chat_id = m.chat_id
+                          AND t.pk = m.pk
+                    )
+                    """
+                )
 
             cur.execute("SELECT COUNT(*) AS cnt FROM temp_cleanup_targets")
             target_count = int(cur.fetchone()["cnt"] or 0)
@@ -549,19 +573,28 @@ def _admin_cleanup_job_runner(
                 verify_scope_params = (chat_id,)
 
             if mode == "empty_media":
-                admin_job_append_log_fn(job_id, "执行彻底性校验：无文本媒体残留")
+                admin_job_append_log_fn(job_id, "执行彻底性校验：无文本消息残留")
                 cur.execute(
                     (
                         "SELECT COUNT(*) AS cnt FROM messages m "
-                        "WHERE m.has_media = 1 "
-                        "AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = ''"
+                        "WHERE ("
+                        "  (m.grouped_id IS NULL AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = '')"
+                        "  OR ("
+                        "    m.grouped_id IS NOT NULL AND NOT EXISTS ("
+                        "      SELECT 1 FROM messages m2 "
+                        "      WHERE m2.chat_id = m.chat_id "
+                        "        AND m2.grouped_id = m.grouped_id "
+                        "        AND COALESCE(NULLIF(m2.content_norm, ''), NULLIF(m2.content, ''), '') <> ''"
+                        "    )"
+                        "  )"
+                        ")"
                         + verify_scope_sql
                     ),
                     verify_scope_params,
                 )
                 remaining_matches = int(cur.fetchone()["cnt"] or 0)
                 if remaining_matches != 0:
-                    raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条无文本媒体消息")
+                    raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条无文本消息")
             else:
                 admin_job_append_log_fn(job_id, "执行彻底性校验：关键字残留")
                 cur.execute(
