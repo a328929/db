@@ -26,6 +26,7 @@ def register_admin_routes(
     admin_start_update_job_thread_fn: Callable[..., Any],
     admin_start_delete_job_thread_fn: Callable[..., Any],
     admin_start_cleanup_job_thread_fn: Callable[..., Any],
+    admin_start_cleanup_empty_job_thread_fn: Callable[..., Any],
     admin_make_job_log_handler_fn,
     admin_job_set_status_fn,
     admin_harvest_target_max_len: int,
@@ -346,5 +347,81 @@ def register_admin_routes(
                 "chat_id": chat_id,
                 "target_label": target_label,
                 "keyword": keyword,
+            },
+        })
+
+
+    @app.post("/api/admin/jobs/cleanup-empty")
+    def api_admin_job_create_cleanup_empty():
+        if not request.is_json:
+            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
+
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+
+        if admin_has_any_active_job_fn():
+            return jsonify({"ok": False, "error": "当前已有进行中的任务，请等待完成后再试"}), 409
+
+        raw_scope = data.get("scope", "")
+        scope = str(raw_scope or "").strip().lower()
+        if scope not in {"all", "chat"}:
+            return jsonify({"ok": False, "error": "scope 参数必须为 all 或 chat"}), 400
+
+        chat_id: Optional[int] = None
+        target_label = "全部数据"
+
+        if scope == "chat":
+            raw_chat_id = data.get("chat_id")
+            try:
+                chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+
+            try:
+                with closing(get_conn_fn()) as conn:
+                    chat_brief = admin_get_chat_brief_fn(conn, chat_id)
+            except sqlite3.Error:
+                logger.exception("读取群信息失败")
+                return jsonify({"ok": False, "error": "读取群信息失败"}), 500
+            except Exception:
+                logger.exception("系统异常")
+                return jsonify({"ok": False, "error": "系统异常"}), 500
+
+            if chat_brief is None:
+                return jsonify({"ok": False, "error": "chat_id 不存在"}), 404
+
+            target_label = str(chat_brief["chat_title"])
+
+        job = admin_job_create_fn("cleanup_empty", target_chat_id=chat_id, target_label=target_label)
+        job_id = str(job.get("job_id") or "")
+
+        admin_job_append_log_fn(job_id, "已接收无文本媒体清理请求")
+        scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
+        admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
+        chat_suffix = '' if chat_id is None else f' ({chat_id})'
+        admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
+        admin_start_cleanup_empty_job_thread_fn(
+            job_id=job_id,
+            scope=scope,
+            chat_id=chat_id,
+            target_label=target_label,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+            admin_job_append_log_fn=admin_job_append_log_fn,
+            has_fts_fn=has_fts_fn,
+        )
+
+        snapshot = admin_job_get_snapshot_fn(job_id)
+        if snapshot is None:
+            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+
+        return jsonify({
+            "ok": True,
+            "job": snapshot,
+            "request": {
+                "scope": scope,
+                "chat_id": chat_id,
+                "target_label": target_label,
             },
         })

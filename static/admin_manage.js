@@ -44,6 +44,7 @@
       deleteDataBtn: document.getElementById('admin-delete-data-btn'),
       logContainer: document.getElementById('admin-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-logs-btn'),
+      cleanupEmptyBtn: document.getElementById('admin-cleanup-empty-btn'),
       openCleanupDialogBtn: document.getElementById('admin-open-cleanup-dialog-btn'),
       cleanupDialog: document.getElementById('admin-cleanup-dialog'),
       cleanupInput: document.getElementById('admin-cleanup-input'),
@@ -66,6 +67,7 @@
       'deleteDataBtn',
       'logContainer',
       'clearLogsBtn',
+      'cleanupEmptyBtn',
       'openCleanupDialogBtn',
       'cleanupDialog',
       'cleanupInput',
@@ -121,6 +123,10 @@
 
     elements.deleteDataBtn.addEventListener('click', function () {
       handleDeleteDataClick(elements);
+    });
+
+    elements.cleanupEmptyBtn.addEventListener('click', function () {
+      handleCleanupEmptyClick(elements);
     });
 
     elements.openCleanupDialogBtn.addEventListener('click', function () {
@@ -570,6 +576,55 @@
     }
   }
 
+
+  async function handleCleanupEmptyClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (target.isNone) {
+      appendLog(elements, '请选择“全部”或某一个群组后再执行无文本媒体清理');
+      return;
+    }
+
+    var scopeLabel = target.isAll ? '全部数据' : (target.label || target.chatId);
+    var confirmText = '确认执行无文本媒体清理？范围：' + scopeLabel + '。';
+    if (!window.confirm(confirmText)) {
+      appendLog(elements, '已取消无文本媒体清理操作');
+      return;
+    }
+
+    var requestPayload = {
+      scope: target.isAll ? 'all' : 'chat'
+    };
+
+    if (!target.isAll) {
+      var chatIdNumber = Number(target.chatId);
+      if (!Number.isFinite(chatIdNumber) || !Number.isInteger(chatIdNumber)) {
+        appendLog(elements, '创建无文本媒体清理任务失败：chat_id 参数非法');
+        return;
+      }
+      requestPayload.chat_id = chatIdNumber;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/cleanup-empty', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify(requestPayload)
+      });
+      var job = payload && payload.job ? payload.job : null;
+      var jobId = job && job.job_id ? String(job.job_id) : '';
+      if (!jobId) {
+        throw new Error('任务创建成功但缺少 job_id');
+      }
+
+      appendLog(elements, '无文本媒体清理任务已创建：' + jobId + '，范围：' + scopeLabel);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建无文本媒体清理任务失败：' + error.message);
+    }
+  }
+
   async function handleStartUpdateClick(elements) {
     var target = getCurrentTargetInfo(elements);
     if (!target.isChat && !target.isAll) {
@@ -904,6 +959,7 @@
     elements.deleteDataBtn.hidden = !hasChatTarget;
     elements.startUpdateBtn.hidden = (!hasChatTarget && !hasAllTarget) || (hasChatTarget && !elements.incrementalCheckbox.checked);
     elements.startUpdateBtn.textContent = hasAllTarget ? '增量更新全部群聊' : '增量更新当前群聊';
+    elements.cleanupEmptyBtn.hidden = !hasSelectedTarget;
     elements.openCleanupDialogBtn.hidden = !hasSelectedTarget;
 
     setAdminControlsBusy(elements, jobPollState.isPolling);
@@ -926,6 +982,7 @@
     setElementDisabled(elements.incrementalCheckbox, disabled);
     setElementDisabled(elements.startUpdateBtn, disabled);
     setElementDisabled(elements.deleteDataBtn, disabled);
+    setElementDisabled(elements.cleanupEmptyBtn, disabled);
     setElementDisabled(elements.openCleanupDialogBtn, disabled);
     setElementDisabled(elements.cleanupConfirmBtn, disabled);
     setElementDisabled(elements.openAddDialogBtn, disabled);
