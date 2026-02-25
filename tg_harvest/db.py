@@ -236,6 +236,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_sender ON messages(chat_id, sender_id, msg_date_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_type_date ON messages(chat_id, msg_type, msg_date_ts DESC)")
     cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_score ON messages(chat_id, promo_score DESC, msg_date_ts DESC)")
+    cur.execute("CREATE INDEX IF NOT EXISTS idx_messages_date_global ON messages(msg_date_ts DESC)")
 
 
 def _create_media_indexes(cur: sqlite3.Cursor):
@@ -419,14 +420,14 @@ def _apply_core_pragmas(cur: sqlite3.Cursor):
     cur.execute("PRAGMA synchronous=NORMAL;")
     cur.execute("PRAGMA temp_store=MEMORY;")
     cur.execute("PRAGMA foreign_keys=ON;")
-    cur.execute("PRAGMA cache_size=-64000;")  # ~64MB
+    cur.execute("PRAGMA cache_size=-262144;")  # ~256MB
     cur.execute("PRAGMA busy_timeout=10000;")  # 10s (Web端并发关键)
     cur.execute("PRAGMA wal_autocheckpoint=1000;")  # 稍微频繁一点 checkpoint
 
 
 def _apply_optional_pragmas(cur: sqlite3.Cursor):
     try:
-        cur.execute("PRAGMA mmap_size=268435456;")  # 256MB
+        cur.execute("PRAGMA mmap_size=1073741824;")  # 1GB
     except Exception:
         pass
     try:

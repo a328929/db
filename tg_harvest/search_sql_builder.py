@@ -19,6 +19,7 @@ def _build_search_query_spec(
 
     has_text_filter = False
     match_query = to_fts_match_fn(params.raw_query)
+    actual_from_sql = from_sql
 
     if force_like:
         like_clause, like_params = _build_like_logic_clause(params.raw_query, tokenize_query_fn)
@@ -28,7 +29,11 @@ def _build_search_query_spec(
             has_text_filter = True
     else:
         if match_query and fts_enabled:
-            where_parts.append("m.pk IN (SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?)")
+            actual_from_sql = from_sql.replace(
+                "FROM messages m",
+                "FROM messages_fts fts JOIN messages m ON m.pk = fts.rowid",
+            )
+            where_parts.append("fts.messages_fts MATCH ?")
             sql_params.append(match_query)
             has_text_filter = True
         else:
@@ -42,11 +47,12 @@ def _build_search_query_spec(
     where_sql = " AND ".join(where_parts)
 
     order_expr, effective_sort, effective_order = _choose_sort(params.search_type, params.sort_by_req, params.order_req)
-    count_sql = f"SELECT COUNT(*) AS c FROM (SELECT m.pk {from_sql} WHERE {where_sql} LIMIT ?)"
+    count_from_sql = actual_from_sql.split("LEFT JOIN")[0]
+    count_sql = f"SELECT COUNT(*) AS c FROM (SELECT m.pk {count_from_sql} WHERE {where_sql} LIMIT ?)"
     query_sql = f"""
         SELECT m.pk,m.chat_id,c.chat_title,m.message_id,m.msg_date_text,m.msg_date_ts,m.msg_type,m.link,m.content,m.grouped_id,
                mm.file_name,mm.file_size,mm.mime_type,mm.media_kind
-        {from_sql}
+        {actual_from_sql}
         WHERE {where_sql}
         ORDER BY {order_expr} {effective_order}, m.msg_date_ts {effective_order}, m.pk {effective_order}
         LIMIT ? OFFSET ?
