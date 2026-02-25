@@ -101,8 +101,11 @@ ON CONFLICT(chat_id, grouped_id) DO UPDATE SET
 
 def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
     cur = conn.cursor()
-    cur.execute("SELECT COALESCE(MAX(message_id), 0) AS m FROM messages WHERE chat_id=?", (chat_id,))
-    return int(cur.fetchone()["m"])
+    try:
+        cur.execute("SELECT COALESCE(MAX(message_id), 0) AS m FROM messages WHERE chat_id=?", (chat_id,))
+        return int(cur.fetchone()["m"])
+    finally:
+        cur.close()
 
 
 def upsert_chat(conn: sqlite3.Connection, row: tuple):
@@ -272,17 +275,20 @@ def refresh_media_groups_for_chat(conn: sqlite3.Connection, chat_id: int, cfg: A
 
 def get_chat_stats(conn: sqlite3.Connection, chat_id: int) -> Dict[str, int]:
     cur = conn.cursor()
-    out = {}
-    for key, sql in {
-        "total_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=?",
-        "media_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND has_media=1",
-        "promo_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1",
-        "promo_dedupe_eligible_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=1",
-        "promo_guarded_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=0",
-        "media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=?",
-        "promo_media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=? AND is_promo=1",
-        "guarded_media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=0",
-    }.items():
-        cur.execute(sql, (chat_id,))
-        out[key] = int(cur.fetchone()["c"] or 0)
-    return out
+    try:
+        out = {}
+        for key, sql in {
+            "total_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=?",
+            "media_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND has_media=1",
+            "promo_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1",
+            "promo_dedupe_eligible_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=1",
+            "promo_guarded_messages": "SELECT COUNT(*) AS c FROM messages WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=0",
+            "media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=?",
+            "promo_media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=? AND is_promo=1",
+            "guarded_media_groups": "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id=? AND is_promo=1 AND dedupe_eligible=0",
+        }.items():
+            cur.execute(sql, (chat_id,))
+            out[key] = int(cur.fetchone()["c"] or 0)
+        return out
+    finally:
+        cur.close()
