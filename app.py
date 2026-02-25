@@ -16,6 +16,7 @@ from tg_harvest.admin_jobs_runners import (
     _admin_start_update_job_thread,
     _admin_start_delete_job_thread,
     _admin_start_cleanup_job_thread,
+    _admin_start_cleanup_empty_job_thread,
 )
 from tg_harvest.admin_jobs_core import (
     _admin_create_chat_job_if_absent,
@@ -205,6 +206,7 @@ def create_app() -> Flask:
         admin_start_update_job_thread_fn=_admin_start_update_job_thread,
         admin_start_delete_job_thread_fn=_admin_start_delete_job_thread,
         admin_start_cleanup_job_thread_fn=_admin_start_cleanup_job_thread,
+        admin_start_cleanup_empty_job_thread_fn=_admin_start_cleanup_empty_job_thread,
         admin_make_job_log_handler_fn=_admin_make_job_log_handler,
         admin_job_set_status_fn=_admin_job_set_status,
         admin_harvest_target_max_len=ADMIN_HARVEST_TARGET_MAX_LEN,

@@ -292,12 +292,18 @@ def _admin_cleanup_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
     has_fts_fn: Callable[[Any], bool],
+    cleanup_mode: str = "keyword",
 ) -> None:
     scope_label = "当前群组" if scope == "chat" and isinstance(chat_id, int) else "全部数据"
+    mode = (cleanup_mode or "keyword").strip().lower()
+    if mode not in {"keyword", "empty_media"}:
+        mode = "keyword"
+    mode_label = "垃圾清理" if mode == "keyword" else "无文本媒体清理"
+
     conn: Optional[sqlite3.Connection] = None
     try:
         admin_job_set_status_fn(job_id, "running")
-        admin_job_append_log_fn(job_id, f"开始垃圾清理任务：范围={scope_label}，目标={target_label}")
+        admin_job_append_log_fn(job_id, f"开始{mode_label}任务：范围={scope_label}，目标={target_label}")
 
         like_pattern = f"%{keyword}%"
         scope_filter_sql = ""
@@ -328,16 +334,80 @@ def _admin_cleanup_job_runner(
                 """
             )
 
-            target_insert_sql = (
-                """
-                INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
-                SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
-                FROM messages m
-                WHERE COALESCE(m.content_norm, m.content, '') LIKE ?
-                """
-                + scope_filter_sql
-            )
-            cur.execute(target_insert_sql, (like_pattern, *scope_filter_params))
+            if mode == "empty_media":
+                # 1) 清理孤立空消息（无 grouped_id，且文本为空；可包含媒体或非媒体）。
+                target_insert_sql = (
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    WHERE m.grouped_id IS NULL
+                      AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = ''
+                    """
+                    + scope_filter_sql
+                )
+                cur.execute(target_insert_sql, scope_filter_params)
+
+                # 2) 仅当整个媒体组都无文本时，才将该 grouped_id 全组纳入删除。
+                target_group_insert_sql = (
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    WHERE m.grouped_id IS NOT NULL
+                      AND NOT EXISTS (
+                          SELECT 1 FROM messages m2
+                          WHERE m2.chat_id = m.chat_id
+                            AND m2.grouped_id = m.grouped_id
+                            AND COALESCE(NULLIF(m2.content_norm, ''), NULLIF(m2.content, ''), '') <> ''
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM temp_cleanup_targets t
+                          WHERE t.chat_id = m.chat_id
+                            AND t.pk = m.pk
+                      )
+                    """
+                    + scope_filter_sql
+                )
+                cur.execute(target_group_insert_sql, scope_filter_params)
+            else:
+                target_insert_sql = (
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    WHERE COALESCE(m.content_norm, m.content, '') LIKE ?
+                    """
+                    + scope_filter_sql
+                )
+                cur.execute(target_insert_sql, (like_pattern, *scope_filter_params))
+
+                # 关键词命中若属于媒体组，需级联纳入整组，避免残留无文案媒体。
+                cur.execute("DROP TABLE IF EXISTS temp_cleanup_grouped_ids")
+                cur.execute(
+                    """
+                    CREATE TEMP TABLE temp_cleanup_grouped_ids AS
+                    SELECT DISTINCT chat_id, grouped_id
+                    FROM temp_cleanup_targets
+                    WHERE grouped_id IS NOT NULL
+                    """
+                )
+                cur.execute(
+                    """
+                    INSERT INTO temp_cleanup_targets (chat_id, pk, message_id, grouped_id)
+                    SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
+                    FROM messages m
+                    JOIN temp_cleanup_grouped_ids g
+                      ON g.chat_id = m.chat_id
+                     AND g.grouped_id = m.grouped_id
+                    WHERE NOT EXISTS (
+                        SELECT 1
+                        FROM temp_cleanup_targets t
+                        WHERE t.chat_id = m.chat_id
+                          AND t.pk = m.pk
+                    )
+                    """
+                )
 
             cur.execute("SELECT COUNT(*) AS cnt FROM temp_cleanup_targets")
             target_count = int(cur.fetchone()["cnt"] or 0)
@@ -502,18 +572,42 @@ def _admin_cleanup_job_runner(
                 verify_scope_sql = " AND m.chat_id = ?"
                 verify_scope_params = (chat_id,)
 
-            admin_job_append_log_fn(job_id, "执行彻底性校验：关键字残留")
-            cur.execute(
-                (
-                    "SELECT COUNT(*) AS cnt FROM messages m "
-                    "WHERE COALESCE(m.content_norm, m.content, '') LIKE ?"
-                    + verify_scope_sql
-                ),
-                (like_pattern, *verify_scope_params),
-            )
-            remaining_matches = int(cur.fetchone()["cnt"] or 0)
-            if remaining_matches != 0:
-                raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条关键字命中消息")
+            if mode == "empty_media":
+                admin_job_append_log_fn(job_id, "执行彻底性校验：无文本消息残留")
+                cur.execute(
+                    (
+                        "SELECT COUNT(*) AS cnt FROM messages m "
+                        "WHERE ("
+                        "  (m.grouped_id IS NULL AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = '')"
+                        "  OR ("
+                        "    m.grouped_id IS NOT NULL AND NOT EXISTS ("
+                        "      SELECT 1 FROM messages m2 "
+                        "      WHERE m2.chat_id = m.chat_id "
+                        "        AND m2.grouped_id = m.grouped_id "
+                        "        AND COALESCE(NULLIF(m2.content_norm, ''), NULLIF(m2.content, ''), '') <> ''"
+                        "    )"
+                        "  )"
+                        ")"
+                        + verify_scope_sql
+                    ),
+                    verify_scope_params,
+                )
+                remaining_matches = int(cur.fetchone()["cnt"] or 0)
+                if remaining_matches != 0:
+                    raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条无文本消息")
+            else:
+                admin_job_append_log_fn(job_id, "执行彻底性校验：关键字残留")
+                cur.execute(
+                    (
+                        "SELECT COUNT(*) AS cnt FROM messages m "
+                        "WHERE COALESCE(m.content_norm, m.content, '') LIKE ?"
+                        + verify_scope_sql
+                    ),
+                    (like_pattern, *verify_scope_params),
+                )
+                remaining_matches = int(cur.fetchone()["cnt"] or 0)
+                if remaining_matches != 0:
+                    raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条关键字命中消息")
 
             admin_job_append_log_fn(job_id, "执行彻底性校验：消息媒体关联孤儿")
             cur.execute(
@@ -640,7 +734,7 @@ def _admin_cleanup_job_runner(
             conn.commit()
             admin_job_append_log_fn(
                 job_id,
-                f"垃圾清理完成：消息记录 {deleted_messages}，消息媒体关联 {deleted_media}，"
+                f"{mode_label}完成：命中待清理消息 {target_count}，消息记录 {deleted_messages}，消息媒体关联 {deleted_media}，"
                 f"去重动作记录 {deleted_actions}，媒体分组 {deleted_groups}，群组记录 {deleted_empty_chats}",
             )
             admin_job_set_status_fn(job_id, "done")
@@ -650,10 +744,10 @@ def _admin_cleanup_job_runner(
         if conn is not None:
             try:
                 conn.rollback()
-                admin_job_append_log_fn(job_id, "垃圾清理失败，事务已回滚")
+                admin_job_append_log_fn(job_id, f"{mode_label}失败，事务已回滚")
             except Exception as rollback_exc:
-                admin_job_append_log_fn(job_id, f"垃圾清理失败，回滚异常：{rollback_exc}")
-        admin_job_append_log_fn(job_id, f"垃圾清理任务执行失败：{exc}")
+                admin_job_append_log_fn(job_id, f"{mode_label}失败，回滚异常：{rollback_exc}")
+        admin_job_append_log_fn(job_id, f"{mode_label}任务执行失败：{exc}")
         admin_job_set_status_fn(job_id, "error")
     finally:
         if conn is not None:
@@ -757,6 +851,34 @@ def _admin_start_cleanup_job_thread(
             "admin_job_set_status_fn": admin_job_set_status_fn,
             "admin_job_append_log_fn": admin_job_append_log_fn,
             "has_fts_fn": has_fts_fn,
+            "cleanup_mode": "keyword",
+        },
+        daemon=True,
+    )
+    worker.start()
+    return worker
+
+
+def _admin_start_cleanup_empty_job_thread(
+    job_id: str,
+    scope: str,
+    chat_id: Optional[int],
+    target_label: str,
+    *,
+    get_conn_fn: Callable[[], Any],
+    admin_job_set_status_fn: Callable[[str, str], bool],
+    admin_job_append_log_fn: Callable[[str, str], Any],
+    has_fts_fn: Callable[[Any], bool],
+) -> threading.Thread:
+    worker = threading.Thread(
+        target=_admin_cleanup_job_runner,
+        args=(job_id, "", scope, chat_id, target_label),
+        kwargs={
+            "get_conn_fn": get_conn_fn,
+            "admin_job_set_status_fn": admin_job_set_status_fn,
+            "admin_job_append_log_fn": admin_job_append_log_fn,
+            "has_fts_fn": has_fts_fn,
+            "cleanup_mode": "empty_media",
         },
         daemon=True,
     )
