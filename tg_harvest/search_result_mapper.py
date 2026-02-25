@@ -24,15 +24,27 @@ def build_result_title(row: sqlite3.Row) -> str:
     return TYPE_FALLBACK_TITLE.get(mt, "[无文本内容]")
 
 
-def _build_search_display_fields(row: sqlite3.Row) -> Dict[str, Any]:
-    return {
-        "content": row["content"] or "",
+def _build_snippet(row: sqlite3.Row, max_len: int = 120) -> str:
+    content = (row["content"] or "").strip()
+    if not content:
+        return ""
+    if len(content) <= max_len:
+        return content
+    return f"{content[:max_len]}…"
+
+
+def _build_search_display_fields(row: sqlite3.Row, detail_level: str = "lite") -> Dict[str, Any]:
+    fields = {
         "file_name": row["file_name"] or "",
         "title": build_result_title(row),
+        "snippet": _build_snippet(row),
     }
+    if detail_level == "full":
+        fields["content"] = row["content"] or ""
+    return fields
 
 
-def _map_search_row(row: sqlite3.Row) -> Dict[str, Any]:
+def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> Dict[str, Any]:
     file_size = int(row["file_size"]) if row["file_size"] is not None else None
     item = {
         "pk": int(row["pk"]),
@@ -44,12 +56,12 @@ def _map_search_row(row: sqlite3.Row) -> Dict[str, Any]:
         "link": row["link"] or "",
         "file_size": file_size,
     }
-    item.update(_build_search_display_fields(row))
+    item.update(_build_search_display_fields(row, detail_level=detail_level))
     return item
 
 
-def _map_search_items(rows: List[sqlite3.Row]) -> List[Dict[str, Any]]:
+def _map_search_items(rows: List[sqlite3.Row], detail_level: str = "lite") -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for row in rows:
-        items.append(_map_search_row(row))
+        items.append(_map_search_row(row, detail_level=detail_level))
     return items

@@ -10,6 +10,7 @@ from flask import Flask
 from tg_harvest.config import CFG
 from tg_harvest.search_params import _parse_search_params
 from tg_harvest.search_service import _search_payload_service
+from tg_harvest.harvest_parse import setup_logging
 from tg_harvest.admin_jobs_runners import (
     _admin_start_harvest_job_thread,
     _admin_start_update_job_thread,
@@ -36,15 +37,7 @@ from tg_harvest.routes_registry import register_all_routes
 logger = logging.getLogger(__name__)
 
 
-def _init_logging() -> None:
-    root_logger = logging.getLogger()
-    if not root_logger.handlers:
-        logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-        logging.getLogger("telethon").setLevel(logging.WARNING)
-        logging.getLogger("werkzeug").setLevel(logging.WARNING)
-
-
-_init_logging()
+setup_logging()
 
 DB_PATH_STR = resolve_db_path_lib(os.getenv("TG_DB_NAME", "tg_data.db"))
 DB_PATH = Path(DB_PATH_STR)
