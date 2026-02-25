@@ -106,7 +106,7 @@
       els.scopeSelect.value = "all";
     }
 
-    setStatus("结果区域为空，点击“搜索”后显示结果。");
+    setStatus("输入关键词后开始搜索。");
   }
 
   function _handleMetaFailure(err) {
