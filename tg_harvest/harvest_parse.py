@@ -185,30 +185,52 @@ def _finalize_media_meta(out: Dict[str, Any], extra: Dict[str, Any]):
     )
 
 
-def resolve_target_entity(client: Any, target: str):
+def _parse_target_identifier(target: str) -> tuple[str, bool]:
     t = (target or "").strip()
-    try:
-        cleaned = t.replace("https://t.me/", "").replace("http://t.me/", "").strip("/")
-        if cleaned.startswith("@"):
-            cleaned = cleaned.lstrip("@")
-        if cleaned and (cleaned != t or t.startswith("@") or re.fullmatch(r"-?\d+", t)):
-            return client.get_entity(cleaned)
-    except Exception:
-        pass
+    cleaned = t.replace("https://t.me/", "").replace("http://t.me/", "").strip("/")
+    if cleaned.startswith("@"):
+        cleaned = cleaned.lstrip("@")
+    explicit_identifier = bool(cleaned and (cleaned != t or t.startswith("@") or re.fullmatch(r"-?\d+", t)))
+    return cleaned, explicit_identifier
+
+
+def resolve_target_entities(client: Any, target: str) -> List[Any]:
+    t = (target or "").strip()
+    if not t:
+        return []
 
     try:
-        exact_match = None
+        cleaned, explicit_identifier = _parse_target_identifier(t)
+        if explicit_identifier:
+            entity = client.get_entity(cleaned)
+            return [entity] if entity is not None else []
+    except Exception:
+        return []
+
+    try:
+        exact_matches: List[Any] = []
         partial_match = None
         for d in client.get_dialogs():
             title = (d.title or "")
             if title.strip() == t:
-                exact_match = d.entity
-                break
+                exact_matches.append(d.entity)
+                continue
             if t and partial_match is None and t in title:
                 partial_match = d.entity
-        return exact_match or partial_match
+
+        if len(exact_matches) > 1:
+            logging.info("发现多个同名群组/频道（target=%s, count=%s），将全部纳入导入", t, len(exact_matches))
+            return exact_matches
+        if len(exact_matches) == 1:
+            return [exact_matches[0]]
+        return [partial_match] if partial_match is not None else []
     except Exception:
-        return None
+        return []
+
+
+def resolve_target_entity(client: Any, target: str):
+    entities = resolve_target_entities(client, target)
+    return entities[0] if entities else None
 
 
 def build_msg_link(entity, msg_id: int) -> str:
