@@ -317,7 +317,8 @@ def register_admin_routes(
         job_id = str(job.get("job_id") or "")
 
         admin_job_append_log_fn(job_id, "已接收垃圾清理请求")
-        admin_job_append_log_fn(job_id, f"作用范围：{scope}")
+        scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
+        admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
         chat_suffix = '' if chat_id is None else f' ({chat_id})'
         admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
         admin_job_append_log_fn(job_id, f"关键字：{keyword}")

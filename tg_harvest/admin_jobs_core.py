@@ -12,6 +12,12 @@ ADMIN_JOB_LOG_MAX_LINES = 200
 ADMIN_JOB_MAX_COUNT = 100
 ADMIN_JOB_ALLOWED_STATUSES = {"queued", "running", "done", "error"}
 ADMIN_PROGRESS_LOG_STEP_FALLBACK = 1000
+ADMIN_JOB_STATUS_DISPLAY_MAP = {
+    "queued": "排队中",
+    "running": "执行中",
+    "done": "完成",
+    "error": "失败",
+}
 
 
 class _AdminJobThreadLogHandler(logging.Handler):
@@ -253,7 +259,8 @@ def _admin_job_update_progress(
             should_log = False
 
     if should_log and log_message:
-        stage_prefix = f"[{progress_stage}] " if progress_stage else ""
+        stage_display = ADMIN_JOB_STATUS_DISPLAY_MAP.get(progress_stage, progress_stage)
+        stage_prefix = f"[{stage_display}] " if stage_display else ""
         _admin_job_append_log(job_id, f"{stage_prefix}{log_message}")
     return True
 

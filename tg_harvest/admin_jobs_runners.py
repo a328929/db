@@ -25,7 +25,7 @@ def _admin_harvest_job_runner(
     root_logger.addHandler(job_log_handler)
     try:
         admin_job_set_status_fn(job_id, "running")
-        admin_job_append_log_fn(job_id, f"开始抓取目标：{target}")
+        admin_job_append_log_fn(job_id, f"开始新增数据采集：目标={target}")
         asyncio.set_event_loop(asyncio.new_event_loop())
         client = TelegramClient(cfg.session_name, cfg.api_id, cfg.api_hash)
         client.connect()
@@ -42,7 +42,7 @@ def _admin_harvest_job_runner(
                 return
 
             entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(target)
-            admin_job_append_log_fn(job_id, f"成功解析目标：{entity_title}")
+            admin_job_append_log_fn(job_id, f"目标解析成功：目标名称={entity_title}")
             conn = get_conn_fn()
             try:
                 _process_entity(conn, client, entity, idx=1, total=1)
@@ -52,7 +52,7 @@ def _admin_harvest_job_runner(
             client.disconnect()
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
-        admin_job_append_log_fn(job_id, f"抓取失败：{exc}")
+        admin_job_append_log_fn(job_id, f"新增数据采集失败：{exc}")
         admin_job_set_status_fn(job_id, "error")
     finally:
         root_logger.removeHandler(job_log_handler)
@@ -74,7 +74,7 @@ def _admin_process_single_chat_update(
 
     entity = client.get_entity(chat_id)
     entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(chat_id)
-    admin_job_append_log_fn(job_id, f"[{idx}/{total}] 成功连接并获取实体：{entity_title}")
+    admin_job_append_log_fn(job_id, f"[{idx}/{total}] 群组连接成功：名称={entity_title}，群组ID={chat_id}")
 
     conn = get_conn_fn()
     try:
@@ -120,9 +120,9 @@ def _admin_update_job_runner(
         mode_label = "增量" if incremental else "全量"
         is_all_scope = isinstance(chat_id, str) and chat_id.strip().lower() == "all"
         if is_all_scope:
-            admin_job_append_log_fn(job_id, f"开始{mode_label}更新：全部群聊")
+            admin_job_append_log_fn(job_id, f"开始新增数据采集：模式={mode_label}，范围=全部群组")
         else:
-            admin_job_append_log_fn(job_id, f"开始{mode_label}更新：{chat_title} ({chat_id})")
+            admin_job_append_log_fn(job_id, f"开始新增数据采集：模式={mode_label}，目标群组={chat_title}，群组ID={chat_id}")
 
         asyncio.set_event_loop(asyncio.new_event_loop())
         client = TelegramClient(cfg.session_name, cfg.api_id, cfg.api_hash)
@@ -157,7 +157,7 @@ def _admin_update_job_runner(
                 success_count = 0
                 failed_count = 0
                 total_added_messages = 0
-                admin_job_append_log_fn(job_id, f"读取到 {total} 个群聊，开始逐个增量更新")
+                admin_job_append_log_fn(job_id, f"读取到 {total} 个群组，开始逐个执行增量采集")
                 for idx, row in enumerate(rows, start=1):
                     current_chat_id = int(row["chat_id"])
                     current_chat_title = str(row["chat_title"] or current_chat_id)
@@ -185,12 +185,12 @@ def _admin_update_job_runner(
                         failed_count += 1
                         admin_job_append_log_fn(
                             job_id,
-                            f"[{idx}/{total}] 更新失败：{current_chat_title} ({current_chat_id})，错误：{chat_exc}",
+                            f"[{idx}/{total}] 增量采集失败：群组={current_chat_title}，群组ID={current_chat_id}，错误={chat_exc}",
                         )
 
                 admin_job_append_log_fn(
                     job_id,
-                    f"全部群聊增量更新完成：成功 {success_count} 个，失败 {failed_count} 个，总计 {total} 个，本次共新增 {total_added_messages} 条消息",
+                    f"全部群组增量采集完成：成功 {success_count} 个，失败 {failed_count} 个，总计 {total} 个，本次共新增 {total_added_messages} 条消息",
                 )
             else:
                 _admin_process_single_chat_update(
@@ -207,7 +207,7 @@ def _admin_update_job_runner(
             client.disconnect()
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
-        admin_job_append_log_fn(job_id, f"更新失败：{exc}")
+        admin_job_append_log_fn(job_id, f"新增数据采集失败：{exc}")
         admin_job_set_status_fn(job_id, "error")
     finally:
         root_logger.removeHandler(job_log_handler)
@@ -226,7 +226,7 @@ def _admin_delete_job_runner(
     conn = None
     try:
         admin_job_set_status_fn(job_id, "running")
-        admin_job_append_log_fn(job_id, f"开始删除目标：{chat_title} ({chat_id})")
+        admin_job_append_log_fn(job_id, f"开始删除数据：目标={chat_title}，群组ID={chat_id}")
 
         conn = get_conn_fn()
         cur = conn.cursor()
@@ -243,22 +243,22 @@ def _admin_delete_job_runner(
             cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
             admin_job_append_log_fn(job_id, "清理关联表数据完成")
 
-            admin_job_append_log_fn(job_id, "删除 messages 表数据")
+            admin_job_append_log_fn(job_id, "删除消息记录数据")
             cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
             deleted_messages = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"messages 删除行数：{deleted_messages}")
+            admin_job_append_log_fn(job_id, f"消息记录删除行数：{deleted_messages}")
 
-            admin_job_append_log_fn(job_id, "删除 chats 表记录")
+            admin_job_append_log_fn(job_id, "删除群组记录")
             cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
             deleted_chats = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"chats 删除行数：{deleted_chats}")
+            admin_job_append_log_fn(job_id, f"群组记录删除行数：{deleted_chats}")
 
             if deleted_chats != 1:
-                raise RuntimeError(f"chats 删除异常，预期 1 行，实际 {deleted_chats} 行")
+                raise RuntimeError(f"群组记录删除异常，预期 1 行，实际 {deleted_chats} 行")
 
             conn.commit()
             admin_job_append_log_fn(job_id, "事务已提交")
-            admin_job_append_log_fn(job_id, f"删除完成：消息 {deleted_messages} 条，chat 记录删除 {deleted_chats} 条")
+            admin_job_append_log_fn(job_id, f"删除完成：消息 {deleted_messages} 条，群组记录删除 {deleted_chats} 条")
             admin_job_set_status_fn(job_id, "done")
         finally:
             cur.close()
@@ -289,10 +289,11 @@ def _admin_cleanup_job_runner(
     admin_job_append_log_fn: Callable[[str, str], Any],
     has_fts_fn: Callable[[Any], bool],
 ) -> None:
+    scope_label = "当前群组" if scope == "chat" and isinstance(chat_id, int) else "全部数据"
     conn: Optional[sqlite3.Connection] = None
     try:
         admin_job_set_status_fn(job_id, "running")
-        admin_job_append_log_fn(job_id, f"开始垃圾清理任务：范围={scope} 目标={target_label}")
+        admin_job_append_log_fn(job_id, f"开始垃圾清理任务：范围={scope_label}，目标={target_label}")
 
         like_pattern = f"%{keyword}%"
         scope_filter_sql = ""
@@ -361,7 +362,7 @@ def _admin_cleanup_job_runner(
             )
             deleted_orphan_media = int(cur.rowcount or 0)
             if deleted_orphan_media > 0:
-                admin_job_append_log_fn(job_id, f"历史孤儿 message_media 清理行数：{deleted_orphan_media}")
+                admin_job_append_log_fn(job_id, f"历史孤立媒体关联记录清理行数：{deleted_orphan_media}")
 
             if target_count == 0:
                 conn.commit()
@@ -381,7 +382,7 @@ def _admin_cleanup_job_runner(
                 """
             )
             deleted_actions = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"dedupe_actions 删除行数：{deleted_actions}")
+            admin_job_append_log_fn(job_id, f"去重动作记录删除行数：{deleted_actions}")
 
             cur.execute(
                 """
@@ -395,7 +396,7 @@ def _admin_cleanup_job_runner(
                 """
             )
             deleted_media = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"message_media 删除行数：{deleted_media}")
+            admin_job_append_log_fn(job_id, f"消息媒体关联删除行数：{deleted_media}")
 
             cur.execute(
                 """
@@ -404,7 +405,7 @@ def _admin_cleanup_job_runner(
                 """
             )
             deleted_messages = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"messages 删除行数：{deleted_messages}")
+            admin_job_append_log_fn(job_id, f"消息记录删除行数：{deleted_messages}")
 
             media_group_scope_sql = ""
             media_group_scope_params: Tuple[Any, ...] = tuple()
@@ -434,7 +435,7 @@ def _admin_cleanup_job_runner(
                 media_group_scope_params,
             )
             deleted_groups = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"media_groups 清理行数：{deleted_groups}")
+            admin_job_append_log_fn(job_id, f"媒体分组清理行数：{deleted_groups}")
 
             cur.execute("DROP TABLE IF EXISTS temp_cleanup_empty_chats")
             cur.execute("CREATE TEMP TABLE temp_cleanup_empty_chats (chat_id INTEGER PRIMARY KEY)")
@@ -483,12 +484,12 @@ def _admin_cleanup_job_runner(
             deleted_empty_chats = int(cur.rowcount or 0)
             admin_job_append_log_fn(
                 job_id,
-                "空 chat 清理："
-                f"dedupe_actions {deleted_actions_empty_chat} 行，"
-                f"message_media {deleted_media_empty_chat} 行，"
-                f"dedupe_runs {deleted_runs_empty_chat} 行，"
-                f"media_groups {deleted_groups_empty_chat} 行，"
-                f"chats {deleted_empty_chats} 行",
+                "空群组清理："
+                f"去重动作记录 {deleted_actions_empty_chat} 行，"
+                f"消息媒体关联 {deleted_media_empty_chat} 行，"
+                f"去重任务记录 {deleted_runs_empty_chat} 行，"
+                f"媒体分组 {deleted_groups_empty_chat} 行，"
+                f"群组记录 {deleted_empty_chats} 行",
             )
 
             verify_scope_sql = ""
@@ -508,9 +509,9 @@ def _admin_cleanup_job_runner(
             )
             remaining_matches = int(cur.fetchone()["cnt"] or 0)
             if remaining_matches != 0:
-                raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条 content LIKE 命中消息")
+                raise RuntimeError(f"清理校验失败：仍存在 {remaining_matches} 条关键字命中消息")
 
-            admin_job_append_log_fn(job_id, "执行彻底性校验：message_media 孤儿")
+            admin_job_append_log_fn(job_id, "执行彻底性校验：消息媒体关联孤儿")
             cur.execute(
                 (
                     "SELECT COUNT(*) AS cnt FROM message_media mm "
@@ -522,7 +523,7 @@ def _admin_cleanup_job_runner(
             )
             orphan_media = int(cur.fetchone()["cnt"] or 0)
             if orphan_media != 0:
-                raise RuntimeError(f"清理校验失败：message_media 存在 {orphan_media} 条孤立记录")
+                raise RuntimeError(f"清理校验失败：消息媒体关联存在 {orphan_media} 条孤立记录")
 
             orphan_groups_scope_sql = ""
             orphan_groups_scope_params: Tuple[Any, ...] = tuple()
@@ -530,7 +531,7 @@ def _admin_cleanup_job_runner(
                 orphan_groups_scope_sql = " AND mg.chat_id = ?"
                 orphan_groups_scope_params = (chat_id,)
 
-            admin_job_append_log_fn(job_id, "执行彻底性校验：media_groups 孤儿")
+            admin_job_append_log_fn(job_id, "执行彻底性校验：媒体分组孤儿")
             cur.execute(
                 (
                     "SELECT COUNT(*) AS cnt FROM media_groups mg "
@@ -546,9 +547,9 @@ def _admin_cleanup_job_runner(
             )
             orphan_groups = int(cur.fetchone()["cnt"] or 0)
             if orphan_groups != 0:
-                raise RuntimeError(f"清理校验失败：media_groups 存在 {orphan_groups} 条孤立记录")
+                raise RuntimeError(f"清理校验失败：媒体分组存在 {orphan_groups} 条孤立记录")
 
-            admin_job_append_log_fn(job_id, "清理历史无效 dedupe_actions")
+            admin_job_append_log_fn(job_id, "清理历史无效去重动作记录")
             cur.execute(
                 (
                     "DELETE FROM dedupe_actions "
@@ -563,9 +564,9 @@ def _admin_cleanup_job_runner(
                 dedupe_scope_params,
             )
             deleted_invalid_dedupe_actions = int(cur.rowcount or 0)
-            admin_job_append_log_fn(job_id, f"历史无效 dedupe_actions 清理行数：{deleted_invalid_dedupe_actions}")
+            admin_job_append_log_fn(job_id, f"历史无效去重动作记录清理行数：{deleted_invalid_dedupe_actions}")
 
-            admin_job_append_log_fn(job_id, "执行彻底性校验：dedupe_actions 无效引用")
+            admin_job_append_log_fn(job_id, "执行彻底性校验：去重动作记录无效引用")
             cur.execute(
                 (
                     "SELECT COUNT(*) AS cnt FROM dedupe_actions da "
@@ -577,11 +578,11 @@ def _admin_cleanup_job_runner(
                 dedupe_scope_params,
             )
             invalid_dedupe_actions = int(cur.fetchone()["cnt"] or 0)
-            admin_job_append_log_fn(job_id, f"dedupe_actions 无效引用剩余：{invalid_dedupe_actions}")
+            admin_job_append_log_fn(job_id, f"去重动作记录无效引用剩余：{invalid_dedupe_actions}")
             if invalid_dedupe_actions != 0:
-                raise RuntimeError(f"清理校验失败：dedupe_actions 存在 {invalid_dedupe_actions} 条无效引用")
+                raise RuntimeError(f"清理校验失败：去重动作记录存在 {invalid_dedupe_actions} 条无效引用")
 
-            admin_job_append_log_fn(job_id, "执行彻底性校验：dedupe_runs 无效引用")
+            admin_job_append_log_fn(job_id, "执行彻底性校验：去重任务记录无效引用")
             if scope == "chat" and isinstance(chat_id, int):
                 cur.execute(
                     """
@@ -604,7 +605,7 @@ def _admin_cleanup_job_runner(
                 )
             invalid_dedupe_runs = int(cur.fetchone()["cnt"] or 0)
             if invalid_dedupe_runs != 0:
-                raise RuntimeError(f"清理校验失败：dedupe_runs 存在 {invalid_dedupe_runs} 条无效引用")
+                raise RuntimeError(f"清理校验失败：去重任务记录存在 {invalid_dedupe_runs} 条无效引用")
 
             if has_fts_fn(conn):
                 admin_job_append_log_fn(job_id, "执行 FTS 一致性校验")
@@ -615,7 +616,7 @@ def _admin_cleanup_job_runner(
                 if total_messages != total_fts:
                     admin_job_append_log_fn(
                         job_id,
-                        f"FTS 检测到漂移（messages={total_messages}, messages_fts={total_fts}），执行重建",
+                        f"FTS 检测到漂移（消息记录={total_messages}，全文索引记录={total_fts}），执行重建",
                     )
                     cur.execute("DELETE FROM messages_fts")
                     cur.execute(
@@ -629,14 +630,14 @@ def _admin_cleanup_job_runner(
                     rebuilt_fts = int(cur.fetchone()["cnt"] or 0)
                     if rebuilt_fts != total_messages:
                         raise RuntimeError(
-                            f"清理校验失败：FTS 重建后仍不一致（messages={total_messages}, messages_fts={rebuilt_fts}）"
+                            f"清理校验失败：FTS 重建后仍不一致（消息记录={total_messages}，全文索引记录={rebuilt_fts}）"
                         )
 
             conn.commit()
             admin_job_append_log_fn(
                 job_id,
-                f"垃圾清理完成：messages {deleted_messages}，message_media {deleted_media}，"
-                f"dedupe_actions {deleted_actions}，media_groups {deleted_groups}，chats {deleted_empty_chats}",
+                f"垃圾清理完成：消息记录 {deleted_messages}，消息媒体关联 {deleted_media}，"
+                f"去重动作记录 {deleted_actions}，媒体分组 {deleted_groups}，群组记录 {deleted_empty_chats}",
             )
             admin_job_set_status_fn(job_id, "done")
         finally:
