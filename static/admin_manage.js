@@ -96,7 +96,7 @@
     updateControlVisibility(elements);
     setAdminControlsBusy(elements, false);
     ensurePlaceholder(elements.logContainer);
-    elements.clearLogsBtn.hidden = true;
+    setElementDisabled(elements.clearLogsBtn, true);
     closeAddDialog(elements, { skipFocusRestore: true });
     closeCleanupDialog(elements, { skipFocusRestore: true });
   }
@@ -948,13 +948,13 @@
     elements.logContainer.appendChild(line);
 
     elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
-    elements.clearLogsBtn.hidden = false;
+    setElementDisabled(elements.clearLogsBtn, false);
   }
 
   function clearLogs(elements) {
     elements.logContainer.textContent = '';
     ensurePlaceholder(elements.logContainer);
-    elements.clearLogsBtn.hidden = true;
+    setElementDisabled(elements.clearLogsBtn, true);
   }
 
   function ensurePlaceholder(container) {
