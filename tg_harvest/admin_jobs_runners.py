@@ -6,6 +6,9 @@ import threading
 from typing import Any, Callable, Optional, Tuple
 
 
+CLEANUP_DELETE_BATCH_SIZE = 2000
+
+
 def _admin_harvest_job_runner(
     job_id: str,
     target: str,
@@ -329,8 +332,21 @@ def _admin_cleanup_job_runner(
                     chat_id INTEGER NOT NULL,
                     pk INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
-                    grouped_id INTEGER
+                    grouped_id INTEGER,
+                    PRIMARY KEY (chat_id, pk)
                 )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_temp_cleanup_targets_chat_message
+                ON temp_cleanup_targets(chat_id, message_id)
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_temp_cleanup_targets_chat_grouped
+                ON temp_cleanup_targets(chat_id, grouped_id)
                 """
             )
 
@@ -444,41 +460,126 @@ def _admin_cleanup_job_runner(
                 admin_job_set_status_fn(job_id, "done")
                 return
 
+            cur.execute("DROP TABLE IF EXISTS temp_cleanup_pending")
             cur.execute(
                 """
-                DELETE FROM dedupe_actions
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM temp_cleanup_targets t
-                    WHERE t.chat_id = dedupe_actions.chat_id
-                      AND (t.pk = dedupe_actions.pk OR t.message_id = dedupe_actions.message_id)
+                CREATE TEMP TABLE temp_cleanup_pending (
+                    chat_id INTEGER NOT NULL,
+                    pk INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    PRIMARY KEY (chat_id, pk)
                 )
                 """
             )
-            deleted_actions = int(cur.rowcount or 0)
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_temp_cleanup_pending_chat_message
+                ON temp_cleanup_pending(chat_id, message_id)
+                """
+            )
+            cur.execute(
+                """
+                INSERT INTO temp_cleanup_pending (chat_id, pk, message_id)
+                SELECT chat_id, pk, message_id
+                FROM temp_cleanup_targets
+                """
+            )
+            cur.execute("DROP TABLE IF EXISTS temp_cleanup_batch")
+            cur.execute(
+                """
+                CREATE TEMP TABLE temp_cleanup_batch (
+                    chat_id INTEGER NOT NULL,
+                    pk INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
+                    PRIMARY KEY (chat_id, pk)
+                )
+                """
+            )
+            cur.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_temp_cleanup_batch_chat_message
+                ON temp_cleanup_batch(chat_id, message_id)
+                """
+            )
+
+            deleted_actions = 0
+            deleted_media = 0
+            deleted_messages = 0
+            batch_no = 0
+            admin_job_append_log_fn(job_id, f"开始分批删除：批大小={CLEANUP_DELETE_BATCH_SIZE}")
+
+            while True:
+                cur.execute("DELETE FROM temp_cleanup_batch")
+                cur.execute(
+                    """
+                    INSERT INTO temp_cleanup_batch (chat_id, pk, message_id)
+                    SELECT chat_id, pk, message_id
+                    FROM temp_cleanup_pending
+                    ORDER BY pk
+                    LIMIT ?
+                    """,
+                    (CLEANUP_DELETE_BATCH_SIZE,),
+                )
+                cur.execute("SELECT COUNT(*) AS cnt FROM temp_cleanup_batch")
+                batch_count = int(cur.fetchone()["cnt"] or 0)
+                if batch_count == 0:
+                    break
+
+                batch_no += 1
+                cur.execute(
+                    """
+                    DELETE FROM dedupe_actions
+                    WHERE rowid IN (
+                        SELECT da.rowid
+                        FROM dedupe_actions da
+                        JOIN temp_cleanup_batch b
+                          ON b.chat_id = da.chat_id
+                         AND (b.pk = da.pk OR b.message_id = da.message_id)
+                    )
+                    """
+                )
+                deleted_actions += int(cur.rowcount or 0)
+
+                cur.execute(
+                    """
+                    DELETE FROM message_media
+                    WHERE rowid IN (
+                        SELECT mm.rowid
+                        FROM message_media mm
+                        JOIN temp_cleanup_batch b
+                          ON b.chat_id = mm.chat_id
+                         AND b.message_id = mm.message_id
+                    )
+                    """
+                )
+                deleted_media += int(cur.rowcount or 0)
+
+                cur.execute(
+                    """
+                    DELETE FROM messages
+                    WHERE pk IN (SELECT pk FROM temp_cleanup_batch)
+                    """
+                )
+                deleted_messages += int(cur.rowcount or 0)
+
+                cur.execute(
+                    """
+                    DELETE FROM temp_cleanup_pending
+                    WHERE pk IN (SELECT pk FROM temp_cleanup_batch)
+                    """
+                )
+
+                should_log_batch = (batch_no == 1) or (batch_no % 10 == 0)
+                if should_log_batch:
+                    cur.execute("SELECT COUNT(*) AS cnt FROM temp_cleanup_pending")
+                    pending_count = int(cur.fetchone()["cnt"] or 0)
+                    admin_job_append_log_fn(
+                        job_id,
+                        f"分批删除进度：第 {batch_no} 批，已删除消息 {deleted_messages}/{target_count}，剩余 {pending_count}",
+                    )
+
             admin_job_append_log_fn(job_id, f"去重动作记录删除行数：{deleted_actions}")
-
-            cur.execute(
-                """
-                DELETE FROM message_media
-                WHERE EXISTS (
-                    SELECT 1
-                    FROM temp_cleanup_targets t
-                    WHERE t.chat_id = message_media.chat_id
-                      AND t.message_id = message_media.message_id
-                )
-                """
-            )
-            deleted_media = int(cur.rowcount or 0)
             admin_job_append_log_fn(job_id, f"消息媒体关联删除行数：{deleted_media}")
-
-            cur.execute(
-                """
-                DELETE FROM messages
-                WHERE pk IN (SELECT pk FROM temp_cleanup_targets)
-                """
-            )
-            deleted_messages = int(cur.rowcount or 0)
             admin_job_append_log_fn(job_id, f"消息记录删除行数：{deleted_messages}")
 
             media_group_scope_sql = ""
