@@ -96,7 +96,7 @@
     updateControlVisibility(elements);
     setAdminControlsBusy(elements, false);
     ensurePlaceholder(elements.logContainer);
-    elements.clearLogsBtn.hidden = true;
+    syncClearLogsButtonVisibility(elements);
     closeAddDialog(elements, { skipFocusRestore: true });
     closeCleanupDialog(elements, { skipFocusRestore: true });
   }
@@ -948,13 +948,31 @@
     elements.logContainer.appendChild(line);
 
     elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
-    elements.clearLogsBtn.hidden = false;
+    syncClearLogsButtonVisibility(elements);
   }
 
   function clearLogs(elements) {
     elements.logContainer.textContent = '';
     ensurePlaceholder(elements.logContainer);
-    elements.clearLogsBtn.hidden = true;
+    syncClearLogsButtonVisibility(elements);
+  }
+
+  function syncClearLogsButtonVisibility(elements) {
+    if (!elements || !elements.logContainer || !elements.clearLogsBtn) {
+      return;
+    }
+
+    var hasLogs = Array.prototype.some.call(elements.logContainer.children, function (node) {
+      if (!node || typeof node.getAttribute !== 'function') {
+        return false;
+      }
+      if (node.getAttribute('data-placeholder') === 'true') {
+        return false;
+      }
+      return !!String(node.textContent || '').trim();
+    });
+
+    elements.clearLogsBtn.hidden = !hasLogs;
   }
 
   function ensurePlaceholder(container) {
