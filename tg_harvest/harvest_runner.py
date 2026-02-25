@@ -14,7 +14,7 @@ from .harvest_parse import (
     extract_media_meta,
     extract_message_text,
     log_parse_failure_summary,
-    resolve_target_entity,
+    resolve_target_entities,
     setup_logging,
 )
 from .harvest_store import (
@@ -70,9 +70,10 @@ def collect_target_entities(conn: sqlite3.Connection, client: Any, cfg: AppConfi
                 logging.warning(f"跳过 chat_id={cid}（无法解析实体）: {e}")
 
     if cfg.target_group.strip():
-        entity = resolve_target_entity(client, cfg.target_group)
-        if entity:
-            _append_entity(entity)
+        target_entities = resolve_target_entities(client, cfg.target_group)
+        if target_entities:
+            for entity in target_entities:
+                _append_entity(entity)
         elif not entities:
             logging.error("❌ 未找到该群组/频道，请检查名称 / 用户名 / 链接")
 

@@ -18,7 +18,7 @@ def _admin_harvest_job_runner(
 ) -> None:
     from telethon.sync import TelegramClient
     from tg_harvest.harvest_runner import _process_entity
-    from tg_harvest.harvest_parse import resolve_target_entity
+    from tg_harvest.harvest_parse import resolve_target_entities
 
     root_logger = logging.getLogger()
     job_log_handler = admin_make_job_log_handler_fn(job_id)
@@ -35,19 +35,23 @@ def _admin_harvest_job_runner(
                 admin_job_set_status_fn(job_id, "error")
                 return
 
-            entity = resolve_target_entity(client, target)
-            if entity is None:
+            entities = resolve_target_entities(client, target)
+            if not entities:
                 admin_job_append_log_fn(job_id, "未找到该群组/频道，请检查名称或链接")
                 admin_job_set_status_fn(job_id, "error")
                 return
 
-            entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(target)
-            admin_job_append_log_fn(job_id, f"目标解析成功：目标名称={entity_title}")
-            conn = get_conn_fn()
-            try:
-                _process_entity(conn, client, entity, idx=1, total=1)
-            finally:
-                conn.close()
+            total = len(entities)
+            admin_job_append_log_fn(job_id, f"目标解析成功：匹配到 {total} 个会话")
+            for idx, entity in enumerate(entities, start=1):
+                entity_title = getattr(entity, "title", None) or getattr(entity, "username", None) or str(target)
+                entity_id = getattr(entity, "id", None)
+                admin_job_append_log_fn(job_id, f"[{idx}/{total}] 导入目标：名称={entity_title}，ID={entity_id}")
+                conn = get_conn_fn()
+                try:
+                    _process_entity(conn, client, entity, idx=idx, total=total)
+                finally:
+                    conn.close()
         finally:
             client.disconnect()
         admin_job_set_status_fn(job_id, "done")

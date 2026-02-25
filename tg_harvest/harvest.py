@@ -15,6 +15,7 @@ from .harvest_parse import (
     extract_media_meta,
     extract_message_text,
     log_parse_failure_summary,
+    resolve_target_entities,
     resolve_target_entity,
     setup_logging,
 )
@@ -35,6 +36,7 @@ __all__ = [
     "extract_media_meta",
     "build_msg_link",
     "log_parse_failure_summary",
+    "resolve_target_entities",
     "resolve_target_entity",
     "get_existing_chat_ids",
     "collect_target_entities",
