@@ -444,6 +444,16 @@
       updateSortAvailability();
     });
 
+    els.sortSelect.addEventListener("change", () => {
+      collectFormState({ resetPage: true });
+      doSearch(1);
+    });
+
+    els.orderSelect.addEventListener("change", () => {
+      collectFormState({ resetPage: true });
+      doSearch(1);
+    });
+
     // 不在 textarea 上绑定 Enter 搜索，保留回车换行习惯
   }
 
