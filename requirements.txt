@@ -1,0 +1,3 @@
+# Full install: Web + harvest
+-r requirements-web.txt
+-r requirements-harvest.txt

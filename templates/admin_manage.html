@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>后台数据库管理</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-manage-page">
+    <header class="page-header">
+      <p class="eyebrow">Admin Console</p>
+      <h1>后台数据库管理</h1>
+      <p class="subtle">统一管理采集任务、数据清理与日志监控。</p>
+    </header>
+
+    <section class="panel admin-panel" aria-labelledby="adminStatusTitle">
+      <h2 id="adminStatusTitle" class="section-title">状态概览</h2>
+      <ul class="admin-stats" aria-label="后台状态统计项">
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">当前目标</span>
+          <strong id="admin-stat-scope" class="admin-stat-value" aria-live="polite">x</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">消息总数</span>
+          <strong id="admin-stat-messages" class="admin-stat-value" aria-live="polite">x</strong>
+        </li>
+      </ul>
+    </section>
+
+    <section class="panel admin-panel" aria-labelledby="adminActionTitle">
+      <h2 id="adminActionTitle" class="section-title">任务操作</h2>
+
+      <div class="admin-form-grid">
+        <div class="field">
+          <label for="admin-scope-select">操作目标</label>
+          <select id="admin-scope-select" aria-label="选择操作目标">
+            <option value="none">无</option>
+            <option value="all" selected>全部</option>
+          </select>
+        </div>
+
+        <label class="admin-check" for="admin-incremental-checkbox">
+          <input
+            id="admin-incremental-checkbox"
+            name="admin-incremental-checkbox"
+            type="checkbox"
+            checked
+            aria-label="是否启用增量更新"
+          />
+          <span>启用增量更新</span>
+        </label>
+      </div>
+
+      <div class="admin-actions" aria-label="更新和删除操作按钮组">
+        <button id="admin-start-update-btn" class="btn" type="button" hidden aria-label="开始更新">
+          开始更新
+        </button>
+        <button id="admin-delete-data-btn" class="btn" type="button" hidden aria-label="删除此数据">
+          删除此数据
+        </button>
+      </div>
+    </section>
+
+    <section class="panel admin-panel" aria-labelledby="adminLogsTitle">
+      <div class="admin-log-head">
+        <h2 id="adminLogsTitle" class="section-title">运行日志</h2>
+        <button id="admin-clear-logs-btn" class="btn" type="button" hidden aria-label="清空日志">
+          清空日志
+        </button>
+      </div>
+      <div
+        id="admin-log-container"
+        class="admin-log-container"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="运行日志内容"
+      ></div>
+    </section>
+
+    <footer class="panel admin-panel" aria-label="底部操作区">
+      <div id="admin-bottom-action-bar" aria-label="更新数据按钮容器">
+        <button id="admin-cleanup-empty-btn" type="button" aria-label="清理无文字段消息">
+          清理无文字段消息
+        </button>
+        <button id="admin-open-cleanup-dialog-btn" type="button" aria-label="垃圾清理">
+          垃圾清理
+        </button>
+        <button id="admin-open-add-dialog-btn" type="button" aria-label="更新数据">
+          新增抓取目标
+        </button>
+      </div>
+    </footer>
+  </main>
+
+  <section
+    id="admin-add-target-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminAddDialogTitle"
+    hidden
+  >
+    <h2 id="adminAddDialogTitle">新增抓取目标</h2>
+    <div>
+      <label for="admin-target-input">群组名称或链接</label>
+      <input
+        id="admin-target-input"
+        name="admin-target-input"
+        type="text"
+        placeholder="请输入群组名称或链接"
+        aria-label="群组名称或链接"
+      />
+    </div>
+    <div aria-label="弹层操作按钮组">
+      <button id="admin-dialog-cancel-btn" class="btn" type="button" aria-label="取消新增抓取对象">取消</button>
+      <button id="admin-dialog-confirm-btn" class="btn primary" type="button" aria-label="确定新增抓取对象">确定</button>
+    </div>
+  </section>
+
+  <section
+    id="admin-cleanup-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCleanupDialogTitle"
+    hidden
+  >
+    <h2 id="adminCleanupDialogTitle">垃圾清理</h2>
+    <p class="subtle">输入需清理的字段，支持包含匹配。</p>
+    <div>
+      <label for="admin-cleanup-input">清理字段</label>
+      <input
+        id="admin-cleanup-input"
+        name="admin-cleanup-input"
+        type="text"
+        placeholder="请输入要清理的字段"
+        aria-label="清理字段"
+      />
+    </div>
+    <div aria-label="垃圾清理弹层操作按钮组">
+      <button id="admin-cleanup-cancel-btn" class="btn" type="button" aria-label="取消垃圾清理">取消</button>
+      <button id="admin-cleanup-confirm-btn" class="btn primary" type="button" aria-label="确定垃圾清理">确定</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage.js') }}"></script>
+</body>
+</html>
