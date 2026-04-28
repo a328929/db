@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>本地会话上下文</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page context-page" id="app" data-chat-id="{{ chat_id }}">
+    <header class="page-header">
+      <p class="eyebrow">Local Context</p>
+      <h1 id="pageTitle">会话上下文</h1>
+      <p class="subtle">正在本地数据库中还原历史消息</p>
+    </header>
+
+    <section class="panel context-panel" aria-labelledby="pageTitle">
+      <div class="context-actions top-actions">
+        <button id="loadBeforeBtn" class="btn" type="button" aria-label="加载更早的 100 条历史消息">
+          加载上一页
+        </button>
+      </div>
+
+      <div id="statusLine" class="status-line" role="status"></div>
+
+      <!-- 核心消息列表：无障碍焦点转移的锚点 -->
+      <ul id="messageList" class="message-list" aria-label="消息列表"></ul>
+
+      <div class="context-actions bottom-actions">
+        <button id="loadAfterBtn" class="btn" type="button" aria-label="加载更新的 100 条历史消息">
+          加载下一页
+        </button>
+      </div>
+    </section>
+  </main>
+  
+  <script src="{{ url_for('static', filename='display_helpers.js') }}"></script>
+  <script src="{{ url_for('static', filename='context.js') }}"></script>
+</body>
+</html>

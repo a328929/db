@@ -1,0 +1,452 @@
+import sqlite3
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+from tg_harvest.storage.schema import create_schema
+from tg_harvest.storage.schema import backfill_message_search_terms_upgrade_batch
+from tg_harvest.storage.schema import ensure_configured_db
+from tg_harvest.storage.schema import drain_message_search_terms_rebuild_queue
+from tg_harvest.storage.schema import detect_sqlite_features
+from tg_harvest.storage.schema import extract_cjk_bigrams
+from tg_harvest.storage.schema import extract_cjk_search_terms
+from tg_harvest.search.result_mapper import _map_search_items
+from tg_harvest.storage.access import has_fts
+
+
+class DbSchemaMigrationTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_create_schema_heals_old_messages_and_chat_columns(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE messages (
+                pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                msg_type TEXT NOT NULL,
+                link TEXT,
+                UNIQUE(chat_id, message_id)
+            )
+            """
+        )
+        self.conn.commit()
+
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+
+        cur.execute("PRAGMA table_info(chats)")
+        chat_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("message_count", chat_columns)
+        self.assertIn("is_public", chat_columns)
+        self.assertIn("chat_type", chat_columns)
+        self.assertIn("first_seen_at", chat_columns)
+        self.assertIn("last_seen_at", chat_columns)
+
+        cur.execute("PRAGMA table_info(messages)")
+        message_columns = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("link", message_columns)
+        self.assertIn("msg_date_text", message_columns)
+        self.assertIn("msg_date_ts", message_columns)
+        self.assertIn("content_norm", message_columns)
+        self.assertIn("is_promo", message_columns)
+        self.assertIn("updated_at", message_columns)
+
+    def test_create_schema_heals_auxiliary_tables(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            "CREATE TABLE chats (chat_id INTEGER PRIMARY KEY, chat_title TEXT NOT NULL)"
+        )
+        cur.execute(
+            """
+            CREATE TABLE messages (
+                pk INTEGER PRIMARY KEY AUTOINCREMENT,
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                msg_date_text TEXT NOT NULL DEFAULT '',
+                msg_date_ts INTEGER NOT NULL DEFAULT 0,
+                msg_type TEXT NOT NULL DEFAULT 'TEXT',
+                UNIQUE(chat_id, message_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE message_media (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, message_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE media_groups (
+                chat_id INTEGER NOT NULL,
+                grouped_id INTEGER NOT NULL,
+                PRIMARY KEY (chat_id, grouped_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE dedupe_runs (
+                batch_id TEXT PRIMARY KEY,
+                chat_id INTEGER NOT NULL,
+                mode TEXT NOT NULL,
+                threshold INTEGER NOT NULL,
+                promo_threshold INTEGER NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE dedupe_actions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                batch_id TEXT NOT NULL,
+                chat_id INTEGER NOT NULL,
+                pk INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.commit()
+
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+
+        cur.execute("PRAGMA table_info(message_media)")
+        media_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("file_name", media_columns)
+        self.assertIn("duration_sec", media_columns)
+        self.assertIn("updated_at", media_columns)
+
+        cur.execute("PRAGMA table_info(media_groups)")
+        media_group_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("item_count", media_group_columns)
+        self.assertIn("dedupe_hash", media_group_columns)
+        self.assertIn("updated_at", media_group_columns)
+
+        cur.execute("PRAGMA table_info(dedupe_runs)")
+        dedupe_run_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("dup_hash_count_solo", dedupe_run_columns)
+        self.assertIn("target_count", dedupe_run_columns)
+
+        cur.execute("PRAGMA table_info(dedupe_actions)")
+        dedupe_action_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("grouped_id", dedupe_action_columns)
+        self.assertIn("dedupe_hash", dedupe_action_columns)
+        self.assertIn("created_at", dedupe_action_columns)
+
+        cur.execute("PRAGMA table_info(message_search_terms)")
+        term_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("pk", term_columns)
+        self.assertIn("term", term_columns)
+
+        cur.execute("PRAGMA table_info(message_search_terms_rebuild_queue)")
+        queue_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("pk", queue_columns)
+        self.assertIn("reason", queue_columns)
+
+        cur.execute("PRAGMA table_info(message_search_terms_meta)")
+        term_meta_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("key", term_meta_columns)
+        self.assertIn("value", term_meta_columns)
+
+        cur.execute("PRAGMA table_info(admin_jobs)")
+        admin_job_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("job_id", admin_job_columns)
+        self.assertIn("status", admin_job_columns)
+        self.assertIn("progress_stage", admin_job_columns)
+
+        cur.execute("PRAGMA table_info(admin_job_logs)")
+        admin_job_log_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("job_id", admin_job_log_columns)
+        self.assertIn("seq", admin_job_log_columns)
+        self.assertIn("message", admin_job_log_columns)
+
+    def test_schema_without_fts5_does_not_install_broken_fts_triggers(self) -> None:
+        feats = SimpleNamespace(supports_strict=False, supports_fts5=False)
+
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_messages_fts_%'"
+        )
+        self.assertEqual([], [row["name"] for row in cur.fetchall()])
+
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 10, '2026-01-01 00:00:00', 1, 'TEXT', 'hello', 'hello', 0)
+            """
+        )
+        cur.execute("UPDATE messages SET content_norm = '福利文本' WHERE chat_id = 1")
+        cur.execute("DELETE FROM messages WHERE chat_id = 1")
+        self.conn.commit()
+
+    def test_create_schema_replaces_stale_fts_triggers(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        if not feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("DROP TRIGGER IF EXISTS trg_messages_fts_insert")
+        cur.execute(
+            """
+            CREATE TRIGGER trg_messages_fts_insert AFTER INSERT ON messages BEGIN
+                INSERT INTO messages_fts(rowid, content) VALUES (new.pk, new.content);
+            END;
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, feats)
+
+        cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='trg_messages_fts_insert'"
+        )
+        trigger_sql = str(cur.fetchone()["sql"])
+        self.assertIn("NULLIF(new.content_norm, '')", trigger_sql)
+
+    def test_ensure_configured_db_uses_cfg_for_connection_and_schema(self) -> None:
+        cfg = SimpleNamespace(
+            db_name="/tmp/test.db",
+            sqlite_cache_mb=128,
+            sqlite_mmap_mb=256,
+            force_heal_fts=1,
+        )
+        fake_conn = object()
+        fake_feats = object()
+
+        with patch(
+            "tg_harvest.storage.schema.connect_db", return_value=(fake_conn, fake_feats)
+        ) as connect_mock, patch(
+            "tg_harvest.storage.schema.create_schema"
+        ) as create_mock:
+            conn, feats = ensure_configured_db(cfg=cfg)
+
+        self.assertIs(fake_conn, conn)
+        self.assertIs(fake_feats, feats)
+        connect_mock.assert_called_once_with("/tmp/test.db", cache_mb=128, mmap_mb=256)
+        create_mock.assert_called_once_with(fake_conn, fake_feats, force_heal_fts=1)
+
+    def test_create_schema_upgrades_old_bigram_only_search_terms(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.execute(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 1, 10, '2026-01-01 00:00:00', 1, 'TEXT', '福利姬', '福利姬', 0)
+            """
+        )
+        cur.execute("DELETE FROM message_search_terms")
+        cur.executemany(
+            "INSERT INTO message_search_terms(pk, term) VALUES (1, ?)",
+            [("福利",), ("利姬",)],
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES ('cjk_terms_version', '1')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, feats)
+
+        cur.execute(
+            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_backfill_mode'"
+        )
+        self.assertEqual("unigram", cur.fetchone()["value"])
+
+        self.assertEqual(1, backfill_message_search_terms_upgrade_batch(self.conn))
+        self.assertEqual(0, backfill_message_search_terms_upgrade_batch(self.conn))
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["利", "利姬", "姬", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+        cur.execute(
+            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_version'"
+        )
+        self.assertEqual("2", cur.fetchone()["value"])
+
+
+class StorageAccessFtsDetectionTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        self.feats = detect_sqlite_features(self.conn)
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_has_fts_returns_false_when_external_content_index_is_empty_but_messages_exist(
+        self,
+    ) -> None:
+        if not self.feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        cur = self.conn.cursor()
+        cur.execute("CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT)")
+        cur.execute(
+            """
+            CREATE VIRTUAL TABLE messages_fts
+            USING fts5(content, content='messages', content_rowid='pk', tokenize='trigram')
+            """
+        )
+        cur.execute("INSERT INTO messages(pk, content) VALUES (1, 'hello')")
+        self.conn.commit()
+
+        self.assertFalse(has_fts(self.conn))
+
+
+class SearchResultMapperTests(unittest.TestCase):
+    def test_map_search_items_tolerates_missing_optional_columns(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE sample (
+                pk INTEGER,
+                chat_id INTEGER,
+                chat_title TEXT,
+                message_id INTEGER,
+                msg_date_text TEXT,
+                msg_type TEXT,
+                content TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO sample(pk, chat_id, chat_title, message_id, msg_date_text, msg_type, content)
+            VALUES (1, 100, 'Test', 200, '2026-01-01 00:00:00', 'TEXT', 'hello')
+            """
+        )
+        cur.execute("SELECT * FROM sample")
+        row = cur.fetchone()
+
+        items = _map_search_items([row])
+        self.assertEqual(1, len(items))
+        self.assertEqual("/open/telegram?chat_id=100&message_id=200", items[0]["link"])
+        self.assertEqual(0, items[0]["is_promo"])
+        self.assertIsNone(items[0]["file_size"])
+        conn.close()
+
+
+class MessageSearchTermExtractionTests(unittest.TestCase):
+    def test_extract_cjk_bigrams_keeps_distinct_adjacent_cjk_pairs(self) -> None:
+        self.assertEqual(
+            ["福利", "利姬"],
+            extract_cjk_bigrams("福利姬"),
+        )
+
+    def test_extract_cjk_bigrams_ignores_non_cjk_pairs(self) -> None:
+        self.assertEqual(
+            ["福利"],
+            extract_cjk_bigrams("#福利A福利"),
+        )
+
+    def test_extract_cjk_search_terms_includes_unigrams_and_bigrams(self) -> None:
+        self.assertEqual(
+            ["福", "利", "姬", "福利", "利姬"],
+            extract_cjk_search_terms("福利姬"),
+        )
+
+
+class MessageSearchTermQueueTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO chats(chat_id, chat_title, message_count)
+            VALUES (1, 'Chat 1', 0)
+            """
+        )
+        self.conn.commit()
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_insert_into_messages_enqueues_rebuild(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 10, '2026-01-01 00:00:00', 1, 'TEXT', '福利姬', '福利姬', 0)
+            """
+        )
+        self.conn.commit()
+
+        cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
+        self.assertEqual("insert", cur.fetchone()["reason"])
+
+        drained = drain_message_search_terms_rebuild_queue(self.conn)
+        self.assertEqual(1, drained)
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["利", "利姬", "姬", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+
+    def test_update_content_norm_enqueues_rebuild(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 11, '2026-01-01 00:00:00', 1, 'TEXT', '普通文本', '普通文本', 0)
+            """
+        )
+        self.conn.commit()
+        drain_message_search_terms_rebuild_queue(self.conn)
+
+        cur.execute(
+            "UPDATE messages SET content_norm = '福利文本' WHERE chat_id = 1 AND message_id = 11"
+        )
+        self.conn.commit()
+
+        cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
+        self.assertEqual("update", cur.fetchone()["reason"])
+
+
+if __name__ == "__main__":
+    unittest.main()

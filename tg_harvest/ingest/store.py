@@ -1,0 +1,550 @@
+# -*- coding: utf-8 -*-
+import logging
+import sqlite3
+import time
+from typing import Any, Dict, Iterable, List, Optional, Set
+
+from tg_harvest.config import AppConfig
+from tg_harvest.storage.schema import synchronized_write
+from tg_harvest.domain.dedupe import make_media_group_signature
+from tg_harvest.domain.normalize import _safe_json
+from tg_harvest.domain.promo import build_group_promo_features
+
+UPSERT_CHAT_SQL = """
+INSERT INTO chats(chat_id, chat_title, chat_username, is_public, chat_type, last_seen_at)
+VALUES (?, ?, ?, ?, ?, datetime('now'))
+ON CONFLICT(chat_id) DO UPDATE SET
+    chat_title = excluded.chat_title,
+    chat_username = excluded.chat_username,
+    is_public = excluded.is_public,
+    chat_type = excluded.chat_type,
+    last_seen_at = datetime('now')
+"""
+
+UPSERT_MESSAGE_SQL = """
+INSERT INTO messages(
+    chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+    content, content_norm, pure_hash, dedupe_hash,
+    msg_type, grouped_id, has_media,
+    is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason, text_len,
+    updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+ON CONFLICT(chat_id, message_id) DO UPDATE SET
+    msg_date_text=excluded.msg_date_text,
+    msg_date_ts=excluded.msg_date_ts,
+    sender_id=excluded.sender_id,
+    content=excluded.content,
+    content_norm=excluded.content_norm,
+    pure_hash=excluded.pure_hash,
+    dedupe_hash=excluded.dedupe_hash,
+    msg_type=excluded.msg_type,
+    grouped_id=excluded.grouped_id,
+    has_media=excluded.has_media,
+    is_promo=excluded.is_promo,
+    promo_score=excluded.promo_score,
+    promo_reasons=excluded.promo_reasons,
+    dedupe_eligible=excluded.dedupe_eligible,
+    guard_reason=excluded.guard_reason,
+    text_len=excluded.text_len,
+    updated_at=datetime('now')
+"""
+
+UPSERT_MEDIA_SQL = """
+INSERT INTO message_media(
+    chat_id, message_id, media_kind, file_unique_id, file_name, file_ext, mime_type,
+    file_size, width, height, duration_sec, grouped_id, media_fingerprint, meta_json, updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+ON CONFLICT(chat_id, message_id) DO UPDATE SET
+    media_kind=excluded.media_kind,
+    file_unique_id=excluded.file_unique_id,
+    file_name=excluded.file_name,
+    file_ext=excluded.file_ext,
+    mime_type=excluded.mime_type,
+    file_size=excluded.file_size,
+    width=excluded.width,
+    height=excluded.height,
+    duration_sec=excluded.duration_sec,
+    grouped_id=excluded.grouped_id,
+    media_fingerprint=excluded.media_fingerprint,
+    meta_json=excluded.meta_json,
+    updated_at=datetime('now')
+"""
+
+UPSERT_MEDIA_GROUP_SQL = """
+INSERT INTO media_groups(
+    chat_id, grouped_id,
+    first_message_id, first_msg_date_ts, last_message_id, last_msg_date_ts,
+    item_count, active_items, types_csv,
+    captions_concat, caption_norm, pure_hash, media_sig_hash, dedupe_hash,
+    is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason,
+    updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, datetime('now'))
+ON CONFLICT(chat_id, grouped_id) DO UPDATE SET
+    first_message_id=excluded.first_message_id,
+    first_msg_date_ts=excluded.first_msg_date_ts,
+    last_message_id=excluded.last_message_id,
+    last_msg_date_ts=excluded.last_msg_date_ts,
+    item_count=excluded.item_count,
+    active_items=excluded.active_items,
+    types_csv=excluded.types_csv,
+    captions_concat=excluded.captions_concat,
+    caption_norm=excluded.caption_norm,
+    pure_hash=excluded.pure_hash,
+    media_sig_hash=excluded.media_sig_hash,
+    dedupe_hash=excluded.dedupe_hash,
+    is_promo=excluded.is_promo,
+    promo_score=excluded.promo_score,
+    promo_reasons=excluded.promo_reasons,
+    dedupe_eligible=excluded.dedupe_eligible,
+    guard_reason=excluded.guard_reason,
+    updated_at=datetime('now')
+"""
+
+
+def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            "SELECT COALESCE(MAX(message_id), 0) AS m FROM messages WHERE chat_id=?",
+            (chat_id,),
+        )
+        return int(cur.fetchone()["m"])
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def upsert_chat(conn: sqlite3.Connection, row: tuple):
+    cur = conn.cursor()
+    try:
+        cur.execute(UPSERT_CHAT_SQL, row)
+    finally:
+        cur.close()
+    conn.commit()
+
+
+def _batch_upsert_messages(cur: sqlite3.Cursor, msg_rows: List[tuple]):
+    if not msg_rows:
+        return
+    cur.executemany(UPSERT_MESSAGE_SQL, msg_rows)
+
+
+def _batch_upsert_media(cur: sqlite3.Cursor, media_rows: List[tuple]):
+    if not media_rows:
+        return
+    cur.executemany(UPSERT_MEDIA_SQL, media_rows)
+
+
+@synchronized_write
+def _backfill_message_media_placeholders_batch(
+    conn: sqlite3.Connection, *, chat_id: Optional[int], batch_size: int
+) -> int:
+    cur = conn.cursor()
+    try:
+        where_sql = "m.has_media = 1 AND mm.chat_id IS NULL"
+        params: List[Any] = []
+        if chat_id is not None:
+            where_sql += " AND m.chat_id = ?"
+            params.append(int(chat_id))
+        params.append(int(batch_size))
+
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            f"""
+            INSERT OR IGNORE INTO message_media(
+                chat_id, message_id, media_kind, file_unique_id, file_name, file_ext,
+                mime_type, file_size, width, height, duration_sec, grouped_id,
+                media_fingerprint, meta_json, updated_at
+            )
+            SELECT
+                m.chat_id,
+                m.message_id,
+                m.msg_type,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                NULL,
+                m.grouped_id,
+                NULL,
+                NULL,
+                datetime('now')
+            FROM messages m
+            LEFT JOIN message_media mm
+              ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+            WHERE {where_sql}
+            ORDER BY m.pk ASC
+            LIMIT ?
+            """,
+            params,
+        )
+        inserted = int(cur.rowcount or 0)
+        conn.commit()
+        return inserted
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        cur.close()
+
+
+def backfill_missing_message_media_placeholders(
+    conn: sqlite3.Connection,
+    *,
+    chat_id: Optional[int] = None,
+    batch_size: int = 50000,
+    log_fn: Optional[Any] = None,
+) -> int:
+    total_inserted = 0
+    safe_batch_size = max(100, int(batch_size))
+
+    while True:
+        inserted = _backfill_message_media_placeholders_batch(
+            conn, chat_id=chat_id, batch_size=safe_batch_size
+        )
+        if inserted <= 0:
+            break
+        total_inserted += inserted
+        if log_fn:
+            scope = f"chat_id={chat_id}" if chat_id is not None else "all_chats"
+            log_fn(
+                f"message_media 占位回填中：作用域={scope}，本批新增 {inserted} 条，累计 {total_inserted} 条"
+            )
+
+    return total_inserted
+
+
+@synchronized_write
+def _backfill_message_search_text_from_filenames_batch(
+    conn: sqlite3.Connection, *, chat_id: Optional[int], batch_size: int
+) -> int:
+    cur = conn.cursor()
+    try:
+        where_sql = """
+            m.has_media = 1
+            AND COALESCE(NULLIF(m.content_norm, ''), NULLIF(m.content, ''), '') = ''
+            AND COALESCE(NULLIF(mm.file_name, ''), '') <> ''
+        """
+        params: List[Any] = []
+        if chat_id is not None:
+            where_sql += " AND m.chat_id = ?"
+            params.append(int(chat_id))
+        params.append(int(batch_size))
+
+        cur.execute(
+            f"""
+            SELECT m.chat_id, m.message_id, mm.file_name
+            FROM messages m
+            JOIN message_media mm
+              ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+            WHERE {where_sql}
+            ORDER BY m.pk ASC
+            LIMIT ?
+            """,
+            params,
+        )
+        rows = cur.fetchall()
+        if not rows:
+            return 0
+
+        cur.execute("BEGIN IMMEDIATE")
+        cur.executemany(
+            """
+            UPDATE messages
+            SET content = ?,
+                content_norm = ?,
+                updated_at = datetime('now')
+            WHERE chat_id = ? AND message_id = ?
+              AND COALESCE(NULLIF(content_norm, ''), NULLIF(content, ''), '') = ''
+            """,
+            [
+                (
+                    str(row["file_name"]),
+                    str(row["file_name"]),
+                    int(row["chat_id"]),
+                    int(row["message_id"]),
+                )
+                for row in rows
+            ],
+        )
+        conn.commit()
+        return int(cur.rowcount or 0)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        cur.close()
+
+
+def backfill_message_search_text_from_filenames(
+    conn: sqlite3.Connection,
+    *,
+    chat_id: Optional[int] = None,
+    batch_size: int = 5000,
+    log_fn: Optional[Any] = None,
+) -> int:
+    total_updated = 0
+    safe_batch_size = max(100, int(batch_size))
+
+    while True:
+        updated = _backfill_message_search_text_from_filenames_batch(
+            conn, chat_id=chat_id, batch_size=safe_batch_size
+        )
+        if updated <= 0:
+            break
+        total_updated += updated
+        if log_fn:
+            scope = f"chat_id={chat_id}" if chat_id is not None else "all_chats"
+            log_fn(
+                f"messages 文本回填中：作用域={scope}，本批补齐 {updated} 条，累计 {total_updated} 条"
+            )
+
+    return total_updated
+
+
+@synchronized_write
+def batch_upsert(
+    conn: sqlite3.Connection, msg_rows: List[tuple], media_rows: List[tuple]
+):
+    if not msg_rows and not media_rows:
+        return
+    cur = conn.cursor()
+    try:
+        try:
+            cur.execute("BEGIN IMMEDIATE")
+            _batch_upsert_messages(cur, msg_rows)
+            _batch_upsert_media(cur, media_rows)
+            conn.commit()
+        except Exception:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise
+    finally:
+        cur.close()
+
+
+def chunked(seq: List[Any], n: int) -> Iterable[List[Any]]:
+    for i in range(0, len(seq), n):
+        yield seq[i : i + n]
+
+
+def _normalize_grouped_ids(grouped_ids: Optional[Set[int]]) -> List[int]:
+    if grouped_ids is None:
+        return []
+    return sorted({int(x) for x in grouped_ids if x is not None})
+
+
+def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> List[int]:
+    cur.execute(
+        "SELECT DISTINCT grouped_id FROM messages WHERE chat_id=? AND grouped_id IS NOT NULL",
+        (chat_id,),
+    )
+    return [int(r["grouped_id"]) for r in cur.fetchall() if r["grouped_id"] is not None]
+
+
+def _delete_media_groups(
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: Optional[List[int]] = None
+):
+    if grouped_ids is None:
+        cur.execute("DELETE FROM media_groups WHERE chat_id=?", (chat_id,))
+        return
+    if not grouped_ids:
+        return
+    for part in chunked(grouped_ids, 500):
+        placeholders = ",".join(["?"] * len(part))
+        cur.execute(
+            f"DELETE FROM media_groups WHERE chat_id=? AND grouped_id IN ({placeholders})",
+            [chat_id] + part,
+        )
+
+
+def _query_media_group_rows(
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids_part: List[int]
+):
+    placeholders = ",".join(["?"] * len(grouped_ids_part))
+    cur.execute(
+        f"""
+        SELECT m.grouped_id, m.message_id, m.msg_date_ts, m.msg_type, COALESCE(m.content, '') AS content, mm.media_fingerprint
+        FROM messages m
+        LEFT JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+        WHERE m.chat_id = ? AND m.grouped_id IN ({placeholders})
+        ORDER BY m.grouped_id ASC, m.message_id ASC
+    """,
+        [chat_id] + grouped_ids_part,
+    )
+    return cur.fetchall()
+
+
+def _build_media_group_upsert_rows(
+    rows: List[sqlite3.Row], chat_id: int, cfg: AppConfig
+) -> List[tuple]:
+    bucket: Dict[int, Dict[str, Any]] = {}
+    for r in rows:
+        gid = int(r["grouped_id"])
+        b = bucket.setdefault(
+            gid,
+            {
+                "first_message_id": None,
+                "first_msg_date_ts": None,
+                "last_message_id": None,
+                "last_msg_date_ts": None,
+                "item_count": 0,
+                "types": [],
+                "captions": [],
+                "media_fingerprints": [],
+            },
+        )
+        mid = int(r["message_id"])
+        ts = int(r["msg_date_ts"])
+        b["first_message_id"] = (
+            mid
+            if b["first_message_id"] is None or mid < b["first_message_id"]
+            else b["first_message_id"]
+        )
+        b["first_msg_date_ts"] = (
+            ts
+            if b["first_msg_date_ts"] is None or ts < b["first_msg_date_ts"]
+            else b["first_msg_date_ts"]
+        )
+        b["last_message_id"] = (
+            mid
+            if b["last_message_id"] is None or mid > b["last_message_id"]
+            else b["last_message_id"]
+        )
+        b["last_msg_date_ts"] = (
+            ts
+            if b["last_msg_date_ts"] is None or ts > b["last_msg_date_ts"]
+            else b["last_msg_date_ts"]
+        )
+        b["item_count"] += 1
+        b["types"].append(r["msg_type"] or "")
+        if r["content"]:
+            b["captions"].append(str(r["content"]))
+        if r["media_fingerprint"]:
+            b["media_fingerprints"].append(str(r["media_fingerprint"]))
+
+    up_rows = []
+    for gid, b in bucket.items():
+        types_csv = ",".join(sorted(set([x for x in b["types"] if x])))
+        captions_concat = "\n".join([c for c in b["captions"] if c]).strip()
+        media_sig_hash = make_media_group_signature(
+            b["media_fingerprints"], b["types"], int(b["item_count"])
+        )
+        features = build_group_promo_features(
+            captions_concat, int(b["item_count"]), media_sig_hash, cfg
+        )
+        up_rows.append(
+            (
+                chat_id,
+                gid,
+                b["first_message_id"],
+                b["first_msg_date_ts"],
+                b["last_message_id"],
+                b["last_msg_date_ts"],
+                int(b["item_count"]),
+                int(b["item_count"]),
+                types_csv,
+                captions_concat,
+                features["caption_norm"],
+                features["pure_hash"],
+                media_sig_hash,
+                features["dedupe_hash"],
+                int(features["is_promo"]),
+                int(features["promo_score"]),
+                _safe_json(features["promo_reasons"]),
+                int(features["dedupe_eligible"]),
+                features["guard_reason"],
+            )
+        )
+    return up_rows
+
+
+def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: List[tuple]):
+    if not up_rows:
+        return
+    cur.executemany(UPSERT_MEDIA_GROUP_SQL, up_rows)
+
+
+def _rebuild_media_groups_for_ids(
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: List[int], cfg: AppConfig
+):
+    if not grouped_ids:
+        return
+    for part in chunked(sorted(set(grouped_ids)), 500):
+        _delete_media_groups(cur, chat_id, grouped_ids=part)
+        rows = _query_media_group_rows(cur, chat_id, part)
+        up_rows = _build_media_group_upsert_rows(rows, chat_id, cfg)
+        _upsert_media_group_rows(cur, up_rows)
+
+
+def _resolve_refresh_grouped_ids(
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: Optional[Set[int]]
+):
+    if grouped_ids is None:
+        return _load_all_grouped_ids(cur, chat_id), True
+    return _normalize_grouped_ids(grouped_ids), False
+
+
+def _execute_media_group_refresh(
+    cur: sqlite3.Cursor,
+    chat_id: int,
+    cfg: AppConfig,
+    target_ids: List[int],
+    full_refresh: bool,
+):
+    if full_refresh:
+        _delete_media_groups(cur, chat_id, grouped_ids=None)
+        _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+        return
+    if target_ids:
+        _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+
+
+@synchronized_write
+def refresh_media_groups_for_chat(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    cfg: AppConfig,
+    grouped_ids: Optional[Set[int]] = None,
+):
+    """
+    grouped_ids=None: 全量刷新（删除 chat 全部聚合，再按 messages 全量重建）
+    grouped_ids=set(...): 按组刷新（仅删除并重建指定 grouped_id）
+    """
+    started_at = time.perf_counter()
+    cur = conn.cursor()
+    try:
+        target_ids, full_refresh = _resolve_refresh_grouped_ids(
+            cur, chat_id, grouped_ids
+        )
+        target_count = len(target_ids)
+        mode_label = "full" if full_refresh else "partial"
+        logging.info(
+            f"media_groups 刷新开始: chat_id={chat_id} mode={mode_label} grouped_ids={target_count}"
+        )
+        cur.execute("BEGIN IMMEDIATE")
+        _execute_media_group_refresh(cur, chat_id, cfg, target_ids, full_refresh)
+        conn.commit()
+        elapsed = time.perf_counter() - started_at
+        logging.info(
+            f"media_groups 刷新完成: chat_id={chat_id} mode={mode_label} grouped_ids={target_count} 耗时={elapsed:.2f}s"
+        )
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        cur.close()
