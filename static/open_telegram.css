@@ -1,0 +1,26 @@
+.open-telegram-page {
+  max-width: 760px;
+}
+
+.open-telegram-panel {
+  display: grid;
+  gap: 14px;
+}
+
+.open-telegram-status {
+  margin: 0;
+}
+
+.open-telegram-actions {
+  margin-top: 2px;
+}
+
+.open-telegram-btn {
+  min-width: 180px;
+  text-align: center;
+  text-decoration: none;
+}
+
+.open-telegram-note {
+  margin: 0;
+}

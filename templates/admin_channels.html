@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>频道管理</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_channels.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-channels-page">
+    <header class="page-header">
+      <p class="eyebrow">Channel Console</p>
+      <h1>频道管理</h1>
+      <p class="subtle">数据库状态与账号清单</p>
+      <p class="subtle"><a href="/admin/manage" class="admin-link">返回后台管理</a></p>
+    </header>
+
+    <section class="panel channel-panel" aria-labelledby="dbChannelsTitle">
+      <div class="channel-panel-head">
+        <div>
+          <h2 id="dbChannelsTitle" class="section-title">数据库频道/群组</h2>
+          <p id="admin-channel-count" class="channel-subline" role="status" aria-live="polite">正在读取列表...</p>
+        </div>
+        <div class="channel-toolbar">
+          <label for="admin-channel-sort-select" class="sr-only">排序方式</label>
+          <select id="admin-channel-sort-select" aria-label="选择频道列表排序方式">
+            <option value="message_count_desc">消息数从大到小</option>
+            <option value="message_count_asc">消息数从小到大</option>
+            <option value="updated_desc">最后消息从新到旧</option>
+            <option value="updated_asc">最后消息从旧到新</option>
+          </select>
+          <button id="admin-channel-refresh-btn" class="btn" type="button" aria-label="刷新数据库频道列表">
+            刷新
+          </button>
+          <button
+            id="admin-channel-list-toggle-btn"
+            class="btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="admin-channel-list"
+            aria-label="收起或展开数据库频道列表"
+          >
+            展开列表
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-channel-list" class="channel-list" aria-label="数据库频道或群组列表" hidden></div>
+    </section>
+
+    <section class="panel channel-panel" aria-labelledby="missingChannelsTitle">
+      <div class="channel-panel-head">
+        <div>
+          <h2 id="missingChannelsTitle" class="section-title">账号中未入库的群组/频道</h2>
+          <p id="admin-missing-status" class="channel-subline" role="status" aria-live="polite">
+            暂无扫描结果。
+          </p>
+        </div>
+        <div class="channel-toolbar">
+          <button id="admin-scan-missing-btn" class="btn primary" type="button" aria-label="扫描当前 Telegram 账号">
+            扫描当前账号
+          </button>
+          <button id="admin-refresh-missing-btn" class="btn" type="button" aria-label="刷新未入库扫描结果">
+            刷新结果
+          </button>
+          <button
+            id="admin-missing-list-toggle-btn"
+            class="btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="admin-missing-list"
+            aria-label="收起或展开未入库群组列表"
+          >
+            展开列表
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-missing-list" class="channel-list" aria-label="未入库群组或频道列表" hidden></div>
+    </section>
+
+    <section class="panel channel-panel" aria-labelledby="absentChannelsTitle">
+      <div class="channel-panel-head">
+        <div>
+          <h2 id="absentChannelsTitle" class="section-title">数据库中账号未加入的群组/频道</h2>
+          <p id="admin-absent-status" class="channel-subline" role="status" aria-live="polite">
+            暂无扫描结果。
+          </p>
+        </div>
+        <div class="channel-toolbar">
+          <button id="admin-scan-absent-btn" class="btn primary" type="button" aria-label="扫描数据库中账号未加入的群组或频道">
+            扫描账号外数据
+          </button>
+          <button id="admin-refresh-absent-btn" class="btn" type="button" aria-label="刷新账号外数据库扫描结果">
+            刷新结果
+          </button>
+          <button
+            id="admin-absent-list-toggle-btn"
+            class="btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="admin-absent-list"
+            aria-label="收起或展开账号外数据库群组列表"
+          >
+            展开列表
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-absent-list" class="channel-list" aria-label="数据库中账号未加入的群组或频道列表" hidden></div>
+    </section>
+
+    <section class="panel channel-panel" aria-labelledby="channelLogTitle">
+      <div class="admin-log-head channel-log-head">
+        <h2 id="channelLogTitle" class="section-title">扫描日志</h2>
+        <button id="admin-clear-channel-logs-btn" class="btn" type="button" hidden aria-label="清空扫描日志">
+          清空日志
+        </button>
+      </div>
+      <div
+        id="admin-channel-log-container"
+        class="admin-log-container"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="频道扫描日志"
+      ></div>
+    </section>
+  </main>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminLoginDialogTitle"
+    hidden
+  >
+    <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
+    <p class="subtle">进入频道管理页面，请先验证管理员密码。</p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input
+        id="admin-password-input"
+        name="admin-password-input"
+        type="password"
+        placeholder="请输入管理员密码"
+        aria-label="管理员密码"
+      />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_channels.js') }}"></script>
+</body>
+</html>

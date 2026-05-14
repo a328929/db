@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>打开 Telegram</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='open_telegram.css') }}">
+</head>
+<body>
+  <main class="page open-telegram-page" id="openTelegramApp">
+    <header class="page-header">
+      <p class="eyebrow">Telegram Jump</p>
+      <h1>正在打开 Telegram</h1>
+      <p class="subtle">如果客户端没有自动唤起，可使用下面的备用入口。</p>
+    </header>
+
+    <section class="panel open-telegram-panel">
+      <p class="section-title">{{ chat_title }}</p>
+      <p class="status-line open-telegram-status" id="openTelegramStatus">
+        正在尝试打开消息 #{{ message_id }}
+      </p>
+
+      <div class="result-links-wrap open-telegram-actions">
+        <a
+          id="openTelegramAppLink"
+          class="btn primary open-telegram-btn"
+          href="{{ telegram_app_link }}"
+          aria-label="使用 Telegram 客户端打开该消息"
+        >打开 Telegram App</a>
+        <a
+          class="btn open-telegram-btn"
+          href="{{ telegram_web_link }}"
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="打开 Telegram 网页备用链接"
+        >备用网页链接</a>
+      </div>
+
+      <p class="subtle open-telegram-note">
+        当前页面不依赖浏览器先访问 <code>t.me</code>，会优先直接唤起本机 Telegram。
+      </p>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='open_telegram.js') }}"></script>
+</body>
+</html>

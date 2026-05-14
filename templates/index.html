@@ -1,0 +1,147 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>Telegram 数据库搜索</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="page" id="app">
+    <header class="page-header">
+      <p class="eyebrow">Telegram Search</p>
+      <h1>数据库搜索</h1>
+    </header>
+
+    <section class="panel" aria-labelledby="searchTitle">
+      <h2 id="searchTitle" class="sr-only">搜索区域</h2>
+      <p class="section-title">关键词检索</p>
+      <div class="search-row">
+        <label for="queryInput" class="sr-only">搜索关键词</label>
+        <textarea
+          id="queryInput"
+          class="query-input"
+          rows="2"
+          placeholder="输入关键词，例如：(女孩/白袜)+写真-广告 或 &quot;C++&quot; / 福利"
+          aria-label="搜索关键词输入框（支持多行）"
+        ></textarea>
+
+        <button id="searchBtn" class="btn primary" type="button" aria-label="执行搜索">
+          搜索
+        </button>
+      </div>
+    </section>
+
+    <section class="panel" aria-labelledby="configTitle">
+      <h2 id="configTitle" class="sr-only">搜索配置区域</h2>
+      <p class="section-title">筛选配置</p>
+
+      <div class="config-grid">
+        <div class="field">
+          <label for="scopeSelect">搜索范围</label>
+          <select id="scopeSelect" aria-label="选择搜索范围">
+            <option value="all">搜索全部</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="typeSelect">搜索类型</label>
+          <select id="typeSelect" aria-label="选择搜索类型">
+            <option value="all">全部</option>
+            <option value="text">文本</option>
+            <option value="audio">音频</option>
+            <option value="video">视频</option>
+            <option value="image">图片</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="sortSelect">排序</label>
+          <select id="sortSelect" aria-label="选择排序方式">
+            <option value="time">时间</option>
+            <option value="size">大小</option>
+            <option value="duration">时长</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="orderSelect">顺序</label>
+          <select id="orderSelect" aria-label="选择排序顺序">
+            <option value="desc" selected>倒序</option>
+            <option value="asc">正序</option>
+          </select>
+        </div>
+
+        <div class="field date-range-field">
+          <span id="dateRangeLabel">时间范围</span>
+          <div class="date-inputs" role="group" aria-labelledby="dateRangeLabel" aria-describedby="dateRangeHelp">
+            <div>
+              <label for="startDateInput">开始日期</label>
+              <div class="date-input-wrap">
+                <input
+                  id="startDateInput"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="off"
+                  placeholder="20260101"
+                  aria-describedby="dateRangeHelp"
+                >
+                <button
+                  id="clearStartDateBtn"
+                  class="clear-input-btn"
+                  type="button"
+                  aria-label="清空开始日期"
+                  hidden
+                >x</button>
+              </div>
+            </div>
+            <div>
+              <label for="endDateInput">结束日期</label>
+              <div class="date-input-wrap">
+                <input
+                  id="endDateInput"
+                  type="text"
+                  inputmode="numeric"
+                  autocomplete="off"
+                  placeholder="2026-01-31"
+                  aria-describedby="dateRangeHelp"
+                >
+                <button
+                  id="clearEndDateBtn"
+                  class="clear-input-btn"
+                  type="button"
+                  aria-label="清空结束日期"
+                  hidden
+                >x</button>
+              </div>
+            </div>
+          </div>
+          <p id="dateRangeHelp" class="field-hint">留空表示不限时间；支持 YYYYMMDD 或 YYYY-MM-DD。</p>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel results-panel" aria-labelledby="resultTitle">
+      <h2 id="resultTitle" class="sr-only">搜索结果</h2>
+      <p class="section-title">搜索结果</p>
+
+      <div id="statusLine" class="status-line" role="status" aria-live="polite">
+        输入关键词后开始搜索。
+      </div>
+
+      <div id="groupFacets" class="group-facets" aria-label="按群组聚合的命中统计"></div>
+
+      <div id="results" class="results-list" aria-label="搜索结果列表"></div>
+
+      <div class="admin-link-wrap">
+        <a href="/admin/manage" class="admin-link">没有想要的数据？前往管理页</a>
+      </div>
+
+      <nav id="pagination" class="pagination" aria-label="搜索结果分页"></nav>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='display_helpers.js') }}"></script>
+  <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>
