@@ -401,6 +401,15 @@ class DbSchemaMigrationTests(unittest.TestCase):
             END;
             """
         )
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.execute(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 1, 10, '2026-01-01 00:00:00', 1, 'TEXT', 'rawonly', 'normtarget', 0)
+            """
+        )
         self.conn.commit()
 
         create_schema(self.conn, feats)
@@ -410,6 +419,55 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         trigger_sql = str(cur.fetchone()["sql"])
         self.assertIn("NULLIF(new.content_norm, '')", trigger_sql)
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"normtarget"',),
+        )
+        self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+
+    def test_create_schema_rebuilds_nonempty_incomplete_fts_index(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        if not feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.executemany(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (?, 1, ?, '2026-01-01 00:00:00', ?, 'TEXT', ?, ?, 0)
+            """,
+            [
+                (1, 10, 1, "firstneedle", "firstneedle"),
+                (2, 11, 2, "missingneedle", "missingneedle"),
+            ],
+        )
+        cur.execute("INSERT INTO messages_fts(messages_fts) VALUES ('delete-all')")
+        cur.execute(
+            "INSERT INTO messages_fts(rowid, content) VALUES (1, 'firstneedle')"
+        )
+        self.conn.commit()
+
+        cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
+        self.assertEqual(1, int(cur.fetchone()["c"]))
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"missingneedle"',),
+        )
+        self.assertEqual([], cur.fetchall())
+
+        create_schema(self.conn, feats)
+
+        cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
+        self.assertEqual(2, int(cur.fetchone()["c"]))
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"missingneedle"',),
+        )
+        self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
 
     def test_create_schema_replaces_stale_message_search_queue_triggers(self) -> None:
         feats = detect_sqlite_features(self.conn)

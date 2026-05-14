@@ -3,6 +3,27 @@ import logging
 import sqlite3
 
 
+_EXPECTED_FTS_TRIGGER_MARKERS = {
+    "trg_messages_fts_insert": (
+        "nullif(new.content_norm, '')",
+        "new.content",
+    ),
+    "trg_messages_fts_delete": (
+        "'delete'",
+        "old.pk",
+        "nullif(old.content_norm, '')",
+        "old.content",
+    ),
+    "trg_messages_fts_update": (
+        "'delete'",
+        "old.pk",
+        "new.pk",
+        "nullif(old.content_norm, '')",
+        "nullif(new.content_norm, '')",
+    ),
+}
+
+
 def _create_fts_table(cur: sqlite3.Cursor) -> None:
     cur.execute("""
     CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts
@@ -13,6 +34,27 @@ def _create_fts_table(cur: sqlite3.Cursor) -> None:
         tokenize='trigram'
     )
     """)
+
+
+def _fts_triggers_are_current(cur: sqlite3.Cursor) -> bool:
+    for trigger_name, markers in _EXPECTED_FTS_TRIGGER_MARKERS.items():
+        cur.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'trigger' AND name = ?
+            LIMIT 1
+            """,
+            (trigger_name,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        trigger_sql = str(row["sql"] if isinstance(row, sqlite3.Row) else row[0] or "")
+        normalized_sql = trigger_sql.lower()
+        if not all(marker in normalized_sql for marker in markers):
+            return False
+    return True
 
 
 def _drop_fts_triggers(cur: sqlite3.Cursor) -> None:
@@ -73,28 +115,46 @@ def _sync_fts_from_scratch(cur: sqlite3.Cursor) -> None:
     _create_fts_triggers(cur)
 
 
-def _heal_fts_if_needed(cur: sqlite3.Cursor, force_heal: bool = False) -> None:
+def _count_table_rows(cur: sqlite3.Cursor, table_name: str) -> int:
+    cur.execute(f"SELECT COUNT(*) AS c FROM {table_name}")
+    row = cur.fetchone()
+    return int(row["c"] if isinstance(row, sqlite3.Row) else row[0] or 0)
+
+
+def _fts_index_row_count_matches_messages(cur: sqlite3.Cursor) -> bool:
+    message_count = _count_table_rows(cur, "messages")
+    indexed_count = _count_table_rows(cur, "messages_fts_docsize")
+    return indexed_count == message_count
+
+
+def _heal_fts_if_needed(
+    cur: sqlite3.Cursor,
+    force_heal: bool = False,
+    rebuild_reason: str = "",
+) -> None:
     """
-    优化后的 FTS 检查逻辑：
-    不再每次启动都执行耗时的全表 COUNT(*)。
-    仅在 FTS 表完全为空，或明确设置了 force_heal=True 时才启动全量同步。
+    检查 FTS5 外部内容索引是否真实完整。
+
+    注意：messages_fts 是 external-content 虚表，普通 SELECT/COUNT 会回读
+    messages 内容表，即使倒排索引完全为空也会“看起来有数据”。因此这里必须
+    检查 shadow docsize 表，它才代表已经写入 FTS 索引的 rowid 数。
     """
     try:
-        cur.execute("SELECT 1 FROM messages_fts LIMIT 1")
-        has_data = cur.fetchone() is not None
-
-        if not has_data or force_heal:
+        index_matches_messages = _fts_index_row_count_matches_messages(cur)
+        if force_heal or not index_matches_messages:
             if force_heal:
-                logging.warning("配置强制开启 FTS 索引修复...")
+                if rebuild_reason:
+                    logging.warning("检测到 %s，正在全量重建 FTS 索引", rebuild_reason)
+                else:
+                    logging.warning("配置强制开启 FTS 索引修复...")
             else:
-                logging.info(
-                    "检测到 FTS 索引为空，正在执行首次同步（大数据库可能耗时几秒）..."
-                )
+                logging.warning("检测到 FTS 索引与 messages 表不一致，正在全量重建")
 
             _sync_fts_from_scratch(cur)
             logging.info("FTS 索引同步成功完成")
         else:
-            logging.debug("FTS 索引已存在，跳过耗时的全量计数校验")
+            logging.debug("FTS 索引已存在且行数一致，跳过全量重建")
 
     except sqlite3.Error as exc:
-        logging.error(f"FTS 检查阶段遇到数据库错误: {exc}")
+        logging.warning("FTS 检查阶段遇到数据库错误，正在尝试全量重建: %s", exc)
+        _sync_fts_from_scratch(cur)

@@ -1391,6 +1391,27 @@ class WriteConsistencyTests(unittest.TestCase):
             VALUES (1, 10)
             """
         )
+        cur = self.conn.cursor()
+        try:
+            cur.execute("DROP TRIGGER IF EXISTS trg_message_terms_delete")
+            cur.execute(
+                "SELECT pk FROM messages WHERE chat_id = 1 AND message_id = 10"
+            )
+            message_pk = int(cur.fetchone()["pk"])
+            cur.execute(
+                "INSERT INTO message_search_terms(pk, term) VALUES (?, ?)",
+                (message_pk, "hello"),
+            )
+            cur.execute(
+                """
+                INSERT INTO message_search_terms_rebuild_queue(pk, reason)
+                VALUES (?, ?)
+                ON CONFLICT(pk) DO UPDATE SET reason = excluded.reason
+                """,
+                (message_pk, "legacy"),
+            )
+        finally:
+            cur.close()
         self.conn.commit()
         lock = _RecordingLock()
 
@@ -1404,6 +1425,10 @@ class WriteConsistencyTests(unittest.TestCase):
         cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 1")
         self.assertEqual(0, int(cur.fetchone()["c"]))
         cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 1")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+        cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+        cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
         self.assertEqual(0, int(cur.fetchone()["c"]))
 
 

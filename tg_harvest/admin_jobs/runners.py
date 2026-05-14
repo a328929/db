@@ -626,6 +626,28 @@ def _delete_from_optional_chat_table(cur: Any, table_name: str, chat_id: int) ->
     cur.execute(f"DELETE FROM {table_name} WHERE chat_id = ?", (chat_id,))
 
 
+def _delete_from_optional_message_pk_table(
+    cur: Any, table_name: str, chat_id: int
+) -> None:
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    )
+    if cur.fetchone() is None:
+        return
+    cur.execute(
+        f"""
+        DELETE FROM {table_name}
+        WHERE pk IN (
+            SELECT pk
+            FROM messages
+            WHERE chat_id = ?
+        )
+        """,
+        (chat_id,),
+    )
+
+
 @synchronized_write
 def _delete_chat_data(conn: Any, chat_id: int) -> int:
     cur = conn.cursor()
@@ -633,6 +655,10 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         cur.execute("BEGIN IMMEDIATE")
         _delete_from_optional_chat_table(cur, "admin_absent_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
+        _delete_from_optional_message_pk_table(cur, "message_search_terms", chat_id)
+        _delete_from_optional_message_pk_table(
+            cur, "message_search_terms_rebuild_queue", chat_id
+        )
         cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM dedupe_runs WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))

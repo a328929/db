@@ -749,8 +749,14 @@ def create_schema(
                 _fts._create_fts_schema(cur) # 调用这个会同时创建表和触发器
                 _fts._sync_fts_from_scratch(cur)
             else:
-                _fts._create_fts_triggers(cur) # 确保触发器存在（如果是旧版本数据库可能没创建）
-                _fts._heal_fts_if_needed(cur, force_heal=(force_heal_fts == 1))
+                fts_triggers_current = _fts._fts_triggers_are_current(cur)
+                # 确保触发器存在且内容为当前版本（旧库可能缺失或使用 content 而非 content_norm）。
+                _fts._create_fts_triggers(cur)
+                _fts._heal_fts_if_needed(
+                    cur,
+                    force_heal=(force_heal_fts == 1 or not fts_triggers_current),
+                    rebuild_reason="FTS 触发器已升级" if not fts_triggers_current else "",
+                )
         else:
             _fts._drop_fts_triggers(cur)
 
