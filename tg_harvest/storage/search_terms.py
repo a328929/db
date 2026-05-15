@@ -434,7 +434,8 @@ def _create_message_search_terms_queue_triggers(cur: sqlite3.Cursor) -> None:
 
     cur.execute("""
     CREATE TRIGGER trg_message_terms_queue_insert
-    AFTER INSERT ON messages BEGIN
+    AFTER INSERT ON messages
+    WHEN new.search_text_present = 1 BEGIN
         INSERT INTO message_search_terms_rebuild_queue(pk, reason, queued_at)
         VALUES (new.pk, 'insert', datetime('now'))
         ON CONFLICT(pk) DO UPDATE SET
@@ -445,7 +446,8 @@ def _create_message_search_terms_queue_triggers(cur: sqlite3.Cursor) -> None:
 
     cur.execute("""
     CREATE TRIGGER trg_message_terms_queue_update
-    AFTER UPDATE OF content, content_norm ON messages BEGIN
+    AFTER UPDATE OF content, content_norm ON messages
+    WHEN new.search_text_present = 1 BEGIN
         INSERT INTO message_search_terms_rebuild_queue(pk, reason, queued_at)
         VALUES (new.pk, 'update', datetime('now'))
         ON CONFLICT(pk) DO UPDATE SET

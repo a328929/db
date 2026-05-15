@@ -363,6 +363,69 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute("SELECT created_at FROM dedupe_actions WHERE batch_id = 'run-1'")
         self.assertTrue(cur.fetchone()["created_at"])
 
+    def test_create_schema_drops_obsolete_duplicate_indexes(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        stale_index_sql = [
+            "CREATE INDEX idx_messages_chat_id ON messages(chat_id)",
+            "CREATE INDEX idx_messages_msg_id ON messages(message_id)",
+            "CREATE INDEX idx_media_file_ref ON message_media(chat_id, message_id)",
+            "CREATE INDEX idx_dedupe_runs_batch ON dedupe_runs(batch_id)",
+            "CREATE INDEX idx_admin_job_logs_job_seq ON admin_job_logs(job_id, seq)",
+            "CREATE INDEX idx_mg_hash ON media_groups(chat_id, pure_hash) WHERE pure_hash <> ''",
+        ]
+        for sql in stale_index_sql:
+            cur.execute(sql)
+        self.conn.commit()
+
+        create_schema(self.conn, feats)
+
+        cur.execute("PRAGMA index_list(messages)")
+        message_indexes = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("idx_messages_chat_id", message_indexes)
+        self.assertNotIn("idx_messages_msg_id", message_indexes)
+        self.assertIn("idx_messages_chat_date", message_indexes)
+
+        cur.execute("PRAGMA index_list(message_media)")
+        media_indexes = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("idx_media_file_ref", media_indexes)
+
+        cur.execute("PRAGMA index_list(dedupe_runs)")
+        dedupe_run_indexes = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("idx_dedupe_runs_batch", dedupe_run_indexes)
+
+        cur.execute("PRAGMA index_list(admin_job_logs)")
+        admin_log_indexes = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("idx_admin_job_logs_job_seq", admin_log_indexes)
+
+        cur.execute("PRAGMA index_list(media_groups)")
+        media_group_indexes = {row[1] for row in cur.fetchall()}
+        self.assertNotIn("idx_mg_hash", media_group_indexes)
+        self.assertIn("idx_mg_pure_hash", media_group_indexes)
+
+    def test_create_schema_replaces_stale_named_index_definitions(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("DROP INDEX IF EXISTS idx_mg_promo")
+        cur.execute(
+            """
+            CREATE INDEX idx_mg_promo
+            ON media_groups(chat_id, is_promo, item_count DESC)
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, feats)
+
+        cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='idx_mg_promo'"
+        )
+        index_sql = str(cur.fetchone()["sql"])
+        self.assertIn("dedupe_eligible", index_sql)
+        self.assertNotIn("item_count DESC", index_sql)
+
     def test_schema_without_fts5_does_not_install_broken_fts_triggers(self) -> None:
         feats = SimpleNamespace(supports_strict=False, supports_fts5=False)
 
@@ -687,6 +750,21 @@ class MessageSearchTermQueueTests(unittest.TestCase):
             ["利", "利姬", "姬", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
         )
+
+    def test_empty_message_does_not_enqueue_search_term_rebuild(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 12, '2026-01-01 00:00:00', 1, 'TEXT', '', '', 0)
+            """
+        )
+        self.conn.commit()
+
+        cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
 
     def test_update_content_norm_enqueues_rebuild(self) -> None:
         cur = self.conn.cursor()
