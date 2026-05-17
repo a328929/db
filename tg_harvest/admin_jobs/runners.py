@@ -47,6 +47,46 @@ def _close_write_coordinator(
         logging.exception("写入队列关闭失败，保留原始采集异常")
 
 
+def _row_value(row: Any, key: str, default: Any = None) -> Any:
+    if isinstance(row, dict):
+        return row.get(key, default)
+    try:
+        keys = row.keys()
+    except Exception:
+        keys = None
+    if keys is not None and key not in keys:
+        return default
+    try:
+        value = row[key]
+    except Exception:
+        return default
+    return default if value is None else value
+
+
+def _chat_title_fallback(chat_id: Any, chat_title: Any) -> str:
+    title = str(chat_title or "").strip()
+    if title:
+        return title
+    chat_id_text = str(chat_id or "").strip()
+    return f"Chat {chat_id_text}" if chat_id_text else "未知群组"
+
+
+def _chat_log_label(chat_id: Any, chat_title: Any) -> str:
+    title = _chat_title_fallback(chat_id, chat_title)
+    chat_id_text = str(chat_id or "").strip()
+    if not chat_id_text:
+        return title
+    return f"{title} (ID={chat_id_text})"
+
+
+def _chat_failure_item(chat_id: Any, chat_title: Any, reason: Any) -> str:
+    return f"{_chat_log_label(chat_id, chat_title)}({str(reason or '').strip()})"
+
+
+def _update_skip_reason(row: Any) -> str:
+    return str(_row_value(row, "update_skip_reason", "") or "").strip()
+
+
 def _admin_update_all_chats(
     job_id, _ignored_client, get_conn_fn, admin_job_append_log_fn, cfg
 ):
@@ -54,7 +94,19 @@ def _admin_update_all_chats(
     try:
         cur = conn.cursor()
         cur.execute(
-            "SELECT chat_id, chat_title, chat_username FROM chats ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC"
+            """
+            SELECT
+                c.chat_id,
+                c.chat_title,
+                c.chat_username,
+                CASE
+                    WHEN a.chat_id IS NULL THEN ''
+                    ELSE COALESCE(NULLIF(a.scan_reason, ''), '账号未加入')
+                END AS update_skip_reason
+            FROM chats c
+            LEFT JOIN admin_absent_chats a ON a.chat_id = c.chat_id
+            ORDER BY c.chat_title COLLATE NOCASE ASC, c.chat_id ASC
+            """
         )
         rows = cur.fetchall()
     finally:
@@ -65,7 +117,9 @@ def _admin_update_all_chats(
         return True
 
     total = len(rows)
-    success_count, failed_count, total_added_messages = 0, 0, 0
+    success_count, skipped_count, failed_count, total_added_messages = 0, 0, 0, 0
+    eligible_targets = []
+    skipped_chats = []
     failed_chats = []
 
     concurrency = getattr(cfg, "admin_update_concurrency", 5)
@@ -80,6 +134,49 @@ def _admin_update_all_chats(
         log_step=0,
     )
 
+    for idx, row in enumerate(rows, start=1):
+        skip_reason = _update_skip_reason(row)
+        if not skip_reason:
+            eligible_targets.append((idx, row))
+            continue
+
+        raw_chat_id = _row_value(row, "chat_id", "")
+        chat_title = _chat_title_fallback(raw_chat_id, _row_value(row, "chat_title", ""))
+        skipped_count += 1
+        skipped_chats.append(_chat_failure_item(raw_chat_id, chat_title, skip_reason))
+        admin_job_append_log_fn(
+            job_id,
+            f"[{idx}/{total}] 跳过更新：群组={_chat_log_label(raw_chat_id, chat_title)}，原因={skip_reason}",
+        )
+
+    if skipped_count:
+        _admin_job_update_progress(
+            job_id,
+            skipped_count,
+            total=total,
+            stage="updating",
+            log_step=0,
+            auto_log=False,
+        )
+
+    if not eligible_targets:
+        final_log_msg = (
+            f"全部群组增量采集完成：成功 0 个，跳过 {skipped_count} 个，失败 0 个，"
+            f"总计 {total} 个，共新增 0 条消息"
+        )
+        if skipped_chats:
+            final_log_msg += f"。跳过列表：{', '.join(skipped_chats)}"
+        admin_job_append_log_fn(job_id, final_log_msg)
+        _admin_job_update_progress(
+            job_id,
+            total,
+            total=total,
+            stage="done",
+            log_step=0,
+            auto_log=False,
+        )
+        return True
+
     if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
         return False
 
@@ -92,9 +189,12 @@ def _admin_update_all_chats(
     def _worker(idx, row):
         job_context.set(str(job_id))
         passthrough_token = job_log_passthrough_enabled.set(False)
-        current_chat_id = int(row["chat_id"])
-        current_chat_title = str(row["chat_title"] or current_chat_id)
-        current_chat_username = row["chat_username"]
+        raw_chat_id = _row_value(row, "chat_id", "")
+        current_chat_title = _chat_title_fallback(
+            raw_chat_id, _row_value(row, "chat_title", "")
+        )
+        current_chat_label = _chat_log_label(raw_chat_id, current_chat_title)
+        current_chat_username = _row_value(row, "chat_username", None)
 
         import random
 
@@ -104,6 +204,10 @@ def _admin_update_all_chats(
         worker_id = f"{job_id}_{idx}"
 
         try:
+            current_chat_id = int(raw_chat_id)
+            if current_chat_id == 0:
+                raise RuntimeError("无法识别群组/频道 ID")
+
             local_client = _create_isolated_worker_client(cfg, worker_id)
             before_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
             entity = resolve_chat_entity(
@@ -115,7 +219,8 @@ def _admin_update_all_chats(
                 or str(current_chat_id)
             )
             admin_job_append_log_fn(
-                job_id, f"[{idx}/{total}] 群组连接成功：名称={entity_title}"
+                job_id,
+                f"[{idx}/{total}] 群组连接成功：目标={current_chat_label}，名称={entity_title}",
             )
 
             stream_entity_harvest_to_writer(
@@ -135,11 +240,11 @@ def _admin_update_all_chats(
             added_count = max(0, after_count - before_count)
             return current_chat_title, current_chat_id, True, added_count, None
         except Exception as chat_exc:
-            logging.exception(f"Worker 执行群组 {current_chat_title} 失败")
+            logging.exception(f"Worker 执行群组 {current_chat_label} 失败")
             user_msg = admin_error_message(chat_exc)
             return (
                 current_chat_title,
-                current_chat_id,
+                raw_chat_id,
                 False,
                 0,
                 user_msg,
@@ -157,32 +262,47 @@ def _admin_update_all_chats(
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {
                 executor.submit(_worker, idx, row): (idx, row)
-                for idx, row in enumerate(rows, start=1)
+                for idx, row in eligible_targets
             }
             for future in as_completed(futures):
                 idx, row = futures[future]
                 try:
                     chat_title, chat_id, success, added, err_msg = future.result()
+                    chat_label = _chat_log_label(chat_id, chat_title)
                     if success:
                         total_added_messages += added
                         success_count += 1
                         admin_job_append_log_fn(
-                            job_id, f"[{idx}/{total}] {chat_title} 新增 {added} 条消息"
+                            job_id, f"[{idx}/{total}] {chat_label} 新增 {added} 条消息"
                         )
                     else:
                         failed_count += 1
-                        failed_chats.append(f"{chat_title}({err_msg})")
+                        failed_chats.append(
+                            _chat_failure_item(chat_id, chat_title, err_msg)
+                        )
                         admin_job_append_log_fn(
                             job_id,
-                            f"[{idx}/{total}] 增量采集失败：群组={chat_title}，错误={err_msg}",
+                            f"[{idx}/{total}] 增量采集失败：群组={chat_label}，错误={err_msg}",
                         )
                 except Exception as e:
                     failed_count += 1
-                    admin_job_append_log_fn(job_id, f"[{idx}/{total}] 线程执行异常：{e}")
+                    raw_chat_id = _row_value(row, "chat_id", "")
+                    chat_title = _chat_title_fallback(
+                        raw_chat_id, _row_value(row, "chat_title", "")
+                    )
+                    chat_label = _chat_log_label(raw_chat_id, chat_title)
+                    err_msg = admin_error_message(e)
+                    failed_chats.append(
+                        _chat_failure_item(raw_chat_id, chat_title, err_msg)
+                    )
+                    admin_job_append_log_fn(
+                        job_id,
+                        f"[{idx}/{total}] 线程执行异常：群组={chat_label}，错误={err_msg}",
+                    )
                 finally:
                     _admin_job_update_progress(
                         job_id,
-                        success_count + failed_count,
+                        success_count + skipped_count + failed_count,
                         total=total,
                         stage="updating",
                         log_step=0,
@@ -200,7 +320,12 @@ def _admin_update_all_chats(
             )
         write_coordinator.close()
 
-    final_log_msg = f"全部群组增量采集完成：成功 {success_count} 个，失败 {failed_count} 个，总计 {total} 个，共新增 {total_added_messages} 条消息"
+    final_log_msg = (
+        f"全部群组增量采集完成：成功 {success_count} 个，跳过 {skipped_count} 个，"
+        f"失败 {failed_count} 个，总计 {total} 个，共新增 {total_added_messages} 条消息"
+    )
+    if skipped_chats:
+        final_log_msg += f"。跳过列表：{', '.join(skipped_chats)}"
     if failed_chats:
         final_log_msg += f"。失败列表：{', '.join(failed_chats)}"
     admin_job_append_log_fn(job_id, final_log_msg)

@@ -154,10 +154,25 @@ def _admin_absent_chats_scan_job_runner(
         admin_job_append_log_fn(job_id, "正在连接 Telegram 并扫描当前账号已加入会话...")
         local_client = _create_isolated_worker_client(cfg, worker_id)
         joined_rows = load_joined_chat_inventory(local_client.iter_dialogs())
-        joined_chat_ids = {int(row.chat_id) for row in joined_rows}
-        admin_job_append_log_fn(job_id, f"当前账号已加入 {len(joined_chat_ids)} 个群组/频道")
+        unavailable_chat_reasons = {
+            int(row.chat_id): str(row.unavailable_reason).strip()
+            for row in joined_rows
+            if str(row.unavailable_reason or "").strip()
+        }
+        joined_chat_ids = {
+            int(row.chat_id) for row in joined_rows if not row.unavailable_reason
+        }
+        admin_job_append_log_fn(
+            job_id,
+            f"当前账号可访问 {len(joined_chat_ids)} 个群组/频道，"
+            f"发现 {len(unavailable_chat_reasons)} 个已加入但不可用的群组/频道",
+        )
 
-        rows = find_database_chats_not_joined(database_rows, joined_chat_ids)
+        rows = find_database_chats_not_joined(
+            database_rows,
+            joined_chat_ids,
+            unavailable_chat_reasons=unavailable_chat_reasons,
+        )
         scanned_at = _admin_now_iso()
 
         admin_job_append_log_fn(job_id, "正在保存扫描结果...")
@@ -182,7 +197,7 @@ def _admin_absent_chats_scan_job_runner(
         )
         admin_job_append_log_fn(
             job_id,
-            f"扫描完成：发现 {saved_count} 个数据库中存在但账号未加入的群组/频道",
+            f"扫描完成：发现 {saved_count} 个数据库中存在但账号未加入或不可用的群组/频道",
         )
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:

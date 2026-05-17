@@ -472,15 +472,20 @@
             { label: 'chat_id', value: String(item.chat_id) },
             { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
             { label: '类型', value: item.chat_type || '' },
+            { label: '原因', value: item.scan_reason || '账号未加入' },
           ],
           actions: createChannelActions(item, elements, { allowDelete: true }),
-          note: item.has_public_link
-            ? ''
-            : '私有群组通常没有稳定网页入口；删除前可复制信息核对目标。'
+          note: item.scan_reason && item.scan_reason !== '账号未加入'
+            ? item.scan_reason
+            : (
+                item.has_public_link
+                  ? ''
+                  : '私有群组通常没有稳定网页入口；删除前可复制信息核对目标。'
+              )
         })
       );
     });
-    elements.absentStatus.textContent = '发现 ' + items.length + ' 个数据库中存在但账号未加入的群组/频道。';
+    elements.absentStatus.textContent = '发现 ' + items.length + ' 个数据库中存在但账号未加入或不可用的群组/频道。';
   }
 
   async function loadAbsentChannels(elements) {
@@ -517,7 +522,7 @@
   }
 
   async function handleScanAbsentClick(elements) {
-    if (!window.confirm('确认扫描数据库中存在但当前账号未加入的群组或频道？')) {
+    if (!window.confirm('确认扫描数据库中存在但当前账号未加入或不可用的群组或频道？')) {
       appendLog(elements, '已取消扫描');
       return;
     }

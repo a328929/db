@@ -260,6 +260,7 @@ def _create_admin_absent_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
         chat_type            TEXT,
         message_count        INTEGER NOT NULL DEFAULT 0,
         last_seen_at         TEXT,
+        scan_reason          TEXT,
         scan_job_id          TEXT,
         scanned_at           TEXT NOT NULL
     ){strict_suffix}
@@ -495,6 +496,7 @@ def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
             ("chat_type", "chat_type TEXT"),
             ("message_count", "message_count INTEGER NOT NULL DEFAULT 0"),
             ("last_seen_at", "last_seen_at TEXT"),
+            ("scan_reason", "scan_reason TEXT"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],

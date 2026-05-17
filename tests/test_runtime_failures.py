@@ -161,9 +161,48 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertFalse(ok)
         self.assertTrue(any("增量采集失败" in line for line in logs))
-        self.assertTrue(any("失败 1 个" in line for line in logs))
+        self.assertTrue(any("bad (ID=2)" in line for line in logs))
+        self.assertTrue(any("跳过 0 个，失败 1 个" in line for line in logs))
+        self.assertTrue(any("失败列表：bad (ID=2)" in line for line in logs))
         self.assertTrue(any(kwargs.get("total") == 2 for _, kwargs in progress_calls))
         self.assertTrue(any(kwargs.get("stage") == "updating" for _, kwargs in progress_calls))
+
+    def test_all_chat_update_skips_known_absent_or_unavailable_chats(self) -> None:
+        rows = [
+            {
+                "chat_id": 9,
+                "chat_title": "blocked-channel",
+                "chat_username": "blocked",
+                "update_skip_reason": "Telegram 限制显示：违规不可用",
+            },
+        ]
+        cfg = SimpleNamespace(admin_update_concurrency=1, session_name="sess")
+        logs = []
+        progress_calls = []
+
+        def append_log(_job_id, message):
+            logs.append(str(message))
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            side_effect=AssertionError("skipped-only update should not open Telegram"),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            ok = _admin_update_all_chats(
+                "job-1",
+                None,
+                lambda: _FakeConn(rows),
+                append_log,
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertTrue(any("跳过更新：群组=blocked-channel (ID=9)" in line for line in logs))
+        self.assertTrue(any("跳过 1 个，失败 0 个" in line for line in logs))
+        self.assertTrue(any("跳过列表：blocked-channel (ID=9)" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
 
     def test_all_chat_update_clears_stale_username_when_chat_becomes_private(self) -> None:
         rows = [

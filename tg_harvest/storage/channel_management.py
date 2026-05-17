@@ -217,16 +217,18 @@ def replace_absent_chat_scan_results(
                 chat_type,
                 message_count,
                 last_seen_at,
+                scan_reason,
                 scan_job_id,
                 scanned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = excluded.chat_title,
                 chat_username = excluded.chat_username,
                 chat_type = excluded.chat_type,
                 message_count = excluded.message_count,
                 last_seen_at = excluded.last_seen_at,
+                scan_reason = excluded.scan_reason,
                 scan_job_id = excluded.scan_job_id,
                 scanned_at = excluded.scanned_at
             """,
@@ -241,6 +243,8 @@ def replace_absent_chat_scan_results(
                     str(_scan_row_value(row, "chat_type", "")),
                     int(_scan_row_value(row, "message_count", 0) or 0),
                     str(_scan_row_value(row, "last_seen_at", "")),
+                    str(_scan_row_value(row, "scan_reason", "")).strip()
+                    or "账号未加入",
                     str(scan_job_id or ""),
                     str(scanned_at or ""),
                 )
@@ -271,6 +275,7 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                 a.chat_type,
                 a.message_count,
                 a.last_seen_at,
+                a.scan_reason,
                 a.scan_job_id,
                 a.scanned_at
             FROM admin_absent_chats a
@@ -295,6 +300,7 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                     "chat_type": str(row["chat_type"] or ""),
                     "message_count": int(row["message_count"] or 0),
                     "last_seen_at": str(row["last_seen_at"] or ""),
+                    "scan_reason": str(row["scan_reason"] or ""),
                     "scan_job_id": str(row["scan_job_id"] or ""),
                     "scanned_at": str(row["scanned_at"] or ""),
                 }

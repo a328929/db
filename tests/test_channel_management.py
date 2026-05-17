@@ -63,6 +63,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 chat_type TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 last_seen_at TEXT,
+                scan_reason TEXT,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
             )
@@ -169,6 +170,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     "chat_type": "Channel",
                     "message_count": 20,
                     "last_seen_at": "2026-02-01 00:00:00",
+                    "scan_reason": "Telegram 限制显示：违规不可用",
                 },
             ],
             scan_job_id="job-2",
@@ -180,6 +182,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(["Large", "Small"], [row["chat_title"] for row in rows])
         self.assertEqual("large", rows[0]["chat_username"])
         self.assertEqual(20, rows[0]["message_count"])
+        self.assertEqual("Telegram 限制显示：违规不可用", rows[0]["scan_reason"])
+        self.assertEqual("账号未加入", rows[1]["scan_reason"])
 
     def test_list_absent_chat_scan_results_hides_deleted_chat(self) -> None:
         replace_absent_chat_scan_results(

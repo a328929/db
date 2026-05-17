@@ -59,6 +59,7 @@ class ChannelRoutesTests(unittest.TestCase):
                     "chat_type": "Channel",
                     "message_count": 5,
                     "last_seen_at": "2026-02-01 00:00:00",
+                    "scan_reason": "账号未加入",
                     "scan_job_id": "job-2",
                     "scanned_at": "2026-02-02 00:00:00",
                 }
@@ -105,6 +106,7 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertEqual("tg://openmessage?chat_id=2", item["telegram_app_link"])
         self.assertEqual("", item["telegram_web_link"])
         self.assertFalse(item["has_public_link"])
+        self.assertEqual("账号未加入", item["scan_reason"])
 
     def test_absent_channels_scan_creates_job(self) -> None:
         from unittest.mock import patch

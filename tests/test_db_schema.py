@@ -348,6 +348,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("chat_title", admin_absent_chat_columns)
         self.assertIn("message_count", admin_absent_chat_columns)
         self.assertIn("last_seen_at", admin_absent_chat_columns)
+        self.assertIn("scan_reason", admin_absent_chat_columns)
         self.assertIn("scanned_at", admin_absent_chat_columns)
 
         cur.execute("SELECT updated_at FROM message_media WHERE chat_id = 1")
