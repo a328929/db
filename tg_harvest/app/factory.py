@@ -32,6 +32,7 @@ from tg_harvest.admin_jobs.runners import (
 from tg_harvest.admin_jobs.channel_inventory import (
     _admin_start_absent_chats_scan_job_thread,
     _admin_start_missing_chats_scan_job_thread,
+    _admin_start_restricted_chats_scan_job_thread,
 )
 from tg_harvest.app.routes_registry import register_all_routes
 from tg_harvest.app.services import AdminRouteServices, RouteRegistryServices
@@ -53,6 +54,7 @@ from tg_harvest.storage.channel_management import (
     list_absent_chat_scan_results,
     list_database_channels,
     list_missing_chat_scan_results,
+    list_restricted_chat_scan_results,
 )
 from tg_harvest.storage.access import FROM_SQL, get_conn as runtime_get_conn, has_fts
 from tg_harvest.storage.connection import connect_db, ensure_configured_db
@@ -257,12 +259,16 @@ def _build_route_services() -> RouteRegistryServices:
         list_database_channels_fn=list_database_channels,
         list_missing_chat_scan_results_fn=list_missing_chat_scan_results,
         list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
+        list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         admin_start_missing_chats_scan_job_thread_fn=(
             _admin_start_missing_chats_scan_job_thread
         ),
         admin_start_absent_chats_scan_job_thread_fn=(
             _admin_start_absent_chats_scan_job_thread
+        ),
+        admin_start_restricted_chats_scan_job_thread_fn=(
+            _admin_start_restricted_chats_scan_job_thread
         ),
     )
 

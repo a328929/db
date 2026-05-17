@@ -2,13 +2,16 @@ import sqlite3
 import unittest
 
 from tg_harvest.domain.chat_inventory import ChatInventoryRow
+from tg_harvest.domain.chat_inventory import RestrictedChatInventoryRow
 from tg_harvest.storage.channel_management import (
     list_absent_chat_scan_results,
     list_database_channels,
     list_missing_chat_scan_results,
+    list_restricted_chat_scan_results,
     normalize_channel_sort,
     replace_absent_chat_scan_results,
     replace_missing_chat_scan_results,
+    replace_restricted_chat_scan_results,
 )
 
 
@@ -64,6 +67,23 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 message_count INTEGER NOT NULL DEFAULT 0,
                 last_seen_at TEXT,
                 scan_reason TEXT,
+                scan_job_id TEXT,
+                scanned_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE admin_restricted_chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT,
+                chat_type TEXT,
+                is_public INTEGER NOT NULL DEFAULT 0,
+                restriction_platforms TEXT,
+                restriction_reasons TEXT,
+                restriction_text TEXT,
+                risk_flags TEXT,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
             )
@@ -202,6 +222,36 @@ class ChannelManagementStorageTests(unittest.TestCase):
 
         rows = list_absent_chat_scan_results(self.conn)
         self.assertEqual([], rows)
+
+    def test_replace_and_list_restricted_chat_scan_results(self) -> None:
+        count = replace_restricted_chat_scan_results(
+            self.conn,
+            [
+                RestrictedChatInventoryRow(
+                    chat_id=8,
+                    chat_title="Restricted",
+                    chat_username="restricted",
+                    chat_type="Channel",
+                    is_public=1,
+                    restriction_platforms="all",
+                    restriction_reasons="porn",
+                    restriction_text="This channel can't be displayed.",
+                    risk_flags="restricted",
+                )
+            ],
+            scan_job_id="job-4",
+            scanned_at="2026-04-04T00:00:00+00:00",
+        )
+
+        rows = list_restricted_chat_scan_results(self.conn)
+        self.assertEqual(1, count)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("Restricted", rows[0]["chat_title"])
+        self.assertEqual("restricted", rows[0]["chat_username"])
+        self.assertEqual("all", rows[0]["restriction_platforms"])
+        self.assertEqual("porn", rows[0]["restriction_reasons"])
+        self.assertEqual("This channel can't be displayed.", rows[0]["restriction_text"])
+        self.assertEqual("restricted", rows[0]["risk_flags"])
 
 
 if __name__ == "__main__":

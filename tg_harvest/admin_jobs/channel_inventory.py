@@ -22,11 +22,13 @@ from tg_harvest.admin_jobs.sessions import (
 )
 from tg_harvest.domain.chat_inventory import find_database_chats_not_joined
 from tg_harvest.domain.chat_inventory import find_missing_joined_chats
+from tg_harvest.domain.chat_inventory import find_restricted_joined_chats
 from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
 from tg_harvest.domain.chat_inventory import load_known_chat_ids
 from tg_harvest.storage.channel_management import list_database_channels
 from tg_harvest.storage.channel_management import replace_absent_chat_scan_results
 from tg_harvest.storage.channel_management import replace_missing_chat_scan_results
+from tg_harvest.storage.channel_management import replace_restricted_chat_scan_results
 
 
 def _admin_missing_chats_scan_job_runner(
@@ -217,6 +219,88 @@ def _admin_absent_chats_scan_job_runner(
 def _admin_start_absent_chats_scan_job_thread(job_id: str, **kwargs):
     return start_admin_job_thread(
         _admin_absent_chats_scan_job_runner,
+        job_id,
+        **kwargs,
+    )
+
+
+def _admin_restricted_chats_scan_job_runner(
+    job_id: str,
+    *,
+    cfg: Any,
+    get_conn_fn: Callable[[], Any],
+    admin_job_set_status_fn: Callable[[str, str], bool],
+    admin_job_append_log_fn: Callable[[str, str], Any],
+) -> None:
+    job_context.set(str(job_id))
+    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    local_client = None
+    worker_id = f"{job_id}_restricted_chats"
+    try:
+        admin_job_set_status_fn(job_id, "running")
+        _admin_job_update_progress(
+            job_id,
+            0,
+            total=None,
+            stage="running",
+            log_step=0,
+            auto_log=False,
+        )
+        admin_job_append_log_fn(job_id, "正在验证 Telegram 会话...")
+        if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
+            admin_job_set_status_fn(job_id, "error")
+            return
+
+        admin_job_append_log_fn(
+            job_id,
+            "正在连接 Telegram 并扫描内容限制/风险标记...",
+        )
+        local_client = _create_isolated_worker_client(cfg, worker_id)
+        rows = find_restricted_joined_chats(local_client.iter_dialogs())
+        scanned_at = _admin_now_iso()
+
+        admin_job_append_log_fn(job_id, "正在保存扫描结果...")
+        write_conn = get_conn_fn()
+        try:
+            saved_count = replace_restricted_chat_scan_results(
+                write_conn,
+                rows,
+                scan_job_id=job_id,
+                scanned_at=scanned_at,
+            )
+        finally:
+            write_conn.close()
+
+        _admin_job_update_progress(
+            job_id,
+            saved_count,
+            total=saved_count,
+            stage="done",
+            log_step=0,
+            auto_log=False,
+        )
+        admin_job_append_log_fn(
+            job_id,
+            f"扫描完成：发现 {saved_count} 个带 Telegram 内容限制/风险标记的群组/频道",
+        )
+        admin_job_set_status_fn(job_id, "done")
+    except Exception as exc:
+        logging.exception("扫描内容限制群组失败: job_id=%s", job_id)
+        admin_job_append_log_fn(job_id, f"扫描失败：{admin_error_message(exc)}")
+        admin_job_set_status_fn(job_id, "error")
+    finally:
+        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
+        if local_client:
+            try:
+                _disconnect_worker_client(local_client)
+            except Exception:
+                pass
+        _cleanup_isolated_worker_session(cfg, worker_id)
+
+
+def _admin_start_restricted_chats_scan_job_thread(job_id: str, **kwargs):
+    return start_admin_job_thread(
+        _admin_restricted_chats_scan_job_runner,
         job_id,
         **kwargs,
     )

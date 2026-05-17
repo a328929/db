@@ -79,7 +79,32 @@ def _load_missing_targets(
 ) -> Dict[int, Dict[str, object]]:
     cur = conn.cursor()
     try:
-        where_sql = "m.has_media = 1 AND COALESCE(mm.file_unique_id, '') = ''"
+        where_sql = """
+            m.has_media = 1
+            AND (
+                mm.chat_id IS NULL
+                OR COALESCE(mm.file_unique_id, '') = ''
+                OR (
+                    (
+                        m.msg_type IN ('VIDEO', 'VIDEO_NOTE', 'AUDIO', 'VOICE', 'GIF')
+                        OR COALESCE(mm.mime_type, '') LIKE 'video/%'
+                        OR COALESCE(mm.mime_type, '') LIKE 'audio/%'
+                    )
+                    AND (
+                        mm.file_size IS NULL
+                        OR mm.duration_sec IS NULL
+                    )
+                )
+                OR (
+                    m.msg_type = 'PHOTO'
+                    AND (
+                        mm.file_size IS NULL
+                        OR mm.width IS NULL
+                        OR mm.height IS NULL
+                    )
+                )
+            )
+        """
         params: List[int] = []
         if chat_id is not None:
             where_sql += " AND m.chat_id = ?"

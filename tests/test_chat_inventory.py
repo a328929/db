@@ -1,6 +1,7 @@
 from tg_harvest.domain.chat_inventory import ChatInventoryRow
 from tg_harvest.domain.chat_inventory import find_database_chats_not_joined
 from tg_harvest.domain.chat_inventory import find_missing_joined_chats
+from tg_harvest.domain.chat_inventory import find_restricted_joined_chats
 from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
 from tg_harvest.domain.chat_inventory import write_missing_chat_report
 
@@ -15,6 +16,8 @@ class _Entity:
         title=None,
         restricted=False,
         restriction_reason=None,
+        scam=False,
+        fake=False,
     ):
         self.id = chat_id
         self.left = left
@@ -22,6 +25,8 @@ class _Entity:
         self.title = title
         self.restricted = restricted
         self.restriction_reason = restriction_reason or []
+        self.scam = scam
+        self.fake = fake
 
 
 class _Dialog:
@@ -48,9 +53,10 @@ class _ChannelForbidden:
 
 
 class _RestrictionReason:
-    def __init__(self, *, text="", reason=""):
+    def __init__(self, *, text="", reason="", platform=""):
         self.text = text
         self.reason = reason
+        self.platform = platform
 
 
 def test_find_missing_joined_chats_filters_and_sorts():
@@ -144,6 +150,50 @@ def test_restricted_joined_chats_still_count_as_joined():
 
     assert [row["chat_id"] for row in absent_rows] == [2]
     assert absent_rows[0]["scan_reason"] == "Telegram 返回该会话不可访问"
+
+
+def test_find_restricted_joined_chats_reports_reasons_and_risk_flags():
+    dialogs = [
+        _Dialog(
+            chat_id=1,
+            title="Restricted",
+            is_channel=True,
+            entity=_Entity(
+                1,
+                title="Restricted",
+                restricted=True,
+                restriction_reason=[
+                    _RestrictionReason(
+                        platform="all",
+                        reason="porn",
+                        text="This channel can't be displayed because it was used to spread pornographic content.",
+                    )
+                ],
+            ),
+        ),
+        _Dialog(
+            chat_id=2,
+            title="Scam",
+            is_channel=True,
+            entity=_Entity(2, title="Scam", scam=True),
+        ),
+        _Dialog(
+            chat_id=3,
+            title="Forbidden",
+            entity=_ChannelForbidden(3, title="Forbidden"),
+        ),
+        _Dialog(chat_id=4, title="Visible", is_channel=True),
+    ]
+
+    rows = find_restricted_joined_chats(dialogs)
+    rows_by_id = {row.chat_id: row for row in rows}
+
+    assert [row.chat_id for row in rows] == [1, 2]
+    assert rows_by_id[1].restriction_platforms == "all"
+    assert rows_by_id[1].restriction_reasons == "porn"
+    assert "pornographic content" in rows_by_id[1].restriction_text
+    assert rows_by_id[1].risk_flags == "restricted"
+    assert rows_by_id[2].risk_flags == "scam"
 
 
 def test_write_missing_chat_report(tmp_path):

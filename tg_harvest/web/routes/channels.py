@@ -31,6 +31,7 @@ def register_channel_routes(
     list_database_channels_fn,
     list_missing_chat_scan_results_fn,
     list_absent_chat_scan_results_fn,
+    list_restricted_chat_scan_results_fn,
     build_telegram_chat_link_bundle_fn,
     admin_try_create_exclusive_job_fn,
     admin_job_get_snapshot_fn,
@@ -38,6 +39,7 @@ def register_channel_routes(
     admin_job_set_status_fn,
     admin_start_missing_chats_scan_job_thread_fn,
     admin_start_absent_chats_scan_job_thread_fn,
+    admin_start_restricted_chats_scan_job_thread_fn,
 ) -> None:
     @app.get("/admin/channels")
     def admin_channels_page():
@@ -87,6 +89,21 @@ def register_channel_routes(
         except sqlite3.Error:
             logger.exception("读取账号外数据库群组扫描结果失败")
             return jsonify({"ok": False, "error": "读取账号外数据库群组扫描结果失败"}), 500
+        except Exception:
+            logger.exception("系统异常")
+            return jsonify({"ok": False, "error": "系统异常"}), 500
+
+    @app.get("/api/admin/channels/restricted")
+    @admin_login_required
+    def api_admin_restricted_channels():
+        try:
+            with closing(get_conn_fn()) as conn:
+                rows = list_restricted_chat_scan_results_fn(conn)
+            items = _with_chat_links(rows, build_telegram_chat_link_bundle_fn)
+            return jsonify({"ok": True, "items": items, "count": len(items)})
+        except sqlite3.Error:
+            logger.exception("读取内容限制群组扫描结果失败")
+            return jsonify({"ok": False, "error": "读取内容限制群组扫描结果失败"}), 500
         except Exception:
             logger.exception("系统异常")
             return jsonify({"ok": False, "error": "系统异常"}), 500
@@ -150,4 +167,14 @@ def register_channel_routes(
             target_label="账号外数据库群组扫描",
             received_log="已接收账号外数据库群组扫描请求",
             start_thread_fn=admin_start_absent_chats_scan_job_thread_fn,
+        )
+
+    @app.post("/api/admin/channels/restricted/scan")
+    @admin_login_required
+    def api_admin_restricted_channels_scan():
+        return _create_scan_job_response(
+            "restricted_chats_scan",
+            target_label="内容限制/风险标记扫描",
+            received_log="已接收内容限制/风险标记扫描请求",
+            start_thread_fn=admin_start_restricted_chats_scan_job_thread_fn,
         )

@@ -267,6 +267,24 @@ def _create_admin_absent_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
+def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_restricted_chats (
+        chat_id                  INTEGER PRIMARY KEY,
+        chat_title               TEXT NOT NULL,
+        chat_username            TEXT,
+        chat_type                TEXT,
+        is_public                INTEGER NOT NULL DEFAULT 0,
+        restriction_platforms    TEXT,
+        restriction_reasons      TEXT,
+        restriction_text         TEXT,
+        risk_flags               TEXT,
+        scan_job_id              TEXT,
+        scanned_at               TEXT NOT NULL
+    ){strict_suffix}
+    """)
+
+
 def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_chats_table(cur, strict_suffix)
     _create_messages_table(cur, strict_suffix)
@@ -279,6 +297,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_job_tables(cur, strict_suffix)
     _create_admin_missing_chats_table(cur, strict_suffix)
     _create_admin_absent_chats_table(cur, strict_suffix)
+    _create_admin_restricted_chats_table(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
@@ -509,6 +528,24 @@ def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
     )
 
 
+def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_restricted_chats",
+        [
+            ("chat_username", "chat_username TEXT"),
+            ("chat_type", "chat_type TEXT"),
+            ("is_public", "is_public INTEGER NOT NULL DEFAULT 0"),
+            ("restriction_platforms", "restriction_platforms TEXT"),
+            ("restriction_reasons", "restriction_reasons TEXT"),
+            ("restriction_text", "restriction_text TEXT"),
+            ("risk_flags", "risk_flags TEXT"),
+            ("scan_job_id", "scan_job_id TEXT"),
+            ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
 def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:
     if not _column_exists(cur, "chats", "message_count"):
         cur.execute(
@@ -736,6 +773,7 @@ def create_schema(
         _ensure_admin_job_schema(cur)
         _ensure_admin_missing_chats_schema(cur)
         _ensure_admin_absent_chats_schema(cur)
+        _ensure_admin_restricted_chats_schema(cur)
         _ensure_chat_summary_columns(cur)
         _heal_chat_message_counts_if_needed(cur)
         _indexes._create_indexes(cur)

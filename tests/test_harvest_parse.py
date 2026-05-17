@@ -84,6 +84,51 @@ class ResolveTargetEntitiesTests(unittest.TestCase):
 
 
 class MessageParserTests(unittest.TestCase):
+    def test_parse_video_meta_falls_back_to_raw_document_attributes(self) -> None:
+        message = SimpleNamespace(
+            id=124,
+            date=datetime(2024, 1, 1, 0, 0, 0),
+            sender_id=1,
+            raw_text="",
+            message="",
+            text="",
+            grouped_id=None,
+            sticker=None,
+            gif=None,
+            voice=None,
+            video_note=None,
+            audio=None,
+            video=object(),
+            photo=None,
+            document=SimpleNamespace(
+                id=987654321,
+                mime_type="video/mp4",
+                size=123456789,
+                attributes=[
+                    SimpleNamespace(file_name="clip.mp4"),
+                    SimpleNamespace(duration=61, w=1920, h=1080),
+                ],
+            ),
+            poll=None,
+            contact=None,
+            geo=None,
+            file=None,
+        )
+
+        parsed = MessageParser.parse(message)
+
+        self.assertIsNotNone(parsed)
+        self.assertEqual("VIDEO", parsed.msg_type)
+        self.assertEqual("clip.mp4", parsed.content)
+        self.assertEqual("987654321", parsed.media_meta["file_unique_id"])
+        self.assertEqual("clip.mp4", parsed.media_meta["file_name"])
+        self.assertEqual(".mp4", parsed.media_meta["file_ext"])
+        self.assertEqual("video/mp4", parsed.media_meta["mime_type"])
+        self.assertEqual(123456789, parsed.media_meta["file_size"])
+        self.assertEqual(61, parsed.media_meta["duration_sec"])
+        self.assertEqual(1920, parsed.media_meta["width"])
+        self.assertEqual(1080, parsed.media_meta["height"])
+
     def test_parse_raises_on_unexpected_media_metadata_error(self) -> None:
         message = SimpleNamespace(
             id=123,

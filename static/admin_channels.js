@@ -33,6 +33,11 @@
     logoutTimer: null
   };
 
+  var restrictedState = {
+    items: [],
+    filterValue: '__all__'
+  };
+
   document.addEventListener('DOMContentLoaded', async function () {
     var elements = getElements();
     if (!elements) return;
@@ -59,6 +64,12 @@
       absentListToggleBtn: document.getElementById('admin-absent-list-toggle-btn'),
       absentStatus: document.getElementById('admin-absent-status'),
       absentList: document.getElementById('admin-absent-list'),
+      scanRestrictedBtn: document.getElementById('admin-scan-restricted-btn'),
+      refreshRestrictedBtn: document.getElementById('admin-refresh-restricted-btn'),
+      restrictedFilterSelect: document.getElementById('admin-restricted-filter-select'),
+      restrictedListToggleBtn: document.getElementById('admin-restricted-list-toggle-btn'),
+      restrictedStatus: document.getElementById('admin-restricted-status'),
+      restrictedList: document.getElementById('admin-restricted-list'),
       logContainer: document.getElementById('admin-channel-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-channel-logs-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
@@ -82,6 +93,12 @@
       'absentListToggleBtn',
       'absentStatus',
       'absentList',
+      'scanRestrictedBtn',
+      'refreshRestrictedBtn',
+      'restrictedFilterSelect',
+      'restrictedListToggleBtn',
+      'restrictedStatus',
+      'restrictedList',
       'logContainer',
       'clearLogsBtn',
       'loginDialog',
@@ -138,6 +155,19 @@
     });
     elements.scanAbsentBtn.addEventListener('click', function () {
       handleScanAbsentClick(elements);
+    });
+    elements.refreshRestrictedBtn.addEventListener('click', function () {
+      loadRestrictedChannels(elements);
+    });
+    elements.restrictedFilterSelect.addEventListener('change', function () {
+      restrictedState.filterValue = elements.restrictedFilterSelect.value || '__all__';
+      renderRestrictedChannels(elements);
+    });
+    elements.restrictedListToggleBtn.addEventListener('click', function () {
+      toggleListArea(elements.restrictedListToggleBtn, elements.restrictedList);
+    });
+    elements.scanRestrictedBtn.addEventListener('click', function () {
+      handleScanRestrictedClick(elements);
     });
     elements.clearLogsBtn.addEventListener('click', function () {
       clearLogs(elements);
@@ -207,6 +237,7 @@
     await loadChannels(elements);
     await loadMissingChannels(elements);
     await loadAbsentChannels(elements);
+    await loadRestrictedChannels(elements);
   }
 
   function formatDateTime(value) {
@@ -498,6 +529,184 @@
     }
   }
 
+  function buildRestrictedNote(item) {
+    var parts = [];
+    if (item.restriction_text) parts.push(item.restriction_text);
+    if (item.restriction_platforms) parts.push('平台：' + item.restriction_platforms);
+    if (item.restriction_reasons) parts.push('原因：' + item.restriction_reasons);
+    if (item.risk_flags) parts.push('标记：' + item.risk_flags);
+    return parts.join(' | ');
+  }
+
+  function splitRestrictionTokens(value) {
+    var text = String(value || '').trim();
+    if (!text) return [''];
+    return text.split(/[、,，;；|/]+/).map(function (part) {
+      return part.trim();
+    }).filter(Boolean);
+  }
+
+  function buildRestrictionFilterKey(platform, reason) {
+    return String(platform || '').trim().toLowerCase() + '\u0001' + String(reason || '').trim().toLowerCase();
+  }
+
+  function displayRestrictionPlatform(platform) {
+    var raw = String(platform || '').trim();
+    var normalized = raw.toLowerCase();
+    if (!normalized) return '未标明平台';
+    if (normalized === 'all') return '全部平台';
+    if (normalized === 'ios') return 'iOS/苹果';
+    if (normalized === 'apple') return 'Apple/苹果';
+    return raw;
+  }
+
+  function displayRestrictionReason(reason) {
+    var raw = String(reason || '').trim();
+    var normalized = raw.toLowerCase();
+    if (!normalized) return '未标明原因';
+    if (normalized === 'porn') return '色情';
+    if (normalized === 'terms' || normalized === 'tos') return '违反条款';
+    if (normalized === 'copyright') return '版权';
+    return raw;
+  }
+
+  function buildRestrictionFilterLabel(platform, reason) {
+    return displayRestrictionPlatform(platform) + ' / ' + displayRestrictionReason(reason);
+  }
+
+  function getRestrictionFilterPairs(item) {
+    var platforms = splitRestrictionTokens(item && item.restriction_platforms);
+    var reasons = splitRestrictionTokens(item && item.restriction_reasons);
+    var pairs = [];
+    platforms.forEach(function (platform) {
+      reasons.forEach(function (reason) {
+        pairs.push({
+          key: buildRestrictionFilterKey(platform, reason),
+          label: buildRestrictionFilterLabel(platform, reason)
+        });
+      });
+    });
+    return pairs.length > 0
+      ? pairs
+      : [{ key: buildRestrictionFilterKey('', ''), label: buildRestrictionFilterLabel('', '') }];
+  }
+
+  function updateRestrictedFilterOptions(elements) {
+    var currentValue = restrictedState.filterValue || '__all__';
+    var countsByKey = {};
+    var labelsByKey = {};
+
+    restrictedState.items.forEach(function (item) {
+      var seenForItem = {};
+      getRestrictionFilterPairs(item).forEach(function (pair) {
+        if (seenForItem[pair.key]) return;
+        seenForItem[pair.key] = true;
+        countsByKey[pair.key] = (countsByKey[pair.key] || 0) + 1;
+        labelsByKey[pair.key] = pair.label;
+      });
+    });
+
+    elements.restrictedFilterSelect.textContent = '';
+    var allOption = document.createElement('option');
+    allOption.value = '__all__';
+    allOption.textContent = '全部类型（' + restrictedState.items.length + '）';
+    elements.restrictedFilterSelect.appendChild(allOption);
+
+    Object.keys(countsByKey).sort(function (a, b) {
+      var countDelta = countsByKey[b] - countsByKey[a];
+      if (countDelta !== 0) return countDelta;
+      return labelsByKey[a].localeCompare(labelsByKey[b]);
+    }).forEach(function (key) {
+      var option = document.createElement('option');
+      option.value = key;
+      option.textContent = labelsByKey[key] + '（' + countsByKey[key] + '）';
+      elements.restrictedFilterSelect.appendChild(option);
+    });
+
+    if (countsByKey[currentValue] || currentValue === '__all__') {
+      restrictedState.filterValue = currentValue;
+    } else {
+      restrictedState.filterValue = '__all__';
+    }
+    elements.restrictedFilterSelect.value = restrictedState.filterValue;
+  }
+
+  function filterRestrictedItems(items) {
+    var filterValue = restrictedState.filterValue || '__all__';
+    if (filterValue === '__all__') return items;
+    return items.filter(function (item) {
+      return getRestrictionFilterPairs(item).some(function (pair) {
+        return pair.key === filterValue;
+      });
+    });
+  }
+
+  function renderRestrictedChannels(elements) {
+    var items = filterRestrictedItems(restrictedState.items);
+    elements.restrictedList.textContent = '';
+    if (!Array.isArray(restrictedState.items) || restrictedState.items.length === 0) {
+      var empty = document.createElement('div');
+      empty.className = 'empty-box';
+      empty.textContent = '暂无内容限制/风险标记扫描结果。';
+      elements.restrictedList.appendChild(empty);
+      elements.restrictedStatus.textContent = '暂无内容限制/风险标记扫描结果，可点击“扫描限制标记”。';
+      return;
+    }
+    if (items.length === 0) {
+      var noMatch = document.createElement('div');
+      noMatch.className = 'empty-box';
+      noMatch.textContent = '当前筛选条件下没有匹配结果。';
+      elements.restrictedList.appendChild(noMatch);
+      elements.restrictedStatus.textContent = '当前类型 0 个，共 ' + restrictedState.items.length + ' 个内容限制/风险标记结果。';
+      return;
+    }
+
+    items.forEach(function (item) {
+      var metaParts = [];
+      if (item.chat_username) metaParts.push('@' + item.chat_username);
+      if (item.chat_type) metaParts.push(item.chat_type);
+      if (item.risk_flags) metaParts.push(item.risk_flags);
+
+      elements.restrictedList.appendChild(
+        createChannelRecordItem({
+          title: item.chat_title || ('Chat ' + item.chat_id),
+          subtitle: metaParts.join(' | '),
+          metrics: [
+            { label: 'chat_id', value: String(item.chat_id) },
+            { label: '扫描', value: formatDateTime(item.scanned_at) }
+          ],
+          meta: [
+            { label: 'chat_id', value: String(item.chat_id) },
+            { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
+            { label: '类型', value: item.chat_type || '' },
+            { label: '平台', value: item.restriction_platforms || '' },
+            { label: '原因', value: item.restriction_reasons || '' },
+            { label: '标记', value: item.risk_flags || '' },
+          ],
+          actions: createChannelActions(item, elements),
+          note: buildRestrictedNote(item)
+        })
+      );
+    });
+    if ((restrictedState.filterValue || '__all__') === '__all__') {
+      elements.restrictedStatus.textContent = '发现 ' + items.length + ' 个带 Telegram 内容限制/风险标记的群组/频道。';
+    } else {
+      elements.restrictedStatus.textContent = '当前类型 ' + items.length + ' 个，共 ' + restrictedState.items.length + ' 个内容限制/风险标记结果。';
+    }
+  }
+
+  async function loadRestrictedChannels(elements) {
+    try {
+      var data = await fetchJSON('/api/admin/channels/restricted');
+      if (!data.ok) throw new Error(data.error || '读取失败');
+      restrictedState.items = Array.isArray(data.items) ? data.items : [];
+      updateRestrictedFilterOptions(elements);
+      renderRestrictedChannels(elements);
+    } catch (error) {
+      elements.restrictedStatus.textContent = '读取扫描结果失败：' + error.message;
+    }
+  }
+
   async function handleScanMissingClick(elements) {
     if (!window.confirm('确认扫描当前 Telegram 账号中已加入但未入库的群组或频道？')) {
       appendLog(elements, '已取消扫描');
@@ -537,6 +746,29 @@
         errorMessage: '扫描任务执行失败，请检查日志',
         onDone: function () {
           return loadAbsentChannels(elements);
+        }
+      });
+    } catch (error) {
+      appendLog(elements, '创建扫描任务失败：' + error.message);
+    }
+  }
+
+  async function handleScanRestrictedClick(elements) {
+    if (!window.confirm('确认扫描当前 Telegram 账号中带内容限制或风险标记的群组或频道？')) {
+      appendLog(elements, '已取消扫描');
+      return;
+    }
+    try {
+      var payload = await fetchJSON('/api/admin/channels/restricted/scan', {
+        method: 'POST'
+      });
+      var jobId = getCreatedJobId(payload);
+      appendLog(elements, '扫描任务已创建：' + jobId);
+      startJobPolling(elements, jobId, {
+        doneMessage: '扫描任务执行完成',
+        errorMessage: '扫描任务执行失败，请检查日志',
+        onDone: function () {
+          return loadRestrictedChannels(elements);
         }
       });
     } catch (error) {
@@ -732,6 +964,10 @@
     setElementDisabled(elements.scanAbsentBtn, disabled);
     setElementDisabled(elements.refreshAbsentBtn, disabled);
     setElementDisabled(elements.absentListToggleBtn, disabled);
+    setElementDisabled(elements.scanRestrictedBtn, disabled);
+    setElementDisabled(elements.refreshRestrictedBtn, disabled);
+    setElementDisabled(elements.restrictedFilterSelect, disabled);
+    setElementDisabled(elements.restrictedListToggleBtn, disabled);
     if (elements.logContainer && typeof elements.logContainer.setAttribute === 'function') {
       elements.logContainer.setAttribute('aria-busy', disabled ? 'true' : 'false');
     }

@@ -73,6 +73,9 @@ def register_all_routes(
         list_database_channels_fn=services.list_database_channels_fn,
         list_missing_chat_scan_results_fn=services.list_missing_chat_scan_results_fn,
         list_absent_chat_scan_results_fn=services.list_absent_chat_scan_results_fn,
+        list_restricted_chat_scan_results_fn=(
+            services.list_restricted_chat_scan_results_fn
+        ),
         build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
         admin_try_create_exclusive_job_fn=services.admin.admin_try_create_exclusive_job_fn,
         admin_job_get_snapshot_fn=services.admin.admin_job_get_snapshot_fn,
@@ -83,5 +86,8 @@ def register_all_routes(
         ),
         admin_start_absent_chats_scan_job_thread_fn=(
             services.admin_start_absent_chats_scan_job_thread_fn
+        ),
+        admin_start_restricted_chats_scan_job_thread_fn=(
+            services.admin_start_restricted_chats_scan_job_thread_fn
         ),
     )

@@ -45,6 +45,8 @@ class RouteRegistryServices:
     list_database_channels_fn: Any
     list_missing_chat_scan_results_fn: Any
     list_absent_chat_scan_results_fn: Any
+    list_restricted_chat_scan_results_fn: Any
     build_telegram_chat_link_bundle_fn: Any
     admin_start_missing_chats_scan_job_thread_fn: Any
     admin_start_absent_chats_scan_job_thread_fn: Any
+    admin_start_restricted_chats_scan_job_thread_fn: Any

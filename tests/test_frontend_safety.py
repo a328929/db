@@ -28,6 +28,9 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin_channels.css", template)
         self.assertIn("admin-absent-list-toggle-btn", template)
         self.assertIn("admin-scan-absent-btn", template)
+        self.assertIn("admin-restricted-list-toggle-btn", template)
+        self.assertIn("admin-scan-restricted-btn", template)
+        self.assertIn("admin-restricted-filter-select", template)
         self.assertNotIn("搜索框", template)
 
     def test_page_templates_load_page_specific_stylesheets(self) -> None:

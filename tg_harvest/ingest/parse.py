@@ -1,5 +1,6 @@
 # -*- coding: utf-8 -*-
 import logging
+import mimetypes
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -56,6 +57,96 @@ class MessageParser:
         "performer",
         "emoji",
     )
+
+    @staticmethod
+    def _coerce_int(value: Any) -> Optional[int]:
+        if value is None:
+            return None
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _set_text_if_empty(cls, meta: Dict[str, Any], key: str, value: Any) -> None:
+        if meta.get(key) or value is None:
+            return
+        text = str(value).strip()
+        if text:
+            meta[key] = text
+
+    @classmethod
+    def _set_int_if_empty(cls, meta: Dict[str, Any], key: str, value: Any) -> None:
+        if meta.get(key) is not None:
+            return
+        parsed = cls._coerce_int(value)
+        if parsed is not None:
+            meta[key] = parsed
+
+    @classmethod
+    def _set_extension_if_empty(cls, meta: Dict[str, Any]) -> None:
+        if meta.get("file_ext"):
+            return
+        file_name = str(meta.get("file_name") or "").strip()
+        if "." in file_name:
+            ext = "." + file_name.rsplit(".", 1)[-1].strip()
+            if len(ext) > 1:
+                meta["file_ext"] = ext
+                return
+        mime_type = str(meta.get("mime_type") or "").strip()
+        if mime_type:
+            guessed_ext = mimetypes.guess_extension(mime_type)
+            if guessed_ext:
+                meta["file_ext"] = guessed_ext
+
+    @classmethod
+    def _extract_document_attribute_meta(
+        cls, meta: Dict[str, Any], extra: Dict[str, Any], document: Any
+    ) -> None:
+        for attr in getattr(document, "attributes", None) or []:
+            cls._set_text_if_empty(meta, "file_name", getattr(attr, "file_name", None))
+            cls._set_int_if_empty(meta, "duration_sec", getattr(attr, "duration", None))
+            cls._set_int_if_empty(meta, "width", getattr(attr, "w", None))
+            cls._set_int_if_empty(meta, "height", getattr(attr, "h", None))
+            for key in ("title", "performer", "emoji"):
+                value = getattr(attr, key, None)
+                if value is not None and key not in extra:
+                    extra[key] = value
+
+    @classmethod
+    def _extract_photo_size_meta(cls, meta: Dict[str, Any], photo: Any) -> None:
+        best_size = None
+        best_area = -1
+        for size in getattr(photo, "sizes", None) or []:
+            width = cls._coerce_int(getattr(size, "w", None))
+            height = cls._coerce_int(getattr(size, "h", None))
+            area = (width or 0) * (height or 0)
+            if area > best_area:
+                best_area = area
+                best_size = size
+        if best_size is None:
+            return
+        cls._set_int_if_empty(meta, "width", getattr(best_size, "w", None))
+        cls._set_int_if_empty(meta, "height", getattr(best_size, "h", None))
+        cls._set_int_if_empty(meta, "file_size", getattr(best_size, "size", None))
+
+    @classmethod
+    def _extract_raw_media_meta(
+        cls, message: Any, meta: Dict[str, Any], extra: Dict[str, Any]
+    ) -> None:
+        document = getattr(message, "document", None)
+        if document:
+            cls._set_text_if_empty(meta, "file_unique_id", getattr(document, "id", None))
+            cls._set_text_if_empty(meta, "mime_type", getattr(document, "mime_type", None))
+            cls._set_int_if_empty(meta, "file_size", getattr(document, "size", None))
+            cls._extract_document_attribute_meta(meta, extra, document)
+
+        photo = getattr(message, "photo", None)
+        if photo:
+            cls._set_text_if_empty(meta, "file_unique_id", getattr(photo, "id", None))
+            cls._extract_photo_size_meta(meta, photo)
+
+        cls._set_extension_if_empty(meta)
 
     @classmethod
     def parse(cls, message: Any) -> Optional[ParsedMessage]:
@@ -167,6 +258,11 @@ class MessageParser:
                     meta["duration_sec"] = int(v)
                 else:
                     extra[k] = v
+
+        # Telethon's convenience .file wrapper is not always populated for older
+        # or refetched messages. The raw document/photo payload usually still
+        # carries size, mime type, dimensions and duration.
+        cls._extract_raw_media_meta(message, meta, extra)
 
         # 2. 回退机制：从原始对象提取 ID
         if not meta["file_unique_id"]:

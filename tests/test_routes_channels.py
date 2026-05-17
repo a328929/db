@@ -64,6 +64,21 @@ class ChannelRoutesTests(unittest.TestCase):
                     "scanned_at": "2026-02-02 00:00:00",
                 }
             ],
+            list_restricted_chat_scan_results_fn=lambda _conn: [
+                {
+                    "chat_id": 3,
+                    "chat_title": "Restricted",
+                    "chat_username": "restricted",
+                    "chat_type": "Channel",
+                    "is_public": 1,
+                    "restriction_platforms": "all",
+                    "restriction_reasons": "porn",
+                    "restriction_text": "This channel can't be displayed.",
+                    "risk_flags": "restricted",
+                    "scan_job_id": "job-3",
+                    "scanned_at": "2026-03-02 00:00:00",
+                }
+            ],
             build_telegram_chat_link_bundle_fn=build_bundle,
             admin_try_create_exclusive_job_fn=lambda *_args, **_kwargs: (
                 {"job_id": "job-1"},
@@ -74,6 +89,9 @@ class ChannelRoutesTests(unittest.TestCase):
             admin_job_set_status_fn=lambda *_args, **_kwargs: True,
             admin_start_missing_chats_scan_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_absent_chats_scan_job_thread_fn=lambda *_args, **_kwargs: None,
+            admin_start_restricted_chats_scan_job_thread_fn=(
+                lambda *_args, **_kwargs: None
+            ),
         )
         self.client = self.app.test_client()
         with self.client.session_transaction() as session:
@@ -113,6 +131,30 @@ class ChannelRoutesTests(unittest.TestCase):
 
         with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
             response = self.client.post("/api/admin/channels/absent/scan")
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+
+    def test_restricted_channels_api_includes_telegram_links(self) -> None:
+        from unittest.mock import patch
+
+        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
+            response = self.client.get("/api/admin/channels/restricted")
+
+        self.assertEqual(200, response.status_code)
+        item = response.get_json()["items"][0]
+        self.assertEqual("Restricted", item["chat_title"])
+        self.assertEqual("tg://resolve?domain=restricted", item["telegram_app_link"])
+        self.assertEqual("https://t.me/restricted", item["telegram_web_link"])
+        self.assertTrue(item["has_public_link"])
+        self.assertEqual("porn", item["restriction_reasons"])
+        self.assertEqual("restricted", item["risk_flags"])
+
+    def test_restricted_channels_scan_creates_job(self) -> None:
+        from unittest.mock import patch
+
+        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
+            response = self.client.post("/api/admin/channels/restricted/scan")
 
         self.assertEqual(200, response.status_code)
         self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])

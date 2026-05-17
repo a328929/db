@@ -351,6 +351,17 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("scan_reason", admin_absent_chat_columns)
         self.assertIn("scanned_at", admin_absent_chat_columns)
 
+        cur.execute("PRAGMA table_info(admin_restricted_chats)")
+        admin_restricted_chat_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("chat_id", admin_restricted_chat_columns)
+        self.assertIn("chat_title", admin_restricted_chat_columns)
+        self.assertIn("chat_username", admin_restricted_chat_columns)
+        self.assertIn("restriction_platforms", admin_restricted_chat_columns)
+        self.assertIn("restriction_reasons", admin_restricted_chat_columns)
+        self.assertIn("restriction_text", admin_restricted_chat_columns)
+        self.assertIn("risk_flags", admin_restricted_chat_columns)
+        self.assertIn("scanned_at", admin_restricted_chat_columns)
+
         cur.execute("SELECT updated_at FROM message_media WHERE chat_id = 1")
         self.assertTrue(cur.fetchone()["updated_at"])
         cur.execute(

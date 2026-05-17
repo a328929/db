@@ -16,6 +16,19 @@ class ChatInventoryRow:
     unavailable_reason: str = ""
 
 
+@dataclass(frozen=True)
+class RestrictedChatInventoryRow:
+    chat_id: int
+    chat_title: str
+    chat_username: str = ""
+    chat_type: str = ""
+    is_public: int = 0
+    restriction_platforms: str = ""
+    restriction_reasons: str = ""
+    restriction_text: str = ""
+    risk_flags: str = ""
+
+
 def load_known_chat_ids(conn: Any) -> Set[int]:
     cur = conn.cursor()
     try:
@@ -104,6 +117,96 @@ def load_joined_chat_inventory(dialogs: Iterable[Any]) -> List[ChatInventoryRow]
         seen_chat_ids.add(identity)
         rows.append(row)
 
+    return rows
+
+
+def _dedupe_nonempty(values: Iterable[Any]) -> List[str]:
+    items: List[str] = []
+    seen: Set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(text)
+    return items
+
+
+def _restriction_reason_parts(entity: Any) -> tuple[str, str, str]:
+    raw_reasons = getattr(entity, "restriction_reason", None) or []
+    if not isinstance(raw_reasons, (list, tuple)):
+        raw_reasons = [raw_reasons]
+
+    platforms = []
+    reasons = []
+    texts = []
+    for raw_reason in raw_reasons:
+        if raw_reason is None:
+            continue
+        platforms.append(getattr(raw_reason, "platform", ""))
+        reasons.append(getattr(raw_reason, "reason", ""))
+        texts.append(getattr(raw_reason, "text", ""))
+
+    return (
+        "、".join(_dedupe_nonempty(platforms)),
+        "、".join(_dedupe_nonempty(reasons)),
+        "；".join(_dedupe_nonempty(texts)),
+    )
+
+
+def _entity_risk_flags(entity: Any) -> str:
+    flag_labels = [
+        ("restricted", "restricted"),
+        ("scam", "scam"),
+        ("fake", "fake"),
+    ]
+    return "、".join(
+        label for attr, label in flag_labels if bool(getattr(entity, attr, False))
+    )
+
+
+def find_restricted_joined_chats(dialogs: Iterable[Any]) -> List[RestrictedChatInventoryRow]:
+    rows: List[RestrictedChatInventoryRow] = []
+    seen_chat_ids: Set[int] = set()
+
+    for dialog in dialogs:
+        base_row = _row_from_dialog(dialog)
+        if base_row is None or base_row.unavailable_reason:
+            continue
+
+        entity = getattr(dialog, "entity", None)
+        platforms, reasons, reason_text = _restriction_reason_parts(entity)
+        risk_flags = _entity_risk_flags(entity)
+        if not any((platforms, reasons, reason_text, risk_flags)):
+            continue
+
+        identity = _chat_id_identity(base_row.chat_id)
+        if identity in seen_chat_ids:
+            continue
+        seen_chat_ids.add(identity)
+        rows.append(
+            RestrictedChatInventoryRow(
+                chat_id=base_row.chat_id,
+                chat_title=base_row.chat_title,
+                chat_username=base_row.chat_username,
+                chat_type=base_row.chat_type,
+                is_public=base_row.is_public,
+                restriction_platforms=platforms,
+                restriction_reasons=reasons,
+                restriction_text=reason_text
+                or (
+                    "Telegram 标记为内容受限"
+                    if "restricted" in risk_flags.split("、")
+                    else ""
+                ),
+                risk_flags=risk_flags,
+            )
+        )
+
+    rows.sort(key=lambda item: (item.chat_title.casefold(), item.chat_id))
     return rows
 
 

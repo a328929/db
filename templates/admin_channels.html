@@ -112,6 +112,41 @@
       <div id="admin-absent-list" class="channel-list" aria-label="数据库中账号未加入或不可用的群组或频道列表" hidden></div>
     </section>
 
+    <section class="panel channel-panel" aria-labelledby="restrictedChannelsTitle">
+      <div class="channel-panel-head">
+        <div>
+          <h2 id="restrictedChannelsTitle" class="section-title">内容限制/风险标记的群组/频道</h2>
+          <p id="admin-restricted-status" class="channel-subline" role="status" aria-live="polite">
+            暂无扫描结果。
+          </p>
+        </div>
+        <div class="channel-toolbar">
+          <label for="admin-restricted-filter-select" class="sr-only">限制标记筛选</label>
+          <select id="admin-restricted-filter-select" aria-label="按平台和原因筛选内容限制扫描结果">
+            <option value="__all__">全部类型</option>
+          </select>
+          <button id="admin-scan-restricted-btn" class="btn primary" type="button" aria-label="扫描当前账号中带内容限制或风险标记的群组或频道">
+            扫描限制标记
+          </button>
+          <button id="admin-refresh-restricted-btn" class="btn" type="button" aria-label="刷新内容限制扫描结果">
+            刷新结果
+          </button>
+          <button
+            id="admin-restricted-list-toggle-btn"
+            class="btn"
+            type="button"
+            aria-expanded="false"
+            aria-controls="admin-restricted-list"
+            aria-label="收起或展开内容限制群组列表"
+          >
+            展开列表
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-restricted-list" class="channel-list" aria-label="内容限制或风险标记的群组或频道列表" hidden></div>
+    </section>
+
     <section class="panel channel-panel" aria-labelledby="channelLogTitle">
       <div class="admin-log-head channel-log-head">
         <h2 id="channelLogTitle" class="section-title">扫描日志</h2>

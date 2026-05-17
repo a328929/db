@@ -3,6 +3,7 @@ import sqlite3
 from typing import Any, Iterable, List
 
 from tg_harvest.domain.chat_inventory import ChatInventoryRow
+from tg_harvest.domain.chat_inventory import RestrictedChatInventoryRow
 from tg_harvest.storage.connection import synchronized_write
 
 
@@ -301,6 +302,120 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                     "message_count": int(row["message_count"] or 0),
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "scan_reason": str(row["scan_reason"] or ""),
+                    "scan_job_id": str(row["scan_job_id"] or ""),
+                    "scanned_at": str(row["scanned_at"] or ""),
+                }
+            )
+        return rows
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def replace_restricted_chat_scan_results(
+    conn: sqlite3.Connection,
+    rows: Iterable[RestrictedChatInventoryRow],
+    *,
+    scan_job_id: str,
+    scanned_at: str,
+) -> int:
+    normalized_rows = list(rows)
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("DELETE FROM admin_restricted_chats")
+        cur.executemany(
+            """
+            INSERT INTO admin_restricted_chats(
+                chat_id,
+                chat_title,
+                chat_username,
+                chat_type,
+                is_public,
+                restriction_platforms,
+                restriction_reasons,
+                restriction_text,
+                risk_flags,
+                scan_job_id,
+                scanned_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                chat_title = excluded.chat_title,
+                chat_username = excluded.chat_username,
+                chat_type = excluded.chat_type,
+                is_public = excluded.is_public,
+                restriction_platforms = excluded.restriction_platforms,
+                restriction_reasons = excluded.restriction_reasons,
+                restriction_text = excluded.restriction_text,
+                risk_flags = excluded.risk_flags,
+                scan_job_id = excluded.scan_job_id,
+                scanned_at = excluded.scanned_at
+            """,
+            [
+                (
+                    int(row.chat_id),
+                    str(row.chat_title or "").strip() or f"Chat {int(row.chat_id)}",
+                    str(getattr(row, "chat_username", "") or "").strip().lstrip("@"),
+                    str(getattr(row, "chat_type", "") or ""),
+                    1 if int(getattr(row, "is_public", 0) or 0) == 1 else 0,
+                    str(getattr(row, "restriction_platforms", "") or "").strip(),
+                    str(getattr(row, "restriction_reasons", "") or "").strip(),
+                    str(getattr(row, "restriction_text", "") or "").strip(),
+                    str(getattr(row, "risk_flags", "") or "").strip(),
+                    str(scan_job_id or ""),
+                    str(scanned_at or ""),
+                )
+                for row in normalized_rows
+            ],
+        )
+        conn.commit()
+        return len(normalized_rows)
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        cur.close()
+
+
+def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                chat_id,
+                chat_title,
+                chat_username,
+                chat_type,
+                is_public,
+                restriction_platforms,
+                restriction_reasons,
+                restriction_text,
+                risk_flags,
+                scan_job_id,
+                scanned_at
+            FROM admin_restricted_chats
+            ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC
+            """
+        )
+        rows = []
+        for row in cur.fetchall():
+            chat_id = int(row["chat_id"])
+            rows.append(
+                {
+                    "chat_id": chat_id,
+                    "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
+                    "chat_username": str(row["chat_username"] or ""),
+                    "chat_type": str(row["chat_type"] or ""),
+                    "is_public": int(row["is_public"] or 0),
+                    "restriction_platforms": str(row["restriction_platforms"] or ""),
+                    "restriction_reasons": str(row["restriction_reasons"] or ""),
+                    "restriction_text": str(row["restriction_text"] or ""),
+                    "risk_flags": str(row["risk_flags"] or ""),
                     "scan_job_id": str(row["scan_job_id"] or ""),
                     "scanned_at": str(row["scanned_at"] or ""),
                 }

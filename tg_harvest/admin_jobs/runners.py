@@ -717,6 +717,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         cur.execute("BEGIN IMMEDIATE")
         _delete_from_optional_chat_table(cur, "admin_absent_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
+        _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
         _delete_from_optional_message_pk_table(cur, "message_search_terms", chat_id)
         _delete_from_optional_message_pk_table(
             cur, "message_search_terms_rebuild_queue", chat_id

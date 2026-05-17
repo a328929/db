@@ -55,6 +55,7 @@ assert _BACKFILL_SPEC is not None and _BACKFILL_SPEC.loader is not None
 _BACKFILL_MODULE = importlib.util.module_from_spec(_BACKFILL_SPEC)
 _BACKFILL_SPEC.loader.exec_module(_BACKFILL_MODULE)
 _fetch_chunk_messages = _BACKFILL_MODULE._fetch_chunk_messages
+_load_missing_media_targets = _BACKFILL_MODULE._load_missing_targets
 
 
 class _FakeCursor:
@@ -85,6 +86,84 @@ class _FakeClient:
 
     def disconnect(self):
         return None
+
+
+class MediaMetadataBackfillTargetTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.conn = sqlite3.connect(":memory:")
+        self.conn.row_factory = sqlite3.Row
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_username TEXT
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                msg_type TEXT NOT NULL,
+                has_media INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY(chat_id, message_id)
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE message_media (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                file_unique_id TEXT,
+                mime_type TEXT,
+                file_size INTEGER,
+                width INTEGER,
+                height INTEGER,
+                duration_sec INTEGER,
+                PRIMARY KEY(chat_id, message_id)
+            )
+            """
+        )
+        cur.execute("INSERT INTO chats(chat_id, chat_username) VALUES (1, 'chan')")
+        cur.executemany(
+            """
+            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
+            VALUES (1, ?, ?, 1)
+            """,
+            [
+                (10, "VIDEO"),
+                (11, "VIDEO"),
+                (12, "PHOTO"),
+                (13, "VIDEO"),
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT INTO message_media(
+                chat_id, message_id, file_unique_id, mime_type,
+                file_size, width, height, duration_sec
+            )
+            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (10, "u10", "video/mp4", None, 1920, 1080, None),
+                (12, "u12", "image/jpeg", None, None, None, None),
+                (13, "u13", "video/mp4", 1000, 1920, 1080, 60),
+            ],
+        )
+        self.conn.commit()
+
+    def tearDown(self) -> None:
+        self.conn.close()
+
+    def test_load_missing_targets_includes_incomplete_video_metadata(self) -> None:
+        targets = _load_missing_media_targets(self.conn, chat_id=None, scan_limit=20)
+
+        self.assertEqual([12, 11, 10], targets[1]["message_ids"])
+        self.assertEqual("chan", targets[1]["chat_username"])
 
 
 class AdminUpdateRunnerTests(unittest.TestCase):

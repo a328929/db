@@ -305,6 +305,27 @@ def _create_admin_absent_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_restricted_chats_scanned",
+        "CREATE INDEX idx_admin_restricted_chats_scanned "
+        "ON admin_restricted_chats(scanned_at DESC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_restricted_chats_title",
+        "CREATE INDEX idx_admin_restricted_chats_title "
+        "ON admin_restricted_chats(chat_title COLLATE NOCASE)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_restricted_chats_public",
+        "CREATE INDEX idx_admin_restricted_chats_public "
+        "ON admin_restricted_chats(is_public, chat_title COLLATE NOCASE)"
+    )
+
+
 def _create_indexes(cur: sqlite3.Cursor):
     _drop_obsolete_indexes(cur)
     _create_message_indexes(cur)
@@ -315,3 +336,4 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_job_indexes(cur)
     _create_admin_missing_chat_indexes(cur)
     _create_admin_absent_chat_indexes(cur)
+    _create_admin_restricted_chat_indexes(cur)
