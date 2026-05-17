@@ -501,6 +501,12 @@ def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
     )
+    cur.execute(
+        """
+        DELETE FROM admin_absent_chats
+        WHERE scan_reason LIKE 'Telegram 限制显示%'
+        """
+    )
 
 
 def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:

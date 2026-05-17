@@ -364,6 +364,29 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute("SELECT created_at FROM dedupe_actions WHERE batch_id = 'run-1'")
         self.assertTrue(cur.fetchone()["created_at"])
 
+    def test_create_schema_drops_legacy_restricted_absent_scan_false_positives(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO admin_absent_chats(
+                chat_id,
+                chat_title,
+                scan_reason,
+                scanned_at
+            )
+            VALUES
+                (1, 'False Positive', 'Telegram 限制显示：This channel can be opened', '2026-01-01'),
+                (2, 'Forbidden', 'Telegram 返回该会话不可访问', '2026-01-01')
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        cur.execute("SELECT chat_id FROM admin_absent_chats ORDER BY chat_id")
+        self.assertEqual([2], [int(row["chat_id"]) for row in cur.fetchall()])
+
     def test_create_schema_drops_obsolete_duplicate_indexes(self) -> None:
         feats = detect_sqlite_features(self.conn)
         create_schema(self.conn, feats)

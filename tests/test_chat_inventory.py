@@ -96,7 +96,7 @@ def test_find_database_chats_not_joined_filters_by_joined_identity():
     assert rows[0]["scan_reason"] == "账号未加入"
 
 
-def test_unavailable_joined_chats_are_treated_as_absent():
+def test_restricted_joined_chats_still_count_as_joined():
     dialogs = [
         _Dialog(
             chat_id=1,
@@ -124,11 +124,11 @@ def test_unavailable_joined_chats_are_treated_as_absent():
     inventory_rows = load_joined_chat_inventory(dialogs)
     inventory_by_id = {row.chat_id: row for row in inventory_rows}
 
-    assert "violated Telegram" in inventory_by_id[1].unavailable_reason
+    assert inventory_by_id[1].unavailable_reason == ""
     assert inventory_by_id[2].unavailable_reason == "Telegram 返回该会话不可访问"
 
     missing_rows = find_missing_joined_chats(dialogs, known_chat_ids=set())
-    assert [row.chat_id for row in missing_rows] == [3]
+    assert [row.chat_id for row in missing_rows] == [1, 3]
 
     absent_rows = find_database_chats_not_joined(
         [
@@ -136,16 +136,14 @@ def test_unavailable_joined_chats_are_treated_as_absent():
             {"chat_id": 2, "chat_title": "Forbidden"},
             {"chat_id": 3, "chat_title": "Visible"},
         ],
-        joined_chat_ids={3},
+        joined_chat_ids={1, 3},
         unavailable_chat_reasons={
-            1: "Telegram 限制显示：This channel can't be displayed because it violated Telegram's Terms of Service.",
             2: "Telegram 返回该会话不可访问",
         },
     )
 
-    assert [row["chat_id"] for row in absent_rows] == [1, 2]
-    assert "violated Telegram" in absent_rows[0]["scan_reason"]
-    assert absent_rows[1]["scan_reason"] == "Telegram 返回该会话不可访问"
+    assert [row["chat_id"] for row in absent_rows] == [2]
+    assert absent_rows[0]["scan_reason"] == "Telegram 返回该会话不可访问"
 
 
 def test_write_missing_chat_report(tmp_path):

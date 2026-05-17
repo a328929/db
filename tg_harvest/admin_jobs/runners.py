@@ -83,10 +83,6 @@ def _chat_failure_item(chat_id: Any, chat_title: Any, reason: Any) -> str:
     return f"{_chat_log_label(chat_id, chat_title)}({str(reason or '').strip()})"
 
 
-def _update_skip_reason(row: Any) -> str:
-    return str(_row_value(row, "update_skip_reason", "") or "").strip()
-
-
 def _admin_update_all_chats(
     job_id, _ignored_client, get_conn_fn, admin_job_append_log_fn, cfg
 ):
@@ -94,19 +90,7 @@ def _admin_update_all_chats(
     try:
         cur = conn.cursor()
         cur.execute(
-            """
-            SELECT
-                c.chat_id,
-                c.chat_title,
-                c.chat_username,
-                CASE
-                    WHEN a.chat_id IS NULL THEN ''
-                    ELSE COALESCE(NULLIF(a.scan_reason, ''), '账号未加入')
-                END AS update_skip_reason
-            FROM chats c
-            LEFT JOIN admin_absent_chats a ON a.chat_id = c.chat_id
-            ORDER BY c.chat_title COLLATE NOCASE ASC, c.chat_id ASC
-            """
+            "SELECT chat_id, chat_title, chat_username FROM chats ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC"
         )
         rows = cur.fetchall()
     finally:
@@ -117,9 +101,7 @@ def _admin_update_all_chats(
         return True
 
     total = len(rows)
-    success_count, skipped_count, failed_count, total_added_messages = 0, 0, 0, 0
-    eligible_targets = []
-    skipped_chats = []
+    success_count, failed_count, total_added_messages = 0, 0, 0
     failed_chats = []
 
     concurrency = getattr(cfg, "admin_update_concurrency", 5)
@@ -133,49 +115,6 @@ def _admin_update_all_chats(
         stage="updating",
         log_step=0,
     )
-
-    for idx, row in enumerate(rows, start=1):
-        skip_reason = _update_skip_reason(row)
-        if not skip_reason:
-            eligible_targets.append((idx, row))
-            continue
-
-        raw_chat_id = _row_value(row, "chat_id", "")
-        chat_title = _chat_title_fallback(raw_chat_id, _row_value(row, "chat_title", ""))
-        skipped_count += 1
-        skipped_chats.append(_chat_failure_item(raw_chat_id, chat_title, skip_reason))
-        admin_job_append_log_fn(
-            job_id,
-            f"[{idx}/{total}] 跳过更新：群组={_chat_log_label(raw_chat_id, chat_title)}，原因={skip_reason}",
-        )
-
-    if skipped_count:
-        _admin_job_update_progress(
-            job_id,
-            skipped_count,
-            total=total,
-            stage="updating",
-            log_step=0,
-            auto_log=False,
-        )
-
-    if not eligible_targets:
-        final_log_msg = (
-            f"全部群组增量采集完成：成功 0 个，跳过 {skipped_count} 个，失败 0 个，"
-            f"总计 {total} 个，共新增 0 条消息"
-        )
-        if skipped_chats:
-            final_log_msg += f"。跳过列表：{', '.join(skipped_chats)}"
-        admin_job_append_log_fn(job_id, final_log_msg)
-        _admin_job_update_progress(
-            job_id,
-            total,
-            total=total,
-            stage="done",
-            log_step=0,
-            auto_log=False,
-        )
-        return True
 
     if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
         return False
@@ -262,7 +201,7 @@ def _admin_update_all_chats(
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
             futures = {
                 executor.submit(_worker, idx, row): (idx, row)
-                for idx, row in eligible_targets
+                for idx, row in enumerate(rows, start=1)
             }
             for future in as_completed(futures):
                 idx, row = futures[future]
@@ -302,7 +241,7 @@ def _admin_update_all_chats(
                 finally:
                     _admin_job_update_progress(
                         job_id,
-                        success_count + skipped_count + failed_count,
+                        success_count + failed_count,
                         total=total,
                         stage="updating",
                         log_step=0,
@@ -321,11 +260,9 @@ def _admin_update_all_chats(
         write_coordinator.close()
 
     final_log_msg = (
-        f"全部群组增量采集完成：成功 {success_count} 个，跳过 {skipped_count} 个，"
-        f"失败 {failed_count} 个，总计 {total} 个，共新增 {total_added_messages} 条消息"
+        f"全部群组增量采集完成：成功 {success_count} 个，失败 {failed_count} 个，"
+        f"总计 {total} 个，共新增 {total_added_messages} 条消息"
     )
-    if skipped_chats:
-        final_log_msg += f"。跳过列表：{', '.join(skipped_chats)}"
     if failed_chats:
         final_log_msg += f"。失败列表：{', '.join(failed_chats)}"
     admin_job_append_log_fn(job_id, final_log_msg)

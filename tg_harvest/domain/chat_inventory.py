@@ -54,29 +54,6 @@ def _is_joined_group_or_channel(dialog: Any) -> bool:
     return True
 
 
-def _normalize_reason_text(value: Any) -> str:
-    text = str(value or "").strip()
-    return " ".join(text.split())
-
-
-def _restriction_reason_text(entity: Any) -> str:
-    reasons = getattr(entity, "restriction_reason", None) or []
-    if not isinstance(reasons, (list, tuple)):
-        reasons = [reasons]
-
-    parts: List[str] = []
-    for reason in reasons:
-        text = _normalize_reason_text(getattr(reason, "text", ""))
-        if text:
-            parts.append(text)
-            continue
-        fallback = _normalize_reason_text(getattr(reason, "reason", ""))
-        if fallback:
-            parts.append(fallback)
-
-    return "；".join(dict.fromkeys(parts))
-
-
 def _dialog_unavailable_reason(dialog: Any) -> str:
     entity = getattr(dialog, "entity", None)
     if entity is None:
@@ -85,12 +62,6 @@ def _dialog_unavailable_reason(dialog: Any) -> str:
     entity_type = entity.__class__.__name__.lower().lstrip("_")
     if entity_type in {"channelforbidden", "chatforbidden"}:
         return "Telegram 返回该会话不可访问"
-
-    if bool(getattr(entity, "restricted", False)):
-        reason = _restriction_reason_text(entity)
-        if reason:
-            return f"Telegram 限制显示：{reason}"
-        return "Telegram 限制显示该会话"
 
     return ""
 
