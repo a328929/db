@@ -59,6 +59,8 @@ class ChannelRoutesTests(unittest.TestCase):
                     "chat_type": "Channel",
                     "message_count": 5,
                     "last_seen_at": "2026-02-01 00:00:00",
+                    "last_message_at": "2026-01-31 00:00:00",
+                    "last_message_ts": 1769817600,
                     "scan_reason": "账号未加入",
                     "scan_job_id": "job-2",
                     "scanned_at": "2026-02-02 00:00:00",
@@ -75,6 +77,8 @@ class ChannelRoutesTests(unittest.TestCase):
                     "restriction_reasons": "porn",
                     "restriction_text": "This channel can't be displayed.",
                     "risk_flags": "restricted",
+                    "last_message_at": "2026-03-01 00:00:00",
+                    "last_message_ts": 1772323200,
                     "scan_job_id": "job-3",
                     "scanned_at": "2026-03-02 00:00:00",
                 }
@@ -125,6 +129,7 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertEqual("", item["telegram_web_link"])
         self.assertFalse(item["has_public_link"])
         self.assertEqual("账号未加入", item["scan_reason"])
+        self.assertEqual("2026-01-31 00:00:00", item["last_message_at"])
 
     def test_absent_channels_scan_creates_job(self) -> None:
         from unittest.mock import patch
@@ -149,6 +154,7 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertTrue(item["has_public_link"])
         self.assertEqual("porn", item["restriction_reasons"])
         self.assertEqual("restricted", item["risk_flags"])
+        self.assertEqual("2026-03-01 00:00:00", item["last_message_at"])
 
     def test_restricted_channels_scan_creates_job(self) -> None:
         from unittest.mock import patch

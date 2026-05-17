@@ -40,6 +40,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 chat_username TEXT,
                 chat_type TEXT,
                 is_public INTEGER NOT NULL DEFAULT 0,
+                last_message_at TEXT,
+                last_message_ts INTEGER,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
             )
@@ -66,6 +68,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 chat_type TEXT,
                 message_count INTEGER NOT NULL DEFAULT 0,
                 last_seen_at TEXT,
+                last_message_at TEXT,
+                last_message_ts INTEGER,
                 scan_reason TEXT,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
@@ -84,6 +88,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 restriction_reasons TEXT,
                 restriction_text TEXT,
                 risk_flags TEXT,
+                last_message_at TEXT,
+                last_message_ts INTEGER,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
             )
@@ -158,6 +164,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     chat_username="missing",
                     chat_type="Channel",
                     is_public=1,
+                    last_message_at="2026-04-01 10:00:00",
+                    last_message_ts=1775037600,
                 )
             ],
             scan_job_id="job-1",
@@ -170,6 +178,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("Missing", rows[0]["chat_title"])
         self.assertEqual("missing", rows[0]["chat_username"])
         self.assertEqual(1, rows[0]["is_public"])
+        self.assertEqual("2026-04-01 10:00:00", rows[0]["last_message_at"])
+        self.assertEqual(1775037600, rows[0]["last_message_ts"])
 
     def test_replace_and_list_absent_chat_scan_results(self) -> None:
         count = replace_absent_chat_scan_results(
@@ -182,6 +192,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     "chat_type": "Channel",
                     "message_count": 2,
                     "last_seen_at": "2026-01-01 00:00:00",
+                    "last_message_at": "2026-01-15 00:00:00",
+                    "last_message_ts": 1768435200,
                 },
                 {
                     "chat_id": 2,
@@ -190,6 +202,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     "chat_type": "Channel",
                     "message_count": 20,
                     "last_seen_at": "2026-02-01 00:00:00",
+                    "last_message_at": "2026-03-10 00:00:00",
+                    "last_message_ts": 1773100800,
                     "scan_reason": "Telegram 返回该会话不可访问",
                 },
             ],
@@ -202,6 +216,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(["Large", "Small"], [row["chat_title"] for row in rows])
         self.assertEqual("large", rows[0]["chat_username"])
         self.assertEqual(20, rows[0]["message_count"])
+        self.assertEqual("2026-03-10 00:00:00", rows[0]["last_message_at"])
+        self.assertEqual(1773100800, rows[0]["last_message_ts"])
         self.assertEqual("Telegram 返回该会话不可访问", rows[0]["scan_reason"])
         self.assertEqual("账号未加入", rows[1]["scan_reason"])
 
@@ -237,6 +253,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     restriction_reasons="porn",
                     restriction_text="This channel can't be displayed.",
                     risk_flags="restricted",
+                    last_message_at="2026-04-04 10:00:00",
+                    last_message_ts=1775296800,
                 )
             ],
             scan_job_id="job-4",
@@ -252,6 +270,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("porn", rows[0]["restriction_reasons"])
         self.assertEqual("This channel can't be displayed.", rows[0]["restriction_text"])
         self.assertEqual("restricted", rows[0]["risk_flags"])
+        self.assertEqual("2026-04-04 10:00:00", rows[0]["last_message_at"])
+        self.assertEqual(1775296800, rows[0]["last_message_ts"])
 
 
 if __name__ == "__main__":

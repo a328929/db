@@ -14,6 +14,8 @@ class ChatInventoryRow:
     chat_type: str = ""
     is_public: int = 0
     unavailable_reason: str = ""
+    last_message_at: str = ""
+    last_message_ts: int | None = None
 
 
 @dataclass(frozen=True)
@@ -27,6 +29,8 @@ class RestrictedChatInventoryRow:
     restriction_reasons: str = ""
     restriction_text: str = ""
     risk_flags: str = ""
+    last_message_at: str = ""
+    last_message_ts: int | None = None
 
 
 def load_known_chat_ids(conn: Any) -> Set[int]:
@@ -79,6 +83,19 @@ def _dialog_unavailable_reason(dialog: Any) -> str:
     return ""
 
 
+def _dialog_last_message_fields(dialog: Any) -> tuple[str, int | None]:
+    message = getattr(dialog, "message", None)
+    dt = getattr(message, "date", None) if message is not None else None
+    if dt is None:
+        return "", None
+    try:
+        ts = int(dt.timestamp())
+        text = dt.strftime("%Y-%m-%d %H:%M:%S")
+        return text, ts
+    except Exception:
+        return str(dt), None
+
+
 def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
     if not _is_joined_group_or_channel(dialog):
         return None
@@ -93,6 +110,7 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
         title = "未命名"
 
     username = str(getattr(entity, "username", None) or "").strip().lstrip("@")
+    last_message_at, last_message_ts = _dialog_last_message_fields(dialog)
     return ChatInventoryRow(
         chat_id=chat_id,
         chat_title=title,
@@ -100,6 +118,8 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
         chat_type=entity.__class__.__name__,
         is_public=1 if username else 0,
         unavailable_reason=_dialog_unavailable_reason(dialog),
+        last_message_at=last_message_at,
+        last_message_ts=last_message_ts,
     )
 
 
@@ -203,6 +223,8 @@ def find_restricted_joined_chats(dialogs: Iterable[Any]) -> List[RestrictedChatI
                     else ""
                 ),
                 risk_flags=risk_flags,
+                last_message_at=base_row.last_message_at,
+                last_message_ts=base_row.last_message_ts,
             )
         )
 
@@ -268,6 +290,8 @@ def find_database_chats_not_joined(
                 "chat_type": str(_mapping_value(row, "chat_type", "")),
                 "message_count": int(_mapping_value(row, "message_count", 0) or 0),
                 "last_seen_at": str(_mapping_value(row, "last_seen_at", "")),
+                "last_message_at": str(_mapping_value(row, "last_message_at", "")),
+                "last_message_ts": _mapping_value(row, "last_message_ts", None),
                 "scan_reason": scan_reason,
             }
         )

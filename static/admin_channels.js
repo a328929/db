@@ -252,6 +252,10 @@
     return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
+  function itemLastMessageAt(item) {
+    return (item && item.last_message_at) || (item && item.last_seen_at) || '';
+  }
+
   function createTextElement(tagName, className, text) {
     var el = document.createElement(tagName);
     if (className) el.className = className;
@@ -429,12 +433,13 @@
           subtitle: metaParts.join(' | '),
           metrics: [
             { label: 'chat_id', value: String(item.chat_id) },
-            { label: '扫描', value: formatDateTime(item.scanned_at) }
+            { label: '最后消息', value: formatDateTime(itemLastMessageAt(item)) }
           ],
           meta: [
             { label: 'chat_id', value: String(item.chat_id) },
             { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
             { label: '类型', value: item.chat_type || '' },
+            { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements),
           note: item.has_public_link
@@ -496,7 +501,7 @@
           subtitle: metaParts.join(' | '),
           metrics: [
             { label: '消息数', value: formatNumber(item.message_count) },
-            { label: '更新', value: formatDateTime(item.last_seen_at) },
+            { label: '最后消息', value: formatDateTime(itemLastMessageAt(item)) },
             { label: '扫描', value: formatDateTime(item.scanned_at) }
           ],
           meta: [
@@ -504,6 +509,7 @@
             { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
             { label: '类型', value: item.chat_type || '' },
             { label: '原因', value: item.scan_reason || '账号未加入' },
+            { label: '入库更新', value: formatDateTime(item.last_seen_at) },
           ],
           actions: createChannelActions(item, elements, { allowDelete: true }),
           note: item.scan_reason && item.scan_reason !== '账号未加入'
@@ -673,7 +679,7 @@
           subtitle: metaParts.join(' | '),
           metrics: [
             { label: 'chat_id', value: String(item.chat_id) },
-            { label: '扫描', value: formatDateTime(item.scanned_at) }
+            { label: '最后消息', value: formatDateTime(itemLastMessageAt(item)) }
           ],
           meta: [
             { label: 'chat_id', value: String(item.chat_id) },
@@ -682,6 +688,7 @@
             { label: '平台', value: item.restriction_platforms || '' },
             { label: '原因', value: item.restriction_reasons || '' },
             { label: '标记', value: item.risk_flags || '' },
+            { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements),
           note: buildRestrictedNote(item)

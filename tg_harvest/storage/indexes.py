@@ -282,6 +282,12 @@ def _create_admin_missing_chat_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_admin_missing_chats_title "
         "ON admin_missing_chats(chat_title COLLATE NOCASE)"
     )
+    _ensure_index(
+        cur,
+        "idx_admin_missing_chats_last_message",
+        "CREATE INDEX idx_admin_missing_chats_last_message "
+        "ON admin_missing_chats(last_message_ts DESC)"
+    )
 
 
 def _create_admin_absent_chat_indexes(cur: sqlite3.Cursor):
@@ -295,13 +301,19 @@ def _create_admin_absent_chat_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_admin_absent_chats_count",
         "CREATE INDEX idx_admin_absent_chats_count "
-        "ON admin_absent_chats(message_count DESC, last_seen_at DESC)"
+        "ON admin_absent_chats(message_count DESC, last_message_ts DESC)"
     )
     _ensure_index(
         cur,
         "idx_admin_absent_chats_title",
         "CREATE INDEX idx_admin_absent_chats_title "
         "ON admin_absent_chats(chat_title COLLATE NOCASE)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_absent_chats_last_message",
+        "CREATE INDEX idx_admin_absent_chats_last_message "
+        "ON admin_absent_chats(last_message_ts DESC)"
     )
 
 
@@ -323,6 +335,12 @@ def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
         "idx_admin_restricted_chats_public",
         "CREATE INDEX idx_admin_restricted_chats_public "
         "ON admin_restricted_chats(is_public, chat_title COLLATE NOCASE)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_restricted_chats_last_message",
+        "CREATE INDEX idx_admin_restricted_chats_last_message "
+        "ON admin_restricted_chats(last_message_ts DESC)"
     )
 
 

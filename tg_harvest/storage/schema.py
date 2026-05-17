@@ -245,6 +245,8 @@ def _create_admin_missing_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
         chat_username        TEXT,
         chat_type            TEXT,
         is_public            INTEGER NOT NULL DEFAULT 0,
+        last_message_at      TEXT,
+        last_message_ts      INTEGER,
         scan_job_id          TEXT,
         scanned_at           TEXT NOT NULL
     ){strict_suffix}
@@ -260,6 +262,8 @@ def _create_admin_absent_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
         chat_type            TEXT,
         message_count        INTEGER NOT NULL DEFAULT 0,
         last_seen_at         TEXT,
+        last_message_at      TEXT,
+        last_message_ts      INTEGER,
         scan_reason          TEXT,
         scan_job_id          TEXT,
         scanned_at           TEXT NOT NULL
@@ -279,6 +283,8 @@ def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str
         restriction_reasons      TEXT,
         restriction_text         TEXT,
         risk_flags               TEXT,
+        last_message_at          TEXT,
+        last_message_ts          INTEGER,
         scan_job_id              TEXT,
         scanned_at               TEXT NOT NULL
     ){strict_suffix}
@@ -500,6 +506,8 @@ def _ensure_admin_missing_chats_schema(cur: sqlite3.Cursor) -> None:
             ("chat_username", "chat_username TEXT"),
             ("chat_type", "chat_type TEXT"),
             ("is_public", "is_public INTEGER NOT NULL DEFAULT 0"),
+            ("last_message_at", "last_message_at TEXT"),
+            ("last_message_ts", "last_message_ts INTEGER"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
@@ -515,6 +523,8 @@ def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
             ("chat_type", "chat_type TEXT"),
             ("message_count", "message_count INTEGER NOT NULL DEFAULT 0"),
             ("last_seen_at", "last_seen_at TEXT"),
+            ("last_message_at", "last_message_at TEXT"),
+            ("last_message_ts", "last_message_ts INTEGER"),
             ("scan_reason", "scan_reason TEXT"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
@@ -540,6 +550,8 @@ def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
             ("restriction_reasons", "restriction_reasons TEXT"),
             ("restriction_text", "restriction_text TEXT"),
             ("risk_flags", "risk_flags TEXT"),
+            ("last_message_at", "last_message_at TEXT"),
+            ("last_message_ts", "last_message_ts INTEGER"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],

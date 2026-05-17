@@ -1,3 +1,5 @@
+from datetime import datetime, timezone
+
 from tg_harvest.domain.chat_inventory import ChatInventoryRow
 from tg_harvest.domain.chat_inventory import find_database_chats_not_joined
 from tg_harvest.domain.chat_inventory import find_missing_joined_chats
@@ -39,11 +41,13 @@ class _Dialog:
         is_channel=False,
         left=False,
         entity=None,
+        message=None,
     ):
         self.title = title
         self.is_group = is_group
         self.is_channel = is_channel
         self.entity = entity or _Entity(chat_id, left=left, title=title)
+        self.message = message
 
 
 class _ChannelForbidden:
@@ -73,6 +77,26 @@ def test_find_missing_joined_chats_filters_and_sorts():
     assert [row.chat_id for row in rows] == [1, 3]
     assert [row.chat_title for row in rows] == ["Alpha", "Beta"]
     assert [row.chat_type for row in rows] == ["_Entity", "_Entity"]
+
+
+def test_joined_chat_inventory_extracts_dialog_last_message_time():
+    dialogs = [
+        _Dialog(
+            chat_id=1,
+            title="With Last Message",
+            is_channel=True,
+            message=type(
+                "Message",
+                (),
+                {"date": datetime(2026, 4, 1, 10, 0, 0, tzinfo=timezone.utc)},
+            )(),
+        )
+    ]
+
+    rows = load_joined_chat_inventory(dialogs)
+
+    assert rows[0].last_message_at == "2026-04-01 10:00:00"
+    assert rows[0].last_message_ts == 1775037600
 
 
 def test_find_database_chats_not_joined_filters_by_joined_identity():
