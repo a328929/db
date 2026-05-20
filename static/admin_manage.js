@@ -8,6 +8,7 @@
   var buildScopeRequestPayload = shared.buildScopeRequestPayload;
   var clearLogs = shared.clearLogs;
   var ensurePlaceholder = shared.ensurePlaceholder;
+  var sharedFetchJSON = shared.fetchJSON;
   var getConfirmationTarget = shared.getConfirmationTarget;
   var getCreatedJobId = shared.getCreatedJobId;
   var getSelectedOptionLabel = shared.getSelectedOptionLabel;
@@ -20,6 +21,7 @@
   var normalizeChats = shared.normalizeChats;
   var pickFirstNumber = shared.pickFirstNumber;
   var pickFirstText = shared.pickFirstText;
+  var sharedPostJSON = shared.postJSON;
   var renderChatOptions = shared.renderChatOptions;
   var setDialogOpenState = shared.setDialogOpenState;
   var setElementDisabled = shared.setElementDisabled;
@@ -409,12 +411,8 @@
   }
 
   async function postJSON(url, payload) {
-    return fetchJSON(url, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json'
-      },
-      body: JSON.stringify(payload)
+    return sharedPostJSON(url, payload, {
+      onUnauthorized: handleUnauthorizedResponse
     });
   }
 
@@ -810,52 +808,15 @@
   }
 
   async function fetchJSON(url, options) {
-    var requestOptions = options || {};
-    var requestHeaders = requestOptions.headers || {};
+    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+      onUnauthorized: handleUnauthorizedResponse
+    }));
+  }
 
-    var response;
-    try {
-      response = await fetch(url, {
-        method: requestOptions.method || 'GET',
-        headers: requestHeaders,
-        body: requestOptions.body
-      });
-    } catch (networkError) {
-      throw new Error('网络请求失败');
-    }
-
-    if (!response.ok) {
-      if (response.status === 401) {
-        // 未授权，弹出登录框
-        authState.authenticated = false;
-        var els = getElements();
-        if (els) openLoginDialog(els);
-        throw new Error('未授权，请先登录');
-      }
-      var errorMessage = '操作失败 ';
-      if (response.status === 429) {
-          errorMessage = '请求太快了，请稍等一会儿再试';
-      } else if (response.status === 500 || response.status === 503) {
-          errorMessage = '数据库忙或系统异常，请 15 秒后再试';
-      } else {
-          errorMessage += '(HTTP ' + response.status + ')';
-          try {
-            var errorPayload = await response.json();
-            if (errorPayload && typeof errorPayload.error === 'string' && errorPayload.error.trim()) {
-              errorMessage += ' ' + errorPayload.error.trim();
-            }
-          } catch (ignoreErrorPayload) {
-            // ignore parse failure, keep HTTP status message.
-          }
-      }
-      throw new Error(errorMessage);
-    }
-
-    try {
-      return await response.json();
-    } catch (parseError) {
-      throw new Error('响应 JSON 解析失败');
-    }
+  function handleUnauthorizedResponse() {
+    authState.authenticated = false;
+    var els = getElements();
+    if (els) openLoginDialog(els);
   }
 
   function updateControlVisibility(elements) {

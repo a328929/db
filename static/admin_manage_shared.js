@@ -477,6 +477,68 @@
     syncClearLogsButtonVisibility(elements);
   }
 
+  async function fetchJSON(url, options) {
+    var requestOptions = options || {};
+    var onUnauthorized = requestOptions.onUnauthorized;
+
+    var response;
+    try {
+      response = await fetch(url, {
+        method: requestOptions.method || 'GET',
+        headers: requestOptions.headers || {},
+        body: requestOptions.body
+      });
+    } catch (_networkError) {
+      throw new Error('网络请求失败');
+    }
+
+    if (!response.ok) {
+      if (response.status === 401) {
+        if (typeof onUnauthorized === 'function') {
+          onUnauthorized();
+        }
+        throw new Error('未授权，请先登录');
+      }
+
+      var errorMessage = '操作失败 ';
+      if (response.status === 429) {
+        errorMessage = '请求太快了，请稍等一会儿再试';
+      } else if (response.status === 500 || response.status === 503) {
+        errorMessage = '数据库忙或系统异常，请 15 秒后再试';
+      } else {
+        errorMessage += '(HTTP ' + response.status + ')';
+        try {
+          var errorPayload = await response.json();
+          if (errorPayload && typeof errorPayload.error === 'string' && errorPayload.error.trim()) {
+            errorMessage += ' ' + errorPayload.error.trim();
+          }
+        } catch (_ignoreErrorPayload) {
+          // Keep the HTTP status message when the error body is not JSON.
+        }
+      }
+      throw new Error(errorMessage);
+    }
+
+    try {
+      return await response.json();
+    } catch (_parseError) {
+      throw new Error('响应 JSON 解析失败');
+    }
+  }
+
+  async function postJSON(url, payload, options) {
+    var opts = options || {};
+    return fetchJSON(url, {
+      method: 'POST',
+      headers: Object.assign(
+        { 'Content-Type': 'application/json' },
+        opts.headers || {}
+      ),
+      body: JSON.stringify(payload),
+      onUnauthorized: opts.onUnauthorized
+    });
+  }
+
   window.AdminManageShared = {
     appendLog: appendLog,
     buildDialogTargetPreview: buildDialogTargetPreview,
@@ -486,6 +548,7 @@
     buildSnapshotProgressMessage: buildSnapshotProgressMessage,
     clearLogs: clearLogs,
     ensurePlaceholder: ensurePlaceholder,
+    fetchJSON: fetchJSON,
     getConfirmationTarget: getConfirmationTarget,
     getCreatedJobId: getCreatedJobId,
     getFocusableElements: getFocusableElements,
@@ -501,6 +564,7 @@
     normalizeChats: normalizeChats,
     pickFirstNumber: pickFirstNumber,
     pickFirstText: pickFirstText,
+    postJSON: postJSON,
     removePlaceholder: removePlaceholder,
     renderChatOptions: renderChatOptions,
     setDialogOpenState: setDialogOpenState,
