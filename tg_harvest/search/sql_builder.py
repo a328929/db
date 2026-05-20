@@ -240,11 +240,23 @@ def _build_search_query_spec(
             inner_from_sql += " JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id "
 
         if effective_sort == "size":
-            final_order_clause = f"mm.file_size {effective_order}, m.pk {effective_order}"
+            final_order_clause = (
+                f"mm.file_size {effective_order}, "
+                f"mm.chat_id {effective_order}, "
+                f"mm.message_id {effective_order}"
+            )
         else: # duration
-            final_order_clause = f"mm.duration_sec {effective_order}, m.pk {effective_order}"
+            final_order_clause = (
+                f"mm.duration_sec {effective_order}, "
+                f"mm.chat_id {effective_order}, "
+                f"mm.message_id {effective_order}"
+            )
     elif effective_sort == "time":
-        final_order_clause = f"{order_expr} {effective_order}, m.pk {effective_order}"
+        final_order_clause = (
+            f"{order_expr} {effective_order}, "
+            f"m.message_id {effective_order}, "
+            f"m.pk {effective_order}"
+        )
     else:
         # 默认回退逻辑
         final_order_clause = f"{order_expr} {effective_order}, m.msg_date_ts {effective_order}, m.pk {effective_order}"

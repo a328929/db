@@ -136,6 +136,129 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("idx_messages_unsearchable_chat", plan_text)
 
+    def test_core_ordering_queries_use_index_without_temp_sort(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+
+        cases = [
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT pk FROM messages
+                WHERE chat_id = 1
+                ORDER BY msg_date_ts DESC, message_id DESC, pk DESC
+                LIMIT 10
+                """,
+                "idx_messages_chat_date",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT pk FROM messages
+                ORDER BY msg_date_ts DESC, message_id DESC, pk DESC
+                LIMIT 10
+                """,
+                "idx_messages_date_global",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT m.pk
+                FROM messages m
+                JOIN message_media mm
+                  ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+                WHERE m.chat_id = 1
+                ORDER BY mm.file_size DESC, mm.chat_id DESC, mm.message_id DESC
+                LIMIT 10
+                """,
+                "idx_media_sort_size",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT m.pk
+                FROM messages m
+                JOIN message_media mm
+                  ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+                ORDER BY mm.file_size DESC, mm.chat_id DESC, mm.message_id DESC
+                LIMIT 10
+                """,
+                "idx_media_sort_size_global",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT pk
+                FROM message_search_terms_rebuild_queue
+                ORDER BY queued_at ASC, pk ASC
+                LIMIT 10
+                """,
+                "idx_message_search_terms_queue_order",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT m.grouped_id, m.message_id
+                FROM messages m
+                WHERE m.chat_id = 1
+                  AND m.grouped_id IN (1, 2, 3)
+                ORDER BY m.grouped_id ASC, m.message_id ASC
+                """,
+                "idx_messages_grouped_id",
+            ),
+        ]
+
+        for sql, expected_index in cases:
+            with self.subTest(expected_index=expected_index):
+                cur.execute(sql)
+                plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+                self.assertIn(expected_index, plan_text)
+                self.assertNotIn("USE TEMP B-TREE", plan_text)
+
+    def test_dedupe_group_hash_queries_use_promo_hash_indexes(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+
+        cases = [
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT pure_hash
+                FROM media_groups
+                WHERE chat_id = 1
+                  AND pure_hash <> ''
+                  AND is_promo = 1
+                  AND dedupe_eligible = 1
+                  AND item_count >= 2
+                GROUP BY pure_hash
+                HAVING COUNT(*) >= 2
+                """,
+                "idx_mg_pure_hash_promo",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT media_sig_hash
+                FROM media_groups
+                WHERE chat_id = 1
+                  AND media_sig_hash <> ''
+                  AND is_promo = 1
+                  AND dedupe_eligible = 1
+                  AND item_count >= 2
+                GROUP BY media_sig_hash
+                HAVING COUNT(*) >= 2
+                """,
+                "idx_mg_media_sig_promo",
+            ),
+        ]
+
+        for sql, expected_index in cases:
+            with self.subTest(expected_index=expected_index):
+                cur.execute(sql)
+                plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+                self.assertIn(expected_index, plan_text)
+                self.assertNotIn("USE TEMP B-TREE FOR GROUP BY", plan_text)
+
     def test_migrated_legacy_tables_get_timestamps_on_future_writes(self) -> None:
         cur = self.conn.cursor()
         cur.execute(

@@ -148,6 +148,7 @@ def _insert_targets_from_solo_hashes(cur: sqlite3.Cursor, chat_id: int):
         INSERT OR IGNORE INTO temp_targets(pk)
         SELECT pk FROM messages
         WHERE chat_id = ? AND grouped_id IS NULL AND is_promo = 1 AND dedupe_eligible = 1
+          AND dedupe_hash <> ''
           AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
         """,
         (chat_id,),
@@ -162,6 +163,7 @@ def _create_temp_target_groups_txt(cur: sqlite3.Cursor, chat_id: int):
         SELECT DISTINCT grouped_id
         FROM media_groups
         WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+          AND pure_hash <> ''
           AND pure_hash IN (SELECT pure_hash FROM temp_dup_hashes_group_txt)
         """,
         (chat_id,),
@@ -176,6 +178,7 @@ def _create_temp_target_groups_med(cur: sqlite3.Cursor, chat_id: int):
         SELECT DISTINCT grouped_id
         FROM media_groups
         WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+          AND media_sig_hash <> ''
           AND media_sig_hash IN (SELECT media_sig_hash FROM temp_dup_hashes_group_med)
         """,
         (chat_id,),
@@ -228,6 +231,7 @@ def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int):
                        ) AS rn
                 FROM messages
                 WHERE chat_id = ? AND grouped_id IS NULL AND is_promo = 1 AND dedupe_eligible = 1
+                  AND dedupe_hash <> ''
                   AND dedupe_hash IN (SELECT dedupe_hash FROM temp_dup_hashes_solo)
             ) WHERE rn = 1
             """,
@@ -253,6 +257,7 @@ def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int):
             SELECT pure_hash, MIN(first_message_id) AS min_msgid
             FROM media_groups
             WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+              AND pure_hash <> ''
               AND pure_hash IN (SELECT pure_hash FROM temp_dup_hashes_group_txt)
             GROUP BY pure_hash
         ) k ON mg.pure_hash = k.pure_hash AND mg.first_message_id = k.min_msgid
@@ -274,6 +279,7 @@ def _build_keep_first_groups_med(cur: sqlite3.Cursor, chat_id: int):
             SELECT media_sig_hash, MIN(first_message_id) AS min_msgid
             FROM media_groups
             WHERE chat_id = ? AND item_count >= 2 AND is_promo = 1 AND dedupe_eligible = 1
+              AND media_sig_hash <> ''
               AND media_sig_hash IN (SELECT media_sig_hash FROM temp_dup_hashes_group_med)
             GROUP BY media_sig_hash
         ) k ON mg.media_sig_hash = k.media_sig_hash AND mg.first_message_id = k.min_msgid

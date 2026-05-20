@@ -304,6 +304,32 @@ class SearchSqlBuilderTests(unittest.TestCase):
 
         self.assertEqual("size", spec["effective_sort"])
         self.assertIn("JOIN message_media mm", spec["count_sql"])
+        self.assertIn(
+            "ORDER BY mm.file_size DESC, mm.chat_id DESC, mm.message_id DESC",
+            spec["query_sql"],
+        )
+
+    def test_time_sort_uses_index_aligned_stable_tiebreakers(self) -> None:
+        params = SearchParams(
+            raw_query="",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=False,
+            max_count=1000,
+        )
+
+        self.assertIn(
+            "ORDER BY m.msg_date_ts DESC, m.message_id DESC, m.pk DESC",
+            spec["query_sql"],
+        )
 
     def test_all_type_rejects_media_sort_like_frontend_controls(self) -> None:
         params = SearchParams(

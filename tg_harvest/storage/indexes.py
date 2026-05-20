@@ -68,7 +68,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_messages_chat_date",
         "CREATE INDEX idx_messages_chat_date "
-        "ON messages(chat_id, msg_date_ts DESC)"
+        "ON messages(chat_id, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
     # 媒体组关联索引（支持相册视图）
@@ -76,7 +76,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_messages_grouped_id",
         "CREATE INDEX idx_messages_grouped_id "
-        "ON messages(chat_id, grouped_id) WHERE grouped_id IS NOT NULL"
+        "ON messages(chat_id, grouped_id, message_id) WHERE grouped_id IS NOT NULL"
     )
 
     # 去重与内容标识索引
@@ -92,13 +92,20 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_messages_dedupe_hash "
         "ON messages(chat_id, dedupe_hash) WHERE dedupe_hash <> ''"
     )
+    _ensure_index(
+        cur,
+        "idx_messages_dedupe_promo_solo",
+        "CREATE INDEX idx_messages_dedupe_promo_solo "
+        "ON messages(chat_id, dedupe_hash, msg_date_ts ASC, message_id ASC, pk ASC) "
+        "WHERE dedupe_hash <> '' AND grouped_id IS NULL AND is_promo = 1 AND dedupe_eligible = 1"
+    )
 
     # 推广内容识别与排序索引
     _ensure_index(
         cur,
         "idx_messages_promo",
         "CREATE INDEX idx_messages_promo "
-        "ON messages(chat_id, is_promo, promo_score DESC, msg_date_ts DESC)"
+        "ON messages(chat_id, is_promo, promo_score DESC, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
     # 发送者与消息类型聚合索引（支持筛选）
@@ -106,13 +113,19 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_messages_sender",
         "CREATE INDEX idx_messages_sender "
-        "ON messages(chat_id, sender_id, msg_date_ts DESC)"
+        "ON messages(chat_id, sender_id, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
     _ensure_index(
         cur,
         "idx_messages_type",
         "CREATE INDEX idx_messages_type "
-        "ON messages(chat_id, msg_type, msg_date_ts DESC)"
+        "ON messages(chat_id, msg_type, msg_date_ts DESC, message_id DESC, pk DESC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_messages_type_global",
+        "CREATE INDEX idx_messages_type_global "
+        "ON messages(msg_type, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
     # 全局时间轴（用于跨频道搜索展示）
@@ -120,7 +133,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_messages_date_global",
         "CREATE INDEX idx_messages_date_global "
-        "ON messages(msg_date_ts DESC)"
+        "ON messages(msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
     if table_has_column(cur, "messages", SEARCH_TEXT_PRESENT_COLUMN):
@@ -166,6 +179,12 @@ def _create_media_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_media_sort_size "
         "ON message_media(chat_id, file_size DESC, message_id DESC)"
     )
+    _ensure_index(
+        cur,
+        "idx_media_sort_size_global",
+        "CREATE INDEX idx_media_sort_size_global "
+        "ON message_media(file_size DESC, chat_id DESC, message_id DESC)"
+    )
 
     # 核心排序索引：按媒体时长排序
     _ensure_index(
@@ -173,6 +192,12 @@ def _create_media_indexes(cur: sqlite3.Cursor):
         "idx_media_sort_duration",
         "CREATE INDEX idx_media_sort_duration "
         "ON message_media(chat_id, duration_sec DESC, message_id DESC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_media_sort_duration_global",
+        "CREATE INDEX idx_media_sort_duration_global "
+        "ON message_media(duration_sec DESC, chat_id DESC, message_id DESC)"
     )
 
     # 类型与元数据过滤索引
@@ -205,9 +230,23 @@ def _create_media_group_indexes(cur: sqlite3.Cursor):
     )
     _ensure_index(
         cur,
+        "idx_mg_pure_hash_promo",
+        "CREATE INDEX idx_mg_pure_hash_promo "
+        "ON media_groups(chat_id, is_promo, dedupe_eligible, pure_hash, item_count, first_message_id, grouped_id) "
+        "WHERE pure_hash <> ''"
+    )
+    _ensure_index(
+        cur,
         "idx_mg_media_sig",
         "CREATE INDEX idx_mg_media_sig "
         "ON media_groups(chat_id, media_sig_hash) WHERE media_sig_hash <> ''"
+    )
+    _ensure_index(
+        cur,
+        "idx_mg_media_sig_promo",
+        "CREATE INDEX idx_mg_media_sig_promo "
+        "ON media_groups(chat_id, is_promo, dedupe_eligible, media_sig_hash, item_count, first_message_id, grouped_id) "
+        "WHERE media_sig_hash <> ''"
     )
     _ensure_index(
         cur,
@@ -248,6 +287,12 @@ def _create_message_search_term_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_message_search_terms_pk",
         "CREATE INDEX idx_message_search_terms_pk ON message_search_terms(pk)"
+    )
+    _ensure_index(
+        cur,
+        "idx_message_search_terms_queue_order",
+        "CREATE INDEX idx_message_search_terms_queue_order "
+        "ON message_search_terms_rebuild_queue(queued_at, pk)"
     )
 
 

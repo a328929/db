@@ -769,6 +769,14 @@ def _refresh_chat_message_counts(
     )
 
 
+def _optimize_query_planner_stats(cur: sqlite3.Cursor) -> None:
+    try:
+        cur.execute("PRAGMA analysis_limit=1000;")
+        cur.execute("PRAGMA optimize;")
+    except sqlite3.Error:
+        logging.debug("SQLite 查询规划统计优化跳过", exc_info=True)
+
+
 @_db_runtime.synchronized_write
 def create_schema(
     conn: sqlite3.Connection, feats: SqliteFeatures, force_heal_fts: int = 0
@@ -822,6 +830,7 @@ def create_schema(
             conn, force_heal=(force_heal_fts == 1)
         )
 
+        _optimize_query_planner_stats(cur)
         conn.commit()
     except Exception:
         try:
