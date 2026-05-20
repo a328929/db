@@ -97,6 +97,7 @@
       statScope: document.getElementById('admin-stat-scope'),
       statMessages: document.getElementById('admin-stat-messages'),
       loginDialog: document.getElementById('admin-login-dialog'),
+      loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
       loginConfirmBtn: document.getElementById('admin-login-confirm-btn')
     };
@@ -121,6 +122,7 @@
       'statScope',
       'statMessages',
       'loginDialog',
+      'loginStatus',
       'passwordInput',
       'loginConfirmBtn'
     ];
@@ -242,7 +244,7 @@
       if (data.authenticated) {
         authState.authenticated = true;
         closeLoginDialog(elements);
-        setupAutoLogout(data.remaining);
+        setupAutoLogout(elements, data.remaining);
         loadInitialReadOnlyData(elements);
       } else {
         openLoginDialog(elements);
@@ -254,8 +256,14 @@
 
   async function handleLogin(elements) {
     var password = elements.passwordInput.value;
-    if (!password) return;
+    if (!password) {
+      setLoginStatus(elements, '请输入管理员密码。');
+      elements.passwordInput.focus();
+      return;
+    }
 
+    setLoginStatus(elements, '');
+    setElementDisabled(elements.loginConfirmBtn, true);
     try {
       var data = await fetchJSON('/api/admin/auth/login', {
         method: 'POST',
@@ -267,23 +275,34 @@
         authState.authenticated = true;
         elements.passwordInput.value = '';
         closeLoginDialog(elements);
-        setupAutoLogout(data.expiry_duration);
+        setupAutoLogout(elements, data.expiry_duration);
         loadInitialReadOnlyData(elements);
         appendLog(elements, '认证成功，欢迎进入管理系统');
       }
     } catch (e) {
-      alert('认证失败：' + e.message);
+      setLoginStatus(elements, '认证失败：' + e.message);
+      elements.passwordInput.focus();
+    } finally {
+      setElementDisabled(elements.loginConfirmBtn, false);
     }
   }
 
-  function setupAutoLogout(seconds) {
+  function setupAutoLogout(elements, seconds) {
     if (authState.logoutTimer) clearTimeout(authState.logoutTimer);
     if (seconds <= 0) return;
 
     authState.logoutTimer = setTimeout(function () {
-      alert('会话已过期，请重新登录');
-      window.location.reload();
+      authState.authenticated = false;
+      setLoginStatus(elements, '会话已过期，请重新登录。');
+      openLoginDialog(elements);
     }, seconds * 1000);
+  }
+
+  function setLoginStatus(elements, message) {
+    if (!elements || !elements.loginStatus) {
+      return;
+    }
+    elements.loginStatus.textContent = String(message || '');
   }
 
   function openLoginDialog(elements) {
@@ -294,6 +313,7 @@
   }
 
   function closeLoginDialog(elements) {
+    setLoginStatus(elements, '');
     setDialogOpenState(elements.loginDialog, false, {
       skipFocusRestore: true
     });
@@ -816,7 +836,10 @@
   function handleUnauthorizedResponse() {
     authState.authenticated = false;
     var els = getElements();
-    if (els) openLoginDialog(els);
+    if (els) {
+      setLoginStatus(els, '会话已过期，请重新登录。');
+      openLoginDialog(els);
+    }
   }
 
   function updateControlVisibility(elements) {

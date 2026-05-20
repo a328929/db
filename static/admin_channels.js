@@ -74,6 +74,7 @@
       logContainer: document.getElementById('admin-channel-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-channel-logs-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
+      loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
       loginConfirmBtn: document.getElementById('admin-login-confirm-btn')
     };
@@ -103,6 +104,7 @@
       'logContainer',
       'clearLogsBtn',
       'loginDialog',
+      'loginStatus',
       'passwordInput',
       'loginConfirmBtn'
     ];
@@ -181,7 +183,7 @@
       if (data.authenticated) {
         authState.authenticated = true;
         closeLoginDialog(elements);
-        setupAutoLogout(data.remaining);
+        setupAutoLogout(elements, data.remaining);
         await loadInitialData(elements);
         return;
       }
@@ -193,7 +195,13 @@
 
   async function handleLogin(elements) {
     var password = elements.passwordInput.value;
-    if (!password) return;
+    if (!password) {
+      setLoginStatus(elements, '请输入管理员密码。');
+      elements.passwordInput.focus();
+      return;
+    }
+    setLoginStatus(elements, '');
+    setElementDisabled(elements.loginConfirmBtn, true);
     try {
       var data = await fetchJSON('/api/admin/auth/login', {
         method: 'POST',
@@ -204,22 +212,33 @@
         authState.authenticated = true;
         elements.passwordInput.value = '';
         closeLoginDialog(elements);
-        setupAutoLogout(data.expiry_duration);
+        setupAutoLogout(elements, data.expiry_duration);
         appendLog(elements, '认证成功，已进入频道管理');
         await loadInitialData(elements);
       }
     } catch (error) {
-      alert('认证失败：' + error.message);
+      setLoginStatus(elements, '认证失败：' + error.message);
+      elements.passwordInput.focus();
+    } finally {
+      setElementDisabled(elements.loginConfirmBtn, false);
     }
   }
 
-  function setupAutoLogout(seconds) {
+  function setupAutoLogout(elements, seconds) {
     if (authState.logoutTimer) window.clearTimeout(authState.logoutTimer);
     if (seconds <= 0) return;
     authState.logoutTimer = window.setTimeout(function () {
-      alert('会话已过期，请重新登录');
-      window.location.reload();
+      authState.authenticated = false;
+      setLoginStatus(elements, '会话已过期，请重新登录。');
+      openLoginDialog(elements);
     }, seconds * 1000);
+  }
+
+  function setLoginStatus(elements, message) {
+    if (!elements || !elements.loginStatus) {
+      return;
+    }
+    elements.loginStatus.textContent = String(message || '');
   }
 
   function openLoginDialog(elements) {
@@ -230,6 +249,7 @@
   }
 
   function closeLoginDialog(elements) {
+    setLoginStatus(elements, '');
     setDialogOpenState(elements.loginDialog, false, { skipFocusRestore: true });
     setPageInteractionState(document.getElementById('admin-channels-page'), true);
   }
@@ -990,6 +1010,9 @@
   function handleUnauthorizedResponse() {
     authState.authenticated = false;
     var els = getElements();
-    if (els) openLoginDialog(els);
+    if (els) {
+      setLoginStatus(els, '会话已过期，请重新登录。');
+      openLoginDialog(els);
+    }
   }
 })();

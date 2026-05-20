@@ -18,7 +18,9 @@
       targetMsgId: parseInt(config.msgId, 10),
       oldestMsgId: null,
       newestMsgId: null,
-      isLoading: false
+      isLoading: false,
+      hasMoreBefore: true,
+      hasMoreAfter: true
   };
 
   const els = {
@@ -93,9 +95,40 @@
       }, { once: true });
   }
 
+  function updateLoadButtonState() {
+      els.loadBeforeBtn.disabled = state.isLoading || !state.hasMoreBefore;
+      els.loadAfterBtn.disabled = state.isLoading || !state.hasMoreAfter;
+      els.loadBeforeBtn.setAttribute("aria-busy", state.isLoading ? "true" : "false");
+      els.loadAfterBtn.setAttribute("aria-busy", state.isLoading ? "true" : "false");
+  }
+
+  function markDirectionExhausted(direction) {
+      if (direction === "before") {
+          state.hasMoreBefore = false;
+          els.statusLine.textContent = "没有更早的消息了。";
+          return;
+      }
+      if (direction === "after") {
+          state.hasMoreAfter = false;
+          els.statusLine.textContent = "没有更新的消息了。";
+          return;
+      }
+      state.hasMoreBefore = false;
+      state.hasMoreAfter = false;
+      els.statusLine.textContent = "未找到目标消息上下文。";
+  }
+
+  function updateAroundBoundaryState(items) {
+      const targetIndex = items.findIndex(item => item.message_id === state.targetMsgId);
+      if (targetIndex < 0) return;
+      state.hasMoreBefore = targetIndex >= 50;
+      state.hasMoreAfter = (items.length - targetIndex - 1) >= 50;
+  }
+
   async function loadData(direction) {
       if (state.isLoading) return;
       state.isLoading = true;
+      updateLoadButtonState();
       els.statusLine.textContent = "加载中...";
 
       let anchorId = state.targetMsgId;
@@ -113,8 +146,9 @@
 
           const items = data.items || [];
           if (items.length === 0) {
-              els.statusLine.textContent = "没有更多消息了。";
+              markDirectionExhausted(direction);
               state.isLoading = false;
+              updateLoadButtonState();
               return;
           }
 
@@ -136,6 +170,7 @@
               }
               state.oldestMsgId = items[0].message_id;
               state.newestMsgId = items[items.length - 1].message_id;
+              updateAroundBoundaryState(items);
 
           } else if (direction === "before") {
               const firstChild = els.messageList.firstElementChild;
@@ -148,6 +183,9 @@
                   firstChild.scrollIntoView({ block: "start", behavior: "auto" });
               }
               state.oldestMsgId = items[0].message_id;
+              if (items.length < 100) {
+                  state.hasMoreBefore = false;
+              }
 
           } else if (direction === "after") {
               const lastChild = els.messageList.lastElementChild;
@@ -159,18 +197,23 @@
                   _focusTargetItem(lastChild.nextElementSibling);
               }
               state.newestMsgId = items[items.length - 1].message_id;
+              if (items.length < 100) {
+                  state.hasMoreAfter = false;
+              }
           }
 
       } catch (err) {
           els.statusLine.textContent = `加载失败: ${err.message}`;
       } finally {
           state.isLoading = false;
+          updateLoadButtonState();
       }
   }
 
   els.loadBeforeBtn.addEventListener("click", () => loadData("before"));
   els.loadAfterBtn.addEventListener("click", () => loadData("after"));
 
+  updateLoadButtonState();
   loadData("around");
 
 })();

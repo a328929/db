@@ -46,6 +46,8 @@
     els.orderSelect.disabled = isSearching;
     els.startDateInput.disabled = isSearching;
     els.endDateInput.disabled = isSearching;
+    els.clearStartDateBtn.disabled = isSearching;
+    els.clearEndDateBtn.disabled = isSearching;
     els.queryInput.disabled = isSearching;
   }
 
@@ -341,6 +343,28 @@
     }
   }
 
+  function applyCountToRenderedResults(payload) {
+    const items = payload.items || [];
+    const total = Number(payload.total || 0);
+    const page = Number(payload.page || 1);
+    const totalPages = Number(payload.total_pages || 0);
+
+    if (total === 0 && items.length === 0 && els.results.children.length === 0) {
+      _renderEmptyResults();
+      renderPagination(totalPages, page);
+      return;
+    }
+
+    if (total === 0 && items.length === 0) {
+      setStatus("未找到匹配内容。");
+    } else {
+      setStatus(`共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`);
+    }
+
+    renderGroupFacets(payload.chat_facets);
+    renderPagination(totalPages, page);
+  }
+
   function createBtn(text, onClick, { disabled = false, ariaLabel = "" } = {}) {
     const btn = document.createElement("button");
     btn.type = "button";
@@ -586,7 +610,7 @@
         data.chat_facets = countData.chat_facets || [];
         data.data_version = countData.data_version || data.data_version;
         _setCachedCount(data);
-        _handleSearchSuccess(data, false);
+        applyCountToRenderedResults(data);
       } else {
         setStatus("后台统计暂不可用，仅显示当前页。");
         els.pagination.textContent = "";
@@ -633,7 +657,7 @@
         data.total_pages = cachedCount.total_pages;
         data.total_is_capped = cachedCount.total_is_capped;
         data.chat_facets = cachedCount.chat_facets || [];
-        _handleSearchSuccess(data, false);
+        applyCountToRenderedResults(data);
         return;
       }
 

@@ -61,6 +61,11 @@ class FrontendSafetyTests(unittest.TestCase):
             source,
         )
 
+    def test_background_count_updates_summary_without_rerendering_results(self) -> None:
+        source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("function applyCountToRenderedResults(payload)", source)
+        self.assertGreaterEqual(source.count("applyCountToRenderedResults(data);"), 2)
+
     def test_search_form_changes_cancel_pending_background_count(self) -> None:
         source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn("function _markSearchCriteriaDirty()", source)
@@ -91,6 +96,11 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("clearDateInput(els.startDateInput, els.clearStartDateBtn)", source)
         self.assertIn("clearDateInput(els.endDateInput, els.clearEndDateBtn)", source)
 
+    def test_date_filter_clear_buttons_disable_while_searching(self) -> None:
+        source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("els.clearStartDateBtn.disabled = isSearching;", source)
+        self.assertIn("els.clearEndDateBtn.disabled = isSearching;", source)
+
     def test_search_page_has_group_facets_region(self) -> None:
         template = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
         source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -115,6 +125,14 @@ class FrontendSafetyTests(unittest.TestCase):
     def test_context_page_uses_backend_title_fallback_for_empty_media_text(self) -> None:
         source = (ROOT / "static" / "context.js").read_text(encoding="utf-8")
         self.assertIn("item.content || item.title", source)
+
+    def test_context_pagination_buttons_track_loading_and_exhaustion(self) -> None:
+        source = (ROOT / "static" / "context.js").read_text(encoding="utf-8")
+        self.assertIn("hasMoreBefore", source)
+        self.assertIn("hasMoreAfter", source)
+        self.assertIn("function updateLoadButtonState()", source)
+        self.assertIn("function markDirectionExhausted(direction)", source)
+        self.assertIn("items.length < 100", source)
 
     def test_context_template_has_no_inline_script(self) -> None:
         template = (ROOT / "templates" / "context.html").read_text(encoding="utf-8")
@@ -153,6 +171,28 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("任务失败", shared_source)
         self.assertIn("正在整理结果", shared_source)
         self.assertNotIn("message: '[进度] ' + stage + ' ' + current + '/' + total", source)
+
+    def test_admin_login_feedback_uses_inline_status_instead_of_alerts(self) -> None:
+        manage_template = (ROOT / "templates" / "admin_manage.html").read_text(
+            encoding="utf-8"
+        )
+        channels_template = (ROOT / "templates" / "admin_channels.html").read_text(
+            encoding="utf-8"
+        )
+        manage_source = (ROOT / "static" / "admin_manage.js").read_text(
+            encoding="utf-8"
+        )
+        channels_source = (ROOT / "static" / "admin_channels.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('id="admin-login-status"', manage_template)
+        self.assertIn('id="admin-login-status"', channels_template)
+        self.assertIn("function setLoginStatus(elements, message)", manage_source)
+        self.assertIn("function setLoginStatus(elements, message)", channels_source)
+        self.assertNotIn("alert(", manage_source)
+        self.assertNotIn("alert(", channels_source)
+        self.assertNotIn("window.location.reload", manage_source)
+        self.assertNotIn("window.location.reload", channels_source)
 
 
 if __name__ == "__main__":

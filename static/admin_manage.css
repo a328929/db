@@ -227,6 +227,18 @@
   font-size: 1.08rem;
 }
 
+.admin-login-status {
+  min-height: 1.35em;
+  margin: 0 0 12px;
+  color: var(--danger);
+  font-size: 0.9rem;
+  line-height: 1.35;
+}
+
+.admin-login-status:empty {
+  margin-bottom: 0;
+}
+
 .admin-dialog label {
   display: inline-block;
   margin-bottom: 6px;
