@@ -80,6 +80,29 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertEqual(raw_query, params.raw_query)
         self.assertEqual(raw_query, spec["raw_query"])
 
+    def test_duration_token_is_extracted_into_media_filter(self) -> None:
+        params = SearchParams(
+            raw_query="女孩+【00:08:00】",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=False,
+            max_count=1000,
+            force_like=True,
+        )
+
+        self.assertIn("m.msg_type IN ('VIDEO', 'GIF', 'VIDEO_NOTE')", spec["where_sql"])
+        self.assertIn("mm.duration_sec = ?", spec["where_sql"])
+        self.assertEqual(["%女孩%", 480], spec["sql_params"])
+        self.assertIn("LEFT JOIN message_media mm", spec["query_sql"])
+
     def test_candidate_fts_match_keeps_only_mandatory_terms(self) -> None:
         self.assertEqual("", to_fts_match("(a/b)+c"))
         self.assertEqual("", to_fts_match("a/-b"))

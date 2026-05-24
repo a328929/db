@@ -99,6 +99,19 @@ class SearchServiceFastCountTests(unittest.TestCase):
         result = _try_fast_count(self.conn, params, page_size=100, max_count=50000000)
         self.assertIsNone(result)
 
+    def test_fast_count_disabled_when_duration_filter_exists(self) -> None:
+        params = SearchParams(
+            raw_query="",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+            duration_sec=480,
+        )
+        result = _try_fast_count(self.conn, params, page_size=100, max_count=50000000)
+        self.assertIsNone(result)
+
     def test_search_payload_service_schedules_async_maintenance_instead_of_draining_inline(
         self,
     ) -> None:
@@ -676,6 +689,13 @@ class SearchParamsParsingTests(unittest.TestCase):
             _parse_search_params(
                 {"start_date": "2026-01-03", "end_date": "2026-01-01"}
             )
+
+    def test_parse_search_params_extracts_duration_filter_from_query(self) -> None:
+        params = _parse_search_params({"query": "女孩+【00:08:00】"})
+
+        self.assertEqual("女孩", params.text_query)
+        self.assertEqual(8 * 60, params.duration_sec)
+        self.assertEqual("女孩+【00:08:00】", params.raw_query)
 
 
 if __name__ == "__main__":

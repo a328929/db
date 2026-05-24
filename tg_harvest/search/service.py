@@ -184,6 +184,8 @@ def _try_fast_count(
 ) -> Tuple[int, bool, int] | None:
     if (params.raw_query or "").strip():
         return None
+    if params.duration_sec is not None:
+        return None
 
     total: int | None
     if (params.search_type or "all").lower() == "all":

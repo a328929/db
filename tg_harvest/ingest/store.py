@@ -1,7 +1,10 @@
 # -*- coding: utf-8 -*-
 import sqlite3
-from typing import Any, List, Optional, Tuple
+from typing import Any, List, Optional, Set, Tuple
 
+from tg_harvest.domain.dedupe import build_message_dedupe_hash
+from tg_harvest.domain.normalize import _safe_json
+from tg_harvest.domain.promo import build_single_promo_features
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.search_text_state import indexed_messages_from_clause
 from tg_harvest.storage.search_text_state import indexed_unsearchable_message_predicate
@@ -204,6 +207,93 @@ def backfill_missing_message_media_placeholders(
     return total_inserted
 
 
+def _table_columns(cur: sqlite3.Cursor, table_name: str) -> Set[str]:
+    try:
+        cur.execute(f"PRAGMA table_xinfo({table_name})")
+    except sqlite3.Error:
+        cur.execute(f"PRAGMA table_info({table_name})")
+    return {
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        for row in cur.fetchall()
+    }
+
+
+def _message_filename_backfill_update_sql(
+    message_columns: Set[str], update_unsearchable_predicate: str
+) -> str:
+    assignments = [
+        "content = ?",
+        "content_norm = ?",
+    ]
+    optional_columns = [
+        ("pure_hash", "pure_hash = ?"),
+        ("dedupe_hash", "dedupe_hash = ?"),
+        ("is_promo", "is_promo = ?"),
+        ("promo_score", "promo_score = ?"),
+        ("promo_reasons", "promo_reasons = ?"),
+        ("dedupe_eligible", "dedupe_eligible = ?"),
+        ("guard_reason", "guard_reason = ?"),
+        ("text_len", "text_len = ?"),
+    ]
+    assignments.extend(
+        sql for column_name, sql in optional_columns if column_name in message_columns
+    )
+    if "updated_at" in message_columns:
+        assignments.append("updated_at = datetime('now')")
+
+    return f"""
+        UPDATE messages
+        SET {", ".join(assignments)}
+        WHERE chat_id = ? AND message_id = ?
+          AND {update_unsearchable_predicate}
+    """
+
+
+def _message_filename_backfill_params(
+    message_columns: Set[str], row: sqlite3.Row, cfg: Optional[Any]
+) -> tuple:
+    file_name = str(row["file_name"] or "").strip()
+    msg_type = str(row["msg_type"] or "FILE")
+    has_media = bool(int(row["has_media"] or 0))
+    media_fingerprint = row["media_fingerprint"]
+    features = build_single_promo_features(
+        file_name,
+        msg_type=msg_type,
+        has_media=has_media,
+        cfg=cfg,
+    )
+
+    params: List[Any] = [
+        file_name,
+        features["content_norm"],
+    ]
+    if "pure_hash" in message_columns:
+        params.append(features["pure_hash"])
+    if "dedupe_hash" in message_columns:
+        params.append(
+            build_message_dedupe_hash(
+                text_pure_hash=features["pure_hash"],
+                has_media=has_media,
+                media_fingerprint=media_fingerprint,
+            )
+        )
+    if "is_promo" in message_columns:
+        params.append(int(features["is_promo"]))
+    if "promo_score" in message_columns:
+        params.append(int(features["promo_score"]))
+    if "promo_reasons" in message_columns:
+        params.append(_safe_json(features["promo_reasons"]))
+    if "dedupe_eligible" in message_columns:
+        params.append(int(features["dedupe_eligible"]))
+    if "guard_reason" in message_columns:
+        params.append(features["guard_reason"])
+    if "text_len" in message_columns:
+        params.append(int(features["text_len"]))
+
+    params.extend([int(row["chat_id"]), int(row["message_id"])])
+    return tuple(params)
+
+
 @synchronized_write
 def _backfill_message_search_text_from_filenames_batch(
     conn: sqlite3.Connection,
@@ -211,9 +301,12 @@ def _backfill_message_search_text_from_filenames_batch(
     chat_id: Optional[int],
     batch_size: int,
     after_pk: int,
+    cfg: Optional[Any],
 ) -> Tuple[int, int]:
     cur = conn.cursor()
     try:
+        message_columns = _table_columns(cur, "messages")
+        media_columns = _table_columns(cur, "message_media")
         unsearchable_predicate = indexed_unsearchable_message_predicate(cur, alias="m")
         messages_from_sql = indexed_messages_from_clause(
             cur,
@@ -226,7 +319,7 @@ def _backfill_message_search_text_from_filenames_batch(
         where_sql = f"""
             m.has_media = 1
             AND {unsearchable_predicate}
-            AND COALESCE(NULLIF(mm.file_name, ''), '') <> ''
+            AND COALESCE(NULLIF(TRIM(mm.file_name), ''), '') <> ''
             AND m.pk > ?
         """
         params: List[Any] = [int(after_pk)]
@@ -234,10 +327,24 @@ def _backfill_message_search_text_from_filenames_batch(
             where_sql += " AND m.chat_id = ?"
             params.append(int(chat_id))
         params.append(int(batch_size))
+        msg_type_select = "m.msg_type" if "msg_type" in message_columns else "'FILE'"
+        has_media_select = "m.has_media" if "has_media" in message_columns else "1"
+        media_fingerprint_select = (
+            "mm.media_fingerprint"
+            if "media_fingerprint" in media_columns
+            else "NULL"
+        )
 
         cur.execute(
             f"""
-            SELECT m.pk, m.chat_id, m.message_id, mm.file_name
+            SELECT
+                m.pk,
+                m.chat_id,
+                m.message_id,
+                {msg_type_select} AS msg_type,
+                {has_media_select} AS has_media,
+                mm.file_name,
+                {media_fingerprint_select} AS media_fingerprint
             FROM {messages_from_sql}
             JOIN message_media mm
               ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
@@ -251,27 +358,16 @@ def _backfill_message_search_text_from_filenames_batch(
         if not rows:
             return 0, 0
         last_pk = int(rows[-1]["pk"])
+        update_sql = _message_filename_backfill_update_sql(
+            message_columns, update_unsearchable_predicate
+        )
+        update_params = [
+            _message_filename_backfill_params(message_columns, row, cfg)
+            for row in rows
+        ]
 
         cur.execute("BEGIN IMMEDIATE")
-        cur.executemany(
-            f"""
-            UPDATE messages
-            SET content = ?,
-                content_norm = ?,
-                updated_at = datetime('now')
-            WHERE chat_id = ? AND message_id = ?
-              AND {update_unsearchable_predicate}
-            """,
-            [
-                (
-                    str(row["file_name"]).strip(),
-                    str(row["file_name"]).strip(),
-                    int(row["chat_id"]),
-                    int(row["message_id"]),
-                )
-                for row in rows
-            ],
-        )
+        cur.executemany(update_sql, update_params)
         conn.commit()
         return int(cur.rowcount or 0), last_pk
     except Exception:
@@ -290,7 +386,13 @@ def backfill_message_search_text_from_filenames(
     chat_id: Optional[int] = None,
     batch_size: int = 5000,
     log_fn: Optional[Any] = None,
+    cfg: Optional[Any] = None,
 ) -> int:
+    if cfg is None:
+        from tg_harvest.config import CFG
+
+        cfg = CFG
+
     total_updated = 0
     safe_batch_size = max(100, int(batch_size))
     last_pk = 0
@@ -301,6 +403,7 @@ def backfill_message_search_text_from_filenames(
             chat_id=chat_id,
             batch_size=safe_batch_size,
             after_pk=last_pk,
+            cfg=cfg,
         )
         if next_last_pk <= 0:
             break
@@ -313,6 +416,42 @@ def backfill_message_search_text_from_filenames(
             )
 
     return total_updated
+
+
+def load_grouped_ids_for_messages(
+    conn: sqlite3.Connection, message_keys: List[Tuple[int, int]]
+) -> Set[int]:
+    if not message_keys:
+        return set()
+    unique_keys = sorted({(int(chat_id), int(message_id)) for chat_id, message_id in message_keys})
+    cur = conn.cursor()
+    try:
+        grouped_ids: Set[int] = set()
+        for start in range(0, len(unique_keys), 400):
+            part = unique_keys[start : start + 400]
+            placeholders = ",".join(["(?, ?)"] * len(part))
+            params: List[int] = []
+            for chat_id, message_id in part:
+                params.extend([chat_id, message_id])
+            cur.execute(
+                f"""
+                WITH target_messages(chat_id, message_id) AS (
+                    VALUES {placeholders}
+                )
+                SELECT DISTINCT m.grouped_id
+                FROM messages m
+                JOIN target_messages t
+                  ON t.chat_id = m.chat_id
+                 AND t.message_id = m.message_id
+                WHERE m.grouped_id IS NOT NULL
+                """,
+                params,
+            )
+            for row in cur.fetchall():
+                grouped_ids.add(int(row["grouped_id"]))
+        return grouped_ids
+    finally:
+        cur.close()
 
 
 @synchronized_write

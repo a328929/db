@@ -34,11 +34,15 @@ from tg_harvest.storage.connection import detect_sqlite_features
 from tg_harvest.storage.schema import create_schema
 from tg_harvest.storage.schema import refresh_chat_message_counts
 from tg_harvest.domain.dedupe import dedupe_promotional_duplicates
+from tg_harvest.domain.normalize import make_hash
+from tg_harvest.domain.normalize import normalize_text_for_hash
+from tg_harvest.domain.normalize import normalize_text_light
 from tg_harvest.ingest.runner import _format_harvest_progress_message
 from tg_harvest.ingest.runner import _read_target_message_total
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
 from tg_harvest.ingest.store import batch_upsert
+from tg_harvest.ingest.store import load_grouped_ids_for_messages
 from tg_harvest.admin_jobs.cleanup import _build_cleanup_like_patterns
 from tg_harvest.admin_jobs.cleanup import _execute_cleanup_deletion_batches
 
@@ -56,6 +60,7 @@ _BACKFILL_MODULE = importlib.util.module_from_spec(_BACKFILL_SPEC)
 _BACKFILL_SPEC.loader.exec_module(_BACKFILL_MODULE)
 _fetch_chunk_messages = _BACKFILL_MODULE._fetch_chunk_messages
 _load_missing_media_targets = _BACKFILL_MODULE._load_missing_targets
+_flush_backfill_write_batch = _BACKFILL_MODULE._flush_write_batch
 
 
 class _FakeCursor:
@@ -725,8 +730,17 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
                 chat_id INTEGER NOT NULL,
                 message_id INTEGER NOT NULL,
                 grouped_id INTEGER,
+                msg_type TEXT,
                 content TEXT,
                 content_norm TEXT,
+                pure_hash TEXT,
+                dedupe_hash TEXT,
+                is_promo INTEGER NOT NULL DEFAULT 0,
+                promo_score INTEGER NOT NULL DEFAULT 0,
+                promo_reasons TEXT,
+                dedupe_eligible INTEGER NOT NULL DEFAULT 0,
+                guard_reason TEXT,
+                text_len INTEGER NOT NULL DEFAULT 0,
                 has_media INTEGER NOT NULL DEFAULT 0,
                 updated_at TEXT NOT NULL DEFAULT (datetime('now'))
             )
@@ -753,8 +767,8 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
         cur = self.conn.cursor()
         cur.execute(
             """
-            INSERT INTO messages(chat_id, message_id, content, content_norm, has_media)
-            VALUES (1, 100, '', '', 1)
+            INSERT INTO messages(chat_id, message_id, msg_type, content, content_norm, has_media)
+            VALUES (1, 100, 'VIDEO', '', '', 1)
             """
         )
         cur.execute(
@@ -775,12 +789,50 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
         self.assertEqual("movie.mp4", row["content"])
         self.assertEqual("movie.mp4", row["content_norm"])
 
+    def test_backfill_message_search_text_from_filenames_recomputes_message_features(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_type, content, content_norm,
+                pure_hash, dedupe_hash, has_media
+            )
+            VALUES (1, 104, 'VIDEO', '', '', '', 'old-dedupe', 1)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_media(chat_id, message_id, file_name, file_unique_id, media_fingerprint)
+            VALUES (1, 104, 'Movie File.MP4', 'u104', 'fp104')
+            """
+        )
+        self.conn.commit()
+
+        updated = backfill_message_search_text_from_filenames(self.conn, chat_id=1)
+        self.assertEqual(1, updated)
+
+        expected_norm = normalize_text_light("Movie File.MP4")
+        expected_hash = make_hash(normalize_text_for_hash("Movie File.MP4"))
+        cur.execute(
+            """
+            SELECT content, content_norm, pure_hash, dedupe_hash, text_len
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 104
+            """
+        )
+        row = cur.fetchone()
+        self.assertEqual("Movie File.MP4", row["content"])
+        self.assertEqual(expected_norm, row["content_norm"])
+        self.assertEqual(expected_hash, row["pure_hash"])
+        self.assertEqual(expected_hash, row["dedupe_hash"])
+        self.assertEqual(len("Movie File.MP4"), int(row["text_len"]))
+
     def test_backfill_message_search_text_from_filenames_advances_by_pk(self) -> None:
         cur = self.conn.cursor()
         cur.executemany(
             """
-            INSERT INTO messages(chat_id, message_id, content, content_norm, has_media)
-            VALUES (1, ?, '', '', 1)
+            INSERT INTO messages(chat_id, message_id, msg_type, content, content_norm, has_media)
+            VALUES (1, ?, 'PHOTO', '', '', 1)
             """,
             [(101,), (102,), (103,)],
         )
@@ -811,6 +863,36 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
             [(101, "a.jpg"), (102, ""), (103, "c.jpg")],
             [(int(row["message_id"]), row["content"]) for row in cur.fetchall()],
         )
+
+    def test_load_grouped_ids_for_messages_reads_existing_album_ids(self) -> None:
+        cur = self.conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO messages(chat_id, message_id, grouped_id, msg_type, content, content_norm, has_media)
+            VALUES (1, ?, ?, 'PHOTO', '', '', 1)
+            """,
+            [(105, 7001), (106, None), (107, 7002)],
+        )
+        self.conn.commit()
+
+        grouped_ids = load_grouped_ids_for_messages(
+            self.conn,
+            [(1, 105), (1, 106), (1, 107), (1, 999)],
+        )
+
+        self.assertEqual({7001, 7002}, grouped_ids)
+
+    def test_media_backfill_flush_uses_public_batch_upsert_writer(self) -> None:
+        conn = object()
+        media_rows = [("media-row",)]
+
+        with patch.object(
+            _BACKFILL_MODULE, "batch_upsert", return_value=None
+        ) as batch_upsert_mock:
+            flushed = _flush_backfill_write_batch(conn, media_rows)
+
+        self.assertEqual(1, flushed)
+        batch_upsert_mock.assert_called_once_with(conn, [], media_rows)
 
     def test_unsearchable_cleanup_targets_media_with_only_identity_metadata(self) -> None:
         cur = self.conn.cursor()

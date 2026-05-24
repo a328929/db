@@ -7,6 +7,7 @@ from tg_harvest.search.expression import compile_like_clause
 from tg_harvest.search.expression import parse_query
 from tg_harvest.search.expression import SearchExprNode
 from tg_harvest.search.params import SearchParams
+from tg_harvest.search.params import split_query_media_duration
 
 
 _CJK_CHAR_RE = re.compile(
@@ -27,6 +28,20 @@ def _safe_split_from_sql(from_sql: str) -> Tuple[str, str]:
 
     pos = match.start()
     return s[:pos].strip(), s[pos:].strip()
+
+
+_MEDIA_JOIN_SQL = (
+    "LEFT JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id"
+)
+
+
+def _ensure_media_join(from_sql: str) -> str:
+    s = (from_sql or "").strip()
+    if not s:
+        return s
+    if "JOIN message_media mm" in s:
+        return s
+    return f"{s} {_MEDIA_JOIN_SQL}"
 
 
 def _term_supports_trigram_candidate(term: str) -> bool:
@@ -185,11 +200,18 @@ def _build_search_query_spec(
     force_like: bool = False,
 ) -> Dict[str, Any]:
     raw_query = (params.raw_query or "").strip()
+    parsed_text_query, parsed_duration_sec = split_query_media_duration(raw_query)
+    duration_sec = (
+        int(params.duration_sec)
+        if params.duration_sec is not None
+        else parsed_duration_sec
+    )
+    text_query = (params.text_query or parsed_text_query or "").strip()
     where_parts: List[str] = ["1=1"]
     sql_params: List[Any] = []
 
     has_text_filter = False
-    expr = parse_query(raw_query) if raw_query else None
+    expr = parse_query(text_query) if text_query else None
     match_query = build_candidate_fts_match(expr)
 
     actual_from_sql = from_sql
@@ -215,6 +237,10 @@ def _build_search_query_spec(
 
     sql_params = candidate_params + like_params + sql_params
     _append_scope_filters(where_parts, sql_params, params)
+    if duration_sec is not None:
+        where_parts.append("m.msg_type IN ('VIDEO', 'GIF', 'VIDEO_NOTE')")
+        where_parts.append("mm.duration_sec = ?")
+        sql_params.append(int(duration_sec))
     where_sql = " AND ".join(where_parts)
 
     order_expr, effective_sort, effective_order = _choose_sort(
@@ -224,6 +250,12 @@ def _build_search_query_spec(
     base_from_sql, outer_from_sql = _safe_split_from_sql(actual_from_sql)
 
     inner_from_sql = base_from_sql
+    needs_media_join = (
+        duration_sec is not None or effective_sort in {"size", "duration"}
+    )
+    if needs_media_join:
+        inner_from_sql = _ensure_media_join(inner_from_sql)
+        outer_from_sql = _ensure_media_join(outer_from_sql)
     if candidate_sql:
         inner_from_sql += " JOIN candidate_pks cp ON cp.pk = m.pk "
     if use_fts_join:
@@ -234,11 +266,6 @@ def _build_search_query_spec(
     # 动态构建排序子句与必要的 JOIN
     # 我们根据排序需求决定子查询是否需要 JOIN 媒体表 (mm)
     if effective_sort in {"size", "duration"}:
-        # P0 级修复：对于媒体类排序，我们在子查询中使用 INNER JOIN 以强制命中复合索引。
-        # 且仅当 inner_from_sql 中还没有 mm 时添加。
-        if "JOIN message_media mm" not in inner_from_sql:
-            inner_from_sql += " JOIN message_media mm ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id "
-
         if effective_sort == "size":
             final_order_clause = (
                 f"mm.file_size {effective_order}, "

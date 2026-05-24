@@ -5,7 +5,7 @@ import asyncio
 import logging
 import os
 import sys
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
@@ -19,24 +19,21 @@ from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
 from tg_harvest.storage.connection import ensure_configured_db
 from tg_harvest.ingest.parse import MessageParser
 from tg_harvest.ingest.runner import _prepare_db_rows
-from tg_harvest.ingest.store import _batch_upsert_media
+from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
+from tg_harvest.ingest.store import batch_upsert
+from tg_harvest.ingest.store import load_grouped_ids_for_messages
 
 
 def _flush_write_batch(conn, write_batch: List[tuple]) -> int:
     if not write_batch:
         return 0
-    cur = conn.cursor()
-    try:
-        cur.execute("BEGIN IMMEDIATE")
-        _batch_upsert_media(cur, write_batch)
-        conn.commit()
-        return len(write_batch)
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()
+    batch_upsert(conn, [], write_batch)
+    return len(write_batch)
+
+
+def _collect_media_row_keys(media_rows: List[tuple]) -> List[Tuple[int, int]]:
+    return [(int(row[0]), int(row[1])) for row in media_rows]
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -247,6 +244,7 @@ async def _run() -> int:
             for current_chat_id, payload in targets.items():
                 ids = payload["message_ids"]
                 chat_username = payload["chat_username"]
+                touched_groups: Set[int] = set()
                 try:
                     entity = await _resolve_entity(
                         client, current_chat_id, chat_username=chat_username
@@ -290,6 +288,11 @@ async def _run() -> int:
                             write_batch.append(media_row)
 
                     if len(write_batch) >= safe_write_batch_size:
+                        touched_groups.update(
+                            load_grouped_ids_for_messages(
+                                conn, _collect_media_row_keys(write_batch)
+                            )
+                        )
                         flushed = _flush_write_batch(conn, write_batch)
                         total_written += flushed
                         logging.info("已补写 message_media: %s", total_written)
@@ -298,6 +301,11 @@ async def _run() -> int:
                     await asyncio.sleep(1.0)
 
                 if write_batch:
+                    touched_groups.update(
+                        load_grouped_ids_for_messages(
+                            conn, _collect_media_row_keys(write_batch)
+                        )
+                    )
                     flushed = _flush_write_batch(conn, write_batch)
                     total_written += flushed
                     write_batch = []
@@ -306,12 +314,30 @@ async def _run() -> int:
                     conn,
                     chat_id=current_chat_id,
                     batch_size=max(safe_write_batch_size, 500),
+                    cfg=CFG,
                 )
                 if text_backfilled > 0:
                     logging.info(
                         "chat_id=%s 已补齐可搜索文件名文本: %s",
                         current_chat_id,
                         text_backfilled,
+                    )
+                    touched_groups.update(
+                        load_grouped_ids_for_messages(
+                            conn,
+                            [
+                                (current_chat_id, int(message_id))
+                                for message_id in ids
+                            ],
+                        )
+                    )
+
+                if touched_groups:
+                    refresh_media_groups_for_chat(
+                        conn,
+                        current_chat_id,
+                        cfg=CFG,
+                        grouped_ids=touched_groups,
                     )
 
                 logging.info(
