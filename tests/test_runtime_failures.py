@@ -61,6 +61,8 @@ _BACKFILL_SPEC.loader.exec_module(_BACKFILL_MODULE)
 _fetch_chunk_messages = _BACKFILL_MODULE._fetch_chunk_messages
 _load_missing_media_targets = _BACKFILL_MODULE._load_missing_targets
 _flush_backfill_write_batch = _BACKFILL_MODULE._flush_write_batch
+_flush_parsed_backfill_write_batch = _BACKFILL_MODULE._flush_parsed_write_batch
+_targets_signature = _BACKFILL_MODULE._targets_signature
 
 
 class _FakeCursor:
@@ -169,6 +171,55 @@ class MediaMetadataBackfillTargetTests(unittest.TestCase):
 
         self.assertEqual([12, 11, 10], targets[1]["message_ids"])
         self.assertEqual("chan", targets[1]["chat_username"])
+
+    def test_load_missing_targets_excludes_non_file_media_types(self) -> None:
+        cur = self.conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
+            VALUES (1, ?, ?, 1)
+            """,
+            [
+                (20, "POLL"),
+                (21, "CONTACT"),
+                (22, "GEO"),
+            ],
+        )
+        self.conn.commit()
+
+        targets = _load_missing_media_targets(self.conn, chat_id=None, scan_limit=20)
+
+        self.assertNotIn(20, targets[1]["message_ids"])
+        self.assertNotIn(21, targets[1]["message_ids"])
+        self.assertNotIn(22, targets[1]["message_ids"])
+
+    def test_load_missing_targets_identity_mode_ignores_dimension_only_gaps(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
+            VALUES (1, 14, 'PHOTO', 1)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_media(
+                chat_id, message_id, file_unique_id, mime_type,
+                file_size, width, height, duration_sec
+            )
+            VALUES (1, 14, '', 'image/jpeg', 100, 640, 480, NULL)
+            """
+        )
+        self.conn.commit()
+
+        targets = _load_missing_media_targets(
+            self.conn,
+            chat_id=None,
+            scan_limit=20,
+            target_mode=_BACKFILL_MODULE.TARGET_MODE_IDENTITY,
+        )
+
+        self.assertEqual([14, 11], targets[1]["message_ids"])
 
 
 class AdminUpdateRunnerTests(unittest.TestCase):
@@ -683,6 +734,26 @@ class _RetryClient:
 
 
 class BackfillRetryTests(unittest.TestCase):
+    def test_targets_signature_changes_when_target_ids_change(self) -> None:
+        targets = {
+            1: {"chat_username": "a", "message_ids": [3, 2]},
+            2: {"chat_username": None, "message_ids": [9]},
+        }
+        same_targets = {
+            1: {"chat_username": "renamed", "message_ids": [3, 2]},
+            2: {"chat_username": None, "message_ids": [9]},
+        }
+        changed_targets = {
+            1: {"chat_username": "a", "message_ids": [3, 1]},
+            2: {"chat_username": None, "message_ids": [9]},
+        }
+
+        self.assertEqual(_targets_signature(targets), _targets_signature(same_targets))
+        self.assertNotEqual(
+            _targets_signature(targets),
+            _targets_signature(changed_targets),
+        )
+
     def test_fetch_chunk_messages_retries_then_succeeds(self) -> None:
         client = _RetryClient([RuntimeError("temporary"), ["ok"]])
 
@@ -893,6 +964,66 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
 
         self.assertEqual(1, flushed)
         batch_upsert_mock.assert_called_once_with(conn, [], media_rows)
+
+    def test_parsed_media_backfill_flush_upserts_messages_and_media(self) -> None:
+        msg_rows = [
+            (
+                1,
+                105,
+                "2026-01-01 00:00:00",
+                1,
+                None,
+                "new caption",
+                "new caption",
+                "pure",
+                "dedupe",
+                "PHOTO",
+                7001,
+                1,
+                0,
+                0,
+                "[]",
+                0,
+                None,
+                11,
+            )
+        ]
+        media_rows = [
+            (
+                1,
+                105,
+                "PHOTO",
+                "fid-105",
+                "photo.jpg",
+                ".jpg",
+                "image/jpeg",
+                123,
+                640,
+                480,
+                None,
+                7001,
+                "fid:fid-105",
+                "{}",
+            )
+        ]
+        touched_groups = set()
+        conn = object()
+
+        with patch.object(
+            _BACKFILL_MODULE,
+            "load_grouped_ids_for_messages",
+            return_value={6001},
+        ) as load_grouped_mock, patch.object(
+            _BACKFILL_MODULE, "batch_upsert", return_value=None
+        ) as batch_upsert_mock:
+            flushed_messages, flushed_media = _flush_parsed_backfill_write_batch(
+                conn, msg_rows, media_rows, touched_groups
+            )
+
+        self.assertEqual((1, 1), (flushed_messages, flushed_media))
+        self.assertEqual({6001, 7001}, touched_groups)
+        load_grouped_mock.assert_called_once_with(conn, [(1, 105)])
+        batch_upsert_mock.assert_called_once_with(conn, msg_rows, media_rows)
 
     def test_unsearchable_cleanup_targets_media_with_only_identity_metadata(self) -> None:
         cur = self.conn.cursor()
