@@ -185,6 +185,21 @@ def _build_candidate_fts_sql(
     return _compile_candidate_node(expr, universe_sql="SELECT pk FROM messages")
 
 
+def _candidate_uses_auxiliary_terms_only(candidate_sql: Optional[str]) -> bool:
+    sql = str(candidate_sql or "")
+    return "message_search_terms" in sql and "messages_fts" not in sql
+
+
+def _single_auxiliary_term(expr: Optional[SearchExprNode]) -> Optional[str]:
+    if expr is None:
+        return None
+    if expr.kind not in {"TERM", "PHRASE"}:
+        return None
+    if not _term_supports_cjk_aux_candidate(expr.value):
+        return None
+    return "".join(str(expr.value or "").split())
+
+
 def _has_boolean_structure(expr: Optional[SearchExprNode]) -> bool:
     if expr is None:
         return False
@@ -219,21 +234,28 @@ def _build_search_query_spec(
     use_fts_join = False
     candidate_sql: Optional[str] = None
     candidate_params: List[Any] = []
+    auxiliary_only_candidate = False
     # 搜索统一走规范化文本：优先 content_norm，缺失时回退 content。
     # 这样每个词只做一次 LIKE 扫描，避免对同一行重复匹配两遍。
     content_expr = "(LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) LIKE ? ESCAPE '\\')"
     like_clause, like_params = compile_like_clause(expr, content_expr=content_expr)
     if like_clause:
         has_text_filter = True
-        where_parts.append(like_clause)
         if not force_like and fts_enabled:
             candidate_plan = _build_candidate_fts_sql(expr)
             if candidate_plan is not None:
                 candidate_sql, candidate_params = candidate_plan
+                auxiliary_only_candidate = _candidate_uses_auxiliary_terms_only(
+                    candidate_sql
+                )
             elif match_query:
                 use_fts_join = True
                 where_parts.append("fts.messages_fts MATCH ?")
                 sql_params.append(match_query)
+        if not auxiliary_only_candidate:
+            where_parts.append(like_clause)
+        else:
+            like_params = []
 
     sql_params = candidate_params + like_params + sql_params
     _append_scope_filters(where_parts, sql_params, params)
@@ -347,6 +369,44 @@ def _build_search_query_spec(
     """
 
     query_sql_skip: Optional[str] = None
+    single_auxiliary_term = _single_auxiliary_term(expr)
+    if (
+        effective_sort == "time"
+        and single_auxiliary_term is not None
+        and candidate_sql
+        and auxiliary_only_candidate
+    ):
+        direct_from_sql = base_from_sql
+        if outer_from_sql:
+            direct_from_sql += f" {outer_from_sql}"
+
+        skip_prefix = f"WITH candidate_pks AS ({candidate_sql}) "
+        query_sql_skip = f"""
+            {skip_prefix}
+            SELECT
+                m.pk,
+                m.chat_id,
+                c.chat_title,
+                c.chat_username,
+                m.message_id,
+                m.msg_date_text,
+                m.msg_date_ts,
+                m.msg_type,
+                m.content,
+                m.grouped_id,
+                m.is_promo,
+                mm.file_name,
+                mm.file_size,
+                mm.mime_type,
+                mm.media_kind,
+                mm.duration_sec
+            {direct_from_sql}
+            WHERE {where_sql}
+              AND EXISTS (SELECT 1 FROM candidate_pks cp WHERE cp.pk = m.pk)
+            ORDER BY {final_order_clause}
+            LIMIT ? OFFSET ?
+        """
+
     if effective_sort == "time" and _has_boolean_structure(expr):
         direct_from_sql = base_from_sql
         if candidate_sql:
@@ -448,6 +508,8 @@ def _choose_sort(search_type: str, sort_by: str, order: str) -> Tuple[str, str, 
     sb = (sort_by or "time").lower()
     od = "ASC" if str(order).lower() == "asc" else "DESC"
     if st in {"all", "text"} and sb in {"size", "duration"}:
+        sb = "time"
+    if st == "image" and sb == "duration":
         sb = "time"
     if sb == "size":
         return "COALESCE(mm.file_size, 0)", "size", od

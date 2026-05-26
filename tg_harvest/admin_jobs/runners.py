@@ -348,7 +348,8 @@ def _admin_get_chat_message_count(get_conn_fn: Callable[[], Any], chat_id: int) 
     try:
         cur = count_conn.cursor()
         cur.execute(
-            "SELECT COUNT(*) AS cnt FROM messages WHERE chat_id = ?", (chat_id,)
+            "SELECT COALESCE(message_count, 0) AS cnt FROM chats WHERE chat_id = ?",
+            (chat_id,),
         )
         row = cur.fetchone()
         return int(row["cnt"] or 0) if row else 0

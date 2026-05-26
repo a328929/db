@@ -80,6 +80,8 @@ def _load_raw_config_values() -> dict:
         "admin_update_concurrency": _env_int("TG_ADMIN_UPDATE_CONCURRENCY", 10),
         # 启动时是否强制修复全文索引。仅数值一表示开启。
         "force_heal_fts": _env_int("TG_FORCE_HEAL_FTS", 0),
+        # 是否跳过启动期 FTS 全量修复。恢复大库且磁盘紧张时可临时开启。
+        "skip_fts_auto_heal": _env_int("TG_SKIP_FTS_AUTO_HEAL", 0),
         # 后台管理密码。未配置时拒绝后台登录。
         "admin_password": _env_str("TG_ADMIN_PASSWORD", ""),
         # 后台登录有效时间，单位为秒。
@@ -121,6 +123,9 @@ def _normalize_config_values(raw: dict) -> dict:
         1, int(normalized["admin_update_concurrency"])
     )
     normalized["force_heal_fts"] = 1 if int(normalized["force_heal_fts"]) == 1 else 0
+    normalized["skip_fts_auto_heal"] = (
+        1 if int(normalized["skip_fts_auto_heal"]) == 1 else 0
+    )
     normalized["admin_session_expiry"] = max(60, int(normalized["admin_session_expiry"]))
     return normalized
 
@@ -147,6 +152,7 @@ def _build_app_config(values: dict) -> "AppConfig":
         admin_job_log_max_lines=values["admin_job_log_max_lines"],
         admin_update_concurrency=values["admin_update_concurrency"],
         force_heal_fts=values["force_heal_fts"],
+        skip_fts_auto_heal=values["skip_fts_auto_heal"],
         admin_password=values["admin_password"],
         admin_session_expiry=values["admin_session_expiry"],
     )
@@ -187,6 +193,7 @@ class AppConfig:
 
     # 索引维护
     force_heal_fts: int
+    skip_fts_auto_heal: int
 
     # 后台验证
     admin_password: str

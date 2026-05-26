@@ -12,6 +12,7 @@ from tg_harvest.storage.search_terms import extract_cjk_bigrams
 from tg_harvest.storage.search_terms import extract_cjk_search_terms
 from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.storage.access import has_fts
+from tg_harvest.storage import fts as _fts
 from tg_harvest.ingest.store import batch_upsert
 from tg_harvest.ingest.store import upsert_chat
 
@@ -205,6 +206,59 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 ORDER BY m.grouped_id ASC, m.message_id ASC
                 """,
                 "idx_messages_grouped_id",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT chat_id, chat_title, chat_username
+                FROM chats
+                ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC
+                """,
+                "idx_chats_title",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT chat_id
+                FROM chats
+                ORDER BY last_seen_at DESC
+                """,
+                "idx_chats_last_seen",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT chat_id, chat_title, message_count
+                FROM chats
+                ORDER BY message_count DESC, chat_title COLLATE NOCASE ASC, chat_id ASC
+                """,
+                "idx_chats_message_count_desc",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT chat_id, chat_title, message_count
+                FROM chats
+                ORDER BY message_count ASC, chat_title COLLATE NOCASE ASC, chat_id ASC
+                """,
+                "idx_chats_message_count_asc",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                DELETE FROM dedupe_runs
+                WHERE chat_id = 1
+                """,
+                "idx_dedupe_runs_chat",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT job_id, status, updated_at, heartbeat_at
+                FROM admin_jobs
+                ORDER BY updated_at ASC, created_at ASC
+                """,
+                "idx_admin_jobs_updated_created",
             ),
         ]
 
@@ -725,6 +779,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
             sqlite_cache_mb=128,
             sqlite_mmap_mb=256,
             force_heal_fts=1,
+            skip_fts_auto_heal=1,
         )
         fake_conn = object()
         fake_feats = object()
@@ -739,7 +794,147 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIs(fake_conn, conn)
         self.assertIs(fake_feats, feats)
         connect_mock.assert_called_once_with("/tmp/test.db", cache_mb=128, mmap_mb=256)
-        create_mock.assert_called_once_with(fake_conn, fake_feats, force_heal_fts=1)
+        create_mock.assert_called_once_with(
+            fake_conn, fake_feats, force_heal_fts=1, skip_fts_auto_heal=1
+        )
+
+    def test_create_schema_skip_fts_auto_heal_keeps_incremental_triggers(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        if not feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.executemany(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (?, 1, ?, '2026-01-01 00:00:00', ?, 'TEXT', ?, ?, 0)
+            """,
+            [
+                (1, 10, 1, "firstneedle", "firstneedle"),
+                (2, 11, 2, "missingneedle", "missingneedle"),
+            ],
+        )
+        cur.execute("INSERT INTO messages_fts(messages_fts) VALUES ('delete-all')")
+        cur.execute(
+            "INSERT INTO messages_fts(rowid, content) VALUES (1, 'firstneedle')"
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, feats, skip_fts_auto_heal=1)
+
+        cur.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_messages_fts_%'"
+        )
+        self.assertEqual(
+            [
+                "trg_messages_fts_delete",
+                "trg_messages_fts_insert",
+                "trg_messages_fts_update",
+            ],
+            sorted(row["name"] for row in cur.fetchall()),
+        )
+        cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
+        self.assertEqual(1, int(cur.fetchone()["c"]))
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"missingneedle"',),
+        )
+        self.assertEqual([], cur.fetchall())
+
+        cur.execute(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (3, 1, 12, '2026-01-01 00:00:03', 3, 'TEXT', 'freshneedle', 'freshneedle', 0)
+            """
+        )
+        self.conn.commit()
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"freshneedle"',),
+        )
+        self.assertEqual([3], [int(row["rowid"]) for row in cur.fetchall()])
+
+        create_schema(self.conn, feats, force_heal_fts=1, skip_fts_auto_heal=1)
+
+        cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
+        self.assertEqual(3, int(cur.fetchone()["c"]))
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"missingneedle"',),
+        )
+        self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
+
+    def test_fts_rebuild_triggers_cover_changes_between_batches(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        if not feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        create_schema(self.conn, feats)
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.execute(
+            """
+            INSERT INTO messages(
+                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 1, 10, '2026-01-01 00:00:00', 1, 'TEXT', 'originalneedle', 'originalneedle', 0)
+            """
+        )
+        self.conn.commit()
+
+        class CommitHookConnection:
+            def __init__(self, conn: sqlite3.Connection) -> None:
+                self.conn = conn
+                self.hook_ran = False
+
+            def commit(self) -> None:
+                self.conn.commit()
+                if self.hook_ran:
+                    return
+                self.hook_ran = True
+                self.conn.execute(
+                    """
+                    UPDATE messages
+                    SET content = 'updatedneedle',
+                        content_norm = 'updatedneedle'
+                    WHERE pk = 1
+                    """
+                )
+                self.conn.commit()
+
+        class CursorProxy:
+            def __init__(self, cursor: sqlite3.Cursor, connection) -> None:
+                self.cursor = cursor
+                self.connection = connection
+
+            def execute(self, *args, **kwargs):
+                return self.cursor.execute(*args, **kwargs)
+
+            def fetchone(self):
+                return self.cursor.fetchone()
+
+            def fetchall(self):
+                return self.cursor.fetchall()
+
+        hook_conn = CommitHookConnection(self.conn)
+        _fts._sync_fts_from_scratch(CursorProxy(cur, hook_conn), batch_size=1)
+
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"updatedneedle"',),
+        )
+        self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+        cur.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ('"originalneedle"',),
+        )
+        self.assertEqual([], cur.fetchall())
 
     def test_create_schema_upgrades_old_bigram_only_search_terms(self) -> None:
         feats = detect_sqlite_features(self.conn)
@@ -813,6 +1008,29 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
             """
         )
         cur.execute("INSERT INTO messages(pk, content) VALUES (1, 'hello')")
+        self.conn.commit()
+
+        self.assertFalse(has_fts(self.conn))
+
+    def test_has_fts_returns_false_when_external_content_index_is_partial(
+        self,
+    ) -> None:
+        if not self.feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        cur = self.conn.cursor()
+        cur.execute("CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT)")
+        cur.execute(
+            """
+            CREATE VIRTUAL TABLE messages_fts
+            USING fts5(content, content='messages', content_rowid='pk', tokenize='trigram')
+            """
+        )
+        cur.executemany(
+            "INSERT INTO messages(pk, content) VALUES (?, ?)",
+            [(1, "hello"), (2, "world")],
+        )
+        cur.execute("INSERT INTO messages_fts(rowid, content) VALUES (1, 'hello')")
         self.conn.commit()
 
         self.assertFalse(has_fts(self.conn))

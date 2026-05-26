@@ -153,6 +153,33 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         )
 
 
+def _create_chat_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_chats_title",
+        "CREATE INDEX idx_chats_title "
+        "ON chats(chat_title COLLATE NOCASE ASC, chat_id ASC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_chats_last_seen",
+        "CREATE INDEX idx_chats_last_seen "
+        "ON chats(last_seen_at DESC, chat_id ASC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_chats_message_count_desc",
+        "CREATE INDEX idx_chats_message_count_desc "
+        "ON chats(message_count DESC, chat_title COLLATE NOCASE ASC, chat_id ASC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_chats_message_count_asc",
+        "CREATE INDEX idx_chats_message_count_asc "
+        "ON chats(message_count ASC, chat_title COLLATE NOCASE ASC, chat_id ASC)"
+    )
+
+
 def _create_media_indexes(cur: sqlite3.Cursor):
     # 文件唯一性索引
     _ensure_index(
@@ -271,6 +298,11 @@ def _create_media_group_indexes(cur: sqlite3.Cursor):
 def _create_dedupe_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
+        "idx_dedupe_runs_chat",
+        "CREATE INDEX idx_dedupe_runs_chat ON dedupe_runs(chat_id)"
+    )
+    _ensure_index(
+        cur,
         "idx_dedupe_actions_batch",
         "CREATE INDEX idx_dedupe_actions_batch ON dedupe_actions(batch_id)"
     )
@@ -297,6 +329,12 @@ def _create_message_search_term_indexes(cur: sqlite3.Cursor):
 
 
 def _create_admin_job_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_jobs_updated_created",
+        "CREATE INDEX idx_admin_jobs_updated_created "
+        "ON admin_jobs(updated_at ASC, created_at ASC)"
+    )
     _ensure_index(
         cur,
         "idx_admin_jobs_status_updated",
@@ -391,6 +429,7 @@ def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
 
 def _create_indexes(cur: sqlite3.Cursor):
     _drop_obsolete_indexes(cur)
+    _create_chat_indexes(cur)
     _create_message_indexes(cur)
     _create_media_indexes(cur)
     _create_media_group_indexes(cur)

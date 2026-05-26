@@ -160,6 +160,7 @@ def ensure_configured_db(
     *,
     cfg: Optional[Any] = None,
     force_heal_fts: Optional[int] = None,
+    skip_fts_auto_heal: Optional[int] = None,
 ) -> Tuple[sqlite3.Connection, SqliteFeatures]:
     runtime_cfg = _resolve_runtime_cfg(cfg)
     conn, feats = connect_configured_db(cfg=runtime_cfg)
@@ -170,6 +171,11 @@ def ensure_configured_db(
         feats,
         force_heal_fts=int(
             runtime_cfg.force_heal_fts if force_heal_fts is None else force_heal_fts
+        ),
+        skip_fts_auto_heal=int(
+            getattr(runtime_cfg, "skip_fts_auto_heal", 0)
+            if skip_fts_auto_heal is None
+            else skip_fts_auto_heal
         ),
     )
     return conn, feats

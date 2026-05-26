@@ -52,12 +52,17 @@ def build_admin_stats_payload(
     cur = conn.cursor()
     try:
         if chat_id is None:
-            cur.execute("SELECT COUNT(*) AS chat_count FROM chats")
-            chat_count = int(cur.fetchone()["chat_count"] or 0)
             cur.execute(
-                "SELECT COALESCE(SUM(message_count), 0) AS message_count FROM chats"
+                """
+                SELECT
+                    COUNT(*) AS chat_count,
+                    COALESCE(SUM(message_count), 0) AS message_count
+                FROM chats
+                """
             )
-            message_count = int(cur.fetchone()["message_count"] or 0)
+            row = cur.fetchone()
+            chat_count = int(row["chat_count"] or 0)
+            message_count = int(row["message_count"] or 0)
 
             return {
                 "ok": True,

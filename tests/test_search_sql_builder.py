@@ -279,7 +279,8 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
         self.assertTrue(spec["uses_text_index"])
         self.assertTrue(spec["uses_auxiliary_terms"])
-        self.assertEqual(["福利", "会员", "%福利%", "%会员%"], spec["sql_params"])
+        self.assertNotIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福利", "会员"], spec["sql_params"])
 
     def test_one_char_cjk_query_uses_auxiliary_term_index(self) -> None:
         params = SearchParams(
@@ -302,7 +303,29 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
         self.assertTrue(spec["uses_text_index"])
         self.assertTrue(spec["uses_auxiliary_terms"])
-        self.assertEqual(["福", "%福%"], spec["sql_params"])
+        self.assertNotIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福"], spec["sql_params"])
+        self.assertIn("EXISTS (SELECT 1 FROM candidate_pks cp WHERE cp.pk = m.pk)", spec["query_sql_skip"])
+
+    def test_mixed_cjk_and_trigram_query_keeps_like_verification(self) -> None:
+        params = SearchParams(
+            raw_query="福利/onlyfans",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=True,
+            max_count=1000,
+        )
+
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福利", '"onlyfans"', "%福利%", "%onlyfans%"], spec["sql_params"])
 
     def test_media_sort_count_sql_uses_same_media_join_as_rows_query(self) -> None:
         params = SearchParams(
@@ -372,6 +395,29 @@ class SearchSqlBuilderTests(unittest.TestCase):
         )
 
         self.assertEqual("time", spec["effective_sort"])
+
+    def test_image_type_rejects_duration_sort_like_frontend_controls(self) -> None:
+        params = SearchParams(
+            raw_query="",
+            search_type="image",
+            sort_by_req="duration",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=False,
+            max_count=1000,
+        )
+
+        self.assertEqual("time", spec["effective_sort"])
+        self.assertIn(
+            "ORDER BY m.msg_date_ts DESC, m.message_id DESC, m.pk DESC",
+            spec["query_sql"],
+        )
 
     def test_date_range_filters_use_message_timestamp_bounds(self) -> None:
         params = SearchParams(

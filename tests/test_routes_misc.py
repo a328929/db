@@ -227,6 +227,17 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
         self.assertEqual(429, response.status_code)
 
+    def test_search_rate_limiter_prunes_expired_client_keys(self) -> None:
+        with search_routes_module._rate_lock:
+            search_routes_module._search_rate_tracker["search:old"] = deque([1.0])
+
+        with patch("tg_harvest.web.routes.search.time.time", return_value=10_000.0):
+            limited = search_routes_module._is_rate_limited("fresh")
+
+        self.assertFalse(limited)
+        with search_routes_module._rate_lock:
+            self.assertNotIn("search:old", search_routes_module._search_rate_tracker)
+
 
 class AppFactoryRuntimeInitTests(unittest.TestCase):
     def test_run_web_server_marks_global_app_ready_after_preinit(self) -> None:

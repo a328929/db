@@ -69,6 +69,8 @@ ON CONFLICT(chat_id, message_id) DO UPDATE SET
     updated_at=datetime('now')
 """
 
+_DELETE_MEDIA_KEY_BATCH_SIZE = 400
+
 def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
     cur = conn.cursor()
     try:
@@ -116,10 +118,19 @@ def _delete_stale_media_for_non_media_messages(
     ]
     if not stale_keys:
         return
-    cur.executemany(
-        "DELETE FROM message_media WHERE chat_id = ? AND message_id = ?",
-        stale_keys,
-    )
+    for start in range(0, len(stale_keys), _DELETE_MEDIA_KEY_BATCH_SIZE):
+        batch = stale_keys[start : start + _DELETE_MEDIA_KEY_BATCH_SIZE]
+        placeholders = ",".join(["(?, ?)"] * len(batch))
+        params: List[int] = []
+        for chat_id, message_id in batch:
+            params.extend([chat_id, message_id])
+        cur.execute(
+            f"""
+            DELETE FROM message_media
+            WHERE (chat_id, message_id) IN ({placeholders})
+            """,
+            params,
+        )
 
 
 @synchronized_write

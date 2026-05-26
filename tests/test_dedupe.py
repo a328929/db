@@ -72,6 +72,62 @@ class DedupeBatchDeletionTests(unittest.TestCase):
         )
         self.assertEqual(501, int(cur.fetchone()["c"]))
 
+    def test_dedupe_deletes_message_media_without_foreign_key_pragmas(self) -> None:
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        rows = [
+            (
+                1,
+                message_id,
+                "2026-01-01 00:00:00",
+                message_id,
+                "PHOTO",
+                "same promo",
+                "same promo",
+                "hash-media",
+                "hash-media",
+                1,
+                1,
+                1,
+                10,
+            )
+            for message_id in (200, 201)
+        ]
+        self.conn.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, pure_hash, dedupe_hash, has_media,
+                is_promo, dedupe_eligible, promo_score
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO message_media(chat_id, message_id, media_kind)
+            VALUES (1, ?, 'PHOTO')
+            """,
+            [(200,), (201,)],
+        )
+        self.conn.commit()
+
+        deleted, _solo, _group_txt, _group_med, _affected_groups = (
+            dedupe_promotional_duplicates(
+                self.conn,
+                chat_id=1,
+                mode="PURGE_ALL",
+                threshold=2,
+            )
+        )
+
+        self.assertEqual(2, deleted)
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id IN (200, 201)"
+        )
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+
 
 if __name__ == "__main__":
     unittest.main()

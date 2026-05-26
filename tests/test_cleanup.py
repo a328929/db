@@ -84,6 +84,55 @@ class CleanupWriteLockTests(unittest.TestCase):
         self.assertTrue(log_lock_states)
         self.assertFalse(any(log_lock_states))
 
+    def test_cleanup_deletes_message_media_without_foreign_key_pragmas(self) -> None:
+        self.conn.execute("PRAGMA foreign_keys=OFF")
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media, is_promo, dedupe_eligible
+            )
+            VALUES (1, 20, '2026-01-01 00:00:00', 20, 'PHOTO', 'delete-media', 'delete-media', 1, 0, 0)
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO message_media(chat_id, message_id, media_kind)
+            VALUES (1, 20, 'PHOTO')
+            """
+        )
+        self.conn.commit()
+
+        cur = self.conn.cursor()
+        try:
+            target_count = _build_cleanup_targets_table(
+                cur,
+                "keyword",
+                "",
+                [],
+                _build_cleanup_like_patterns("delete-media"),
+            )
+            self.conn.commit()
+            deleted = _execute_cleanup_deletion_batches(
+                self.conn,
+                cur,
+                "job-1",
+                target_count,
+                lambda *_args: None,
+            )
+        finally:
+            cur.close()
+
+        self.assertEqual(1, deleted)
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id = 20"
+            )
+            self.assertEqual(0, int(cur.fetchone()["c"]))
+        finally:
+            cur.close()
+
 
 if __name__ == "__main__":
     unittest.main()

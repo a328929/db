@@ -42,6 +42,7 @@ bash start_web.sh
 - `TG_SQLITE_MMAP_MB`: SQLite mmap 大小
 - `TG_ADMIN_PASSWORD`: 管理页密码，必须显式设置；未设置时后台登录会被拒绝
 - `FLASK_SECRET_KEY`: Flask session 签名密钥，建议显式设置以避免重启后登录态失效
+- `TG_SKIP_FTS_AUTO_HEAL`: 设置为 `1` 时跳过启动期 FTS 全量修复，仅恢复增量同步触发器；磁盘紧张的大库恢复场景可临时使用
 
 ## 运行说明
 

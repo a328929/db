@@ -10,18 +10,18 @@ from tg_harvest.storage.connection import synchronized_write
 CHANNEL_SORT_DEFAULT = "message_count_desc"
 CHANNEL_SORT_OPTIONS = {
     "message_count_asc": (
-        "COALESCE(message_count, 0) ASC, chat_title COLLATE NOCASE ASC, chat_id ASC"
+        "c.message_count ASC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
     ),
     "message_count_desc": (
-        "COALESCE(message_count, 0) DESC, chat_title COLLATE NOCASE ASC, chat_id ASC"
+        "c.message_count DESC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
     ),
     "updated_desc": (
         "CASE WHEN last_message_ts IS NULL THEN 1 ELSE 0 END ASC, "
-        "last_message_ts DESC, chat_title COLLATE NOCASE ASC, chat_id ASC"
+        "last_message_ts DESC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
     ),
     "updated_asc": (
         "CASE WHEN last_message_ts IS NULL THEN 1 ELSE 0 END ASC, "
-        "last_message_ts ASC, chat_title COLLATE NOCASE ASC, chat_id ASC"
+        "last_message_ts ASC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
     ),
 }
 
@@ -61,21 +61,18 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> List[dict]
                 c.chat_type,
                 c.message_count,
                 c.last_seen_at,
-                (
-                    SELECT m.msg_date_text
-                    FROM messages m
-                    WHERE m.chat_id = c.chat_id
-                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                    LIMIT 1
-                ) AS last_message_at,
-                (
-                    SELECT m.msg_date_ts
-                    FROM messages m
-                    WHERE m.chat_id = c.chat_id
-                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                    LIMIT 1
-                ) AS last_message_ts
+                lm.msg_date_text AS last_message_at,
+                lm.msg_date_ts AS last_message_ts
             FROM chats c
+            LEFT JOIN messages lm
+              ON lm.chat_id = c.chat_id
+             AND lm.message_id = (
+                    SELECT m.message_id
+                    FROM messages m
+                    WHERE m.chat_id = c.chat_id
+                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                    LIMIT 1
+                )
             ORDER BY {order_sql}
             """
         )
@@ -180,28 +177,28 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                 a.is_public,
                 COALESCE(
                     NULLIF(a.last_message_at, ''),
-                    (
-                        SELECT m.msg_date_text
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    ),
+                    lm.msg_date_text,
                     ''
                 ) AS last_message_at,
                 COALESCE(
                     a.last_message_ts,
-                    (
-                        SELECT m.msg_date_ts
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    )
+                    lm.msg_date_ts
                 ) AS last_message_ts,
                 a.scan_job_id,
                 a.scanned_at
             FROM admin_missing_chats a
+            LEFT JOIN messages lm
+              ON lm.chat_id = a.chat_id
+             AND lm.message_id = (
+                    SELECT m.message_id
+                    FROM messages m
+                    WHERE m.chat_id = a.chat_id
+                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                    LIMIT 1
+                )
+            WHERE NOT EXISTS (
+                SELECT 1 FROM chats c WHERE c.chat_id = a.chat_id
+            )
             ORDER BY a.chat_title COLLATE NOCASE ASC, a.chat_id ASC
             """
         )
@@ -322,30 +319,27 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                 a.last_seen_at,
                 COALESCE(
                     NULLIF(a.last_message_at, ''),
-                    (
-                        SELECT m.msg_date_text
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    ),
+                    lm.msg_date_text,
                     NULLIF(a.last_seen_at, ''),
                     ''
                 ) AS last_message_at,
                 COALESCE(
                     a.last_message_ts,
-                    (
-                        SELECT m.msg_date_ts
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    )
+                    lm.msg_date_ts
                 ) AS last_message_ts,
                 a.scan_reason,
                 a.scan_job_id,
                 a.scanned_at
             FROM admin_absent_chats a
+            LEFT JOIN messages lm
+              ON lm.chat_id = a.chat_id
+             AND lm.message_id = (
+                    SELECT m.message_id
+                    FROM messages m
+                    WHERE m.chat_id = a.chat_id
+                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                    LIMIT 1
+                )
             WHERE EXISTS (
                 SELECT 1 FROM chats c WHERE c.chat_id = a.chat_id
             )
@@ -472,28 +466,25 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
                 a.risk_flags,
                 COALESCE(
                     NULLIF(a.last_message_at, ''),
-                    (
-                        SELECT m.msg_date_text
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    ),
+                    lm.msg_date_text,
                     ''
                 ) AS last_message_at,
                 COALESCE(
                     a.last_message_ts,
-                    (
-                        SELECT m.msg_date_ts
-                        FROM messages m
-                        WHERE m.chat_id = a.chat_id
-                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                        LIMIT 1
-                    )
+                    lm.msg_date_ts
                 ) AS last_message_ts,
                 a.scan_job_id,
                 a.scanned_at
             FROM admin_restricted_chats a
+            LEFT JOIN messages lm
+              ON lm.chat_id = a.chat_id
+             AND lm.message_id = (
+                    SELECT m.message_id
+                    FROM messages m
+                    WHERE m.chat_id = a.chat_id
+                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                    LIMIT 1
+                )
             ORDER BY a.chat_title COLLATE NOCASE ASC, a.chat_id ASC
             """
         )

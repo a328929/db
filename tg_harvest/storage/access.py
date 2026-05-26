@@ -32,11 +32,11 @@ def has_fts(conn: sqlite3.Connection) -> bool:
         if cur.fetchone() is None:
             return False
         try:
-            cur.execute("SELECT 1 FROM messages_fts_idx LIMIT 1")
-            if cur.fetchone() is not None:
-                return True
-            cur.execute("SELECT 1 FROM messages LIMIT 1")
-            return cur.fetchone() is None
+            cur.execute("SELECT COUNT(*) AS c FROM messages")
+            message_count = int(cur.fetchone()["c"])
+            cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
+            indexed_count = int(cur.fetchone()["c"])
+            return indexed_count == message_count
         except sqlite3.Error:
             return False
     finally:

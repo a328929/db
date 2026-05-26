@@ -779,11 +779,15 @@ def _optimize_query_planner_stats(cur: sqlite3.Cursor) -> None:
 
 @_db_runtime.synchronized_write
 def create_schema(
-    conn: sqlite3.Connection, feats: SqliteFeatures, force_heal_fts: int = 0
+    conn: sqlite3.Connection,
+    feats: SqliteFeatures,
+    force_heal_fts: int = 0,
+    skip_fts_auto_heal: int = 0,
 ):
     cur = conn.cursor()
     try:
         strict_suffix = " STRICT" if feats.supports_strict else ""
+        skip_fts_heal = int(skip_fts_auto_heal) == 1 and int(force_heal_fts) != 1
         _create_tables(cur, strict_suffix)
         _ensure_chats_schema(cur)
         _ensure_messages_schema(cur, feats)
@@ -812,17 +816,30 @@ def create_schema(
             if not table_sql or "trigram" not in table_sql.lower():
                 logging.info("正在初始化或重建 FTS5 Trigram 索引表...")
                 cur.execute("DROP TABLE IF EXISTS messages_fts")
-                _fts._create_fts_schema(cur) # 调用这个会同时创建表和触发器
-                _fts._sync_fts_from_scratch(cur)
+                if skip_fts_heal:
+                    _fts._create_fts_table(cur)
+                    _fts._create_fts_triggers(cur)
+                    logging.warning("已跳过启动期 FTS 全量重建，仅恢复增量同步触发器")
+                else:
+                    _fts._create_fts_schema(cur) # 调用这个会同时创建表和触发器
+                    _fts._sync_fts_from_scratch(cur)
             else:
                 fts_triggers_current = _fts._fts_triggers_are_current(cur)
                 # 确保触发器存在且内容为当前版本（旧库可能缺失或使用 content 而非 content_norm）。
                 _fts._create_fts_triggers(cur)
-                _fts._heal_fts_if_needed(
-                    cur,
-                    force_heal=(force_heal_fts == 1 or not fts_triggers_current),
-                    rebuild_reason="FTS 触发器已升级" if not fts_triggers_current else "",
-                )
+                if skip_fts_heal:
+                    try:
+                        fts_index_complete = _fts._fts_index_row_count_matches_messages(cur)
+                    except sqlite3.Error:
+                        fts_index_complete = False
+                    if not fts_index_complete:
+                        logging.warning("已跳过启动期 FTS 完整性修复，仅恢复增量同步触发器")
+                else:
+                    _fts._heal_fts_if_needed(
+                        cur,
+                        force_heal=(force_heal_fts == 1 or not fts_triggers_current),
+                        rebuild_reason="FTS 触发器已升级" if not fts_triggers_current else "",
+                    )
         else:
             _fts._drop_fts_triggers(cur)
 

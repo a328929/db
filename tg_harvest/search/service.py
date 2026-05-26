@@ -186,6 +186,8 @@ def _try_fast_count(
         return None
     if params.duration_sec is not None:
         return None
+    if params.start_ts is not None or params.end_ts_exclusive is not None:
+        return None
 
     total: int | None
     if (params.search_type or "all").lower() == "all":
@@ -216,7 +218,7 @@ def _run_search_query(
 ) -> Tuple[List[sqlite3.Row], int, int, bool, int]:
     cur = conn.cursor()
     try:
-        if params.skip_count:
+        if params.skip_count and not params.count_only:
             total, total_is_capped, total_pages = -1, False, 0
         else:
             total, total_is_capped, total_pages = _resolve_precise_count(

@@ -102,17 +102,56 @@ def _create_fts_schema(cur: sqlite3.Cursor) -> None:
     _create_fts_triggers(cur)
 
 
-def _sync_fts_from_scratch(cur: sqlite3.Cursor) -> None:
+def _sync_fts_from_scratch(cur: sqlite3.Cursor, *, batch_size: int = 50000) -> None:
     """从 messages 表全量同步数据到 FTS 表。"""
     _drop_fts_triggers(cur)
     cur.execute("DROP TABLE IF EXISTS messages_fts")
     _create_fts_table(cur)
-    cur.execute("""
-        INSERT INTO messages_fts(rowid, content)
-        SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
-        FROM messages
-    """)
+    # Keep triggers installed while historical rows are backfilled. The rebuild
+    # commits in batches, so this prevents a crash or external writer from
+    # leaving new message changes outside the FTS index mid-rebuild.
     _create_fts_triggers(cur)
+
+    conn = cur.connection
+    last_pk = 0
+    batch_size = max(1, int(batch_size))
+    while True:
+        cur.execute(
+            """
+            SELECT pk
+            FROM messages
+            WHERE pk > ?
+            ORDER BY pk ASC
+            LIMIT ?
+            """,
+            (last_pk, batch_size),
+        )
+        pk_rows = cur.fetchall()
+        if not pk_rows:
+            break
+
+        next_last_pk = int(
+            pk_rows[-1]["pk"] if isinstance(pk_rows[-1], sqlite3.Row) else pk_rows[-1][0]
+        )
+        cur.execute(
+            """
+            INSERT INTO messages_fts(rowid, content)
+            SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
+            FROM messages
+            WHERE pk > ? AND pk <= ?
+              AND NOT EXISTS (
+                  SELECT 1 FROM messages_fts_docsize d WHERE d.id = messages.pk
+              )
+            ORDER BY pk ASC
+            """,
+            (last_pk, next_last_pk),
+        )
+        conn.commit()
+        try:
+            cur.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except sqlite3.Error:
+            logging.debug("FTS 分批重建期间 WAL checkpoint 跳过", exc_info=True)
+        last_pk = next_last_pk
 
 
 def _count_table_rows(cur: sqlite3.Cursor, table_name: str) -> int:

@@ -31,23 +31,18 @@ def _admin_fetch_job_snapshot_row(job_id: str) -> Optional[sqlite3.Row]:
                     j.progress_total,
                     j.progress_stage,
                     j.last_logged_current,
-                    COUNT(l.seq) AS log_count,
-                    COALESCE(MAX(l.seq), 0) AS last_seq
+                    (
+                        SELECT COUNT(*)
+                        FROM admin_job_logs l
+                        WHERE l.job_id = j.job_id
+                    ) AS log_count,
+                    (
+                        SELECT COALESCE(MAX(l.seq), 0)
+                        FROM admin_job_logs l
+                        WHERE l.job_id = j.job_id
+                    ) AS last_seq
                 FROM admin_jobs j
-                LEFT JOIN admin_job_logs l ON l.job_id = j.job_id
                 WHERE j.job_id = ?
-                GROUP BY
-                    j.job_id,
-                    j.job_type,
-                    j.status,
-                    j.target_chat_id,
-                    j.target_label,
-                    j.created_at,
-                    j.updated_at,
-                    j.progress_current,
-                    j.progress_total,
-                    j.progress_stage,
-                    j.last_logged_current
                 LIMIT 1
                 """,
                 (job_id,),

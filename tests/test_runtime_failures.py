@@ -20,11 +20,14 @@ from tg_harvest.admin_jobs.core import _admin_recover_interrupted_jobs
 from tg_harvest.admin_jobs.core import _AdminJobThreadLogHandler
 from tg_harvest.admin_jobs.core import job_context
 from tg_harvest.admin_jobs.core import job_log_passthrough_enabled
+from tg_harvest.admin_jobs.store import _admin_fetch_job_snapshot_row
 from tg_harvest.admin_jobs import core as admin_jobs_core
+from tg_harvest.admin_jobs import store as admin_jobs_store
 from tg_harvest.admin_jobs import runtime as admin_jobs_runtime
 from tg_harvest.admin_jobs.common import admin_error_message
 from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
 from tg_harvest.admin_jobs.runners import _admin_harvest_job_runner
+from tg_harvest.admin_jobs.runners import _admin_get_chat_message_count
 from tg_harvest.admin_jobs.runners import _admin_process_single_chat_update
 from tg_harvest.admin_jobs.runners import _admin_update_all_chats
 from tg_harvest.admin_jobs.runners import _delete_chat_data
@@ -223,6 +226,32 @@ class MediaMetadataBackfillTargetTests(unittest.TestCase):
 
 
 class AdminUpdateRunnerTests(unittest.TestCase):
+    def test_chat_message_count_reads_chat_summary_not_messages_count(self) -> None:
+        statements = []
+
+        class _Cursor:
+            def execute(self, sql, params=()):
+                statements.append(" ".join(str(sql).split()))
+
+            def fetchone(self):
+                return {"cnt": 42}
+
+        class _Conn:
+            def cursor(self):
+                return _Cursor()
+
+            def close(self):
+                return None
+
+        count = _admin_get_chat_message_count(lambda: _Conn(), 1)
+
+        self.assertEqual(42, count)
+        self.assertEqual(1, len(statements))
+        self.assertIn("message_count", statements[0])
+        self.assertIn("FROM chats", statements[0])
+        self.assertNotIn("COUNT(*)", statements[0])
+        self.assertNotIn("FROM messages", statements[0])
+
     def test_all_chat_update_returns_false_when_any_worker_fails(self) -> None:
         rows = [
             {"chat_id": 1, "chat_title": "ok", "chat_username": "ok_name"},
@@ -1349,6 +1378,38 @@ class PersistentAdminJobsTests(unittest.TestCase):
             [item["message"] for item in logs or []],
         )
 
+    def test_snapshot_row_uses_indexed_log_aggregates_without_join_group(self) -> None:
+        job = _admin_job_create("cleanup", target_chat_id=123, target_label="chat-123")
+        job_id = str(job["job_id"])
+        _admin_job_append_log(job_id, "line-2")
+
+        statements = []
+        real_admin_connect = admin_jobs_store._admin_connect
+
+        def traced_admin_connect():
+            conn = real_admin_connect()
+            conn.set_trace_callback(
+                lambda sql: statements.append(" ".join(str(sql).split()))
+            )
+            return conn
+
+        with patch.object(admin_jobs_store, "_admin_connect", traced_admin_connect):
+            row = _admin_fetch_job_snapshot_row(job_id)
+
+        self.assertIsNotNone(row)
+        assert row is not None
+        self.assertEqual(2, int(row["log_count"]))
+        self.assertEqual(2, int(row["last_seq"]))
+        snapshot_sql = next(
+            sql
+            for sql in statements
+            if sql.upper().startswith("SELECT") and "FROM admin_jobs j" in sql
+        )
+        self.assertIn("SELECT COUNT(*) FROM admin_job_logs", snapshot_sql)
+        self.assertIn("SELECT COALESCE(MAX(l.seq), 0)", snapshot_sql)
+        self.assertNotIn("LEFT JOIN admin_job_logs", snapshot_sql)
+        self.assertNotIn("GROUP BY", snapshot_sql)
+
     def test_recover_interrupted_jobs_marks_running_jobs_as_error(self) -> None:
         job = _admin_job_create("update", target_chat_id=321, target_label="chat-321")
         job_id = str(job["job_id"])
@@ -1675,6 +1736,94 @@ class WriteConsistencyTests(unittest.TestCase):
         self.assertEqual("TEXT", message_row["msg_type"])
         cur.execute(
             "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id = 900"
+        )
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+
+    def test_batch_upsert_deletes_stale_media_in_key_batches(self) -> None:
+        media_messages = [
+            (
+                1,
+                2000 + idx,
+                "2026-01-01 00:00:00",
+                idx,
+                1,
+                f"photo caption {idx}",
+                f"photo caption {idx}",
+                f"pure-photo-{idx}",
+                f"dedupe-photo-{idx}",
+                "PHOTO",
+                None,
+                1,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                15,
+            )
+            for idx in range(9)
+        ]
+        media_rows = [
+            (
+                1,
+                2000 + idx,
+                "PHOTO",
+                f"file-{idx}",
+                f"photo-{idx}.jpg",
+                ".jpg",
+                "image/jpeg",
+                100 + idx,
+                640,
+                480,
+                None,
+                None,
+                f"media-fp-{idx}",
+                "{}",
+            )
+            for idx in range(9)
+        ]
+        text_messages = [
+            (
+                1,
+                2000 + idx,
+                "2026-01-01 00:01:00",
+                idx + 100,
+                1,
+                f"edited text {idx}",
+                f"edited text {idx}",
+                f"pure-text-{idx}",
+                f"dedupe-text-{idx}",
+                "TEXT",
+                None,
+                0,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                13,
+            )
+            for idx in range(9)
+        ]
+
+        batch_upsert(self.conn, media_messages, media_rows)
+        statements = []
+        self.conn.set_trace_callback(
+            lambda sql: statements.append(" ".join(str(sql).split()))
+        )
+        try:
+            batch_upsert(self.conn, text_messages, [])
+        finally:
+            self.conn.set_trace_callback(None)
+
+        stale_media_deletes = [
+            sql for sql in statements if sql.startswith("DELETE FROM message_media")
+        ]
+        self.assertEqual(1, len(stale_media_deletes))
+        self.assertIn("(chat_id, message_id) IN", stale_media_deletes[0])
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id >= 2000"
         )
         self.assertEqual(0, int(cur.fetchone()["c"]))
 

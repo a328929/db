@@ -406,6 +406,17 @@ def _delete_target_messages(cur: sqlite3.Cursor):
             break
         pks = [int(row["pk"] if isinstance(row, sqlite3.Row) else row[0]) for row in rows]
         placeholders = ",".join(["?"] * len(pks))
+        cur.execute(
+            f"""
+            DELETE FROM message_media
+            WHERE (chat_id, message_id) IN (
+                SELECT chat_id, message_id
+                FROM messages
+                WHERE pk IN ({placeholders})
+            )
+            """,
+            pks,
+        )
         cur.execute(f"DELETE FROM messages WHERE pk IN ({placeholders})", pks)
         cur.execute(f"DELETE FROM temp_targets WHERE pk IN ({placeholders})", pks)
         # 批量删除期间不提交事务，但在 8 核服务器上，分批 SQL 能让 SQLite 的 WAL 机制处理得更平滑

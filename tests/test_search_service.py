@@ -112,6 +112,19 @@ class SearchServiceFastCountTests(unittest.TestCase):
         result = _try_fast_count(self.conn, params, page_size=100, max_count=50000000)
         self.assertIsNone(result)
 
+    def test_fast_count_disabled_when_date_filter_exists(self) -> None:
+        params = SearchParams(
+            raw_query="",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+            start_ts=100,
+        )
+        result = _try_fast_count(self.conn, params, page_size=100, max_count=50000000)
+        self.assertIsNone(result)
+
     def test_search_payload_service_schedules_async_maintenance_instead_of_draining_inline(
         self,
     ) -> None:
@@ -249,6 +262,44 @@ class SearchServiceFastCountTests(unittest.TestCase):
 
         self.assertEqual(0, payload["total"])
         self.assertEqual(0, payload["total_pages"])
+        self.assertEqual([], payload["items"])
+
+    def test_count_only_ignores_skip_count_flag(self) -> None:
+        params = SearchParams(
+            raw_query="",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+            skip_count=True,
+            count_only=True,
+        )
+        spec = {
+            "count_sql": "SELECT COUNT(*) AS c FROM (SELECT 1 FROM messages LIMIT ?)",
+            "query_sql": "SELECT pk FROM messages ORDER BY pk ASC LIMIT ? OFFSET ?",
+            "query_sql_skip": None,
+            "prefer_skip_query": False,
+            "sql_params": [],
+            "count_limit": 1000,
+            "match_query": "",
+            "raw_query": "",
+            "effective_sort": "time",
+            "effective_order": "desc",
+            "has_text_filter": False,
+        }
+
+        payload = _build_payload_from_spec(
+            self.conn,
+            params,
+            spec,
+            page_size=100,
+            max_count=50000000,
+            map_search_items_fn=lambda rows: [dict(row) for row in rows],
+        )
+
+        self.assertEqual(5, payload["total"])
+        self.assertEqual(1, payload["total_pages"])
         self.assertEqual([], payload["items"])
 
     def test_count_only_payload_can_include_top_chat_facets(self) -> None:

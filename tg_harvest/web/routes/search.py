@@ -17,6 +17,17 @@ _search_rate_tracker: Dict[str, deque] = {}
 _rate_lock = threading.Lock()
 
 
+def _prune_expired_rate_limit_keys_locked(now: float) -> None:
+    expired_keys = []
+    for tracker_key, history in _search_rate_tracker.items():
+        while history and history[0] < now - SEARCH_WINDOW_SEC:
+            history.popleft()
+        if not history:
+            expired_keys.append(tracker_key)
+    for tracker_key in expired_keys:
+        _search_rate_tracker.pop(tracker_key, None)
+
+
 def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
     now = time.time()
     limit = (
@@ -26,14 +37,11 @@ def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
     )
     tracker_key = f"{bucket}:{ip}"
     with _rate_lock:
+        _prune_expired_rate_limit_keys_locked(now)
         if tracker_key not in _search_rate_tracker:
             _search_rate_tracker[tracker_key] = deque()
 
         history = _search_rate_tracker[tracker_key]
-        # 清除过期的记录
-        while history and history[0] < now - SEARCH_WINDOW_SEC:
-            history.popleft()
-
         if len(history) >= limit:
             return True
 

@@ -154,6 +154,21 @@ class ChannelManagementStorageTests(unittest.TestCase):
         channels = list_database_channels(self.conn, sort="updated_asc")
         self.assertEqual(["Small", "Fresh", "Large"], [c["chat_title"] for c in channels])
 
+    def test_list_database_channels_uses_one_latest_message_lookup(self) -> None:
+        statements = []
+        self.conn.set_trace_callback(
+            lambda sql: statements.append(" ".join(str(sql).split()))
+        )
+        try:
+            list_database_channels(self.conn, sort="updated_desc")
+        finally:
+            self.conn.set_trace_callback(None)
+
+        select_sql = next(sql for sql in statements if "FROM chats c" in sql)
+        self.assertEqual(1, select_sql.count("SELECT m.message_id FROM messages m"))
+        self.assertNotIn("SELECT m.msg_date_text FROM messages m", select_sql)
+        self.assertNotIn("SELECT m.msg_date_ts FROM messages m", select_sql)
+
     def test_replace_and_list_missing_chat_scan_results(self) -> None:
         count = replace_missing_chat_scan_results(
             self.conn,
@@ -180,6 +195,36 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(1, rows[0]["is_public"])
         self.assertEqual("2026-04-01 10:00:00", rows[0]["last_message_at"])
         self.assertEqual(1775037600, rows[0]["last_message_ts"])
+
+    def test_list_missing_chat_scan_results_hides_imported_chat(self) -> None:
+        replace_missing_chat_scan_results(
+            self.conn,
+            [
+                ChatInventoryRow(
+                    chat_id=1,
+                    chat_title="Small",
+                    chat_username="small",
+                    chat_type="Channel",
+                    is_public=1,
+                    last_message_at="2026-04-01 10:00:00",
+                    last_message_ts=1775037600,
+                ),
+                ChatInventoryRow(
+                    chat_id=9,
+                    chat_title="Still Missing",
+                    chat_username="missing",
+                    chat_type="Channel",
+                    is_public=1,
+                    last_message_at="2026-04-01 11:00:00",
+                    last_message_ts=1775041200,
+                ),
+            ],
+            scan_job_id="job-1",
+            scanned_at="2026-04-01T00:00:00+00:00",
+        )
+
+        rows = list_missing_chat_scan_results(self.conn)
+        self.assertEqual(["Still Missing"], [row["chat_title"] for row in rows])
 
     def test_replace_and_list_absent_chat_scan_results(self) -> None:
         count = replace_absent_chat_scan_results(

@@ -149,6 +149,17 @@ def _delete_cleanup_batch(conn, cur, pks: list[int]) -> int:
 
     placeholders = ",".join(["?"] * len(pks))
     try:
+        cur.execute(
+            f"""
+            DELETE FROM message_media
+            WHERE (chat_id, message_id) IN (
+                SELECT chat_id, message_id
+                FROM messages
+                WHERE pk IN ({placeholders})
+            )
+            """,
+            pks,
+        )
         cur.execute(f"DELETE FROM messages WHERE pk IN ({placeholders})", pks)
         count = int(cur.rowcount or 0)
         cur.execute(f"DELETE FROM temp_cleanup_targets WHERE pk IN ({placeholders})", pks)
