@@ -7,6 +7,9 @@ from tg_harvest.admin_jobs.core import job_context, job_log_passthrough_enabled
 from tg_harvest.ingest.store import batch_upsert, upsert_chat
 
 
+CLOSE_JOIN_TIMEOUT_SEC = 5.0
+
+
 class ChatUpdateWriteCoordinator:
     def __init__(
         self,
@@ -123,10 +126,13 @@ class ChatUpdateWriteCoordinator:
     def close(self) -> None:
         if self._thread.is_alive():
             try:
-                self._enqueue({"kind": "stop"}, allow_error=True)
-            except RuntimeError:
-                pass
-            self._thread.join(timeout=5.0)
+                self._queue.put({"kind": "stop"}, timeout=0.5)
+            except Full as exc:
+                self._set_error(RuntimeError("写入队列已满，无法发送停止信号"))
+                raise RuntimeError("写入队列已满，无法发送停止信号") from exc
+            self._thread.join(timeout=CLOSE_JOIN_TIMEOUT_SEC)
+            if self._thread.is_alive():
+                self._set_error(RuntimeError("写入线程关闭超时，仍在运行"))
         self._raise_if_error()
 
     def _enqueue(self, item: dict[str, Any], *, allow_error: bool = False) -> None:

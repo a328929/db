@@ -8,6 +8,91 @@ from tg_harvest.search.sql_builder import _build_search_query_spec
 
 
 class SearchSqlBuilderTests(unittest.TestCase):
+    def test_slash_groups_bind_before_required_terms(self) -> None:
+        expr = parse_query("女同/百合/拉拉/女女+足交")
+        self.assertEqual(
+            {
+                "kind": "AND",
+                "value": "",
+                "left": {
+                    "kind": "OR",
+                    "value": "",
+                    "left": {
+                        "kind": "OR",
+                        "value": "",
+                        "left": {
+                            "kind": "OR",
+                            "value": "",
+                            "left": {
+                                "kind": "TERM",
+                                "value": "女同",
+                                "left": None,
+                                "right": None,
+                            },
+                            "right": {
+                                "kind": "TERM",
+                                "value": "百合",
+                                "left": None,
+                                "right": None,
+                            },
+                        },
+                        "right": {
+                            "kind": "TERM",
+                            "value": "拉拉",
+                            "left": None,
+                            "right": None,
+                        },
+                    },
+                    "right": {
+                        "kind": "TERM",
+                        "value": "女女",
+                        "left": None,
+                        "right": None,
+                    },
+                },
+                "right": {
+                    "kind": "TERM",
+                    "value": "足交",
+                    "left": None,
+                    "right": None,
+                },
+            },
+            expr_to_debug_dict(expr),
+        )
+
+    def test_slash_group_query_requires_terms_after_plus_in_sql(self) -> None:
+        params = SearchParams(
+            raw_query="女同/百合/拉拉/女女+足交",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=False,
+            max_count=1000,
+            force_like=True,
+        )
+
+        self.assertIn(" OR ", spec["where_sql"])
+        self.assertIn(" AND ", spec["where_sql"])
+        self.assertEqual(
+            ["%女同%", "%百合%", "%拉拉%", "%女女%", "%足交%"],
+            spec["sql_params"],
+        )
+
+    def test_full_width_boolean_symbols_are_supported(self) -> None:
+        expr = parse_query("女同／百合＋足交－广告")
+
+        self.assertEqual(
+            parse_query("女同/百合+足交-广告"),
+            expr,
+        )
+
     def test_parenthesized_boolean_expression_is_parsed(self) -> None:
         expr = parse_query('(foo/bar)+"baz qux"-spam')
         self.assertEqual(
@@ -123,7 +208,7 @@ class SearchSqlBuilderTests(unittest.TestCase):
             params,
             from_sql="FROM messages m",
             fts_enabled=False,
-            max_count=1000,
+            max_count=50000000,
             force_like=True,
         )
 
@@ -132,6 +217,8 @@ class SearchSqlBuilderTests(unittest.TestCase):
             spec["where_sql"],
         )
         self.assertNotIn("m.content LIKE ?", spec["where_sql"])
+        self.assertEqual(50000001, spec["count_limit"])
+        self.assertEqual(50000001, spec["chat_facet_scan_limit"])
 
     def test_like_query_escapes_wildcard_characters(self) -> None:
         params = SearchParams(
@@ -376,6 +463,27 @@ class SearchSqlBuilderTests(unittest.TestCase):
             "ORDER BY m.msg_date_ts DESC, m.message_id DESC, m.pk DESC",
             spec["query_sql"],
         )
+        self.assertEqual(1001, spec["count_limit"])
+
+    def test_text_search_count_limit_uses_max_count(self) -> None:
+        params = SearchParams(
+            raw_query="hello",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=False,
+            max_count=1000,
+            force_like=True,
+        )
+
+        self.assertEqual(1001, spec["count_limit"])
 
     def test_all_type_rejects_media_sort_like_frontend_controls(self) -> None:
         params = SearchParams(
@@ -467,6 +575,10 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertIn("ORDER BY match_count DESC", spec["chat_facet_sql"])
         self.assertIn("m.msg_date_ts >= ?", spec["chat_facet_sql"])
         self.assertIn("m.msg_date_ts < ?", spec["chat_facet_sql"])
+        self.assertIn("FROM (\n", spec["chat_facet_sql"])
+        self.assertEqual(2, spec["chat_facet_sql"].count("LIMIT ?"))
+        inner_sql = spec["chat_facet_sql"].split(") m", 1)[0]
+        self.assertNotIn("ORDER BY", inner_sql)
 
 
 if __name__ == "__main__":

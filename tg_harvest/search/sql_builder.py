@@ -324,9 +324,13 @@ def _build_search_query_spec(
             COALESCE(c.chat_title, '') AS chat_title,
             COUNT(*) AS match_count,
             MAX(m.msg_date_ts) AS latest_msg_date_ts
-        {inner_from_sql}
+        FROM (
+            SELECT m.chat_id, m.msg_date_ts
+            {inner_from_sql}
+            WHERE {where_sql}
+            LIMIT ?
+        ) m
         LEFT JOIN chats c ON c.chat_id = m.chat_id
-        WHERE {where_sql}
         GROUP BY m.chat_id
         ORDER BY match_count DESC, latest_msg_date_ts DESC, m.chat_id ASC
         LIMIT ?
@@ -445,8 +449,7 @@ def _build_search_query_spec(
             LIMIT ? OFFSET ?
         """
 
-    # 如果有文本搜索关键字，我们将计数限制设为5000（50页），这避免了数据库去统计成千上万的总数而导致严重拖慢响应速度
-    count_limit = max_count
+    count_limit = max_count + 1
 
     return {
         "where_sql": where_sql,
@@ -460,7 +463,8 @@ def _build_search_query_spec(
         "prefer_skip_query": bool(query_sql_skip),
         "effective_sort": effective_sort,
         "effective_order": effective_order,
-        "count_limit": count_limit + 1,
+        "count_limit": count_limit,
+        "chat_facet_scan_limit": count_limit,
         "has_text_filter": has_text_filter,
         "uses_text_index": bool(candidate_sql or use_fts_join),
         "uses_auxiliary_terms": bool(

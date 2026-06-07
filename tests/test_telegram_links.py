@@ -5,6 +5,7 @@ from tg_harvest.web.telegram_links import build_telegram_app_link
 from tg_harvest.web.telegram_links import build_telegram_chat_app_link
 from tg_harvest.web.telegram_links import build_telegram_chat_link_bundle
 from tg_harvest.web.telegram_links import build_telegram_chat_web_link
+from tg_harvest.web.telegram_links import build_telegram_fallback_app_link
 from tg_harvest.web.telegram_links import build_telegram_link_bundle
 from tg_harvest.web.telegram_links import build_telegram_web_link
 
@@ -21,6 +22,125 @@ class TelegramLinkBuilderTests(unittest.TestCase):
             "https://t.me/public_channel/321",
             build_telegram_web_link(
                 chat_id=123456, message_id=321, chat_username="@public_channel"
+            ),
+        )
+
+    def test_public_channel_message_links_prefer_username_for_precise_post(self) -> None:
+        self.assertEqual(
+            "tg://resolve?domain=possibly_stale&post=321",
+            build_telegram_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@possibly_stale",
+                chat_type="Channel",
+            ),
+        )
+        self.assertEqual(
+            "https://t.me/possibly_stale/321",
+            build_telegram_web_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@possibly_stale",
+                chat_type="Channel",
+            ),
+        )
+
+    def test_public_channel_message_links_expose_privatepost_fallback(self) -> None:
+        self.assertEqual(
+            "tg://privatepost?channel=2202633364&post=321",
+            build_telegram_fallback_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@public_channel",
+                chat_type="Channel",
+            ),
+        )
+
+    def test_grouped_media_links_include_single_flag(self) -> None:
+        self.assertEqual(
+            "tg://resolve?domain=public_channel&post=321&single",
+            build_telegram_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@public_channel",
+                chat_type="Channel",
+                single_message=True,
+            ),
+        )
+        self.assertEqual(
+            "tg://privatepost?channel=2202633364&post=321&single",
+            build_telegram_fallback_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@public_channel",
+                chat_type="Channel",
+                single_message=True,
+            ),
+        )
+        self.assertEqual(
+            "https://t.me/public_channel/321?single",
+            build_telegram_web_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_username="@public_channel",
+                chat_type="Channel",
+                single_message=True,
+            ),
+        )
+
+    def test_grouped_private_channel_links_include_single_flag(self) -> None:
+        self.assertEqual(
+            "tg://privatepost?channel=2202633364&post=321&single",
+            build_telegram_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_type="Channel",
+                single_message=True,
+            ),
+        )
+        self.assertEqual(
+            "https://t.me/c/2202633364/321?single",
+            build_telegram_web_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_type="Channel",
+                single_message=True,
+            ),
+        )
+
+    def test_private_channel_message_links_have_no_duplicate_fallback(self) -> None:
+        self.assertEqual(
+            "tg://privatepost?channel=2202633364&post=321",
+            build_telegram_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_type="Channel",
+            ),
+        )
+        self.assertEqual(
+            "",
+            build_telegram_fallback_app_link(
+                chat_id=-1002202633364,
+                message_id=321,
+                chat_type="Channel",
+            ),
+        )
+
+    def test_basic_chat_message_links_use_openmessage_not_channel_privatepost(self) -> None:
+        self.assertEqual(
+            "tg://openmessage?chat_id=123456&message_id=321",
+            build_telegram_app_link(
+                chat_id=123456,
+                message_id=321,
+                chat_type="Chat",
+            ),
+        )
+        self.assertEqual(
+            "",
+            build_telegram_web_link(
+                chat_id=123456,
+                message_id=321,
+                chat_type="Chat",
             ),
         )
 
@@ -58,6 +178,7 @@ class TelegramLinkBuilderTests(unittest.TestCase):
         bundle = build_telegram_link_bundle(chat_id=42, message_id=7)
 
         self.assertEqual("/open/telegram?chat_id=42&message_id=7", bundle.open_link)
+        self.assertEqual("", bundle.fallback_app_link)
 
     def test_open_link_preserves_signed_chat_id_for_database_lookup(self) -> None:
         bundle = build_telegram_link_bundle(chat_id=-1002202633364, message_id=7)

@@ -324,12 +324,12 @@
     }
 
     if (isCounting) {
-      setStatus(`已快速加载 ${items.length} 条结果，正在后台精确统计总数...`);
+      setStatus(`已快速加载 ${items.length} 条结果，正在后台统计结果数量...`);
     } else {
       if (total === 0 && items.length === 0) {
         setStatus("未找到匹配内容。");
       } else {
-        setStatus(`共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`);
+        setStatus(_formatResultSummary(payload));
       }
     }
 
@@ -358,11 +358,21 @@
     if (total === 0 && items.length === 0) {
       setStatus("未找到匹配内容。");
     } else {
-      setStatus(`共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`);
+      setStatus(_formatResultSummary(payload));
     }
 
     renderGroupFacets(payload.chat_facets);
     renderPagination(totalPages, page);
+  }
+
+  function _formatResultSummary(payload) {
+    const total = Number(payload.total || 0);
+    const page = Number(payload.page || 1);
+    const totalPages = Number(payload.total_pages || 0);
+    if (payload.total_is_capped) {
+      return `超过 ${total} 条结果，当前第 ${page} / 至少 ${totalPages} 页（每页 100 条）`;
+    }
+    return `共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`;
   }
 
   function createBtn(text, onClick, { disabled = false, ariaLabel = "" } = {}) {

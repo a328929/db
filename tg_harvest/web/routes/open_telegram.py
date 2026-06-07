@@ -28,25 +28,37 @@ def _parse_nonzero_int(raw_value: str, field_name: str) -> int:
     return value
 
 
-def _load_chat_meta(
-    get_conn_fn, chat_id: int
-) -> tuple[Optional[str], Optional[str]]:
+def _load_message_open_meta(
+    get_conn_fn, chat_id: int, message_id: int
+) -> tuple[Optional[str], Optional[str], Optional[str], bool]:
     with closing(get_conn_fn()) as conn:
         cur = conn.cursor()
         try:
             cur.execute(
                 """
-                SELECT chat_title, chat_username
-                FROM chats
-                WHERE chat_id = ?
+                SELECT
+                    c.chat_title,
+                    c.chat_username,
+                    c.chat_type,
+                    m.grouped_id
+                FROM chats c
+                LEFT JOIN messages m
+                  ON m.chat_id = c.chat_id
+                 AND m.message_id = ?
+                WHERE c.chat_id = ?
                 LIMIT 1
                 """,
-                (int(chat_id),),
+                (int(message_id), int(chat_id)),
             )
             row = cur.fetchone()
             if row is None:
-                return None, None
-            return row["chat_title"], row["chat_username"]
+                return None, None, None, False
+            return (
+                row["chat_title"],
+                row["chat_username"],
+                row["chat_type"],
+                row["grouped_id"] is not None,
+            )
         finally:
             cur.close()
 
@@ -63,7 +75,9 @@ def register_open_telegram_routes(app, *, logger, get_conn_fn) -> None:
             return jsonify({"ok": False, "error": str(exc)}), 400
 
         try:
-            chat_title, chat_username = _load_chat_meta(get_conn_fn, chat_id)
+            chat_title, chat_username, chat_type, single_message = (
+                _load_message_open_meta(get_conn_fn, chat_id, message_id)
+            )
         except sqlite3.Error:
             logger.exception("读取 Telegram 跳转元数据失败")
             return jsonify({"ok": False, "error": "读取跳转元数据失败"}), 500
@@ -75,6 +89,8 @@ def register_open_telegram_routes(app, *, logger, get_conn_fn) -> None:
             chat_id=chat_id,
             message_id=message_id,
             chat_username=chat_username,
+            chat_type=chat_type,
+            single_message=single_message,
         )
         return render_template(
             "open_telegram.html",
@@ -82,5 +98,6 @@ def register_open_telegram_routes(app, *, logger, get_conn_fn) -> None:
             chat_title=chat_title or f"Chat {chat_id}",
             message_id=message_id,
             telegram_app_link=bundle.app_link,
+            telegram_fallback_app_link=bundle.fallback_app_link,
             telegram_web_link=bundle.web_link,
         )

@@ -41,6 +41,15 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("context.css", context_template)
         self.assertIn("open_telegram.css", open_telegram_template)
 
+    def test_open_telegram_fallback_copy_matches_rendered_web_link(self) -> None:
+        template = (ROOT / "templates" / "open_telegram.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "open_telegram.js").read_text(encoding="utf-8")
+        self.assertIn('id="openTelegramWebLink"', template)
+        self.assertIn('document.getElementById("openTelegramWebLink")', source)
+        self.assertIn("if (webLink && webLink.href)", source)
+
     def test_search_results_do_not_inject_user_content_via_inner_html(self) -> None:
         source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn("innerHTML = badgesHtml + (item.title", source)

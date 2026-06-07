@@ -3,8 +3,10 @@ import importlib.util
 import logging
 import os
 import pathlib
+import queue
 import sqlite3
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -32,6 +34,7 @@ from tg_harvest.admin_jobs.runners import _admin_process_single_chat_update
 from tg_harvest.admin_jobs.runners import _admin_update_all_chats
 from tg_harvest.admin_jobs.runners import _delete_chat_data
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
+from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.admin_jobs.cleanup import _build_cleanup_targets_table
 from tg_harvest.storage.connection import detect_sqlite_features
 from tg_harvest.storage.schema import create_schema
@@ -251,6 +254,50 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertIn("FROM chats", statements[0])
         self.assertNotIn("COUNT(*)", statements[0])
         self.assertNotIn("FROM messages", statements[0])
+
+    def test_write_coordinator_close_raises_when_writer_thread_does_not_stop(self) -> None:
+        release = threading.Event()
+
+        def blocked_get_conn():
+            release.wait(timeout=1.0)
+            return _FakeConn([])
+
+        coordinator = ChatUpdateWriteCoordinator(
+            job_id="job-stuck",
+            get_conn_fn=blocked_get_conn,
+            queue_maxsize=1,
+        )
+        try:
+            with patch(
+                "tg_harvest.admin_jobs.update_writer.CLOSE_JOIN_TIMEOUT_SEC",
+                0.01,
+            ):
+                with self.assertRaisesRegex(RuntimeError, "写入线程关闭超时"):
+                    coordinator.close()
+        finally:
+            release.set()
+            coordinator._thread.join(timeout=1.0)
+
+    def test_write_coordinator_close_raises_when_stop_signal_cannot_be_queued(self) -> None:
+        release = threading.Event()
+
+        def blocked_get_conn():
+            release.wait(timeout=1.0)
+            return _FakeConn([])
+
+        coordinator = ChatUpdateWriteCoordinator(
+            job_id="job-full",
+            get_conn_fn=blocked_get_conn,
+            queue_maxsize=1,
+        )
+        try:
+            coordinator._queue.put_nowait({"kind": "batch", "chat_id": 1})
+            with patch.object(coordinator._queue, "put", side_effect=queue.Full):
+                with self.assertRaisesRegex(RuntimeError, "无法发送停止信号"):
+                    coordinator.close()
+        finally:
+            release.set()
+            coordinator._thread.join(timeout=1.0)
 
     def test_all_chat_update_returns_false_when_any_worker_fails(self) -> None:
         rows = [

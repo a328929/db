@@ -287,9 +287,13 @@ def _execute_chat_facet_query(
     chat_facet_sql: str,
     sql_params: List[Any],
     *,
+    scan_limit: int,
     limit: int = _CHAT_FACET_LIMIT,
 ) -> List[Dict[str, Any]]:
-    cur.execute(chat_facet_sql, sql_params + [max(1, int(limit))])
+    cur.execute(
+        chat_facet_sql,
+        sql_params + [max(1, int(scan_limit)), max(1, int(limit))],
+    )
     facets: List[Dict[str, Any]] = []
     for row in cur.fetchall():
         chat_id = int(row["chat_id"])
@@ -335,6 +339,7 @@ def _build_payload_from_spec(
                 cur,
                 str(spec["chat_facet_sql"]),
                 list(spec["sql_params"]),
+                scan_limit=int(spec.get("chat_facet_scan_limit") or spec["count_limit"]),
             )
         finally:
             cur.close()

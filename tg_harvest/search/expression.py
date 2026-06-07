@@ -7,7 +7,19 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from tg_harvest.domain.normalize import normalize_search_term
 
 
-CURLY_QUOTES_MAP = str.maketrans({"“": '"', "”": '"', "‘": "'", "’": "'"})
+QUERY_SYMBOLS_MAP = str.maketrans(
+    {
+        "“": '"',
+        "”": '"',
+        "‘": "'",
+        "’": "'",
+        "＋": "+",
+        "／": "/",
+        "－": "-",
+        "（": "(",
+        "）": ")",
+    }
+)
 
 TOKEN_TERM = "TERM"
 TOKEN_PHRASE = "PHRASE"
@@ -38,7 +50,7 @@ def norm_for_search(term: str) -> str:
 
 
 def lex_query(query: str) -> List[ExprToken]:
-    q = (query or "").translate(CURLY_QUOTES_MAP)
+    q = (query or "").translate(QUERY_SYMBOLS_MAP)
     tokens: List[ExprToken] = []
     i, n = 0, len(q)
     while i < n:
@@ -118,30 +130,30 @@ class _SearchExprParser:
     def parse(self) -> SearchExprNode:
         if not self.tokens:
             raise ValueError("搜索表达式为空")
-        expr = self._parse_or_expr()
+        expr = self._parse_and_expr()
         if self._peek() is not None:
             raise ValueError("搜索表达式存在无法解析的尾部内容")
         return expr
 
-    def _parse_or_expr(self) -> SearchExprNode:
-        node = self._parse_and_expr()
-        while self._match(TOKEN_OR):
-            right = self._parse_and_expr()
-            node = SearchExprNode("OR", left=node, right=right)
-        return node
-
     def _parse_and_expr(self) -> SearchExprNode:
-        node = self._parse_unary_expr()
+        node = self._parse_or_expr()
         while True:
             next_token = self._peek()
-            if next_token is None or next_token.kind in {TOKEN_RPAREN, TOKEN_OR}:
+            if next_token is None or next_token.kind == TOKEN_RPAREN:
                 break
             if next_token.kind == TOKEN_AND:
                 self.index += 1
             elif next_token.kind not in _START_TOKENS:
                 raise ValueError("搜索表达式存在非法连接符")
-            right = self._parse_unary_expr()
+            right = self._parse_or_expr()
             node = SearchExprNode("AND", left=node, right=right)
+        return node
+
+    def _parse_or_expr(self) -> SearchExprNode:
+        node = self._parse_unary_expr()
+        while self._match(TOKEN_OR):
+            right = self._parse_unary_expr()
+            node = SearchExprNode("OR", left=node, right=right)
         return node
 
     def _parse_unary_expr(self) -> SearchExprNode:
@@ -156,7 +168,7 @@ class _SearchExprParser:
             raise ValueError("搜索表达式意外结束")
         if token.kind == TOKEN_LPAREN:
             self.index += 1
-            expr = self._parse_or_expr()
+            expr = self._parse_and_expr()
             if not self._match(TOKEN_RPAREN):
                 raise ValueError("括号未闭合")
             return expr

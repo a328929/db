@@ -2,6 +2,8 @@
   "use strict";
 
   const appLink = document.getElementById("openTelegramAppLink");
+  const fallbackAppLink = document.getElementById("openTelegramFallbackAppLink");
+  const webLink = document.getElementById("openTelegramWebLink");
   const statusLine = document.getElementById("openTelegramStatus");
   if (!appLink || !statusLine || !appLink.href) {
     return;
@@ -14,7 +16,17 @@
   }, 120);
 
   window.setTimeout(() => {
+    if (fallbackAppLink && fallbackAppLink.href) {
+      statusLine.textContent =
+        "如果 Telegram 没有自动打开到目标消息，请点击“备用 App 链接”或“备用网页链接”。";
+      return;
+    }
+    if (webLink && webLink.href) {
+      statusLine.textContent =
+        "如果 Telegram 没有自动弹出，请点击“打开 Telegram App”；若当前浏览器阻止协议唤起，可使用备用网页链接。";
+      return;
+    }
     statusLine.textContent =
-      "如果 Telegram 没有自动弹出，请点击“打开 Telegram App”；若当前浏览器阻止协议唤起，可使用备用网页链接。";
+      "如果 Telegram 没有自动弹出，请点击“打开 Telegram App”。";
   }, 1800);
 })();

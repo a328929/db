@@ -314,6 +314,7 @@ class SearchServiceFastCountTests(unittest.TestCase):
                 CREATE TABLE messages(
                     pk INTEGER PRIMARY KEY,
                     chat_id INTEGER NOT NULL,
+                    message_id INTEGER NOT NULL,
                     msg_date_ts INTEGER NOT NULL,
                     msg_type TEXT NOT NULL,
                     content TEXT,
@@ -326,11 +327,11 @@ class SearchServiceFastCountTests(unittest.TestCase):
                 [(1, "Alpha"), (2, "Beta")],
             )
             conn.executemany(
-                "INSERT INTO messages(pk, chat_id, msg_date_ts, msg_type, content, content_norm) VALUES (?, ?, ?, 'TEXT', ?, ?)",
+                "INSERT INTO messages(pk, chat_id, message_id, msg_date_ts, msg_type, content, content_norm) VALUES (?, ?, ?, ?, 'TEXT', ?, ?)",
                 [
-                    (1, 1, 100, "hello", "hello"),
-                    (2, 1, 101, "hello again", "hello again"),
-                    (3, 2, 102, "hello", "hello"),
+                    (1, 1, 10, 100, "hello", "hello"),
+                    (2, 1, 11, 101, "hello again", "hello again"),
+                    (3, 2, 20, 102, "hello", "hello"),
                 ],
             )
             conn.commit()

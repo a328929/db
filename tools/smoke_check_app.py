@@ -19,6 +19,8 @@ REQUIRED_ROUTES = {
     "/api/admin/channels/missing/scan",
     "/api/admin/channels/absent",
     "/api/admin/channels/absent/scan",
+    "/api/admin/channels/restricted",
+    "/api/admin/channels/restricted/scan",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

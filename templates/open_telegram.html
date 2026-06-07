@@ -28,13 +28,24 @@
           href="{{ telegram_app_link }}"
           aria-label="使用 Telegram 客户端打开该消息"
         >打开 Telegram App</a>
+        {% if telegram_fallback_app_link %}
         <a
+          id="openTelegramFallbackAppLink"
+          class="btn open-telegram-btn"
+          href="{{ telegram_fallback_app_link }}"
+          aria-label="使用 Telegram 客户端备用方式打开该消息"
+        >备用 App 链接</a>
+        {% endif %}
+        {% if telegram_web_link %}
+        <a
+          id="openTelegramWebLink"
           class="btn open-telegram-btn"
           href="{{ telegram_web_link }}"
           target="_blank"
           rel="noopener noreferrer"
           aria-label="打开 Telegram 网页备用链接"
         >备用网页链接</a>
+        {% endif %}
       </div>
 
       <p class="subtle open-telegram-note">
