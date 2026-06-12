@@ -1,6 +1,4 @@
-# -*- coding: utf-8 -*-
 import sqlite3
-
 
 SEARCH_TEXT_PRESENT_COLUMN = "search_text_present"
 

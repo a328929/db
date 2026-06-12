@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
-import re
+import hashlib
 import html
 import json
-import hashlib
+import re
 import unicodedata
-from typing import Any, List, Optional
+from typing import Any
 
 # =========================
 # 文本清洗 / 归一化工具
@@ -225,7 +224,7 @@ def _light_normalize(s: str) -> str:
     return s
 
 
-def _should_keep_non_noise_token(tok: str) -> Optional[str]:
+def _should_keep_non_noise_token(tok: str) -> str | None:
     if not tok:
         return None
 
@@ -263,10 +262,7 @@ def _is_structural_noise_token(t: str) -> bool:
         return True
 
     # 字母数字混合长串
-    if LONG_MIXED_TOKEN_RE.match(t):
-        return True
-
-    return False
+    return bool(LONG_MIXED_TOKEN_RE.match(t))
 
 
 def _is_ratio_noise_token(t: str) -> bool:
@@ -290,10 +286,7 @@ def _is_noise_token(tok: str) -> bool:
     if _is_structural_noise_token(t):
         return True
 
-    if _is_ratio_noise_token(t):
-        return True
-
-    return False
+    return bool(_is_ratio_noise_token(t))
 
 
 def _replace_strong_signals(s: str) -> str:
@@ -314,7 +307,7 @@ def _inject_compact_markers(s: str) -> str:
     # 一些被拆开的弱形式再兜一层（压缩串级别）
     compact = _compact_for_detection(s)
     # 如果压缩串里出现明显 tg/wechat/qq 形态，给原串注入占位，增强稳定性
-    marker_tokens: List[str] = []
+    marker_tokens: list[str] = []
     if "tme" in compact or "telegramme" in compact or "joinchat" in compact:
         marker_tokens.append("TGLINK")
     if "vx" in compact or "wx" in compact or "wechat" in compact or "微信" in compact:

@@ -1,15 +1,15 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 import time
-from typing import Any, Dict, Iterable, List, Optional, Set
+from collections.abc import Iterable
+from contextlib import suppress
+from typing import Any
 
 from tg_harvest.config import AppConfig
 from tg_harvest.domain.dedupe import make_media_group_signature
 from tg_harvest.domain.normalize import _safe_json
 from tg_harvest.domain.promo import build_group_promo_features
 from tg_harvest.storage.connection import synchronized_write
-
 
 UPSERT_MEDIA_GROUP_SQL = """
 INSERT INTO media_groups(
@@ -42,18 +42,18 @@ ON CONFLICT(chat_id, grouped_id) DO UPDATE SET
 """
 
 
-def chunked(seq: List[Any], n: int) -> Iterable[List[Any]]:
+def chunked(seq: list[Any], n: int) -> Iterable[list[Any]]:
     for i in range(0, len(seq), n):
         yield seq[i : i + n]
 
 
-def _normalize_grouped_ids(grouped_ids: Optional[Set[int]]) -> List[int]:
+def _normalize_grouped_ids(grouped_ids: set[int] | None) -> list[int]:
     if grouped_ids is None:
         return []
     return sorted({int(x) for x in grouped_ids if x is not None})
 
 
-def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> List[int]:
+def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> list[int]:
     cur.execute(
         "SELECT DISTINCT grouped_id FROM messages WHERE chat_id=? AND grouped_id IS NOT NULL",
         (chat_id,),
@@ -62,7 +62,7 @@ def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> List[int]:
 
 
 def _delete_media_groups(
-    cur: sqlite3.Cursor, chat_id: int, grouped_ids: Optional[List[int]] = None
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int] | None = None
 ):
     if grouped_ids is None:
         cur.execute("DELETE FROM media_groups WHERE chat_id=?", (chat_id,))
@@ -78,7 +78,7 @@ def _delete_media_groups(
 
 
 def _query_media_group_rows(
-    cur: sqlite3.Cursor, chat_id: int, grouped_ids_part: List[int]
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids_part: list[int]
 ):
     placeholders = ",".join(["?"] * len(grouped_ids_part))
     cur.execute(
@@ -101,9 +101,9 @@ def _query_media_group_rows(
 
 
 def _build_media_group_upsert_rows(
-    rows: List[sqlite3.Row], chat_id: int, cfg: AppConfig
-) -> List[tuple]:
-    bucket: Dict[int, Dict[str, Any]] = {}
+    rows: list[sqlite3.Row], chat_id: int, cfg: AppConfig
+) -> list[tuple]:
+    bucket: dict[int, dict[str, Any]] = {}
     for r in rows:
         gid = int(r["grouped_id"])
         b = bucket.setdefault(
@@ -184,14 +184,14 @@ def _build_media_group_upsert_rows(
     return up_rows
 
 
-def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: List[tuple]):
+def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: list[tuple]):
     if not up_rows:
         return
     cur.executemany(UPSERT_MEDIA_GROUP_SQL, up_rows)
 
 
 def _rebuild_media_groups_for_ids(
-    cur: sqlite3.Cursor, chat_id: int, grouped_ids: List[int], cfg: AppConfig
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int], cfg: AppConfig
 ):
     if not grouped_ids:
         return
@@ -203,7 +203,7 @@ def _rebuild_media_groups_for_ids(
 
 
 def _resolve_refresh_grouped_ids(
-    cur: sqlite3.Cursor, chat_id: int, grouped_ids: Optional[Set[int]]
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: set[int] | None
 ):
     if grouped_ids is None:
         return _load_all_grouped_ids(cur, chat_id), True
@@ -214,7 +214,7 @@ def _execute_media_group_refresh(
     cur: sqlite3.Cursor,
     chat_id: int,
     cfg: AppConfig,
-    target_ids: List[int],
+    target_ids: list[int],
     full_refresh: bool,
 ):
     if full_refresh:
@@ -230,7 +230,7 @@ def refresh_media_groups_for_chat(
     conn: sqlite3.Connection,
     chat_id: int,
     cfg: AppConfig,
-    grouped_ids: Optional[Set[int]] = None,
+    grouped_ids: set[int] | None = None,
 ):
     """
     grouped_ids=None: 全量刷新（删除 chat 全部聚合，再按 messages 全量重建）
@@ -255,10 +255,8 @@ def refresh_media_groups_for_chat(
             f"media_groups 刷新完成: chat_id={chat_id} mode={mode_label} grouped_ids={target_count} 耗时={elapsed:.2f}s"
         )
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()

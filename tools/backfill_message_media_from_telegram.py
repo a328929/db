@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import argparse
 import asyncio
 import hashlib
@@ -7,27 +6,15 @@ import logging
 import os
 import sys
 import time
-from typing import Dict, List, Optional, Set, Tuple
+
+from telethon import TelegramClient
+from telethon.errors import FloodWaitError
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from telethon import TelegramClient
-from telethon.errors import FloodWaitError
-
-from tg_harvest.config import CFG
-from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
-from tg_harvest.storage.connection import ensure_configured_db
-from tg_harvest.ingest.parse import MessageParser
-from tg_harvest.ingest.runner import _prepare_db_rows
-from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
-from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
-from tg_harvest.ingest.store import batch_upsert
-from tg_harvest.ingest.store import load_grouped_ids_for_messages
-from tg_harvest.storage.search_text_state import indexed_messages_from_clause
-from tg_harvest.storage.search_text_state import indexed_unsearchable_message_predicate
-
+from tg_harvest.storage.introspection import table_columns as _table_columns  # noqa: E402,I001
 
 FILE_MEDIA_MESSAGE_TYPES = (
     "PHOTO",
@@ -45,25 +32,95 @@ TARGET_MODE_FULL = "full"
 TARGET_MODE_IDENTITY = "identity"
 
 
-def _sql_text_list(values: Tuple[str, ...]) -> str:
+class MessageParser:
+    @staticmethod
+    def parse(message):
+        from tg_harvest.ingest.parse import MessageParser as _MessageParser
+
+        return _MessageParser.parse(message)
+
+
+def candidate_chat_entity_ids(chat_id: int):
+    from tg_harvest.domain.chat_ids import candidate_chat_entity_ids as _candidate_ids
+
+    return _candidate_ids(chat_id)
+
+
+def refresh_media_groups_for_chat(*args, **kwargs):
+    from tg_harvest.ingest.media_groups import (
+        refresh_media_groups_for_chat as _refresh_media_groups_for_chat,
+    )
+
+    return _refresh_media_groups_for_chat(*args, **kwargs)
+
+
+def _prepare_db_rows(*args, **kwargs):
+    from tg_harvest.ingest.runner import _prepare_db_rows as _prepare_rows
+
+    return _prepare_rows(*args, **kwargs)
+
+
+def backfill_message_search_text_from_filenames(*args, **kwargs):
+    from tg_harvest.ingest.store import (
+        backfill_message_search_text_from_filenames as _backfill_text,
+    )
+
+    return _backfill_text(*args, **kwargs)
+
+
+def batch_upsert(*args, **kwargs):
+    from tg_harvest.ingest.store import batch_upsert as _batch_upsert
+
+    return _batch_upsert(*args, **kwargs)
+
+
+def load_grouped_ids_for_messages(*args, **kwargs):
+    from tg_harvest.ingest.store import (
+        load_grouped_ids_for_messages as _load_grouped_ids_for_messages,
+    )
+
+    return _load_grouped_ids_for_messages(*args, **kwargs)
+
+
+def ensure_configured_db(*args, **kwargs):
+    from tg_harvest.storage.connection import ensure_configured_db as _ensure_db
+
+    return _ensure_db(*args, **kwargs)
+
+
+def indexed_messages_from_clause(*args, **kwargs):
+    from tg_harvest.storage.search_text_state import (
+        indexed_messages_from_clause as _indexed_messages_from_clause,
+    )
+
+    return _indexed_messages_from_clause(*args, **kwargs)
+
+
+def indexed_unsearchable_message_predicate(*args, **kwargs):
+    from tg_harvest.storage.search_text_state import (
+        indexed_unsearchable_message_predicate as _indexed_unsearchable_predicate,
+    )
+
+    return _indexed_unsearchable_predicate(*args, **kwargs)
+
+
+def _get_cfg():
+    from tg_harvest.config import CFG
+
+    return CFG
+
+
+def _sql_text_list(values: tuple[str, ...]) -> str:
     return ", ".join([f"'{value}'" for value in values])
-
-
-def _table_columns(cur, table_name: str) -> Set[str]:
-    try:
-        cur.execute(f"PRAGMA table_xinfo({table_name})")
-    except Exception:
-        cur.execute(f"PRAGMA table_info({table_name})")
-    return {str(row["name"] if hasattr(row, "keys") else row[1]) for row in cur.fetchall()}
 
 
 def _flush_write_batch(
     conn,
-    write_batch: List[tuple],
-    media_rows: Optional[List[tuple]] = None,
+    write_batch: list[tuple],
+    media_rows: list[tuple] | None = None,
 ) -> int:
     if media_rows is None:
-        msg_rows: List[tuple] = []
+        msg_rows: list[tuple] = []
         media_rows = write_batch
     else:
         msg_rows = write_batch
@@ -74,16 +131,16 @@ def _flush_write_batch(
     return len(media_rows)
 
 
-def _collect_media_row_keys(media_rows: List[tuple]) -> List[Tuple[int, int]]:
+def _collect_media_row_keys(media_rows: list[tuple]) -> list[tuple[int, int]]:
     return [(int(row[0]), int(row[1])) for row in media_rows]
 
 
-def _collect_message_row_keys(msg_rows: List[tuple]) -> List[Tuple[int, int]]:
+def _collect_message_row_keys(msg_rows: list[tuple]) -> list[tuple[int, int]]:
     return [(int(row[0]), int(row[1])) for row in msg_rows]
 
 
-def _collect_message_row_grouped_ids(msg_rows: List[tuple]) -> Set[int]:
-    grouped_ids: Set[int] = set()
+def _collect_message_row_grouped_ids(msg_rows: list[tuple]) -> set[int]:
+    grouped_ids: set[int] = set()
     for row in msg_rows:
         if len(row) <= 10 or row[10] is None:
             continue
@@ -93,10 +150,10 @@ def _collect_message_row_grouped_ids(msg_rows: List[tuple]) -> Set[int]:
 
 def _flush_parsed_write_batch(
     conn,
-    msg_rows: List[tuple],
-    media_rows: List[tuple],
-    touched_groups: Set[int],
-) -> Tuple[int, int]:
+    msg_rows: list[tuple],
+    media_rows: list[tuple],
+    touched_groups: set[int],
+) -> tuple[int, int]:
     if not msg_rows and not media_rows:
         return 0, 0
 
@@ -111,7 +168,7 @@ def _flush_parsed_write_batch(
     return len(msg_rows), media_count
 
 
-def _load_pending_filename_backfill_grouped_ids(conn, chat_id: int) -> Set[int]:
+def _load_pending_filename_backfill_grouped_ids(conn, chat_id: int) -> set[int]:
     cur = conn.cursor()
     try:
         message_columns = _table_columns(cur, "messages")
@@ -217,11 +274,11 @@ def _build_parser() -> argparse.ArgumentParser:
 def _load_missing_targets(
     conn,
     *,
-    chat_id: Optional[int],
+    chat_id: int | None,
     scan_limit: int,
     target_mode: str = TARGET_MODE_FULL,
     max_chats: int = 0,
-) -> Dict[int, Dict[str, object]]:
+) -> dict[int, dict[str, object]]:
     cur = conn.cursor()
     try:
         message_columns = _table_columns(cur, "messages")
@@ -289,7 +346,7 @@ def _load_missing_targets(
                 {" OR ".join(missing_predicates)}
             )
         """
-        params: List[int] = []
+        params: list[int] = []
         if chat_id is not None:
             where_sql += " AND m.chat_id = ?"
             params.append(int(chat_id))
@@ -312,7 +369,7 @@ def _load_missing_targets(
             params,
         )
 
-        out: Dict[int, Dict[str, object]] = {}
+        out: dict[int, dict[str, object]] = {}
         for row in cur.fetchall():
             current_chat_id = int(row["chat_id"])
             bucket = out.setdefault(
@@ -337,7 +394,7 @@ def _max_passes_reached(pass_index: int, max_passes: int) -> bool:
     return int(max_passes) > 0 and int(pass_index) >= int(max_passes)
 
 
-def _targets_signature(targets: Dict[int, Dict[str, object]]) -> str:
+def _targets_signature(targets: dict[int, dict[str, object]]) -> str:
     digest = hashlib.sha1()
     for chat_id, payload in targets.items():
         digest.update(str(int(chat_id)).encode("ascii"))
@@ -363,7 +420,7 @@ async def _sleep_after_chat(delay_seconds: float) -> None:
     await asyncio.sleep(safe_delay)
 
 
-async def _resolve_entity(client, chat_id: int, chat_username: Optional[str] = None):
+async def _resolve_entity(client, chat_id: int, chat_username: str | None = None):
     try:
         return await client.get_entity(chat_id)
     except Exception as e:
@@ -385,11 +442,11 @@ async def _resolve_entity(client, chat_id: int, chat_username: Optional[str] = N
 async def _fetch_chunk_messages(
     client,
     entity,
-    chunk_ids: List[int],
+    chunk_ids: list[int],
     *,
     chat_id: int,
     max_retries: int,
-) -> List[object]:
+) -> list[object]:
     attempt = 0
     safe_retries = max(1, int(max_retries))
 
@@ -433,8 +490,9 @@ async def _fetch_chunk_messages(
 async def _run() -> int:
     args = _build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+    cfg = _get_cfg()
 
-    conn, _ = ensure_configured_db(cfg=CFG)
+    conn, _ = ensure_configured_db(cfg=cfg)
     try:
         safe_scan_limit = max(1, int(args.scan_limit))
         requested_fetch_batch_size = max(1, int(args.fetch_batch_size))
@@ -454,9 +512,9 @@ async def _run() -> int:
         target_mode = str(args.target_mode or TARGET_MODE_FULL)
 
         client = TelegramClient(
-            CFG.session_name,
-            CFG.api_id,
-            CFG.api_hash,
+            cfg.session_name,
+            cfg.api_id,
+            cfg.api_hash,
             request_retries=5,
             connection_retries=5,
             timeout=15,
@@ -466,10 +524,10 @@ async def _run() -> int:
         try:
             total_message_written = 0
             total_media_written = 0
-            failed_chunks: List[str] = []
-            failed_messages: List[str] = []
+            failed_chunks: list[str] = []
+            failed_messages: list[str] = []
             pass_index = 0
-            previous_target_signature: Optional[str] = None
+            previous_target_signature: str | None = None
             stalled = False
 
             while True:
@@ -519,9 +577,9 @@ async def _run() -> int:
                 for current_chat_id, payload in targets.items():
                     ids = payload["message_ids"]
                     chat_username = payload["chat_username"]
-                    touched_groups: Set[int] = set()
-                    msg_batch: List[tuple] = []
-                    media_batch: List[tuple] = []
+                    touched_groups: set[int] = set()
+                    msg_batch: list[tuple] = []
+                    media_batch: list[tuple] = []
                     try:
                         entity = await _resolve_entity(
                             client, current_chat_id, chat_username=chat_username
@@ -637,7 +695,7 @@ async def _run() -> int:
                             conn,
                             chat_id=current_chat_id,
                             batch_size=max(safe_write_batch_size, 500),
-                            cfg=CFG,
+                            cfg=cfg,
                         )
                     else:
                         text_backfilled = 0
@@ -661,7 +719,7 @@ async def _run() -> int:
                         refresh_media_groups_for_chat(
                             conn,
                             current_chat_id,
-                            cfg=CFG,
+                            cfg=cfg,
                             grouped_ids=touched_groups,
                         )
 

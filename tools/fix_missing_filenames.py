@@ -1,23 +1,25 @@
-# -*- coding: utf-8 -*-
 import logging
-import sys
 import os
+import sys
+from collections.abc import Sequence
 
 # 增加对上级目录的引用，以便导入 tg_harvest
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from tg_harvest.storage.connection import ensure_configured_db
-from tg_harvest.config import CFG
-from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 
-def fix_missing_filenames():
+def main(_argv: Sequence[str] | None = None) -> int:
+    from tg_harvest.config import CFG
+    from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
+    from tg_harvest.storage.connection import ensure_configured_db
+
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s"
     )
 
     db_name = CFG.db_name
-    logging.info(f"正在连接数据库: {db_name}")
+    logging.info("正在连接数据库: %s", db_name)
     conn, _ = ensure_configured_db(cfg=CFG)
 
     try:
@@ -29,16 +31,18 @@ def fix_missing_filenames():
         )
         if updated <= 0:
             logging.info("未发现需要修复的消息。")
-            return
+            return 0
 
         logging.info("消息内容已更新: %s", updated)
+        return 0
 
-    except Exception as e:
-        logging.error(f"修复过程中出错: {e}")
+    except Exception:
+        logging.exception("修复过程中出错")
         conn.rollback()
+        return 1
     finally:
         conn.close()
 
 
 if __name__ == "__main__":
-    fix_missing_filenames()
+    raise SystemExit(main())

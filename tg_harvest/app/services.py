@@ -13,6 +13,8 @@ class AdminRouteServices:
     admin_get_chat_brief_fn: Any
     admin_job_get_snapshot_fn: Any
     admin_job_get_logs_fn: Any
+    admin_get_active_job_fn: Any
+    admin_request_job_stop_fn: Any
     admin_has_any_active_job_fn: Any
     admin_try_create_exclusive_job_fn: Any
     admin_create_chat_job_if_absent_fn: Any
@@ -21,6 +23,7 @@ class AdminRouteServices:
     admin_start_harvest_job_thread_fn: Any
     admin_start_update_job_thread_fn: Any
     admin_start_delete_job_thread_fn: Any
+    admin_start_delete_empty_chats_job_thread_fn: Any
     admin_start_cleanup_job_thread_fn: Any
     admin_start_cleanup_empty_job_thread_fn: Any
     admin_make_job_log_handler_fn: Any
@@ -46,7 +49,11 @@ class RouteRegistryServices:
     list_missing_chat_scan_results_fn: Any
     list_absent_chat_scan_results_fn: Any
     list_restricted_chat_scan_results_fn: Any
+    list_recovery_chat_candidates_fn: Any
+    build_recovery_overview_fn: Any
     build_telegram_chat_link_bundle_fn: Any
     admin_start_missing_chats_scan_job_thread_fn: Any
     admin_start_absent_chats_scan_job_thread_fn: Any
     admin_start_restricted_chats_scan_job_thread_fn: Any
+    admin_start_recovery_scan_job_thread_fn: Any
+    admin_start_recovery_restore_job_thread_fn: Any

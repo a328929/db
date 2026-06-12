@@ -46,8 +46,14 @@
         <button id="admin-start-update-btn" class="btn" type="button" hidden aria-label="开始更新">
           开始更新
         </button>
+        <button id="admin-stop-job-btn" class="btn danger" type="button" hidden aria-label="停止当前任务">
+          停止任务
+        </button>
         <button id="admin-delete-data-btn" class="btn" type="button" hidden aria-label="删除此数据">
           删除此数据
+        </button>
+        <button id="admin-delete-empty-chats-btn" class="btn danger" type="button" hidden aria-label="删除零消息群组">
+          删除零消息群组
         </button>
       </div>
     </section>
@@ -73,6 +79,9 @@
       <div id="admin-bottom-action-bar" aria-label="新增数据按钮容器">
         <a id="admin-open-channel-manage-link" href="/admin/channels" aria-label="频道管理">
           频道管理
+        </a>
+        <a id="admin-open-recovery-link" href="/admin/recovery" aria-label="群组恢复监控">
+          群组恢复监控
         </a>
         <button id="admin-cleanup-empty-btn" type="button" aria-label="不可搜索数据清理">
           不可搜索数据清理

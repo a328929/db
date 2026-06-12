@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>后台登录</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+</head>
+<body>
+  <main id="admin-login-page" class="admin-login-page" data-next-path="{{ next_path }}">
+    <section class="panel admin-login-panel" aria-labelledby="adminLoginPageTitle">
+      <p class="eyebrow">Admin Console</p>
+      <h1 id="adminLoginPageTitle">后台登录</h1>
+      <p class="subtle">请输入管理员密码。</p>
+      <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+
+      <div class="field">
+        <label for="admin-password-input">管理员密码</label>
+        <input
+          id="admin-password-input"
+          name="admin-password-input"
+          type="password"
+          autocomplete="current-password"
+          aria-label="管理员密码"
+        />
+      </div>
+
+      <div class="admin-login-actions">
+        <button id="admin-login-confirm-btn" class="btn primary" type="button">登录</button>
+      </div>
+    </section>
+  </main>
+
+  <script src="{{ url_for('static', filename='admin_login.js') }}"></script>
+</body>
+</html>

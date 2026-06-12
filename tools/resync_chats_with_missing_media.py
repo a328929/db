@@ -1,30 +1,17 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import argparse
 import logging
 import os
 import sys
 import time
+from contextlib import suppress
 from dataclasses import dataclass
-from typing import List, Optional, Set, Tuple
 
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
 
-from tg_harvest.admin_jobs.common import admin_error_message
-from tg_harvest.admin_jobs.common import resolve_chat_entity
-from tg_harvest.admin_jobs.core import job_context
-from tg_harvest.admin_jobs.runners import _admin_process_single_chat_update
-from tg_harvest.admin_jobs.runners import _delete_chat_data
-from tg_harvest.admin_jobs.sessions import _cleanup_isolated_worker_session
-from tg_harvest.admin_jobs.sessions import _create_isolated_worker_client
-from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
-from tg_harvest.admin_jobs.sessions import _ensure_base_session_valid
-from tg_harvest.config import CFG
-from tg_harvest.ingest.parse import setup_logging
-from tg_harvest.storage.connection import ensure_configured_db
-
+from tg_harvest.storage.introspection import table_columns as _table_columns  # noqa: E402,I001
 
 FILE_MEDIA_MESSAGE_TYPES = (
     "PHOTO",
@@ -43,11 +30,31 @@ TARGET_MODE_IDENTITY = "identity"
 MISSING_IDENTITY_INDEX_NAME = "idx_media_missing_identity_rank"
 
 
+def admin_error_message(exc: Exception) -> str:
+    from tg_harvest.admin_jobs.common import admin_error_message as _admin_error_message
+
+    return _admin_error_message(exc)
+
+
+def resolve_chat_entity(client, chat_id: int, chat_username: str | None):
+    from tg_harvest.admin_jobs.common import resolve_chat_entity as _resolve_chat_entity
+
+    return _resolve_chat_entity(client, chat_id, chat_username)
+
+
+def _admin_process_single_chat_update(**kwargs):
+    from tg_harvest.admin_jobs.runners import (
+        _admin_process_single_chat_update as _run_single_chat_update,
+    )
+
+    return _run_single_chat_update(**kwargs)
+
+
 @dataclass(frozen=True)
 class MissingMediaChat:
     chat_id: int
     chat_title: str
-    chat_username: Optional[str]
+    chat_username: str | None
     message_count: int
     missing_count: int
 
@@ -60,19 +67,11 @@ class ResyncResult:
     after_messages: int = 0
     missing_after: int = 0
     elapsed_sec: float = 0.0
-    error: Optional[str] = None
+    error: str | None = None
 
 
-def _sql_text_list(values: Tuple[str, ...]) -> str:
+def _sql_text_list(values: tuple[str, ...]) -> str:
     return ", ".join([f"'{value}'" for value in values])
-
-
-def _table_columns(cur, table_name: str) -> Set[str]:
-    try:
-        cur.execute(f"PRAGMA table_xinfo({table_name})")
-    except Exception:
-        cur.execute(f"PRAGMA table_info({table_name})")
-    return {str(row["name"] if hasattr(row, "keys") else row[1]) for row in cur.fetchall()}
 
 
 def _index_exists(cur, index_name: str) -> bool:
@@ -83,7 +82,7 @@ def _index_exists(cur, index_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _identity_missing_predicate(media_columns: Set[str], alias: str = "mm") -> str:
+def _identity_missing_predicate(media_columns: set[str], alias: str = "mm") -> str:
     predicates = []
     for column in ("file_unique_id", "media_fingerprint", "media_kind"):
         if column in media_columns:
@@ -187,8 +186,8 @@ def _missing_media_where_sql(cur, *, target_mode: str) -> str:
 def _identity_target_sql(
     cur,
     *,
-    chat_id: Optional[int],
-) -> Tuple[str, List[int]]:
+    chat_id: int | None,
+) -> tuple[str, list[int]]:
     message_columns = _table_columns(cur, "messages")
     media_columns = _table_columns(cur, "message_media")
     file_media_types_sql = _sql_text_list(FILE_MEDIA_MESSAGE_TYPES)
@@ -209,8 +208,8 @@ def _identity_target_sql(
         else ""
     )
 
-    parts: List[str] = []
-    params: List[int] = []
+    parts: list[str] = []
+    params: list[int] = []
     identity_predicate = _identity_missing_predicate(media_columns, alias="mm")
     if identity_predicate != "0":
         chat_filter = ""
@@ -275,8 +274,8 @@ def load_missing_media_chats(
     target_mode: str = TARGET_MODE_IDENTITY,
     min_missing: int = 1,
     limit: int = 0,
-    chat_id: Optional[int] = None,
-) -> List[MissingMediaChat]:
+    chat_id: int | None = None,
+) -> list[MissingMediaChat]:
     cur = conn.cursor()
     try:
         if target_mode == TARGET_MODE_IDENTITY:
@@ -328,7 +327,7 @@ def load_missing_media_chats(
             return rows
 
         where_sql = _missing_media_where_sql(cur, target_mode=target_mode)
-        params: List[int] = []
+        params: list[int] = []
         if chat_id is not None:
             where_sql += " AND m.chat_id = ?"
             params.append(int(chat_id))
@@ -483,11 +482,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _open_conn():
+    from tg_harvest.config import CFG
+    from tg_harvest.storage.connection import ensure_configured_db
+
     conn, _ = ensure_configured_db(cfg=CFG)
     return conn
 
 
-def _log_plan(chats: List[MissingMediaChat], *, execute: bool) -> None:
+def _log_plan(chats: list[MissingMediaChat], *, execute: bool) -> None:
     total_missing = sum(chat.missing_count for chat in chats)
     logging.info(
         "发现 %s 个包含缺失媒体信息的群组，缺失媒体消息合计 %s 条",
@@ -515,6 +517,8 @@ def _append_job_log(_job_id: str, message: str) -> None:
 
 
 def _delete_chat(chat_id: int) -> int:
+    from tg_harvest.admin_jobs.runners import _delete_chat_data
+
     conn = _open_conn()
     try:
         return _delete_chat_data(conn, int(chat_id))
@@ -603,7 +607,7 @@ def _resync_one_chat(client, job_id: str, chat: MissingMediaChat, idx: int, tota
         )
 
 
-def _log_summary(results: List[ResyncResult]) -> None:
+def _log_summary(results: list[ResyncResult]) -> None:
     success = [r for r in results if r.status == "success"]
     skipped = [r for r in results if r.status == "skipped"]
     failed = [r for r in results if r.status == "error"]
@@ -644,6 +648,16 @@ def _log_summary(results: List[ResyncResult]) -> None:
 
 
 def _run() -> int:
+    from tg_harvest.admin_jobs.core import job_context
+    from tg_harvest.admin_jobs.sessions import (
+        _cleanup_isolated_worker_session,
+        _create_isolated_worker_client,
+        _disconnect_worker_client,
+        _ensure_base_session_valid,
+    )
+    from tg_harvest.config import CFG
+    from tg_harvest.ingest.parse import setup_logging
+
     args = _build_parser().parse_args()
     setup_logging()
 
@@ -678,7 +692,7 @@ def _run() -> int:
     context_token = job_context.set(job_id)
     client = None
     worker_id = f"{job_id}_main"
-    results: List[ResyncResult] = []
+    results: list[ResyncResult] = []
     try:
         if not _ensure_base_session_valid(CFG, job_id, _append_job_log):
             return 1
@@ -702,10 +716,8 @@ def _run() -> int:
                 time.sleep(delay)
     finally:
         if client is not None:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(CFG, worker_id)
         job_context.reset(context_token)
 

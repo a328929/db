@@ -1,8 +1,8 @@
-import unittest
 import hashlib
 import os
 import sqlite3
 import tempfile
+import unittest
 from collections import deque
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,12 +10,13 @@ from unittest.mock import patch
 
 from flask import Flask
 
-from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.app import factory as app_factory
+from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.web import auth as auth_module
 from tg_harvest.web.auth import register_auth_routes
-from tg_harvest.web.routes.context import register_context_routes
 from tg_harvest.web.routes import search as search_routes_module
+from tg_harvest.web.routes.context import register_context_routes
+from tg_harvest.web.routes.pages import register_page_routes
 from tg_harvest.web.routes.search import register_search_routes
 
 
@@ -69,6 +70,69 @@ class AuthRoutesValidationTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertTrue(response.get_json()["ok"])
         self.assertNotIn("token", response.get_json())
+        self.assertIsInstance(response.get_json()["csrf_token"], str)
+        self.assertTrue(response.get_json()["csrf_token"])
+
+    def test_auth_check_returns_csrf_token_for_authenticated_session(self) -> None:
+        with patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
+        ):
+            login_response = self.client.post(
+                "/api/admin/auth/login",
+                json={"password": "secret"},
+            )
+            check_response = self.client.get("/api/admin/auth/check")
+
+        self.assertEqual(200, login_response.status_code)
+        self.assertEqual(200, check_response.status_code)
+        self.assertTrue(check_response.get_json()["authenticated"])
+        self.assertEqual(
+            login_response.get_json()["csrf_token"],
+            check_response.get_json()["csrf_token"],
+        )
+
+    def test_admin_write_request_rejects_missing_csrf_token(self) -> None:
+        @self.app.post("/api/admin/protected-write")
+        def _protected_write():
+            return {"ok": True}
+
+        with patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
+        ):
+            login_response = self.client.post(
+                "/api/admin/auth/login",
+                json={"password": "secret"},
+            )
+            response = self.client.post("/api/admin/protected-write", json={})
+
+        self.assertEqual(200, login_response.status_code)
+        self.assertEqual(403, response.status_code)
+        self.assertTrue(response.get_json()["csrf_required"])
+
+    def test_admin_write_request_accepts_valid_csrf_token(self) -> None:
+        @self.app.post("/api/admin/protected-write")
+        def _protected_write():
+            return {"ok": True}
+
+        with patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
+        ):
+            login_response = self.client.post(
+                "/api/admin/auth/login",
+                json={"password": "secret"},
+            )
+            csrf_token = login_response.get_json()["csrf_token"]
+            response = self.client.post(
+                "/api/admin/protected-write",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["ok"])
 
     def test_login_rate_limits_repeated_password_failures(self) -> None:
         ip = "203.0.113.10"
@@ -137,12 +201,11 @@ class AuthRoutesValidationTests(unittest.TestCase):
         with patch(
             "tg_harvest.web.auth._get_auth_config",
             return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
-        ):
-            with self.app.test_request_context("/"):
-                self.app.secret_key = "secret-key-a"
-                fingerprint_a = auth_module._admin_password_fingerprint()
-                self.app.secret_key = "secret-key-b"
-                fingerprint_b = auth_module._admin_password_fingerprint()
+        ), self.app.test_request_context("/"):
+            self.app.secret_key = "secret-key-a"
+            fingerprint_a = auth_module._admin_password_fingerprint()
+            self.app.secret_key = "secret-key-b"
+            fingerprint_b = auth_module._admin_password_fingerprint()
 
         unsalted = hashlib.blake2b(b"secret", digest_size=16).hexdigest()
         self.assertNotEqual(fingerprint_a, fingerprint_b)
@@ -152,12 +215,95 @@ class AuthRoutesValidationTests(unittest.TestCase):
         with patch(
             "tg_harvest.web.auth._get_auth_config",
             return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
-        ):
-            with self.app.test_request_context("/"):
-                self.app.secret_key = "x" * 200
-                fingerprint = auth_module._admin_password_fingerprint()
+        ), self.app.test_request_context("/"):
+            self.app.secret_key = "x" * 200
+            fingerprint = auth_module._admin_password_fingerprint()
 
         self.assertTrue(fingerprint)
+
+    def test_normalize_admin_next_path_rejects_external_urls(self) -> None:
+        self.assertEqual(
+            "/admin/manage",
+            auth_module.normalize_admin_next_path("https://evil.example/admin/manage"),
+        )
+        self.assertEqual(
+            "/admin/manage",
+            auth_module.normalize_admin_next_path("//evil.example/admin/manage"),
+        )
+
+    def test_normalize_admin_next_path_allows_known_admin_pages_only(self) -> None:
+        self.assertEqual(
+            "/admin/channels?sort=updated_desc",
+            auth_module.normalize_admin_next_path("/admin/channels?sort=updated_desc"),
+        )
+        self.assertEqual(
+            "/admin/recovery",
+            auth_module.normalize_admin_next_path("/admin/recovery"),
+        )
+        self.assertEqual(
+            "/admin/manage",
+            auth_module.normalize_admin_next_path("/api/admin/chats"),
+        )
+
+
+class AdminPageRoutesTests(unittest.TestCase):
+    def setUp(self) -> None:
+        with auth_module._admin_login_failure_lock:
+            auth_module._admin_login_failure_tracker.clear()
+        self.app = Flask(__name__, template_folder="/root/db/templates")
+        self.app.secret_key = "test-secret"
+        register_auth_routes(self.app)
+        register_page_routes(self.app, page_size=100)
+        self.client = self.app.test_client()
+
+    def _auth_config_patch(self):
+        return patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(
+                admin_password="secret",
+                admin_session_expiry=60,
+            ),
+        )
+
+    def _login_admin(self) -> None:
+        response = self.client.post(
+            "/api/admin/auth/login",
+            json={"password": "secret"},
+        )
+        self.assertEqual(200, response.status_code)
+
+    def test_admin_manage_page_redirects_to_login_when_unauthenticated(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/manage")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/login?next=%2Fadmin%2Fmanage", response.location)
+
+    def test_admin_login_page_sanitizes_next_parameter(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/login?next=https://evil.example/")
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_data(as_text=True)
+        self.assertIn('id="admin-login-page"', body)
+        self.assertIn('data-next-path="/admin/manage"', body)
+        self.assertNotIn("evil.example", body)
+
+    def test_authenticated_login_page_redirects_to_allowed_next_page(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/login?next=/admin/channels")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/channels", response.location)
+
+    def test_authenticated_admin_manage_page_renders(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/manage")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn("后台数据库管理", response.get_data(as_text=True))
 
 
 class SearchRoutesValidationTests(unittest.TestCase):
@@ -240,6 +386,45 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
 
 class AppFactoryRuntimeInitTests(unittest.TestCase):
+    def test_create_app_requires_security_config_when_production_flag_is_enabled(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"TG_REQUIRE_SECURE_CONFIG": "1", "FLASK_SECRET_KEY": ""},
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", ""), (
+            self.assertRaisesRegex(
+                RuntimeError, "FLASK_SECRET_KEY.*TG_ADMIN_PASSWORD"
+            )
+        ):
+            app_factory.create_app(init_db=False)
+
+    def test_create_app_enables_secure_session_cookie_in_production(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TG_REQUIRE_SECURE_CONFIG": "1",
+                "FLASK_SECRET_KEY": "stable-test-secret",
+            },
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", "secret"):
+            app = app_factory.create_app(init_db=False)
+
+        self.assertTrue(app.config["SESSION_COOKIE_SECURE"])
+
+    def test_create_app_allows_secure_cookie_override_for_local_tls_termination(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TG_REQUIRE_SECURE_CONFIG": "1",
+                "FLASK_SECRET_KEY": "stable-test-secret",
+                "TG_SESSION_COOKIE_SECURE": "0",
+            },
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", "secret"):
+            app = app_factory.create_app(init_db=False)
+
+        self.assertFalse(app.config["SESSION_COOKIE_SECURE"])
+
     def test_run_web_server_marks_global_app_ready_after_preinit(self) -> None:
         app_factory.app.extensions["tg_db_ready"] = False
 
@@ -251,6 +436,64 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
         ensure_db_mock.assert_called_once_with()
         run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=False)
         self.assertTrue(app_factory.app.extensions["tg_db_ready"])
+
+    def test_db_free_routes_do_not_trigger_runtime_db_initialization(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"FLASK_SECRET_KEY": "stable-test-secret"},
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", "secret"):
+            app = app_factory.create_app(init_db=False)
+
+        client = app.test_client()
+        with patch.object(app_factory, "_ensure_db") as ensure_db_mock:
+            login_response = client.get("/admin/login")
+            auth_check_response = client.get("/api/admin/auth/check")
+            admin_response = client.get("/admin/manage")
+            static_response = client.get("/static/admin_login.js")
+
+        self.assertEqual(200, login_response.status_code)
+        self.assertEqual(200, auth_check_response.status_code)
+        self.assertEqual(302, admin_response.status_code)
+        self.assertEqual(200, static_response.status_code)
+        ensure_db_mock.assert_not_called()
+        self.assertFalse(app.extensions["tg_db_ready"])
+
+    def test_database_api_triggers_runtime_db_initialization_once(self) -> None:
+        with patch.dict(
+            os.environ,
+            {"FLASK_SECRET_KEY": "stable-test-secret"},
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", "secret"):
+            app = app_factory.create_app(init_db=False)
+
+        client = app.test_client()
+        with patch.object(app_factory, "_ensure_db") as ensure_db_mock:
+            response = client.get("/api/meta")
+            second_response = client.get("/api/meta")
+
+        self.assertNotEqual(404, response.status_code)
+        self.assertNotEqual(404, second_response.status_code)
+        ensure_db_mock.assert_called_once_with()
+        self.assertTrue(app.extensions["tg_db_ready"])
+
+    def test_unauthenticated_admin_api_does_not_trigger_runtime_db_initialization(
+        self,
+    ) -> None:
+        with patch.dict(
+            os.environ,
+            {"FLASK_SECRET_KEY": "stable-test-secret"},
+            clear=False,
+        ), patch.object(app_factory.CFG, "admin_password", "secret"):
+            app = app_factory.create_app(init_db=False)
+
+        client = app.test_client()
+        with patch.object(app_factory, "_ensure_db") as ensure_db_mock:
+            response = client.get("/api/admin/chats")
+
+        self.assertEqual(401, response.status_code)
+        ensure_db_mock.assert_not_called()
+        self.assertFalse(app.extensions["tg_db_ready"])
 
 
 class ContextRoutesTests(unittest.TestCase):

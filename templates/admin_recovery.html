@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>群组恢复监控</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_recovery.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-recovery-page">
+    <header class="page-header">
+      <p class="eyebrow">Recovery Console</p>
+      <h1>群组恢复监控</h1>
+      <p class="subtle">从本地 Telegram Session 缓存恢复群组/频道摘要</p>
+      <p class="subtle"><a href="/admin/manage" class="admin-link">返回后台管理</a></p>
+    </header>
+
+    <section class="panel recovery-panel" aria-labelledby="recoveryStatusTitle">
+      <div class="recovery-panel-head">
+        <div>
+          <h2 id="recoveryStatusTitle" class="section-title">恢复状态</h2>
+          <p id="admin-recovery-status" class="recovery-subline" role="status" aria-live="polite">正在读取恢复状态...</p>
+        </div>
+        <div class="recovery-toolbar">
+          <button id="admin-recovery-refresh-btn" class="btn" type="button" aria-label="刷新恢复候选">
+            刷新
+          </button>
+          <button id="admin-recovery-scan-btn" class="btn primary" type="button" aria-label="扫描本地 Session 缓存">
+            扫描 Session
+          </button>
+          <button id="admin-recovery-restore-all-btn" class="btn" type="button" aria-label="恢复全部未入库候选">
+            恢复全部
+          </button>
+          <button id="admin-recovery-stop-job-btn" class="btn danger" type="button" hidden aria-label="停止当前任务">
+            停止任务
+          </button>
+        </div>
+      </div>
+
+      <ul class="admin-stats recovery-stats" aria-label="恢复状态统计项">
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">候选总数</span>
+          <strong id="admin-recovery-total" class="admin-stat-value" aria-live="polite">0</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">待恢复</span>
+          <strong id="admin-recovery-pending" class="admin-stat-value" aria-live="polite">0</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">已在库</span>
+          <strong id="admin-recovery-in-db" class="admin-stat-value" aria-live="polite">0</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">最后扫描</span>
+          <strong id="admin-recovery-last-scan" class="admin-stat-value" aria-live="polite">暂无</strong>
+        </li>
+      </ul>
+    </section>
+
+    <section class="panel recovery-panel" aria-labelledby="recoveryCandidatesTitle">
+      <div class="recovery-panel-head">
+        <div>
+          <h2 id="recoveryCandidatesTitle" class="section-title">恢复候选</h2>
+          <p id="admin-recovery-list-status" class="recovery-subline" role="status" aria-live="polite">暂无候选。</p>
+        </div>
+        <div class="recovery-toolbar">
+          <label for="admin-recovery-filter-select" class="sr-only">候选筛选</label>
+          <select id="admin-recovery-filter-select" aria-label="选择恢复候选筛选方式">
+            <option value="pending">待恢复摘要</option>
+            <option value="ready">准备恢复</option>
+            <option value="all">全部</option>
+            <option value="in_database">已在库</option>
+          </select>
+          <button
+            id="admin-recovery-list-toggle-btn"
+            class="btn"
+            type="button"
+            aria-expanded="true"
+            aria-controls="admin-recovery-list"
+            aria-label="收起或展开恢复候选列表"
+          >
+            收起列表
+          </button>
+        </div>
+      </div>
+
+      <div id="admin-recovery-list" class="recovery-list" aria-label="恢复候选群组或频道列表"></div>
+    </section>
+
+    <section class="panel recovery-panel" aria-labelledby="recoveryLogTitle">
+      <div class="admin-log-head recovery-log-head">
+        <h2 id="recoveryLogTitle" class="section-title">恢复日志</h2>
+        <button id="admin-clear-recovery-logs-btn" class="btn" type="button" hidden aria-label="清空恢复日志">
+          清空日志
+        </button>
+      </div>
+      <div
+        id="admin-recovery-log-container"
+        class="admin-log-container"
+        role="log"
+        aria-live="polite"
+        aria-relevant="additions text"
+        aria-label="群组恢复日志"
+      ></div>
+    </section>
+  </main>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminLoginDialogTitle"
+    hidden
+  >
+    <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
+    <p class="subtle">进入群组恢复监控页面，请先验证管理员密码。</p>
+    <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input
+        id="admin-password-input"
+        name="admin-password-input"
+        type="password"
+        placeholder="请输入管理员密码"
+        aria-label="管理员密码"
+      />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_recovery.js') }}"></script>
+</body>
+</html>

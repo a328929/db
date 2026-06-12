@@ -1,5 +1,4 @@
 #!/usr/bin/env python3
-# -*- coding: utf-8 -*-
 import argparse
 import logging
 import os
@@ -8,10 +7,6 @@ import sys
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if PROJECT_ROOT not in sys.path:
     sys.path.insert(0, PROJECT_ROOT)
-
-from tg_harvest.config import CFG
-from tg_harvest.storage.connection import ensure_configured_db
-from tg_harvest.ingest.store import backfill_missing_message_media_placeholders
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -26,6 +21,10 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def main() -> int:
+    from tg_harvest.config import CFG
+    from tg_harvest.ingest.store import backfill_missing_message_media_placeholders
+    from tg_harvest.storage.connection import ensure_configured_db
+
     args = _build_parser().parse_args()
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 

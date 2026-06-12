@@ -1,17 +1,19 @@
-# -*- coding: utf-8 -*-
-import sqlite3
 import logging
 import re
-from typing import Iterable, Optional, Sequence, Tuple
+import sqlite3
+from collections.abc import Iterable, Sequence
+from contextlib import suppress
 
 from . import connection as _db_runtime
 from . import fts as _fts
 from . import indexes as _indexes
 from . import search_terms as _search_terms
-from .search_text_state import SEARCH_TEXT_PRESENT_COLUMN
-from .search_text_state import search_text_present_column_sql
-from .search_text_state import table_has_column as _table_has_column
 from .connection import SqliteFeatures
+from .search_text_state import (
+    SEARCH_TEXT_PRESENT_COLUMN,
+    search_text_present_column_sql,
+)
+from .search_text_state import table_has_column as _table_has_column
 
 # =========================
 # Schema 初始化
@@ -221,7 +223,8 @@ def _create_admin_job_tables(cur: sqlite3.Cursor, strict_suffix: str):
         progress_current     INTEGER NOT NULL DEFAULT 0,
         progress_total       INTEGER,
         progress_stage       TEXT NOT NULL DEFAULT 'queued',
-        last_logged_current  INTEGER NOT NULL DEFAULT 0
+        last_logged_current  INTEGER NOT NULL DEFAULT 0,
+        stop_requested       INTEGER NOT NULL DEFAULT 0
     ){strict_suffix}
     """)
 
@@ -291,6 +294,26 @@ def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str
     """)
 
 
+def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_recovery_chats (
+        chat_id                  INTEGER PRIMARY KEY,
+        chat_title               TEXT NOT NULL,
+        chat_username            TEXT,
+        chat_type                TEXT,
+        is_public                INTEGER NOT NULL DEFAULT 0,
+        source_session           TEXT,
+        source_entity_id         INTEGER,
+        session_entity_date      TEXT,
+        session_entity_ts        INTEGER,
+        recovered_at             TEXT,
+        recovered_job_id         TEXT,
+        scan_job_id              TEXT,
+        scanned_at               TEXT NOT NULL
+    ){strict_suffix}
+    """)
+
+
 def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_chats_table(cur, strict_suffix)
     _create_messages_table(cur, strict_suffix)
@@ -304,6 +327,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_missing_chats_table(cur, strict_suffix)
     _create_admin_absent_chats_table(cur, strict_suffix)
     _create_admin_restricted_chats_table(cur, strict_suffix)
+    _create_admin_recovery_chats_table(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
@@ -346,7 +370,7 @@ def _add_column_compatible(
 
 
 def _ensure_table_columns(
-    cur: sqlite3.Cursor, table_name: str, column_defs: Sequence[Tuple[str, str]]
+    cur: sqlite3.Cursor, table_name: str, column_defs: Sequence[tuple[str, str]]
 ) -> None:
     if not _table_exists(cur, table_name):
         return
@@ -494,6 +518,7 @@ def _ensure_admin_job_schema(cur: sqlite3.Cursor) -> None:
             ("progress_total", "progress_total INTEGER"),
             ("progress_stage", "progress_stage TEXT NOT NULL DEFAULT 'queued'"),
             ("last_logged_current", "last_logged_current INTEGER NOT NULL DEFAULT 0"),
+            ("stop_requested", "stop_requested INTEGER NOT NULL DEFAULT 0"),
         ],
     )
 
@@ -552,6 +577,26 @@ def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
             ("risk_flags", "risk_flags TEXT"),
             ("last_message_at", "last_message_at TEXT"),
             ("last_message_ts", "last_message_ts INTEGER"),
+            ("scan_job_id", "scan_job_id TEXT"),
+            ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
+def _ensure_admin_recovery_chats_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_recovery_chats",
+        [
+            ("chat_username", "chat_username TEXT"),
+            ("chat_type", "chat_type TEXT"),
+            ("is_public", "is_public INTEGER NOT NULL DEFAULT 0"),
+            ("source_session", "source_session TEXT"),
+            ("source_entity_id", "source_entity_id INTEGER"),
+            ("session_entity_date", "session_entity_date TEXT"),
+            ("session_entity_ts", "session_entity_ts INTEGER"),
+            ("recovered_at", "recovered_at TEXT"),
+            ("recovered_job_id", "recovered_job_id TEXT"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
@@ -735,7 +780,7 @@ def _ensure_message_media_schema(cur: sqlite3.Cursor, feats: SqliteFeatures) -> 
 
 
 def _refresh_chat_message_counts(
-    cur: sqlite3.Cursor, chat_ids: Optional[Sequence[int]] = None
+    cur: sqlite3.Cursor, chat_ids: Sequence[int] | None = None
 ) -> None:
     if chat_ids is None:
         cur.execute(
@@ -798,6 +843,7 @@ def create_schema(
         _ensure_admin_missing_chats_schema(cur)
         _ensure_admin_absent_chats_schema(cur)
         _ensure_admin_restricted_chats_schema(cur)
+        _ensure_admin_recovery_chats_schema(cur)
         _ensure_chat_summary_columns(cur)
         _heal_chat_message_counts_if_needed(cur)
         _indexes._create_indexes(cur)
@@ -819,6 +865,7 @@ def create_schema(
                 if skip_fts_heal:
                     _fts._create_fts_table(cur)
                     _fts._create_fts_triggers(cur)
+                    _fts._write_fts_index_status(cur, ready=False)
                     logging.warning("已跳过启动期 FTS 全量重建，仅恢复增量同步触发器")
                 else:
                     _fts._create_fts_schema(cur) # 调用这个会同时创建表和触发器
@@ -832,6 +879,7 @@ def create_schema(
                         fts_index_complete = _fts._fts_index_row_count_matches_messages(cur)
                     except sqlite3.Error:
                         fts_index_complete = False
+                    _fts._write_fts_index_status(cur, ready=fts_index_complete)
                     if not fts_index_complete:
                         logging.warning("已跳过启动期 FTS 完整性修复，仅恢复增量同步触发器")
                 else:
@@ -842,6 +890,7 @@ def create_schema(
                     )
         else:
             _fts._drop_fts_triggers(cur)
+            _fts._write_fts_index_status(cur, ready=False)
 
         _search_terms._heal_message_search_terms_if_needed(
             conn, force_heal=(force_heal_fts == 1)
@@ -850,17 +899,15 @@ def create_schema(
         _optimize_query_planner_stats(cur)
         conn.commit()
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
 
 @_db_runtime.synchronized_write
 def refresh_chat_message_counts(
-    conn: sqlite3.Connection, chat_ids: Optional[Iterable[int]] = None
+    conn: sqlite3.Connection, chat_ids: Iterable[int] | None = None
 ) -> None:
     cur = conn.cursor()
     try:
@@ -870,10 +917,8 @@ def refresh_chat_message_counts(
         )
         conn.commit()
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()

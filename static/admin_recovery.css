@@ -1,0 +1,250 @@
+#admin-recovery-page {
+  max-width: 1080px;
+}
+
+.recovery-panel {
+  padding: 20px;
+}
+
+.recovery-panel-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-bottom: 14px;
+}
+
+.recovery-panel-head .section-title {
+  margin: 0 0 6px;
+}
+
+.recovery-subline {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.91rem;
+}
+
+.recovery-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.recovery-toolbar select {
+  min-height: 42px;
+  border: 1px solid var(--border);
+  background: rgba(252, 254, 255, 0.96);
+  color: var(--text);
+  border-radius: 10px;
+  padding: 9px 10px;
+  font-size: 0.95rem;
+}
+
+.recovery-stats {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+
+.recovery-list {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+}
+
+.recovery-list[hidden] {
+  display: none;
+}
+
+.recovery-list-item {
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96) 0%, rgba(248, 252, 255, 0.92) 100%);
+  padding: 12px;
+}
+
+.recovery-list-item.is-recovered {
+  background: rgba(248, 251, 253, 0.86);
+}
+
+.recovery-item-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.recovery-item-title-wrap {
+  min-width: 0;
+}
+
+.recovery-item-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.recovery-item-title {
+  margin: 0;
+  font-size: 0.98rem;
+  line-height: 1.35;
+  font-weight: 680;
+  word-break: break-word;
+}
+
+.recovery-state-pill {
+  border-radius: 999px;
+  padding: 2px 8px;
+  font-size: 0.74rem;
+  font-weight: 700;
+  color: #236049;
+  background: #e9f8f1;
+  border: 1px solid #c7ead9;
+}
+
+.recovery-state-pill.is-pending {
+  color: #854c00;
+  background: #fff7e6;
+  border-color: #f2d39a;
+}
+
+.recovery-state-pill.is-ready {
+  color: #245f8f;
+  background: #eaf5ff;
+  border-color: #bdddf8;
+}
+
+.recovery-item-subtitle {
+  margin: 4px 0 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.recovery-item-metrics,
+.recovery-item-meta {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.recovery-item-meta {
+  justify-content: flex-start;
+  margin-top: 10px;
+}
+
+.recovery-info-pill {
+  min-width: 100px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.8);
+  padding: 5px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  text-align: right;
+}
+
+.recovery-item-meta .recovery-info-pill {
+  text-align: left;
+}
+
+.recovery-info-label {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+
+.recovery-info-pill strong {
+  color: #243657;
+  font-size: 0.86rem;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  word-break: break-word;
+}
+
+.recovery-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.recovery-actions a,
+.recovery-actions button {
+  min-height: 34px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.95);
+  color: #325e9b;
+  padding: 6px 10px;
+  font-size: 0.86rem;
+  font-weight: 600;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.recovery-actions a:hover,
+.recovery-actions button:hover {
+  background: #f4f9fe;
+  border-color: var(--border-strong);
+}
+
+.recovery-actions button.primary-action {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: #fff;
+}
+
+.recovery-actions button.primary-action:hover {
+  background: var(--primary-hover);
+  border-color: var(--primary-hover);
+}
+
+.recovery-actions button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.recovery-note {
+  color: var(--muted);
+  font-size: 0.8rem;
+  margin: 8px 0 0;
+}
+
+.recovery-log-head {
+  margin-top: 4px;
+}
+
+@media (max-width: 880px) {
+  .recovery-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+@media (max-width: 760px) {
+  .recovery-panel-head {
+    flex-direction: column;
+  }
+
+  .recovery-toolbar {
+    width: 100%;
+    justify-content: stretch;
+  }
+
+  .recovery-toolbar select,
+  .recovery-toolbar .btn {
+    width: 100%;
+  }
+
+  .recovery-item-head {
+    grid-template-columns: 1fr;
+  }
+
+  .recovery-item-metrics {
+    justify-content: flex-start;
+  }
+}

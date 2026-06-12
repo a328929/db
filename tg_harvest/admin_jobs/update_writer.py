@@ -1,11 +1,11 @@
-# -*- coding: utf-8 -*-
 import threading
+from collections.abc import Callable
+from contextlib import suppress
 from queue import Full, Queue
-from typing import Any, Callable, Optional
+from typing import Any
 
 from tg_harvest.admin_jobs.core import job_context, job_log_passthrough_enabled
 from tg_harvest.ingest.store import batch_upsert, upsert_chat
-
 
 CLOSE_JOIN_TIMEOUT_SEC = 5.0
 
@@ -24,7 +24,7 @@ class ChatUpdateWriteCoordinator:
         self._states_lock = threading.Lock()
         self._states: dict[int, dict[str, Any]] = {}
         self._error_lock = threading.Lock()
-        self._error: Optional[BaseException] = None
+        self._error: BaseException | None = None
         self._thread = threading.Thread(
             target=self._writer_loop,
             name=f"chat-update-writer-{self._job_id[:8]}",
@@ -60,7 +60,7 @@ class ChatUpdateWriteCoordinator:
         *,
         chat_id: int,
         chat_title: str,
-        chat_username: Optional[str],
+        chat_username: str | None,
         chat_type: str,
     ) -> None:
         self._enqueue(
@@ -147,9 +147,9 @@ class ChatUpdateWriteCoordinator:
             except Full:
                 self._raise_if_error()
                 if not self._thread.is_alive():
-                    raise RuntimeError("写入线程已退出，无法继续入队")
+                    raise RuntimeError("写入线程已退出，无法继续入队") from None
 
-    def _mark_done(self, chat_id: int, exc: Optional[BaseException] = None) -> None:
+    def _mark_done(self, chat_id: int, exc: BaseException | None = None) -> None:
         with self._states_lock:
             state = self._states.get(int(chat_id))
         if state is None:
@@ -211,12 +211,8 @@ class ChatUpdateWriteCoordinator:
             self._set_error(exc)
         finally:
             if passthrough_token is not None:
-                try:
+                with suppress(Exception):
                     job_log_passthrough_enabled.reset(passthrough_token)
-                except Exception:
-                    pass
             if conn:
-                try:
+                with suppress(Exception):
                     conn.close()
-                except Exception:
-                    pass

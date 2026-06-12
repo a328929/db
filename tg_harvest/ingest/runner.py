@@ -1,22 +1,23 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 import time
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any
 
-from tg_harvest.config import AppConfig, CFG, _is_enabled
-from tg_harvest.storage.connection import ensure_configured_db
+from tg_harvest.config import CFG, AppConfig, _is_enabled
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
-from tg_harvest.storage.schema import refresh_chat_message_counts
 from tg_harvest.domain.dedupe import (
     build_message_dedupe_hash,
     dedupe_promotional_duplicates,
 )
+from tg_harvest.domain.normalize import _safe_json
+from tg_harvest.domain.promo import build_single_promo_features
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.parse import (
     HarvestCounters,
-    MessageParser,
     MessageParseError,
+    MessageParser,
     ParsedMessage,
     log_parse_failure_summary,
     resolve_target_entities,
@@ -27,13 +28,13 @@ from tg_harvest.ingest.store import (
     get_last_message_id,
     upsert_chat,
 )
-from tg_harvest.domain.normalize import _safe_json
-from tg_harvest.domain.promo import build_single_promo_features
+from tg_harvest.storage.connection import ensure_configured_db
+from tg_harvest.storage.schema import refresh_chat_message_counts
 
 
 def _read_target_message_total(
     client: Any, entity: Any, *, first_sync: bool, scan_from_id: int
-) -> Optional[int]:
+) -> int | None:
     try:
         kwargs = {"limit": 0}
         if not first_sync and scan_from_id > 0:
@@ -47,7 +48,7 @@ def _read_target_message_total(
 
 
 def _format_harvest_progress_message(
-    current: int, total: Optional[int] = None, *, prefix: str = "正在采集"
+    current: int, total: int | None = None, *, prefix: str = "正在采集"
 ) -> str:
     safe_current = max(int(current), 0)
     if isinstance(total, int) and total >= 0:
@@ -57,18 +58,22 @@ def _format_harvest_progress_message(
     return f"{prefix} {safe_current}"
 
 
-def _log_harvest_progress(current: int, total: Optional[int] = None) -> None:
+def _log_harvest_progress(current: int, total: int | None = None) -> None:
     logging.info(_format_harvest_progress_message(current, total))
 
 
-def _build_iter_messages_kwargs(resume_from_id: int) -> dict[str, int | bool]:
-    kwargs: dict[str, int | bool] = {"reverse": True}
+def _build_iter_messages_kwargs(
+    resume_from_id: int, *, history_wait_time: float | None = None
+) -> dict[str, int | bool | float]:
+    kwargs: dict[str, int | bool | float] = {"reverse": True}
     if resume_from_id > 0:
         kwargs["min_id"] = int(resume_from_id)
+    if history_wait_time is not None:
+        kwargs["wait_time"] = max(0.0, float(history_wait_time))
     return kwargs
 
 
-def _last_message_id_in_rows(msg_rows: List[tuple]) -> int:
+def _last_message_id_in_rows(msg_rows: list[tuple]) -> int:
     if not msg_rows:
         return 0
     return max(int(row[1]) for row in msg_rows)
@@ -76,10 +81,10 @@ def _last_message_id_in_rows(msg_rows: List[tuple]) -> int:
 
 def _write_message_batch(
     conn: sqlite3.Connection,
-    msg_rows: List[tuple],
-    media_rows: List[tuple],
+    msg_rows: list[tuple],
+    media_rows: list[tuple],
     *,
-    write_batch_fn: Optional[Callable[[List[tuple], List[tuple]], None]] = None,
+    write_batch_fn: Callable[[list[tuple], list[tuple]], None] | None = None,
 ) -> None:
     if write_batch_fn is not None:
         write_batch_fn(list(msg_rows), list(media_rows))
@@ -87,7 +92,7 @@ def _write_message_batch(
     batch_upsert(conn, msg_rows, media_rows)
 
 
-def get_existing_chat_ids(conn: sqlite3.Connection) -> List[int]:
+def get_existing_chat_ids(conn: sqlite3.Connection) -> list[int]:
     cur = conn.cursor()
     try:
         cur.execute("SELECT chat_id FROM chats ORDER BY last_seen_at DESC")
@@ -112,7 +117,7 @@ def _resolve_entity_by_chat_id(client: Any, chat_id: int) -> Any:
 
 def collect_target_entities(
     conn: sqlite3.Connection, client: Any, cfg: AppConfig
-) -> List[Any]:
+) -> list[Any]:
     entities = []
     seen_ids = set()
     to_resolve_ids = []
@@ -154,7 +159,7 @@ def collect_target_entities(
 
 def _prepare_db_rows(
     entity: Any, chat_id: int, p: ParsedMessage
-) -> Tuple[tuple, Optional[tuple]]:
+) -> tuple[tuple, tuple | None]:
     """构建存库所需的元组"""
     features = build_single_promo_features(
         p.content, msg_type=p.msg_type, has_media=p.has_media, cfg=CFG
@@ -215,8 +220,8 @@ def _harvest_messages_for_entity(
     entity: Any,
     chat_id: int,
     *,
-    write_batch_fn: Optional[Callable[[List[tuple], List[tuple]], None]] = None,
-) -> Tuple[HarvestCounters, Set[int], bool]:
+    write_batch_fn: Callable[[list[tuple], list[tuple]], None] | None = None,
+) -> tuple[HarvestCounters, set[int], bool]:
     from telethon.errors import FloodWaitError, RPCError
 
     started_at = time.perf_counter()
@@ -245,7 +250,11 @@ def _harvest_messages_for_entity(
     while retry_count < max_retries:
         try:
             iterator = client.iter_messages(
-                entity, **_build_iter_messages_kwargs(resume_from_id)
+                entity,
+                **_build_iter_messages_kwargs(
+                    resume_from_id,
+                    history_wait_time=CFG.history_wait_time,
+                ),
             )
             for message in iterator:
                 if message.id <= resume_from_id:
@@ -317,11 +326,9 @@ def _harvest_messages_for_entity(
                 logging.error(
                     f"检测到 Telegram 内部位点冲突 ({err_msg})，正在尝试重置位点..."
                 )
-                try:
+                with suppress(Exception):
                     # 通过拉取最新一条消息，强迫 Telethon 内部更新位点 (pts)
                     client.get_messages(entity, limit=1)
-                except Exception:
-                    pass
                 retry_count += 1
                 if retry_count >= max_retries:
                     raise RuntimeError(
@@ -375,18 +382,18 @@ def _finalize_entity_processing(
     chat_id: int,
     chat_title: str,
     counters: HarvestCounters,
-    touched_groups: Set[int],
+    touched_groups: set[int],
     first_sync: bool,
     total_started_at: float,
     skip_postprocess_if_unchanged: bool = False,
     enable_dedupe: bool = True,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     media_groups_elapsed = 0.0
     refresh_counts_elapsed = 0.0
     dedupe_elapsed = 0.0
     dedupe_refresh_elapsed = 0.0
     del_count = 0
-    affected_groups: Set[int] = set()
+    affected_groups: set[int] = set()
     should_skip_postprocess = (
         skip_postprocess_if_unchanged
         and counters.written <= 0

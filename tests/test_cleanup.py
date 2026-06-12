@@ -133,6 +133,66 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
+    def test_cleanup_deletes_fully_removed_media_group_without_rebuild(self) -> None:
+        self.conn.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                grouped_id, content, content_norm, has_media, is_promo, dedupe_eligible
+            )
+            VALUES (1, ?, '2026-01-01 00:00:00', ?, 'PHOTO', 77, 'delete-album', 'delete-album', 1, 0, 0)
+            """,
+            [(20, 20), (21, 21)],
+        )
+        self.conn.executemany(
+            """
+            INSERT INTO message_media(chat_id, message_id, media_kind)
+            VALUES (1, ?, 'PHOTO')
+            """,
+            [(20,), (21,)],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO media_groups(chat_id, grouped_id, item_count, active_items)
+            VALUES (1, 77, 2, 2)
+            """
+        )
+        self.conn.commit()
+
+        cur = self.conn.cursor()
+        try:
+            target_count = _build_cleanup_targets_table(
+                cur,
+                "keyword",
+                "",
+                [],
+                _build_cleanup_like_patterns("delete-album"),
+            )
+            self.conn.commit()
+            with patch(
+                "tg_harvest.admin_jobs.cleanup.refresh_media_groups_for_chat"
+            ) as refresh_mock:
+                deleted = _execute_cleanup_deletion_batches(
+                    self.conn,
+                    cur,
+                    "job-1",
+                    target_count,
+                    lambda *_args: None,
+                )
+        finally:
+            cur.close()
+
+        self.assertEqual(2, deleted)
+        refresh_mock.assert_not_called()
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 1 AND grouped_id = 77"
+            )
+            self.assertEqual(0, int(cur.fetchone()["c"]))
+        finally:
+            cur.close()
+
 
 if __name__ == "__main__":
     unittest.main()

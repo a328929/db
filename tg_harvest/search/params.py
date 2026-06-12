@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
+import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-import re
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 MAX_SEARCH_PAGE = 500000
 _DATE_YYYYMMDD_RE = re.compile(r"^\d{8}$")
@@ -19,13 +18,13 @@ class SearchParams:
     sort_by_req: str
     order_req: str
     page: int
-    chat_id: Optional[int]
+    chat_id: int | None
     skip_count: bool = False
     count_only: bool = False
-    start_ts: Optional[int] = None
-    end_ts_exclusive: Optional[int] = None
+    start_ts: int | None = None
+    end_ts_exclusive: int | None = None
     text_query: str = ""
-    duration_sec: Optional[int] = None
+    duration_sec: int | None = None
 
 
 def _parse_bool(value: Any, *, default: bool = False) -> bool:
@@ -48,7 +47,7 @@ def _local_timezone():
     return datetime.now().astimezone().tzinfo
 
 
-def _parse_date_bound(value: Any, *, field_label: str, end_exclusive: bool) -> Optional[int]:
+def _parse_date_bound(value: Any, *, field_label: str, end_exclusive: bool) -> int | None:
     raw = str(value or "").strip()
     if not raw:
         return None
@@ -97,12 +96,12 @@ def _parse_media_duration_token(body: str) -> int:
     return hours * 3600 + minutes * 60 + seconds
 
 
-def split_query_media_duration(raw_query: str) -> Tuple[str, Optional[int]]:
+def split_query_media_duration(raw_query: str) -> tuple[str, int | None]:
     text = str(raw_query or "")
     if not text:
         return "", None
 
-    duration_sec: Optional[int] = None
+    duration_sec: int | None = None
     pieces: list[str] = []
     last_end = 0
 
@@ -147,7 +146,7 @@ def _cleanup_query_after_duration_removal(text: str) -> str:
     return q
 
 
-def _parse_search_params(data: Dict[str, Any]) -> SearchParams:
+def _parse_search_params(data: dict[str, Any]) -> SearchParams:
     raw_query = str(data.get("query", "") or "")
     text_query, duration_sec = split_query_media_duration(raw_query)
     search_type = str(data.get("search_type", "all") or "all").lower()

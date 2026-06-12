@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
-import os
-import re
 import asyncio
 import logging
+import os
+import re
 import sys
 from pathlib import Path
+
 from telethon import TelegramClient, events
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent

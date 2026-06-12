@@ -1,7 +1,9 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 
+_FTS_INDEX_STATUS_KEY = "fts_index_status"
+_FTS_INDEX_STATUS_READY = "ready"
+_FTS_INDEX_STATUS_INCOMPLETE = "incomplete"
 
 _EXPECTED_FTS_TRIGGER_MARKERS = {
     "trg_messages_fts_insert": (
@@ -22,6 +24,52 @@ _EXPECTED_FTS_TRIGGER_MARKERS = {
         "nullif(new.content_norm, '')",
     ),
 }
+
+
+def _message_search_terms_meta_exists(cur: sqlite3.Cursor) -> bool:
+    cur.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='message_search_terms_meta' LIMIT 1"
+    )
+    return cur.fetchone() is not None
+
+
+def _write_fts_index_status(cur: sqlite3.Cursor, *, ready: bool) -> None:
+    if not _message_search_terms_meta_exists(cur):
+        return
+    cur.execute(
+        """
+        INSERT INTO message_search_terms_meta(key, value)
+        VALUES (?, ?)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        """,
+        (
+            _FTS_INDEX_STATUS_KEY,
+            _FTS_INDEX_STATUS_READY if ready else _FTS_INDEX_STATUS_INCOMPLETE,
+        ),
+    )
+
+
+def fts_index_is_marked_ready(conn: sqlite3.Connection) -> bool:
+    cur = conn.cursor()
+    try:
+        if not _message_search_terms_meta_exists(cur):
+            return False
+        cur.execute(
+            """
+            SELECT value
+            FROM message_search_terms_meta
+            WHERE key = ?
+            LIMIT 1
+            """,
+            (_FTS_INDEX_STATUS_KEY,),
+        )
+        row = cur.fetchone()
+        if row is None:
+            return False
+        value = row["value"] if isinstance(row, sqlite3.Row) else row[0]
+        return str(value or "") == _FTS_INDEX_STATUS_READY
+    finally:
+        cur.close()
 
 
 def _create_fts_table(cur: sqlite3.Cursor) -> None:
@@ -107,6 +155,7 @@ def _sync_fts_from_scratch(cur: sqlite3.Cursor, *, batch_size: int = 50000) -> N
     _drop_fts_triggers(cur)
     cur.execute("DROP TABLE IF EXISTS messages_fts")
     _create_fts_table(cur)
+    _write_fts_index_status(cur, ready=False)
     # Keep triggers installed while historical rows are backfilled. The rebuild
     # commits in batches, so this prevents a crash or external writer from
     # leaving new message changes outside the FTS index mid-rebuild.
@@ -152,6 +201,7 @@ def _sync_fts_from_scratch(cur: sqlite3.Cursor, *, batch_size: int = 50000) -> N
         except sqlite3.Error:
             logging.debug("FTS 分批重建期间 WAL checkpoint 跳过", exc_info=True)
         last_pk = next_last_pk
+    _write_fts_index_status(cur, ready=True)
 
 
 def _count_table_rows(cur: sqlite3.Cursor, table_name: str) -> int:
@@ -192,8 +242,10 @@ def _heal_fts_if_needed(
             _sync_fts_from_scratch(cur)
             logging.info("FTS 索引同步成功完成")
         else:
+            _write_fts_index_status(cur, ready=True)
             logging.debug("FTS 索引已存在且行数一致，跳过全量重建")
 
     except sqlite3.Error as exc:
+        _write_fts_index_status(cur, ready=False)
         logging.warning("FTS 检查阶段遇到数据库错误，正在尝试全量重建: %s", exc)
         _sync_fts_from_scratch(cur)

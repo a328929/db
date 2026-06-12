@@ -1,6 +1,7 @@
-# -*- coding: utf-8 -*-
 import logging
-from typing import Any, Callable
+from collections.abc import Callable
+from contextlib import suppress
+from typing import Any
 
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
@@ -8,9 +9,9 @@ from tg_harvest.admin_jobs.common import (
     start_admin_job_thread,
 )
 from tg_harvest.admin_jobs.core import (
-    job_context,
     _admin_job_heartbeat,
     _admin_job_update_progress,
+    job_context,
 )
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
@@ -20,15 +21,19 @@ from tg_harvest.admin_jobs.sessions import (
     _ensure_base_session_valid,
     _start_job_heartbeat,
 )
-from tg_harvest.domain.chat_inventory import find_database_chats_not_joined
-from tg_harvest.domain.chat_inventory import find_missing_joined_chats
-from tg_harvest.domain.chat_inventory import find_restricted_joined_chats
-from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
-from tg_harvest.domain.chat_inventory import load_known_chat_ids
-from tg_harvest.storage.channel_management import list_database_channels
-from tg_harvest.storage.channel_management import replace_absent_chat_scan_results
-from tg_harvest.storage.channel_management import replace_missing_chat_scan_results
-from tg_harvest.storage.channel_management import replace_restricted_chat_scan_results
+from tg_harvest.domain.chat_inventory import (
+    find_database_chats_not_joined,
+    find_missing_joined_chats,
+    find_restricted_joined_chats,
+    load_joined_chat_inventory,
+    load_known_chat_ids,
+)
+from tg_harvest.storage.channel_management import (
+    list_database_channels,
+    replace_absent_chat_scan_results,
+    replace_missing_chat_scan_results,
+    replace_restricted_chat_scan_results,
+)
 
 
 def _admin_missing_chats_scan_job_runner(
@@ -103,10 +108,8 @@ def _admin_missing_chats_scan_job_runner(
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if local_client:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(local_client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(cfg, worker_id)
 
 
@@ -209,10 +212,8 @@ def _admin_absent_chats_scan_job_runner(
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if local_client:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(local_client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(cfg, worker_id)
 
 
@@ -291,10 +292,8 @@ def _admin_restricted_chats_scan_job_runner(
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if local_client:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(local_client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(cfg, worker_id)
 
 

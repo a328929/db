@@ -1,8 +1,10 @@
 import sqlite3
 import unittest
 
-from tg_harvest.domain.chat_inventory import ChatInventoryRow
-from tg_harvest.domain.chat_inventory import RestrictedChatInventoryRow
+from tg_harvest.domain.chat_inventory import (
+    ChatInventoryRow,
+    RestrictedChatInventoryRow,
+)
 from tg_harvest.storage.channel_management import (
     list_absent_chat_scan_results,
     list_database_channels,

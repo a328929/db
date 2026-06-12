@@ -1,17 +1,10 @@
-# -*- coding: utf-8 -*-
 import logging
 import time
-from typing import Any, Callable, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextlib import suppress
+from typing import Any
 
-from tg_harvest.storage.connection import synchronized_write
-from tg_harvest.storage.schema import refresh_chat_message_counts
-from tg_harvest.admin_jobs.core import (
-    job_context,
-    job_log_passthrough_enabled,
-    _admin_job_heartbeat,
-    _admin_job_update_progress,
-)
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -24,6 +17,13 @@ from tg_harvest.admin_jobs.common import (
     resolve_chat_entity,
     start_admin_job_thread,
 )
+from tg_harvest.admin_jobs.core import (
+    _admin_job_heartbeat,
+    _admin_job_stop_requested,
+    _admin_job_update_progress,
+    job_context,
+    job_log_passthrough_enabled,
+)
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
     _create_isolated_worker_client,
@@ -33,7 +33,16 @@ from tg_harvest.admin_jobs.sessions import (
 )
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
+from tg_harvest.domain.chat_inventory import (
+    filter_database_chats_to_joined,
+    load_joined_chat_inventory,
+)
 from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
+from tg_harvest.storage import fts as _fts
+from tg_harvest.storage import search_terms as _search_terms
+from tg_harvest.storage.connection import synchronized_write
+
+DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
 
 
 def _close_write_coordinator(
@@ -86,6 +95,9 @@ def _chat_failure_item(chat_id: Any, chat_title: Any, reason: Any) -> str:
 def _admin_update_all_chats(
     job_id, _ignored_client, get_conn_fn, admin_job_append_log_fn, cfg
 ):
+    if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
+        return False
+
     conn = get_conn_fn()
     try:
         cur = conn.cursor()
@@ -100,11 +112,57 @@ def _admin_update_all_chats(
         admin_job_append_log_fn(job_id, "当前无可更新群聊，任务结束")
         return True
 
+    admin_job_append_log_fn(
+        job_id,
+        f"数据库中共有 {len(rows)} 个群组/频道，正在扫描当前账号已加入会话...",
+    )
+    inventory_client = None
+    inventory_worker_id = f"{job_id}_inventory"
+    try:
+        inventory_client = _create_isolated_worker_client(cfg, inventory_worker_id)
+        joined_rows = load_joined_chat_inventory(inventory_client.iter_dialogs())
+    finally:
+        if inventory_client:
+            with suppress(Exception):
+                _disconnect_worker_client(inventory_client)
+        _cleanup_isolated_worker_session(cfg, inventory_worker_id)
+
+    accessible_count = sum(
+        1 for row in joined_rows if not str(row.unavailable_reason or "").strip()
+    )
+    rows = filter_database_chats_to_joined(rows, joined_rows)
+    skipped_unjoined_count = max(0, len(joined_rows) - accessible_count)
+    admin_job_append_log_fn(
+        job_id,
+        f"当前账号可访问 {accessible_count} 个群组/频道；"
+        f"本次仅更新其中已入库的 {len(rows)} 个，跳过数据库中账号未加入或不可访问的群组",
+    )
+    if skipped_unjoined_count:
+        admin_job_append_log_fn(
+            job_id,
+            f"另发现 {skipped_unjoined_count} 个已加入但 Telegram 返回不可访问的会话，已跳过",
+        )
+
+    if not rows:
+        admin_job_append_log_fn(job_id, "当前账号没有可访问且已入库的群组，任务结束")
+        _admin_job_update_progress(
+            job_id,
+            0,
+            total=0,
+            stage="done",
+            log_step=0,
+            auto_log=False,
+        )
+        return True
+
     total = len(rows)
     success_count, failed_count, total_added_messages = 0, 0, 0
     failed_chats = []
 
-    concurrency = getattr(cfg, "admin_update_concurrency", 5)
+    try:
+        concurrency = max(1, int(getattr(cfg, "admin_update_concurrency", 5)))
+    except (TypeError, ValueError):
+        concurrency = 5
     admin_job_append_log_fn(
         job_id, f"读取到 {total} 个群组，开始执行并发拉取 + 单线程写入（并发数：{concurrency}）"
     )
@@ -115,9 +173,6 @@ def _admin_update_all_chats(
         stage="updating",
         log_step=0,
     )
-
-    if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
-        return False
 
     write_coordinator = ChatUpdateWriteCoordinator(
         job_id=str(job_id),
@@ -191,62 +246,100 @@ def _admin_update_all_chats(
         finally:
             job_log_passthrough_enabled.reset(passthrough_token)
             if local_client:
-                try:
+                with suppress(Exception):
                     _disconnect_worker_client(local_client)
-                except Exception:
-                    pass
             _cleanup_isolated_worker_session(cfg, worker_id)
+
+    stopped_early = False
+    stop_logged = False
+    row_iter = iter(enumerate(rows, start=1))
+
+    def _log_stop_once() -> None:
+        nonlocal stop_logged
+        if stop_logged:
+            return
+        stop_logged = True
+        admin_job_append_log_fn(
+            job_id,
+            "已收到停止请求：不再启动新的群组，等待当前并发中的群组完成后收尾",
+        )
+
+    def _should_stop_submitting() -> bool:
+        nonlocal stopped_early
+        if not _admin_job_stop_requested(str(job_id)):
+            return False
+        stopped_early = True
+        _log_stop_once()
+        return True
+
+    def _submit_next(executor: ThreadPoolExecutor, futures: dict) -> bool:
+        if _should_stop_submitting():
+            return False
+        try:
+            idx, row = next(row_iter)
+        except StopIteration:
+            return False
+        futures[executor.submit(_worker, idx, row)] = (idx, row)
+        return True
 
     try:
         with ThreadPoolExecutor(max_workers=concurrency) as executor:
-            futures = {
-                executor.submit(_worker, idx, row): (idx, row)
-                for idx, row in enumerate(rows, start=1)
-            }
-            for future in as_completed(futures):
-                idx, row = futures[future]
-                try:
-                    chat_title, chat_id, success, added, err_msg = future.result()
-                    chat_label = _chat_log_label(chat_id, chat_title)
-                    if success:
-                        total_added_messages += added
-                        success_count += 1
-                        admin_job_append_log_fn(
-                            job_id, f"[{idx}/{total}] {chat_label} 新增 {added} 条消息"
-                        )
-                    else:
+            futures = {}
+            while len(futures) < concurrency and _submit_next(executor, futures):
+                pass
+
+            while futures:
+                done_futures, _pending_futures = wait(
+                    futures.keys(), return_when=FIRST_COMPLETED
+                )
+                for future in done_futures:
+                    idx, row = futures.pop(future)
+                    try:
+                        chat_title, chat_id, success, added, err_msg = future.result()
+                        chat_label = _chat_log_label(chat_id, chat_title)
+                        if success:
+                            total_added_messages += added
+                            success_count += 1
+                            admin_job_append_log_fn(
+                                job_id,
+                                f"[{idx}/{total}] {chat_label} 新增 {added} 条消息",
+                            )
+                        else:
+                            failed_count += 1
+                            failed_chats.append(
+                                _chat_failure_item(chat_id, chat_title, err_msg)
+                            )
+                            admin_job_append_log_fn(
+                                job_id,
+                                f"[{idx}/{total}] 增量采集失败：群组={chat_label}，错误={err_msg}",
+                            )
+                    except Exception as e:
                         failed_count += 1
+                        raw_chat_id = _row_value(row, "chat_id", "")
+                        chat_title = _chat_title_fallback(
+                            raw_chat_id, _row_value(row, "chat_title", "")
+                        )
+                        chat_label = _chat_log_label(raw_chat_id, chat_title)
+                        err_msg = admin_error_message(e)
                         failed_chats.append(
-                            _chat_failure_item(chat_id, chat_title, err_msg)
+                            _chat_failure_item(raw_chat_id, chat_title, err_msg)
                         )
                         admin_job_append_log_fn(
                             job_id,
-                            f"[{idx}/{total}] 增量采集失败：群组={chat_label}，错误={err_msg}",
+                            f"[{idx}/{total}] 线程执行异常：群组={chat_label}，错误={err_msg}",
                         )
-                except Exception as e:
-                    failed_count += 1
-                    raw_chat_id = _row_value(row, "chat_id", "")
-                    chat_title = _chat_title_fallback(
-                        raw_chat_id, _row_value(row, "chat_title", "")
-                    )
-                    chat_label = _chat_log_label(raw_chat_id, chat_title)
-                    err_msg = admin_error_message(e)
-                    failed_chats.append(
-                        _chat_failure_item(raw_chat_id, chat_title, err_msg)
-                    )
-                    admin_job_append_log_fn(
-                        job_id,
-                        f"[{idx}/{total}] 线程执行异常：群组={chat_label}，错误={err_msg}",
-                    )
-                finally:
-                    _admin_job_update_progress(
-                        job_id,
-                        success_count + failed_count,
-                        total=total,
-                        stage="updating",
-                        log_step=0,
-                        auto_log=False,
-                    )
+                    finally:
+                        _admin_job_update_progress(
+                            job_id,
+                            success_count + failed_count,
+                            total=total,
+                            stage="updating",
+                            log_step=0,
+                            auto_log=False,
+                        )
+
+                while len(futures) < concurrency and _submit_next(executor, futures):
+                    pass
     finally:
         if success_count + failed_count >= total:
             _admin_job_update_progress(
@@ -259,16 +352,24 @@ def _admin_update_all_chats(
             )
         write_coordinator.close()
 
-    final_log_msg = (
-        f"全部群组增量采集完成：成功 {success_count} 个，失败 {failed_count} 个，"
-        f"总计 {total} 个，共新增 {total_added_messages} 条消息"
-    )
+    processed_count = success_count + failed_count
+    skipped_count = max(0, total - processed_count)
+    if stopped_early:
+        final_log_msg = (
+            f"全部群组增量采集已按请求停止：成功 {success_count} 个，失败 {failed_count} 个，"
+            f"未启动 {skipped_count} 个，总计 {total} 个，共新增 {total_added_messages} 条消息"
+        )
+    else:
+        final_log_msg = (
+            f"全部群组增量采集完成：成功 {success_count} 个，失败 {failed_count} 个，"
+            f"总计 {total} 个，共新增 {total_added_messages} 条消息"
+        )
     if failed_chats:
         final_log_msg += f"。失败列表：{', '.join(failed_chats)}"
     admin_job_append_log_fn(job_id, final_log_msg)
     _admin_job_update_progress(
         job_id,
-        total,
+        processed_count if stopped_early else total,
         total=total,
         stage="done" if failed_count == 0 else "error",
         log_step=0,
@@ -285,7 +386,7 @@ def _admin_process_single_chat_update(
     admin_job_append_log_fn: Callable[[str, str], Any],
     chat_id: int,
     chat_title: str,
-    chat_username: Optional[str] = None,
+    chat_username: str | None = None,
     idx: int,
     total: int,
 ) -> None:
@@ -475,10 +576,8 @@ def _admin_harvest_job_runner(
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if local_client:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(local_client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(cfg, worker_id)
         root_logger.removeHandler(job_log_handler)
 
@@ -541,10 +640,8 @@ def _admin_update_job_runner(
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if local_client:
-            try:
+            with suppress(Exception):
                 _disconnect_worker_client(local_client)
-            except Exception:
-                pass
         _cleanup_isolated_worker_session(cfg, worker_id)
         root_logger.removeHandler(job_log_handler)
 
@@ -569,6 +666,19 @@ def _admin_delete_job_runner(
             job_id, f"开始删除数据：目标={chat_title}，群组ID={chat_id}"
         )
         conn = get_conn_fn()
+        related_counts = _count_chat_related_rows(conn, int(chat_id))
+        admin_job_append_log_fn(
+            job_id,
+            "待删除数据："
+            f"消息 {related_counts['messages']} 条，"
+            f"媒体记录 {related_counts['media_rows']} 条，"
+            f"媒体组 {related_counts['media_groups']} 个",
+        )
+        if related_counts["messages"] >= DELETE_CHAT_FAST_PATH_THRESHOLD:
+            admin_job_append_log_fn(
+                job_id,
+                "大型群组启用快速删除模式：批量同步搜索索引，暂停逐条关联索引触发器",
+            )
         admin_job_append_log_fn(job_id, "清理关联数据...")
         deleted_messages = _delete_chat_data(conn, int(chat_id))
         admin_job_append_log_fn(
@@ -586,11 +696,52 @@ def _admin_delete_job_runner(
             conn.close()
 
 
+def _admin_delete_empty_chats_job_runner(
+    job_id: str,
+    *,
+    get_conn_fn: Callable[[], Any],
+    admin_job_set_status_fn: Callable[[str, str], bool],
+    admin_job_append_log_fn: Callable[[str, str], Any],
+) -> None:
+    job_context.set(str(job_id))
+    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(
+        job_id, _admin_job_heartbeat
+    )
+    conn = None
+    try:
+        admin_job_set_status_fn(job_id, "running")
+        admin_job_append_log_fn(job_id, "开始删除零消息群组")
+        conn = get_conn_fn()
+        stats = _delete_empty_chats_data(conn)
+        deleted_chats = int(stats.get("deleted_chats", 0) or 0)
+        if deleted_chats <= 0:
+            admin_job_append_log_fn(job_id, "未发现消息数量为 0 的可删除群组")
+        else:
+            admin_job_append_log_fn(
+                job_id,
+                "零消息群组删除完成："
+                f"删除群组 {deleted_chats} 个，"
+                f"清理残留消息 {int(stats.get('deleted_messages', 0) or 0)} 条，"
+                f"媒体记录 {int(stats.get('deleted_media_rows', 0) or 0)} 条，"
+                f"媒体组 {int(stats.get('deleted_media_groups', 0) or 0)} 个",
+            )
+        admin_job_set_status_fn(job_id, "done")
+    except Exception as exc:
+        if conn:
+            conn.rollback()
+        admin_job_append_log_fn(job_id, f"删除零消息群组失败：{exc}")
+        admin_job_set_status_fn(job_id, "error")
+    finally:
+        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
+        if conn:
+            conn.close()
+
+
 def _admin_cleanup_job_runner(
     job_id: str,
     keyword: str,
     scope: str,
-    chat_id: Optional[int],
+    chat_id: int | None,
     target_label: str,
     *,
     get_conn_fn: Callable[[], Any],
@@ -679,65 +830,312 @@ def _admin_start_update_job_thread(job_id, chat_id, chat_title, **kwargs):
     )
 
 
-def _delete_from_optional_chat_table(cur: Any, table_name: str, chat_id: int) -> None:
+def _optional_table_exists(cur: Any, table_name: str) -> bool:
     cur.execute(
         "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
         (table_name,),
     )
-    if cur.fetchone() is None:
+    return cur.fetchone() is not None
+
+
+def _delete_from_optional_chat_table(cur: Any, table_name: str, chat_id: int) -> None:
+    if not _optional_table_exists(cur, table_name):
         return
     cur.execute(f"DELETE FROM {table_name} WHERE chat_id = ?", (chat_id,))
 
 
-def _delete_from_optional_message_pk_table(
-    cur: Any, table_name: str, chat_id: int
-) -> None:
+def _delete_from_optional_chat_targets_table(
+    cur: Any, table_name: str, target_table: str
+) -> int:
+    if not _optional_table_exists(cur, table_name):
+        return 0
     cur.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
-        (table_name,),
+        f"""
+        DELETE FROM {table_name}
+        WHERE chat_id IN (
+            SELECT chat_id
+            FROM {target_table}
+        )
+        """
     )
-    if cur.fetchone() is None:
-        return
+    return int(cur.rowcount or 0)
+
+
+def _delete_from_optional_message_pk_targets_table(
+    cur: Any, table_name: str, target_table: str
+) -> int:
+    if not _optional_table_exists(cur, table_name):
+        return 0
     cur.execute(
         f"""
         DELETE FROM {table_name}
         WHERE pk IN (
             SELECT pk
-            FROM messages
-            WHERE chat_id = ?
+            FROM {target_table}
         )
+        """
+    )
+    return int(cur.rowcount or 0)
+
+
+def _prepare_delete_chat_message_targets(cur: Any, chat_id: int) -> int:
+    cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
+    cur.execute(
+        """
+        CREATE TEMP TABLE temp_delete_chat_messages (
+            pk INTEGER PRIMARY KEY,
+            message_id INTEGER NOT NULL
+        )
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO temp_delete_chat_messages(pk, message_id)
+        SELECT pk, message_id
+        FROM messages
+        WHERE chat_id = ?
         """,
-        (chat_id,),
+        (int(chat_id),),
+    )
+    cur.execute("SELECT COUNT(*) FROM temp_delete_chat_messages")
+    return int(cur.fetchone()[0] or 0)
+
+
+def _prepare_empty_chat_targets(cur: Any) -> int:
+    cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
+    cur.execute(
+        """
+        CREATE TEMP TABLE temp_delete_empty_chats (
+            chat_id INTEGER PRIMARY KEY
+        )
+        """
+    )
+    cur.execute(
+        """
+        INSERT INTO temp_delete_empty_chats(chat_id)
+        SELECT c.chat_id
+        FROM chats c
+        WHERE COALESCE(c.message_count, 0) = 0
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages m
+              WHERE m.chat_id = c.chat_id
+          )
+        """
+    )
+    cur.execute("SELECT COUNT(*) FROM temp_delete_empty_chats")
+    return int(cur.fetchone()[0] or 0)
+
+
+def _sqlite_object_exists(cur: Any, object_type: str, name: str) -> bool:
+    cur.execute(
+        """
+        SELECT 1
+        FROM sqlite_master
+        WHERE type = ? AND name = ?
+        LIMIT 1
+        """,
+        (object_type, name),
+    )
+    return cur.fetchone() is not None
+
+
+def _chat_delete_has_fts_index(cur: Any) -> bool:
+    return _sqlite_object_exists(cur, "table", "messages_fts")
+
+
+def _drop_message_delete_triggers_for_bulk_delete(
+    cur: Any, *, fts_enabled: bool
+) -> None:
+    if fts_enabled:
+        cur.execute("DROP TRIGGER IF EXISTS trg_messages_fts_delete")
+    cur.execute("DROP TRIGGER IF EXISTS trg_message_terms_delete")
+
+
+def _restore_message_delete_triggers_after_bulk_delete(
+    cur: Any, *, fts_enabled: bool
+) -> None:
+    if fts_enabled:
+        _fts._create_fts_triggers(cur)
+    _search_terms._create_message_search_terms_queue_triggers(cur)
+
+
+def _delete_fts_entries_for_chat_targets(cur: Any) -> None:
+    cur.execute(
+        """
+        INSERT INTO messages_fts(messages_fts, rowid, content)
+        SELECT
+            'delete',
+            m.pk,
+            COALESCE(NULLIF(m.content_norm, ''), m.content, '')
+        FROM messages m
+        JOIN temp_delete_chat_messages t ON t.pk = m.pk
+        """
     )
 
 
 @synchronized_write
 def _delete_chat_data(conn: Any, chat_id: int) -> int:
     cur = conn.cursor()
+    fts_enabled = False
+    triggers_dropped = False
     try:
         cur.execute("BEGIN IMMEDIATE")
+        deleted_messages = _prepare_delete_chat_message_targets(cur, chat_id)
+        trigger_optimization_required = (
+            int(deleted_messages) >= DELETE_CHAT_FAST_PATH_THRESHOLD
+        )
+        fts_enabled = trigger_optimization_required and _chat_delete_has_fts_index(cur)
+        if trigger_optimization_required:
+            _drop_message_delete_triggers_for_bulk_delete(
+                cur,
+                fts_enabled=fts_enabled,
+            )
+            triggers_dropped = True
+            if fts_enabled:
+                _delete_fts_entries_for_chat_targets(cur)
         _delete_from_optional_chat_table(cur, "admin_absent_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
-        _delete_from_optional_message_pk_table(cur, "message_search_terms", chat_id)
-        _delete_from_optional_message_pk_table(
-            cur, "message_search_terms_rebuild_queue", chat_id
+        _delete_from_optional_message_pk_targets_table(
+            cur, "message_search_terms", "temp_delete_chat_messages"
+        )
+        _delete_from_optional_message_pk_targets_table(
+            cur, "message_search_terms_rebuild_queue", "temp_delete_chat_messages"
         )
         cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM dedupe_runs WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
-        deleted_messages = int(cur.rowcount or 0)
         cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
+        if triggers_dropped:
+            _restore_message_delete_triggers_after_bulk_delete(
+                cur,
+                fts_enabled=fts_enabled,
+            )
+            triggers_dropped = False
+        cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
         conn.commit()
         return deleted_messages
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
+        if triggers_dropped:
+            with suppress(Exception):
+                _restore_message_delete_triggers_after_bulk_delete(
+                    cur,
+                    fts_enabled=fts_enabled,
+                )
+                conn.commit()
         raise
+    finally:
+        with suppress(Exception):
+            cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
+        cur.close()
+
+
+@synchronized_write
+def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        target_count = _prepare_empty_chat_targets(cur)
+        if target_count <= 0:
+            cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
+            conn.commit()
+            return {
+                "deleted_chats": 0,
+                "deleted_messages": 0,
+                "deleted_media_rows": 0,
+                "deleted_media_groups": 0,
+            }
+
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_absent_chats", "temp_delete_empty_chats"
+        )
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_missing_chats", "temp_delete_empty_chats"
+        )
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_restricted_chats", "temp_delete_empty_chats"
+        )
+        cur.execute(
+            """
+            DELETE FROM dedupe_actions
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        cur.execute(
+            """
+            DELETE FROM dedupe_runs
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        cur.execute(
+            """
+            DELETE FROM media_groups
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        deleted_media_groups = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM message_media
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        deleted_media_rows = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM messages
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        deleted_messages = int(cur.rowcount or 0)
+        cur.execute(
+            """
+            DELETE FROM chats
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        deleted_chats = int(cur.rowcount or 0)
+        cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
+        conn.commit()
+        return {
+            "deleted_chats": deleted_chats,
+            "deleted_messages": deleted_messages,
+            "deleted_media_rows": deleted_media_rows,
+            "deleted_media_groups": deleted_media_groups,
+        }
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        with suppress(Exception):
+            cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
+        cur.close()
+
+
+def _count_chat_related_rows(conn: Any, chat_id: int) -> dict[str, int]:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ?", (int(chat_id),))
+        messages = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            "SELECT COUNT(*) FROM message_media WHERE chat_id = ?", (int(chat_id),)
+        )
+        media_rows = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            "SELECT COUNT(*) FROM media_groups WHERE chat_id = ?", (int(chat_id),)
+        )
+        media_groups = int(cur.fetchone()[0] or 0)
+        return {
+            "messages": messages,
+            "media_rows": media_rows,
+            "media_groups": media_groups,
+        }
     finally:
         cur.close()
 
@@ -746,6 +1144,10 @@ def _admin_start_delete_job_thread(job_id, chat_id, chat_title, **kwargs):
     return start_admin_job_thread(
         _admin_delete_job_runner, job_id, chat_id, chat_title, **kwargs
     )
+
+
+def _admin_start_delete_empty_chats_job_thread(job_id, **kwargs):
+    return start_admin_job_thread(_admin_delete_empty_chats_job_runner, job_id, **kwargs)
 
 
 def _admin_start_cleanup_job_thread(

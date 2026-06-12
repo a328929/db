@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from tg_harvest.runtime.paths import resolve_db_path
-from tg_harvest.runtime.paths import resolve_session_name
+
+from tg_harvest.runtime.paths import resolve_db_path, resolve_session_name
 
 # =========================
 # 配置加载
@@ -38,6 +37,19 @@ def _env_int(name: str, default: int) -> int:
         return int(default)
 
 
+def _env_optional_float(name: str) -> float | None:
+    v = os.getenv(name, None)
+    if v is None:
+        return None
+    text = v.strip().lower()
+    if not text or text in {"auto", "none", "default"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
 def _load_raw_config_values() -> dict:
     return {
         # 电报接口编号。允许从环境使用测试专用编号，但服务端会限制用途。
@@ -68,6 +80,8 @@ def _load_raw_config_values() -> dict:
         "disable_promo_filter": _env_int("TG_DISABLE_PROMO_FILTER", 1),
         # 采集进度日志间隔。最小值为一。
         "log_every": _env_int("TG_LOG_EVERY", 1000),
+        # Telegram 历史消息请求间隔。空值表示使用 Telethon 默认保护策略。
+        "history_wait_time": _env_optional_float("TG_HISTORY_WAIT_TIME"),
         # 数据库页面缓存大小，单位为兆。
         "sqlite_cache_mb": _env_int("TG_SQLITE_CACHE_MB", 512),
         # 数据库内存映射大小，单位为兆。数值零表示关闭。
@@ -113,6 +127,8 @@ def _normalize_config_values(raw: dict) -> dict:
         1 if int(normalized["disable_promo_filter"]) == 1 else 0
     )
     normalized["log_every"] = max(1, int(normalized["log_every"]))
+    if normalized["history_wait_time"] is not None:
+        normalized["history_wait_time"] = max(0.0, float(normalized["history_wait_time"]))
     normalized["sqlite_cache_mb"] = max(16, int(normalized["sqlite_cache_mb"]))
     normalized["sqlite_mmap_mb"] = max(0, int(normalized["sqlite_mmap_mb"]))
     normalized["admin_job_max_count"] = max(10, int(normalized["admin_job_max_count"]))
@@ -146,6 +162,7 @@ def _build_app_config(values: dict) -> "AppConfig":
         promo_score_threshold=values["promo_score_threshold"],
         disable_promo_filter=values["disable_promo_filter"],
         log_every=values["log_every"],
+        history_wait_time=values["history_wait_time"],
         sqlite_cache_mb=values["sqlite_cache_mb"],
         sqlite_mmap_mb=values["sqlite_mmap_mb"],
         admin_job_max_count=values["admin_job_max_count"],
@@ -181,6 +198,7 @@ class AppConfig:
     promo_score_threshold: int
     disable_promo_filter: int
     log_every: int
+    history_wait_time: float | None
 
     # 数据库
     sqlite_cache_mb: int

@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 import math
 import sqlite3
-from typing import Any, Callable, Dict, List, Tuple
+from collections.abc import Callable
+from typing import Any
 
 from tg_harvest.search import cache as _search_cache
 from tg_harvest.search import maintenance as _search_maintenance
 from tg_harvest.search.params import SearchParams
-from tg_harvest.search.sql_builder import _build_search_query_spec
-from tg_harvest.search.sql_builder import _make_type_clause
+from tg_harvest.search.sql_builder import _build_search_query_spec, _make_type_clause
 from tg_harvest.storage import search_terms as _search_terms
 
 _CHAT_FACET_LIMIT = 12
@@ -16,11 +15,11 @@ _CHAT_FACET_LIMIT = 12
 def _execute_count_query(
     cur: sqlite3.Cursor,
     count_sql: str,
-    sql_params: List[Any],
+    sql_params: list[Any],
     count_limit: int,
     max_count: int,
     page_size: int,
-) -> Tuple[int, bool, int]:
+) -> tuple[int, bool, int]:
     cur.execute(count_sql, sql_params + [count_limit])
     counted = int(cur.fetchone()["c"] or 0)
     total_is_capped = counted > max_count
@@ -33,13 +32,13 @@ def _execute_rows_query(
     cur: sqlite3.Cursor,
     query_sql: str,
     query_sql_skip: str | None,
-    sql_params: List[Any],
+    sql_params: list[Any],
     page: int,
     total_pages: int,
     page_size: int,
     *,
     use_skip_optimized_query: bool = False,
-) -> Tuple[List[sqlite3.Row], int]:
+) -> tuple[list[sqlite3.Row], int]:
     effective_page = page
     if total_pages > 0 and effective_page > total_pages:
         effective_page = total_pages
@@ -66,7 +65,7 @@ def _has_pending_message_search_term_rebuilds(conn: sqlite3.Connection) -> bool:
 
 
 def _should_try_like_fallback(
-    conn: sqlite3.Connection, primary_spec: Dict[str, Any]
+    conn: sqlite3.Connection, primary_spec: dict[str, Any]
 ) -> bool:
     if not bool(primary_spec.get("has_text_filter")):
         return False
@@ -84,7 +83,7 @@ def _should_try_like_fallback(
     return False
 
 
-def _payload_has_results(payload: Dict[str, Any]) -> bool:
+def _payload_has_results(payload: dict[str, Any]) -> bool:
     total_val = int(payload.get("total") or 0)
     if total_val > 0:
         return True
@@ -96,12 +95,12 @@ def _resolve_precise_count(
     cur: sqlite3.Cursor,
     *,
     count_sql: str,
-    sql_params: List[Any],
+    sql_params: list[Any],
     params: SearchParams,
     count_limit: int,
     max_count: int,
     page_size: int,
-) -> Tuple[int, bool, int]:
+) -> tuple[int, bool, int]:
     cached_count = _try_fast_count(
         conn,
         params,
@@ -161,7 +160,7 @@ def _fast_count_by_type(
     cur = conn.cursor()
     try:
         where_parts = [type_clause]
-        sql_params: List[Any] = list(type_params)
+        sql_params: list[Any] = list(type_params)
         if chat_id is not None:
             where_parts.append("chat_id = ?")
             sql_params.append(chat_id)
@@ -181,7 +180,7 @@ def _try_fast_count(
     *,
     page_size: int,
     max_count: int,
-) -> Tuple[int, bool, int] | None:
+) -> tuple[int, bool, int] | None:
     if (params.raw_query or "").strip():
         return None
     if params.duration_sec is not None:
@@ -210,12 +209,12 @@ def _run_search_query(
     query_sql: str,
     query_sql_skip: str | None,
     prefer_skip_query: bool,
-    sql_params: List[Any],
+    sql_params: list[Any],
     params: SearchParams,
     count_limit: int,
     max_count: int,
     page_size: int,
-) -> Tuple[List[sqlite3.Row], int, int, bool, int]:
+) -> tuple[list[sqlite3.Row], int, int, bool, int]:
     cur = conn.cursor()
     try:
         if params.skip_count and not params.count_only:
@@ -233,7 +232,7 @@ def _run_search_query(
             )
 
         if params.count_only:
-            rows: List[sqlite3.Row] = []
+            rows: list[sqlite3.Row] = []
             effective_page = params.page
         else:
             # When skipping count, we assume we always have enough pages to fetch the current one
@@ -285,16 +284,16 @@ def _run_search_query(
 def _execute_chat_facet_query(
     cur: sqlite3.Cursor,
     chat_facet_sql: str,
-    sql_params: List[Any],
+    sql_params: list[Any],
     *,
     scan_limit: int,
     limit: int = _CHAT_FACET_LIMIT,
-) -> List[Dict[str, Any]]:
+) -> list[dict[str, Any]]:
     cur.execute(
         chat_facet_sql,
         sql_params + [max(1, int(scan_limit)), max(1, int(limit))],
     )
-    facets: List[Dict[str, Any]] = []
+    facets: list[dict[str, Any]] = []
     for row in cur.fetchall():
         chat_id = int(row["chat_id"])
         title = str(row["chat_title"] or "").strip() or f"Chat {chat_id}"
@@ -311,13 +310,13 @@ def _execute_chat_facet_query(
 def _build_payload_from_spec(
     conn: sqlite3.Connection,
     params: SearchParams,
-    spec: Dict[str, Any],
+    spec: dict[str, Any],
     *,
     page_size: int,
     max_count: int,
-    map_search_items_fn: Callable[[List[sqlite3.Row]], List[Dict[str, Any]]],
+    map_search_items_fn: Callable[[list[sqlite3.Row]], list[dict[str, Any]]],
     include_chat_facets: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     data_fingerprint = _search_cache._read_database_fingerprint(conn)
     rows, total, total_pages, total_is_capped, effective_page = _run_search_query(
         conn,
@@ -331,7 +330,7 @@ def _build_payload_from_spec(
         max_count=max_count,
         page_size=page_size,
     )
-    chat_facets: List[Dict[str, Any]] = []
+    chat_facets: list[dict[str, Any]] = []
     if include_chat_facets and params.chat_id is None and spec.get("chat_facet_sql"):
         cur = conn.cursor()
         try:
@@ -371,8 +370,8 @@ def _search_payload_service(
     from_sql: str,
     page_size: int,
     max_count: int,
-    map_search_items_fn: Callable[[List[sqlite3.Row]], List[Dict[str, Any]]],
-) -> Dict[str, Any]:
+    map_search_items_fn: Callable[[list[sqlite3.Row]], list[dict[str, Any]]],
+) -> dict[str, Any]:
     _search_maintenance.schedule_message_search_maintenance()
 
     primary_spec = _build_search_query_spec(

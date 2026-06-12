@@ -46,7 +46,8 @@
     pollCount: 0,
     pollToken: 0,
     retryCount: 0,
-    lastProgressKey: ''
+    lastProgressKey: '',
+    stopRequested: false
   };
 
   var authState = {
@@ -80,7 +81,9 @@
     var elements = {
       scopeSelect: document.getElementById('admin-scope-select'),
       startUpdateBtn: document.getElementById('admin-start-update-btn'),
+      stopJobBtn: document.getElementById('admin-stop-job-btn'),
       deleteDataBtn: document.getElementById('admin-delete-data-btn'),
+      deleteEmptyChatsBtn: document.getElementById('admin-delete-empty-chats-btn'),
       logContainer: document.getElementById('admin-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-logs-btn'),
       cleanupEmptyBtn: document.getElementById('admin-cleanup-empty-btn'),
@@ -105,7 +108,9 @@
     var requiredKeys = [
       'scopeSelect',
       'startUpdateBtn',
+      'stopJobBtn',
       'deleteDataBtn',
+      'deleteEmptyChatsBtn',
       'logContainer',
       'clearLogsBtn',
       'cleanupEmptyBtn',
@@ -174,8 +179,16 @@
       handleStartUpdateClick(elements);
     });
 
+    elements.stopJobBtn.addEventListener('click', function () {
+      handleStopJobClick(elements);
+    });
+
     elements.deleteDataBtn.addEventListener('click', function () {
       handleDeleteDataClick(elements);
+    });
+
+    elements.deleteEmptyChatsBtn.addEventListener('click', function () {
+      handleDeleteEmptyChatsClick(elements);
     });
 
     elements.cleanupEmptyBtn.addEventListener('click', function () {
@@ -322,6 +335,7 @@
 
   function getActiveDialog(elements) {
     return getVisibleDialog([
+      elements && elements.loginDialog,
       elements && elements.cleanupDialog,
       elements && elements.dialog
     ]);
@@ -336,6 +350,7 @@
       chatsErrorPrefix: '读取群组列表失败',
       statsErrorPrefix: '读取统计信息失败'
     });
+    await resumeActiveJobPolling(elements);
   }
 
   async function fetchChatsIntoSelect(elements) {
@@ -416,6 +431,28 @@
       chatsErrorPrefix: '刷新群组列表失败',
       statsErrorPrefix: '刷新统计失败'
     });
+  }
+
+  async function resumeActiveJobPolling(elements) {
+    if (jobPollState.isPolling) {
+      return;
+    }
+
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/active');
+      var job = payload && payload.job && typeof payload.job === 'object' && !Array.isArray(payload.job)
+        ? payload.job
+        : null;
+      var jobId = job && job.job_id ? String(job.job_id) : '';
+      var status = job && typeof job.status === 'string' ? job.status.trim().toLowerCase() : '';
+      if (!jobId || (status !== 'queued' && status !== 'running')) {
+        return;
+      }
+      appendLog(elements, '检测到正在执行的任务，继续监控：' + jobId);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '检查正在执行的任务失败：' + error.message);
+    }
   }
 
   function getTargetScopeLabel(target) {
@@ -596,6 +633,33 @@
     }
   }
 
+  async function handleStopJobClick(elements) {
+    var jobId = String(jobPollState.jobId || '').trim();
+    if (!jobId) {
+      appendLog(elements, '当前没有正在轮询的任务');
+      return;
+    }
+
+    if (!window.confirm('确认请求停止当前任务？已开始抓取的群组会继续完成，之后不再启动新的群组。')) {
+      appendLog(elements, '已取消停止请求');
+      return;
+    }
+
+    setElementDisabled(elements.stopJobBtn, true);
+    try {
+      var payload = await postJSON('/api/admin/jobs/' + encodeURIComponent(jobId) + '/stop', {});
+      if (!payload || payload.ok === false) {
+        throw new Error((payload && payload.error) || '停止请求失败');
+      }
+      jobPollState.stopRequested = true;
+      appendLog(elements, '已请求停止：等待当前并发中的群组完成');
+      setStopButtonState(elements);
+    } catch (error) {
+      appendLog(elements, '请求停止失败：' + error.message);
+      setStopButtonState(elements);
+    }
+  }
+
   async function handleDeleteDataClick(elements) {
     var target = getCurrentTargetInfo(elements);
     if (!target.isChat) {
@@ -628,6 +692,31 @@
     }
   }
 
+  async function handleDeleteEmptyChatsClick(elements) {
+    var target = getCurrentTargetInfo(elements);
+    if (!target.isAll) {
+      appendLog(elements, '请选择“全部”后再删除零消息群组');
+      return;
+    }
+
+    var confirmText = '确认删除所有消息数量为 0 的群组/频道？\n系统会再次检查真实消息表，避免误删仍有消息的群组。';
+    if (!confirmAction(elements, confirmText, '已取消删除零消息群组操作')) {
+      return;
+    }
+
+    try {
+      await createJobAndStartPolling(elements, {
+        url: '/api/admin/jobs/delete-empty-chats',
+        requestPayload: {
+          confirm: 'DELETE_EMPTY_CHATS'
+        },
+        successMessage: '零消息群组删除任务已创建：{jobId}'
+      });
+    } catch (error) {
+      appendLog(elements, '创建零消息群组删除任务失败：' + error.message);
+    }
+  }
+
 
   function startJobPolling(elements, jobId) {
     var normalizedJobId = String(jobId || '').trim();
@@ -644,6 +733,7 @@
     jobPollState.pollCount = 0;
     jobPollState.retryCount = 0;
     jobPollState.lastProgressKey = '';
+    jobPollState.stopRequested = false;
     jobPollState.isPolling = true;
     setAdminControlsBusy(elements, true);
 
@@ -659,6 +749,7 @@
     }
     jobPollState.timerId = null;
     jobPollState.isPolling = false;
+    jobPollState.stopRequested = false;
     setAdminControlsBusy(elements, false);
   }
 
@@ -768,6 +859,8 @@
 
       jobPollState.retryCount = 0;
       var progressState = buildSnapshotProgressMessage(snapshot);
+      jobPollState.stopRequested = !!snapshot.stop_requested;
+      setStopButtonState(elements);
       if (progressState.key && progressState.key !== jobPollState.lastProgressKey) {
         jobPollState.lastProgressKey = progressState.key;
         if (progressState.message) {
@@ -849,12 +942,23 @@
     var hasAllTarget = isAllScopeValue(scopeValue);
 
     elements.deleteDataBtn.hidden = !hasChatTarget;
+    elements.deleteEmptyChatsBtn.hidden = !hasAllTarget;
     elements.startUpdateBtn.hidden = !hasChatTarget && !hasAllTarget;
     elements.startUpdateBtn.textContent = hasAllTarget ? '增量更新全部群聊' : '增量更新当前群聊';
+    elements.stopJobBtn.hidden = !jobPollState.isPolling;
     elements.cleanupEmptyBtn.hidden = !hasSelectedTarget;
     elements.openCleanupDialogBtn.hidden = !hasSelectedTarget;
 
     setAdminControlsBusy(elements, jobPollState.isPolling);
+  }
+
+  function setStopButtonState(elements) {
+    if (!elements || !elements.stopJobBtn) {
+      return;
+    }
+    elements.stopJobBtn.hidden = !jobPollState.isPolling;
+    elements.stopJobBtn.textContent = jobPollState.stopRequested ? '停止请求已发送' : '停止任务';
+    setElementDisabled(elements.stopJobBtn, !jobPollState.isPolling || jobPollState.stopRequested);
   }
 
   function setAdminControlsBusy(elements, isBusy) {
@@ -865,7 +969,9 @@
     var disabled = !!isBusy;
     setElementDisabled(elements.scopeSelect, disabled);
     setElementDisabled(elements.startUpdateBtn, disabled);
+    setStopButtonState(elements);
     setElementDisabled(elements.deleteDataBtn, disabled);
+    setElementDisabled(elements.deleteEmptyChatsBtn, disabled);
     setElementDisabled(elements.cleanupEmptyBtn, disabled);
     setElementDisabled(elements.openCleanupDialogBtn, disabled);
     setElementDisabled(elements.cleanupConfirmBtn, disabled);

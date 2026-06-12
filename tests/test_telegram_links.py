@@ -1,13 +1,15 @@
 import unittest
 
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
-from tg_harvest.web.telegram_links import build_telegram_app_link
-from tg_harvest.web.telegram_links import build_telegram_chat_app_link
-from tg_harvest.web.telegram_links import build_telegram_chat_link_bundle
-from tg_harvest.web.telegram_links import build_telegram_chat_web_link
-from tg_harvest.web.telegram_links import build_telegram_fallback_app_link
-from tg_harvest.web.telegram_links import build_telegram_link_bundle
-from tg_harvest.web.telegram_links import build_telegram_web_link
+from tg_harvest.web.telegram_links import (
+    build_telegram_app_link,
+    build_telegram_chat_app_link,
+    build_telegram_chat_link_bundle,
+    build_telegram_chat_web_link,
+    build_telegram_fallback_app_link,
+    build_telegram_link_bundle,
+    build_telegram_web_link,
+)
 
 
 class TelegramLinkBuilderTests(unittest.TestCase):

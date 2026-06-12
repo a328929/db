@@ -1,8 +1,6 @@
-# -*- coding: utf-8 -*-
-import os
 import sqlite3
 from contextlib import closing
-from typing import Any, Dict, Optional
+from typing import Any
 
 from tg_harvest.config import CFG
 from tg_harvest.storage.connection import connect_configured_db
@@ -13,7 +11,7 @@ def _admin_connect() -> sqlite3.Connection:
     return conn
 
 
-def _admin_fetch_job_snapshot_row(job_id: str) -> Optional[sqlite3.Row]:
+def _admin_fetch_job_snapshot_row(job_id: str) -> sqlite3.Row | None:
     with closing(_admin_connect()) as conn:
         cur = conn.cursor()
         try:
@@ -31,6 +29,7 @@ def _admin_fetch_job_snapshot_row(job_id: str) -> Optional[sqlite3.Row]:
                     j.progress_total,
                     j.progress_stage,
                     j.last_logged_current,
+                    j.stop_requested,
                     (
                         SELECT COUNT(*)
                         FROM admin_job_logs l
@@ -66,7 +65,7 @@ def _admin_fetch_last_seq(job_id: str) -> int:
             cur.close()
 
 
-def _admin_snapshot_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+def _admin_snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
     progress_total = row["progress_total"]
     return {
         "job_id": str(row["job_id"] or ""),
@@ -81,18 +80,20 @@ def _admin_snapshot_from_row(row: sqlite3.Row) -> Dict[str, Any]:
             "total": int(progress_total) if isinstance(progress_total, int) else None,
             "stage": str(row["progress_stage"] or "queued"),
         },
+        "stop_requested": int(row["stop_requested"] or 0) == 1,
         "log_count": int(row["log_count"] or 0),
         "last_seq": int(row["last_seq"] or 0),
     }
 
 
-def _admin_active_job_summary_from_row(row: sqlite3.Row) -> Dict[str, Any]:
+def _admin_active_job_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "job_id": str(row["job_id"] or ""),
         "job_type": str(row["job_type"] or "").lower(),
         "status": str(row["status"] or "").lower(),
         "target_chat_id": row["target_chat_id"],
         "target_label": row["target_label"],
+        "stop_requested": int(row["stop_requested"] or 0) == 1,
     }
 
 
@@ -101,8 +102,8 @@ def _admin_insert_job_row(
     *,
     job_id: str,
     job_type: str,
-    target_chat_id: Optional[int],
-    target_label: Optional[str],
+    target_chat_id: int | None,
+    target_label: str | None,
     created_at: str,
     owner_instance_id: str,
     owner_pid: int,
@@ -123,9 +124,10 @@ def _admin_insert_job_row(
             progress_current,
             progress_total,
             progress_stage,
-            last_logged_current
+            last_logged_current,
+            stop_requested
         )
-        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'queued', 0)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'queued', 0, 0)
         """,
         (
             job_id,
@@ -145,8 +147,8 @@ def _admin_persist_job_create(
     *,
     job_id: str,
     job_type: str,
-    target_chat_id: Optional[int],
-    target_label: Optional[str],
+    target_chat_id: int | None,
+    target_label: str | None,
     created_at: str,
     owner_instance_id: str,
     owner_pid: int,
@@ -171,7 +173,7 @@ def _admin_persist_job_create(
 
 def _admin_persist_log_locked(
     job_id: str,
-    log_item: Dict[str, Any],
+    log_item: dict[str, Any],
     *,
     owner_instance_id: str,
     owner_pid: int,

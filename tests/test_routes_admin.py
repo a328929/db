@@ -27,6 +27,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         def start_cleanup_empty(**kwargs):
             self.started_jobs.append(kwargs)
 
+        def start_delete_empty_chats(*args, **kwargs):
+            self.started_jobs.append({"args": args, **kwargs})
+
         self.handler = AdminRoutesHandler(
             logger=_LoggerStub(),
             cfg=object(),
@@ -36,6 +39,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             admin_job_append_log_fn=append_log,
             admin_job_get_snapshot_fn=lambda job_id: {"job_id": job_id, "status": "queued"},
             admin_job_get_logs_fn=lambda *_args, **_kwargs: [],
+            admin_get_active_job_fn=lambda: None,
+            admin_request_job_stop_fn=lambda *_args, **_kwargs: (True, None),
             admin_has_any_active_job_fn=lambda: False,
             admin_try_create_exclusive_job_fn=lambda *_args, **_kwargs: (
                 {"job_id": "job-1"},
@@ -45,6 +50,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             admin_start_harvest_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_update_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_delete_job_thread_fn=lambda *_args, **_kwargs: None,
+            admin_start_delete_empty_chats_job_thread_fn=start_delete_empty_chats,
             admin_start_cleanup_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_cleanup_empty_job_thread_fn=start_cleanup_empty,
             admin_get_chat_brief_fn=lambda _conn, chat_id: {
@@ -136,6 +142,82 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         self.assertEqual(400, status_code)
         self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+
+    def test_delete_empty_chats_requires_server_side_confirmation(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/delete-empty-chats",
+            method="POST",
+            json={},
+        ):
+            response, status_code = (
+                self.handler.api_admin_job_create_delete_empty_chats.__wrapped__(
+                    self.handler
+                )
+            )
+
+        self.assertEqual(400, status_code)
+        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+
+    def test_delete_empty_chats_success_starts_job(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/delete-empty-chats",
+            method="POST",
+            json={"confirm": "DELETE_EMPTY_CHATS"},
+        ):
+            response = self.handler.api_admin_job_create_delete_empty_chats.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [("job-1", "已接收零消息群组删除请求")],
+            self.logs,
+        )
+        self.assertEqual(1, len(self.started_jobs))
+        self.assertEqual(("job-1",), self.started_jobs[0]["args"])
+
+    def test_active_job_returns_current_snapshot(self) -> None:
+        self.handler.admin_get_active_job_fn = lambda: {
+            "job_id": "job-active",
+            "status": "running",
+        }
+        self.handler.admin_job_get_snapshot_fn = lambda job_id: {
+            "job_id": job_id,
+            "status": "running",
+            "stop_requested": False,
+        }
+
+        with self.app.test_request_context("/api/admin/jobs/active", method="GET"):
+            response = self.handler.api_admin_active_job.__wrapped__(self.handler)
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("job-active", payload["job"]["job_id"])
+
+    def test_job_stop_marks_active_job_and_logs_request(self) -> None:
+        stop_calls = []
+        self.handler.admin_job_get_snapshot_fn = lambda job_id: {
+            "job_id": job_id,
+            "status": "running",
+            "stop_requested": bool(stop_calls),
+        }
+        self.handler.admin_request_job_stop_fn = (
+            lambda job_id: stop_calls.append(job_id) or (True, None)
+        )
+
+        with self.app.test_request_context("/api/admin/jobs/job-1/stop", method="POST"):
+            response = self.handler.api_admin_job_stop.__wrapped__(
+                self.handler, "job-1"
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(["job-1"], stop_calls)
+        self.assertIn(
+            ("job-1", "已收到停止请求，当前群组完成后停止派发新群组"),
+            self.logs,
+        )
 
 
 if __name__ == "__main__":

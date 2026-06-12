@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 import sqlite3
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 from tg_harvest.domain.meta_payload import _chat_sort_key, _chat_title_or_fallback
 
 
-def build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
+def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     cur = conn.cursor()
     try:
         cur.execute(
@@ -39,7 +38,7 @@ def build_admin_chats_payload(conn: sqlite3.Connection) -> Dict[str, Any]:
         cur.close()
 
 
-def parse_admin_chat_id(raw_chat_id: Optional[str]) -> Optional[int]:
+def parse_admin_chat_id(raw_chat_id: str | None) -> int | None:
     value = (raw_chat_id or "").strip()
     if not value or value.lower() == "none":
         return None
@@ -47,8 +46,8 @@ def parse_admin_chat_id(raw_chat_id: Optional[str]) -> Optional[int]:
 
 
 def build_admin_stats_payload(
-    conn: sqlite3.Connection, chat_id: Optional[int]
-) -> Tuple[Dict[str, Any], int]:
+    conn: sqlite3.Connection, chat_id: int | None
+) -> tuple[dict[str, Any], int]:
     cur = conn.cursor()
     try:
         if chat_id is None:
@@ -101,7 +100,7 @@ def build_admin_stats_payload(
 
 def get_admin_chat_brief(
     conn: sqlite3.Connection, chat_id: int
-) -> Optional[Dict[str, Any]]:
+) -> dict[str, Any] | None:
     cur = conn.cursor()
     try:
         cur.execute(

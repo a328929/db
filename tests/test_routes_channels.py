@@ -1,7 +1,11 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from flask import Flask
 
+from tg_harvest.web import auth as auth_module
+from tg_harvest.web.auth import register_auth_routes
 from tg_harvest.web.routes.channels import register_channel_routes
 
 
@@ -33,6 +37,7 @@ class ChannelRoutesTests(unittest.TestCase):
                 web_link=f"https://t.me/{username}" if username else "",
             )
 
+        register_auth_routes(self.app)
         register_channel_routes(
             self.app,
             logger=_LoggerStub(),
@@ -98,15 +103,29 @@ class ChannelRoutesTests(unittest.TestCase):
             ),
         )
         self.client = self.app.test_client()
-        with self.client.session_transaction() as session:
-            session["admin_token"] = "token"
-            session["admin_expiry"] = 9999999999
-            session["admin_auth_fp"] = "fp"
+
+    def _auth_config_patch(self):
+        return patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(
+                admin_password="secret",
+                admin_session_expiry=60,
+            ),
+        )
+
+    def _login_admin(self) -> str:
+        response = self.client.post(
+            "/api/admin/auth/login",
+            json={"password": "secret"},
+        )
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        return str(payload["csrf_token"])
 
     def test_database_channels_api_includes_telegram_links(self) -> None:
-        from unittest.mock import patch
-
-        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
+        with self._auth_config_patch():
+            self._login_admin()
             response = self.client.get("/api/admin/channels")
 
         self.assertEqual(200, response.status_code)
@@ -117,9 +136,8 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertTrue(item["has_public_link"])
 
     def test_absent_channels_api_includes_telegram_links(self) -> None:
-        from unittest.mock import patch
-
-        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
+        with self._auth_config_patch():
+            self._login_admin()
             response = self.client.get("/api/admin/channels/absent")
 
         self.assertEqual(200, response.status_code)
@@ -131,19 +149,58 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertEqual("账号未加入", item["scan_reason"])
         self.assertEqual("2026-01-31 00:00:00", item["last_message_at"])
 
-    def test_absent_channels_scan_creates_job(self) -> None:
-        from unittest.mock import patch
+    def test_channels_page_redirects_to_login_when_unauthenticated(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/channels")
 
-        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
-            response = self.client.post("/api/admin/channels/absent/scan")
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/login?next=%2Fadmin%2Fchannels", response.location)
+
+    def test_channels_page_renders_when_authenticated(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/channels")
 
         self.assertEqual(200, response.status_code)
-        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+        self.assertIn("频道管理", response.get_data(as_text=True))
+
+    def test_channel_scan_routes_reject_unauthenticated_requests(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.post("/api/admin/channels/absent/scan")
+
+        self.assertEqual(401, response.status_code)
+        self.assertTrue(response.get_json()["auth_required"])
+
+    def test_channel_scan_routes_reject_missing_csrf_token(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.post("/api/admin/channels/absent/scan")
+
+        self.assertEqual(403, response.status_code)
+        self.assertTrue(response.get_json()["csrf_required"])
+
+    def test_channel_scan_routes_accept_real_login_and_csrf_token(self) -> None:
+        endpoints = [
+            "/api/admin/channels/missing/scan",
+            "/api/admin/channels/absent/scan",
+            "/api/admin/channels/restricted/scan",
+        ]
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            for endpoint in endpoints:
+                with self.subTest(endpoint=endpoint):
+                    response = self.client.post(
+                        endpoint,
+                        headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+                    )
+                    self.assertEqual(200, response.status_code)
+                    self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+
 
     def test_restricted_channels_api_includes_telegram_links(self) -> None:
-        from unittest.mock import patch
-
-        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
+        with self._auth_config_patch():
+            self._login_admin()
             response = self.client.get("/api/admin/channels/restricted")
 
         self.assertEqual(200, response.status_code)
@@ -155,15 +212,6 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertEqual("porn", item["restriction_reasons"])
         self.assertEqual("restricted", item["risk_flags"])
         self.assertEqual("2026-03-01 00:00:00", item["last_message_at"])
-
-    def test_restricted_channels_scan_creates_job(self) -> None:
-        from unittest.mock import patch
-
-        with patch("tg_harvest.web.auth.is_authenticated", return_value=True):
-            response = self.client.post("/api/admin/channels/restricted/scan")
-
-        self.assertEqual(200, response.status_code)
-        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
 
 
 if __name__ == "__main__":

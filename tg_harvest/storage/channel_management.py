@@ -1,11 +1,13 @@
-# -*- coding: utf-8 -*-
 import sqlite3
-from typing import Any, Iterable, List
+from collections.abc import Iterable
+from contextlib import suppress
+from typing import Any
 
-from tg_harvest.domain.chat_inventory import ChatInventoryRow
-from tg_harvest.domain.chat_inventory import RestrictedChatInventoryRow
+from tg_harvest.domain.chat_inventory import (
+    ChatInventoryRow,
+    RestrictedChatInventoryRow,
+)
 from tg_harvest.storage.connection import synchronized_write
-
 
 CHANNEL_SORT_DEFAULT = "message_count_desc"
 CHANNEL_SORT_OPTIONS = {
@@ -47,7 +49,7 @@ def _optional_int(value: Any) -> int | None:
         return None
 
 
-def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> List[dict]:
+def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]:
     normalized_sort = normalize_channel_sort(sort)
     order_sql = CHANNEL_SORT_OPTIONS[normalized_sort]
     cur = conn.cursor()
@@ -155,16 +157,14 @@ def replace_missing_chat_scan_results(
         conn.commit()
         return len(normalized_rows)
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
 
 
-def list_missing_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
+def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
         cur.execute(
@@ -296,16 +296,14 @@ def replace_absent_chat_scan_results(
         conn.commit()
         return len(normalized_rows)
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
 
 
-def list_absent_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
+def list_absent_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
         cur.execute(
@@ -440,16 +438,14 @@ def replace_restricted_chat_scan_results(
         conn.commit()
         return len(normalized_rows)
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
 
 
-def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> List[dict]:
+def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
         cur.execute(

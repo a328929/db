@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 import asyncio
 import os
 import shutil
 import sqlite3
 import threading
+from collections.abc import Callable
+from contextlib import suppress
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from telethon.sync import TelegramClient
-
 
 JOB_HEARTBEAT_INTERVAL_SEC = 30.0
 
@@ -43,15 +43,11 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         return False
     finally:
         if client is not None:
-            try:
+            with suppress(Exception):
                 client.disconnect()
-            except Exception:
-                pass
         if loop is not None:
-            try:
+            with suppress(Exception):
                 loop.close()
-            except Exception:
-                pass
 
 
 def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
@@ -63,10 +59,8 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
         src = f"{base_session_name}{ext}"
         dst = f"{worker_session_name}{ext}"
         if os.path.exists(src):
-            try:
+            with suppress(Exception):
                 shutil.copy2(src, dst)
-            except Exception:
-                pass
 
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
@@ -82,19 +76,15 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
             timeout=15,
             receive_updates=False
         )
-        setattr(client, "_tg_harvest_loop", loop)
+        client._tg_harvest_loop = loop
         client.connect()
         return client
     except Exception:
         if client is not None:
-            try:
+            with suppress(Exception):
                 client.disconnect()
-            except Exception:
-                pass
-        try:
+        with suppress(Exception):
             loop.close()
-        except Exception:
-            pass
         raise
 
 
@@ -104,10 +94,8 @@ def _disconnect_worker_client(client: Any) -> None:
         client.disconnect()
     finally:
         if loop is not None:
-            try:
+            with suppress(Exception):
                 loop.close()
-            except Exception:
-                pass
 
 
 def _cleanup_isolated_worker_session(cfg: Any, worker_id: str):

@@ -187,7 +187,8 @@
   min-width: 140px;
 }
 
-#admin-open-channel-manage-link {
+#admin-open-channel-manage-link,
+#admin-open-recovery-link {
   min-height: 42px;
   min-width: 140px;
   border: 1px solid var(--border);
@@ -204,7 +205,8 @@
   justify-content: center;
 }
 
-#admin-open-channel-manage-link:hover {
+#admin-open-channel-manage-link:hover,
+#admin-open-recovery-link:hover {
   background: #f7fbff;
   border-color: var(--border-strong);
   box-shadow: var(--shadow-soft);
@@ -237,6 +239,30 @@
 
 .admin-login-status:empty {
   margin-bottom: 0;
+}
+
+.admin-login-page {
+  max-width: 440px;
+  min-height: calc(100vh - 66px);
+  margin: 0 auto;
+  display: grid;
+  align-items: center;
+}
+
+.admin-login-panel {
+  padding: 24px;
+}
+
+.admin-login-panel h1 {
+  margin: 0;
+  font-size: 1.45rem;
+  line-height: 1.2;
+}
+
+.admin-login-actions {
+  margin-top: 14px;
+  display: flex;
+  justify-content: flex-end;
 }
 
 .admin-dialog label {

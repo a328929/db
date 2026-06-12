@@ -5,7 +5,6 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-
 _SCRIPT_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
     / "tools"

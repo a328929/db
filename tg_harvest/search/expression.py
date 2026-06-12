@@ -1,11 +1,10 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any
 
 from tg_harvest.domain.normalize import normalize_search_term
-
 
 QUERY_SYMBOLS_MAP = str.maketrans(
     {
@@ -41,17 +40,17 @@ class ExprToken:
 class SearchExprNode:
     kind: str
     value: str = ""
-    left: Optional["SearchExprNode"] = None
-    right: Optional["SearchExprNode"] = None
+    left: SearchExprNode | None = None
+    right: SearchExprNode | None = None
 
 
 def norm_for_search(term: str) -> str:
     return normalize_search_term(term)
 
 
-def lex_query(query: str) -> List[ExprToken]:
+def lex_query(query: str) -> list[ExprToken]:
     q = (query or "").translate(QUERY_SYMBOLS_MAP)
-    tokens: List[ExprToken] = []
+    tokens: list[ExprToken] = []
     i, n = 0, len(q)
     while i < n:
         ch = q[i]
@@ -80,7 +79,7 @@ def lex_query(query: str) -> List[ExprToken]:
             continue
         if ch == '"':
             i += 1
-            buf: List[str] = []
+            buf: list[str] = []
             closed = False
             while i < n:
                 c = q[i]
@@ -101,7 +100,7 @@ def lex_query(query: str) -> List[ExprToken]:
                 tokens.append(ExprToken(TOKEN_PHRASE, term))
             continue
 
-        buf: List[str] = []
+        buf: list[str] = []
         while i < n and (not q[i].isspace()) and q[i] not in '+-/()"':
             buf.append(q[i])
             i += 1
@@ -111,7 +110,7 @@ def lex_query(query: str) -> List[ExprToken]:
     return tokens
 
 
-def parse_query(raw_query: str) -> Optional[SearchExprNode]:
+def parse_query(raw_query: str) -> SearchExprNode | None:
     normalized_query = (raw_query or "").strip()
     if not normalized_query:
         return None
@@ -182,7 +181,7 @@ class _SearchExprParser:
             raise ValueError("存在多余的右括号")
         raise ValueError("搜索表达式存在非法位置的操作符")
 
-    def _peek(self) -> Optional[ExprToken]:
+    def _peek(self) -> ExprToken | None:
         if self.index >= len(self.tokens):
             return None
         return self.tokens[self.index]
@@ -196,8 +195,8 @@ class _SearchExprParser:
 
 
 def compile_like_clause(
-    expr: Optional[SearchExprNode], *, content_expr: str
-) -> Tuple[str, List[Any]]:
+    expr: SearchExprNode | None, *, content_expr: str
+) -> tuple[str, list[Any]]:
     if expr is None:
         return "", []
     sql, params = _compile_like_node(expr, content_expr)
@@ -206,7 +205,7 @@ def compile_like_clause(
 
 def _compile_like_node(
     node: SearchExprNode, content_expr: str
-) -> Tuple[str, List[Any]]:
+) -> tuple[str, list[Any]]:
     if node.kind in {"TERM", "PHRASE"}:
         like_val = f"%{_escape_like_value(node.value.lower())}%"
         return f"({content_expr})", [like_val]
@@ -236,7 +235,7 @@ def _escape_like_value(value: str) -> str:
     )
 
 
-def build_candidate_fts_match(expr: Optional[SearchExprNode]) -> str:
+def build_candidate_fts_match(expr: SearchExprNode | None) -> str:
     mandatory_terms = [
         term for term in _collect_mandatory_terms(expr) if _supports_trigram_fts(term)
     ]
@@ -250,13 +249,13 @@ def _supports_trigram_fts(term: str) -> bool:
     return len(compact) >= 3
 
 
-def _collect_mandatory_terms(expr: Optional[SearchExprNode]) -> List[str]:
+def _collect_mandatory_terms(expr: SearchExprNode | None) -> list[str]:
     if expr is None:
         return []
     return list(_mandatory_terms(expr))
 
 
-def _mandatory_terms(node: SearchExprNode) -> Tuple[str, ...]:
+def _mandatory_terms(node: SearchExprNode) -> tuple[str, ...]:
     if node.kind in {"TERM", "PHRASE"}:
         return (node.value,)
     if node.kind == "NOT":
@@ -270,8 +269,8 @@ def _mandatory_terms(node: SearchExprNode) -> Tuple[str, ...]:
     return ()
 
 
-def _merge_unique(left: Sequence[str], right: Sequence[str]) -> Tuple[str, ...]:
-    merged: List[str] = []
+def _merge_unique(left: Sequence[str], right: Sequence[str]) -> tuple[str, ...]:
+    merged: list[str] = []
     seen = set()
     for term in list(left) + list(right):
         if term in seen:
@@ -289,7 +288,7 @@ def to_fts_match(raw_query: str) -> str:
     return build_candidate_fts_match(parse_query(raw_query))
 
 
-def expr_to_debug_dict(expr: Optional[SearchExprNode]) -> Optional[Dict[str, Any]]:
+def expr_to_debug_dict(expr: SearchExprNode | None) -> dict[str, Any] | None:
     if expr is None:
         return None
     return {

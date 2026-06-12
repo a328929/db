@@ -2,9 +2,11 @@ import unittest
 from datetime import datetime
 from types import SimpleNamespace
 
-from tg_harvest.ingest.parse import MessageParseError
-from tg_harvest.ingest.parse import MessageParser
-from tg_harvest.ingest.parse import resolve_target_entities
+from tg_harvest.ingest.parse import (
+    MessageParseError,
+    MessageParser,
+    resolve_target_entities,
+)
 
 
 class _FakeDialog:

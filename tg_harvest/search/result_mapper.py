@@ -1,5 +1,5 @@
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any
 
 from tg_harvest.web.telegram_links import build_telegram_open_link
 
@@ -37,7 +37,7 @@ def _build_snippet(row: sqlite3.Row, max_len: int = 120) -> str:
 
 def _build_search_display_fields(
     row: sqlite3.Row, detail_level: str = "lite"
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     fields = {
         "file_name": _row_value(row, "file_name", "") or "",
         "title": build_result_title(row),
@@ -49,10 +49,13 @@ def _build_search_display_fields(
 
 
 def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
-    return row[key] if key in row.keys() else default
+    try:
+        return row[key]
+    except (IndexError, KeyError):
+        return default
 
 
-def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> Dict[str, Any]:
+def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> dict[str, Any]:
     chat_id = int(row["chat_id"])
     message_id = int(row["message_id"])
     file_size_raw = _row_value(row, "file_size")
@@ -76,9 +79,9 @@ def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> Dict[str, A
 
 
 def _map_search_items(
-    rows: List[sqlite3.Row], detail_level: str = "lite"
-) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
+    rows: list[sqlite3.Row], detail_level: str = "lite"
+) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
     for row in rows:
         items.append(_map_search_row(row, detail_level=detail_level))
     return items

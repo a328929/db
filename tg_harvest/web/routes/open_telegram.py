@@ -1,10 +1,9 @@
-# -*- coding: utf-8 -*-
 import sqlite3
 from contextlib import closing
-from typing import Optional
 
-from flask import jsonify, render_template, request
+from flask import render_template, request
 
+from tg_harvest.web.responses import json_error, logged_json_error
 from tg_harvest.web.telegram_links import build_telegram_link_bundle
 
 
@@ -30,7 +29,7 @@ def _parse_nonzero_int(raw_value: str, field_name: str) -> int:
 
 def _load_message_open_meta(
     get_conn_fn, chat_id: int, message_id: int
-) -> tuple[Optional[str], Optional[str], Optional[str], bool]:
+) -> tuple[str | None, str | None, str | None, bool]:
     with closing(get_conn_fn()) as conn:
         cur = conn.cursor()
         try:
@@ -72,18 +71,20 @@ def register_open_telegram_routes(app, *, logger, get_conn_fn) -> None:
                 request.args.get("message_id", ""), "message_id"
             )
         except ValueError as exc:
-            return jsonify({"ok": False, "error": str(exc)}), 400
+            return json_error(str(exc), 400)
 
         try:
             chat_title, chat_username, chat_type, single_message = (
                 _load_message_open_meta(get_conn_fn, chat_id, message_id)
             )
         except sqlite3.Error:
-            logger.exception("读取 Telegram 跳转元数据失败")
-            return jsonify({"ok": False, "error": "读取跳转元数据失败"}), 500
+            return logged_json_error(
+                logger,
+                "读取 Telegram 跳转元数据失败",
+                "读取跳转元数据失败",
+            )
         except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return logged_json_error(logger, "系统异常", "系统异常")
 
         bundle = build_telegram_link_bundle(
             chat_id=chat_id,

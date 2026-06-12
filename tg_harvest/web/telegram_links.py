@@ -1,7 +1,5 @@
-# -*- coding: utf-8 -*-
 from dataclasses import dataclass
-from typing import Optional
-from urllib.parse import urlencode, quote
+from urllib.parse import quote, urlencode
 
 
 @dataclass(frozen=True)
@@ -18,15 +16,15 @@ class TelegramChatLinkBundle:
     web_link: str
 
 
-def normalize_chat_username(chat_username: Optional[str]) -> str:
+def normalize_chat_username(chat_username: str | None) -> str:
     return str(chat_username or "").strip().lstrip("@")
 
 
-def normalize_chat_type(chat_type: Optional[str]) -> str:
+def normalize_chat_type(chat_type: str | None) -> str:
     return str(chat_type or "").strip().lower().lstrip("_")
 
 
-def is_direct_openmessage_chat_type(chat_type: Optional[str]) -> bool:
+def is_direct_openmessage_chat_type(chat_type: str | None) -> bool:
     return normalize_chat_type(chat_type) in {"chat", "user"}
 
 
@@ -57,8 +55,8 @@ def build_telegram_web_link(
     *,
     chat_id: int,
     message_id: int,
-    chat_username: Optional[str] = None,
-    chat_type: Optional[str] = None,
+    chat_username: str | None = None,
+    chat_type: str | None = None,
     single_message: bool = False,
 ) -> str:
     username = normalize_chat_username(chat_username)
@@ -79,8 +77,8 @@ def build_telegram_app_link(
     *,
     chat_id: int,
     message_id: int,
-    chat_username: Optional[str] = None,
-    chat_type: Optional[str] = None,
+    chat_username: str | None = None,
+    chat_type: str | None = None,
     single_message: bool = False,
 ) -> str:
     username = normalize_chat_username(chat_username)
@@ -103,8 +101,8 @@ def build_telegram_fallback_app_link(
     *,
     chat_id: int,
     message_id: int,
-    chat_username: Optional[str] = None,
-    chat_type: Optional[str] = None,
+    chat_username: str | None = None,
+    chat_type: str | None = None,
     single_message: bool = False,
 ) -> str:
     username = normalize_chat_username(chat_username)
@@ -126,7 +124,7 @@ def build_telegram_open_link(*, chat_id: int, message_id: int) -> str:
     )
 
 
-def build_telegram_chat_web_link(*, chat_username: Optional[str] = None) -> str:
+def build_telegram_chat_web_link(*, chat_username: str | None = None) -> str:
     username = normalize_chat_username(chat_username)
     if not username:
         return ""
@@ -134,7 +132,7 @@ def build_telegram_chat_web_link(*, chat_username: Optional[str] = None) -> str:
 
 
 def build_telegram_chat_app_link(
-    *, chat_id: int, chat_username: Optional[str] = None
+    *, chat_id: int, chat_username: str | None = None
 ) -> str:
     username = normalize_chat_username(chat_username)
     if username:
@@ -143,7 +141,7 @@ def build_telegram_chat_app_link(
 
 
 def build_telegram_chat_link_bundle(
-    *, chat_id: int, chat_username: Optional[str] = None
+    *, chat_id: int, chat_username: str | None = None
 ) -> TelegramChatLinkBundle:
     return TelegramChatLinkBundle(
         app_link=build_telegram_chat_app_link(
@@ -158,8 +156,8 @@ def build_telegram_link_bundle(
     *,
     chat_id: int,
     message_id: int,
-    chat_username: Optional[str] = None,
-    chat_type: Optional[str] = None,
+    chat_username: str | None = None,
+    chat_type: str | None = None,
     single_message: bool = False,
 ) -> TelegramLinkBundle:
     return TelegramLinkBundle(

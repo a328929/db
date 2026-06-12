@@ -1,14 +1,15 @@
 from functools import partial
 
 from tg_harvest.app.services import RouteRegistryServices
+from tg_harvest.web.auth import register_auth_routes
 from tg_harvest.web.routes.admin import register_admin_routes
 from tg_harvest.web.routes.channels import register_channel_routes
+from tg_harvest.web.routes.context import register_context_routes
 from tg_harvest.web.routes.meta import register_meta_routes
 from tg_harvest.web.routes.open_telegram import register_open_telegram_routes
 from tg_harvest.web.routes.pages import register_page_routes
+from tg_harvest.web.routes.recovery import register_recovery_routes
 from tg_harvest.web.routes.search import register_search_routes
-from tg_harvest.web.auth import register_auth_routes
-from tg_harvest.web.routes.context import register_context_routes
 
 
 def register_all_routes(
@@ -89,5 +90,25 @@ def register_all_routes(
         ),
         admin_start_restricted_chats_scan_job_thread_fn=(
             services.admin_start_restricted_chats_scan_job_thread_fn
+        ),
+    )
+
+    register_recovery_routes(
+        app,
+        logger=services.logger,
+        get_conn_fn=services.get_conn_fn,
+        cfg=services.admin.cfg,
+        list_recovery_chat_candidates_fn=services.list_recovery_chat_candidates_fn,
+        build_recovery_overview_fn=services.build_recovery_overview_fn,
+        build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
+        admin_try_create_exclusive_job_fn=services.admin.admin_try_create_exclusive_job_fn,
+        admin_job_get_snapshot_fn=services.admin.admin_job_get_snapshot_fn,
+        admin_job_append_log_fn=services.admin.admin_job_append_log_fn,
+        admin_job_set_status_fn=services.admin.admin_job_set_status_fn,
+        admin_start_recovery_scan_job_thread_fn=(
+            services.admin_start_recovery_scan_job_thread_fn
+        ),
+        admin_start_recovery_restore_job_thread_fn=(
+            services.admin_start_recovery_restore_job_thread_fn
         ),
     )

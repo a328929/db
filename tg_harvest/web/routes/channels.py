@@ -1,10 +1,14 @@
-# -*- coding: utf-8 -*-
 import sqlite3
 from contextlib import closing
 
 from flask import jsonify, render_template
 
-from tg_harvest.web.auth import admin_login_required
+from tg_harvest.web.auth import admin_login_required, admin_page_login_required
+from tg_harvest.web.responses import (
+    create_exclusive_job_or_response,
+    created_job_snapshot_response,
+    logged_json_error,
+)
 
 
 def _with_chat_links(rows, build_telegram_chat_link_bundle_fn):
@@ -20,6 +24,16 @@ def _with_chat_links(rows, build_telegram_chat_link_bundle_fn):
         item["has_public_link"] = bool(item["telegram_web_link"])
         items.append(item)
     return items
+
+
+def _load_linked_channel_items(get_conn_fn, list_fn, build_link_bundle_fn, *args, **kwargs):
+    with closing(get_conn_fn()) as conn:
+        rows = list_fn(conn, *args, **kwargs)
+    return _with_chat_links(rows, build_link_bundle_fn)
+
+
+def _channel_items_payload(items):
+    return {"ok": True, "items": items, "count": len(items)}
 
 
 def register_channel_routes(
@@ -42,6 +56,7 @@ def register_channel_routes(
     admin_start_restricted_chats_scan_job_thread_fn,
 ) -> None:
     @app.get("/admin/channels")
+    @admin_page_login_required
     def admin_channels_page():
         return render_template("admin_channels.html")
 
@@ -52,61 +67,58 @@ def register_channel_routes(
             from flask import request
 
             sort = request.args.get("sort", "")
-            with closing(get_conn_fn()) as conn:
-                channels = list_database_channels_fn(conn, sort=sort)
-            channels = _with_chat_links(channels, build_telegram_chat_link_bundle_fn)
+            channels = _load_linked_channel_items(
+                get_conn_fn,
+                list_database_channels_fn,
+                build_telegram_chat_link_bundle_fn,
+                sort=sort,
+            )
             return jsonify({"ok": True, "channels": channels})
         except sqlite3.Error:
-            logger.exception("读取频道管理列表失败")
-            return jsonify({"ok": False, "error": "读取频道管理列表失败"}), 500
+            return logged_json_error(
+                logger,
+                "读取频道管理列表失败",
+                "读取频道管理列表失败",
+            )
         except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    def _scan_result_response(list_fn, log_message: str):
+        try:
+            items = _load_linked_channel_items(
+                get_conn_fn,
+                list_fn,
+                build_telegram_chat_link_bundle_fn,
+            )
+            return jsonify(_channel_items_payload(items))
+        except sqlite3.Error:
+            return logged_json_error(logger, log_message, log_message)
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
 
     @app.get("/api/admin/channels/missing")
     @admin_login_required
     def api_admin_missing_channels():
-        try:
-            with closing(get_conn_fn()) as conn:
-                rows = list_missing_chat_scan_results_fn(conn)
-            items = _with_chat_links(rows, build_telegram_chat_link_bundle_fn)
-            return jsonify({"ok": True, "items": items, "count": len(items)})
-        except sqlite3.Error:
-            logger.exception("读取未入库群组扫描结果失败")
-            return jsonify({"ok": False, "error": "读取未入库群组扫描结果失败"}), 500
-        except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+        return _scan_result_response(
+            list_missing_chat_scan_results_fn,
+            "读取未入库群组扫描结果失败",
+        )
 
     @app.get("/api/admin/channels/absent")
     @admin_login_required
     def api_admin_absent_channels():
-        try:
-            with closing(get_conn_fn()) as conn:
-                rows = list_absent_chat_scan_results_fn(conn)
-            items = _with_chat_links(rows, build_telegram_chat_link_bundle_fn)
-            return jsonify({"ok": True, "items": items, "count": len(items)})
-        except sqlite3.Error:
-            logger.exception("读取账号外数据库群组扫描结果失败")
-            return jsonify({"ok": False, "error": "读取账号外数据库群组扫描结果失败"}), 500
-        except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+        return _scan_result_response(
+            list_absent_chat_scan_results_fn,
+            "读取账号外数据库群组扫描结果失败",
+        )
 
     @app.get("/api/admin/channels/restricted")
     @admin_login_required
     def api_admin_restricted_channels():
-        try:
-            with closing(get_conn_fn()) as conn:
-                rows = list_restricted_chat_scan_results_fn(conn)
-            items = _with_chat_links(rows, build_telegram_chat_link_bundle_fn)
-            return jsonify({"ok": True, "items": items, "count": len(items)})
-        except sqlite3.Error:
-            logger.exception("读取内容限制群组扫描结果失败")
-            return jsonify({"ok": False, "error": "读取内容限制群组扫描结果失败"}), 500
-        except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+        return _scan_result_response(
+            list_restricted_chat_scan_results_fn,
+            "读取内容限制群组扫描结果失败",
+        )
 
     def _create_scan_job_response(
         job_type,
@@ -115,26 +127,14 @@ def register_channel_routes(
         received_log,
         start_thread_fn,
     ):
-        job, existing_job = admin_try_create_exclusive_job_fn(
+        job_id, error_response = create_exclusive_job_or_response(
+            admin_try_create_exclusive_job_fn,
             job_type,
             target_chat_id=None,
             target_label=target_label,
         )
-        if existing_job is not None:
-            return (
-                jsonify(
-                    {
-                        "ok": False,
-                        "error": "当前已有进行中的任务，请等待完成后再试",
-                        "existing_job": existing_job,
-                    }
-                ),
-                409,
-            )
-
-        job_id = str((job or {}).get("job_id") or "")
-        if not job_id:
-            return jsonify({"ok": False, "error": "任务创建失败"}), 500
+        if error_response is not None:
+            return error_response
 
         admin_job_append_log_fn(job_id, received_log)
         start_thread_fn(
@@ -144,10 +144,7 @@ def register_channel_routes(
             admin_job_set_status_fn=admin_job_set_status_fn,
             admin_job_append_log_fn=admin_job_append_log_fn,
         )
-        snapshot = admin_job_get_snapshot_fn(job_id)
-        if snapshot is None:
-            return jsonify({"ok": False, "error": "任务创建失败"}), 500
-        return jsonify({"ok": True, "job": snapshot})
+        return created_job_snapshot_response(job_id, admin_job_get_snapshot_fn)
 
     @app.post("/api/admin/channels/missing/scan")
     @admin_login_required

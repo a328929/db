@@ -1,6 +1,37 @@
 (function () {
   'use strict';
 
+  var adminCsrfToken = '';
+
+  function setAdminCsrfToken(token) {
+    adminCsrfToken = typeof token === 'string' ? token : '';
+  }
+
+  function getAdminCsrfToken() {
+    return adminCsrfToken;
+  }
+
+  function isAdminWriteRequest(url, method) {
+    var normalizedMethod = String(method || 'GET').toUpperCase();
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].indexOf(normalizedMethod) === -1) {
+      return false;
+    }
+    var normalizedUrl = String(url || '');
+    if (normalizedUrl.indexOf('/api/admin/') !== 0) {
+      return false;
+    }
+    return normalizedUrl !== '/api/admin/auth/login';
+  }
+
+  function buildFetchHeaders(url, requestOptions) {
+    var headers = Object.assign({}, requestOptions.headers || {});
+    var method = requestOptions.method || 'GET';
+    if (isAdminWriteRequest(url, method) && adminCsrfToken) {
+      headers['X-CSRF-Token'] = adminCsrfToken;
+    }
+    return headers;
+  }
+
   function normalizeChats(payload) {
     function normalizeChatItem(chat) {
       if (!chat || typeof chat !== 'object') {
@@ -127,6 +158,15 @@
     }
     pageElement.style.opacity = interactive ? '1' : '0.1';
     pageElement.style.pointerEvents = interactive ? 'auto' : 'none';
+    if (interactive) {
+      pageElement.removeAttribute('aria-hidden');
+      pageElement.removeAttribute('inert');
+      pageElement.inert = false;
+      return;
+    }
+    pageElement.setAttribute('aria-hidden', 'true');
+    pageElement.setAttribute('inert', '');
+    pageElement.inert = true;
   }
 
   function getVisibleDialog(dialogs) {
@@ -477,6 +517,32 @@
     syncClearLogsButtonVisibility(elements);
   }
 
+  async function readResponseErrorPayload(response) {
+    try {
+      var payload = await response.json();
+      return payload && typeof payload === 'object' ? payload : {};
+    } catch (_ignoreErrorPayload) {
+      return {};
+    }
+  }
+
+  function buildResponseErrorMessage(response, payload) {
+    var serverMessage = '';
+    if (payload && typeof payload.error === 'string' && payload.error.trim()) {
+      serverMessage = payload.error.trim();
+    }
+    if (serverMessage) {
+      return serverMessage;
+    }
+    if (response.status === 429) {
+      return '请求太快了，请稍等一会儿再试';
+    }
+    if (response.status === 500 || response.status === 503) {
+      return '系统异常，请 15 秒后再试';
+    }
+    return '操作失败 (HTTP ' + response.status + ')';
+  }
+
   async function fetchJSON(url, options) {
     var requestOptions = options || {};
     var onUnauthorized = requestOptions.onUnauthorized;
@@ -485,7 +551,7 @@
     try {
       response = await fetch(url, {
         method: requestOptions.method || 'GET',
-        headers: requestOptions.headers || {},
+        headers: buildFetchHeaders(url, requestOptions),
         body: requestOptions.body
       });
     } catch (_networkError) {
@@ -500,27 +566,18 @@
         throw new Error('未授权，请先登录');
       }
 
-      var errorMessage = '操作失败 ';
-      if (response.status === 429) {
-        errorMessage = '请求太快了，请稍等一会儿再试';
-      } else if (response.status === 500 || response.status === 503) {
-        errorMessage = '数据库忙或系统异常，请 15 秒后再试';
-      } else {
-        errorMessage += '(HTTP ' + response.status + ')';
-        try {
-          var errorPayload = await response.json();
-          if (errorPayload && typeof errorPayload.error === 'string' && errorPayload.error.trim()) {
-            errorMessage += ' ' + errorPayload.error.trim();
-          }
-        } catch (_ignoreErrorPayload) {
-          // Keep the HTTP status message when the error body is not JSON.
-        }
-      }
-      throw new Error(errorMessage);
+      throw new Error(buildResponseErrorMessage(
+        response,
+        await readResponseErrorPayload(response)
+      ));
     }
 
     try {
-      return await response.json();
+      var payload = await response.json();
+      if (payload && typeof payload.csrf_token === 'string') {
+        setAdminCsrfToken(payload.csrf_token);
+      }
+      return payload;
     } catch (_parseError) {
       throw new Error('响应 JSON 解析失败');
     }
@@ -549,6 +606,7 @@
     clearLogs: clearLogs,
     ensurePlaceholder: ensurePlaceholder,
     fetchJSON: fetchJSON,
+    getAdminCsrfToken: getAdminCsrfToken,
     getConfirmationTarget: getConfirmationTarget,
     getCreatedJobId: getCreatedJobId,
     getFocusableElements: getFocusableElements,
@@ -572,6 +630,7 @@
     setElementHidden: setElementHidden,
     setStatsLineText: setStatsLineText,
     setPageInteractionState: setPageInteractionState,
+    setAdminCsrfToken: setAdminCsrfToken,
     syncClearLogsButtonVisibility: syncClearLogsButtonVisibility,
     trapFocusWithin: trapFocusWithin
   };

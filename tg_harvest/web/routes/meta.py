@@ -1,8 +1,9 @@
-# -*- coding: utf-8 -*-
 import sqlite3
 from contextlib import closing
 
 from flask import jsonify
+
+from tg_harvest.web.responses import logged_json_error
 
 
 def register_meta_routes(app, *, logger, get_conn_fn, build_meta_payload_fn) -> None:
@@ -15,8 +16,6 @@ def register_meta_routes(app, *, logger, get_conn_fn, build_meta_payload_fn) -> 
             response.headers["Cache-Control"] = "no-store"
             return response
         except sqlite3.Error:
-            logger.exception("读取群列表失败")
-            return jsonify({"ok": False, "error": "读取群列表失败"}), 500
+            return logged_json_error(logger, "读取群列表失败", "读取群列表失败")
         except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return logged_json_error(logger, "系统异常", "系统异常")

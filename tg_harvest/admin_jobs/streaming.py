@@ -1,8 +1,8 @@
-# -*- coding: utf-8 -*-
 import logging
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Any
 
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.ingest.parse import HarvestCounters
@@ -12,14 +12,14 @@ from tg_harvest.ingest.parse import HarvestCounters
 class StreamedEntityHarvestResult:
     chat_id: int
     chat_title: str
-    chat_username: Optional[str]
+    chat_username: str | None
     counters: Any
     touched_groups: set[int]
     first_sync: bool
     submitted_message_count: int
 
 
-def _entity_chat_id(entity: Any, fallback_chat_id: Optional[int]) -> int:
+def _entity_chat_id(entity: Any, fallback_chat_id: int | None) -> int:
     raw_chat_id = (
         fallback_chat_id if fallback_chat_id is not None else getattr(entity, "id", None)
     )
@@ -30,7 +30,7 @@ def _entity_chat_id(entity: Any, fallback_chat_id: Optional[int]) -> int:
 
 
 def _entity_chat_title(
-    entity: Any, fallback_chat_title: Optional[str], chat_id: int
+    entity: Any, fallback_chat_title: str | None, chat_id: int
 ) -> str:
     return str(
         getattr(entity, "title", None)
@@ -61,9 +61,9 @@ def stream_entity_harvest_to_writer(
     entity: Any,
     idx: int,
     total: int,
-    fallback_chat_id: Optional[int] = None,
-    fallback_chat_title: Optional[str] = None,
-    fallback_chat_username: Optional[str] = None,
+    fallback_chat_id: int | None = None,
+    fallback_chat_title: str | None = None,
+    fallback_chat_username: str | None = None,
     skip_postprocess_if_unchanged: bool = False,
     enable_dedupe: bool = True,
 ) -> StreamedEntityHarvestResult:

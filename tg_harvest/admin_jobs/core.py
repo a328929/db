@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
 import contextvars
 import logging
 import os
-import sqlite3
 import threading
 import uuid
 from contextlib import closing
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 from tg_harvest.admin_jobs import runtime as _job_runtime
 from tg_harvest.admin_jobs.store import (
@@ -29,11 +27,11 @@ job_log_passthrough_enabled: contextvars.ContextVar[bool] = contextvars.ContextV
 )
 
 # 任务真相源已迁移到 SQLite；内存仅保留轻量锁与递增日志序号缓存。
-ADMIN_JOBS: Dict[str, Dict[str, Any]] = {}
+ADMIN_JOBS: dict[str, dict[str, Any]] = {}
 ADMIN_JOBS_LOCK = threading.RLock()
 
 
-def _admin_cache_entry_locked(job_id: str) -> Dict[str, Any]:
+def _admin_cache_entry_locked(job_id: str) -> dict[str, Any]:
     entry = ADMIN_JOBS.get(job_id)
     if not isinstance(entry, dict):
         entry = {
@@ -49,7 +47,7 @@ def _admin_cache_entry_locked(job_id: str) -> Dict[str, Any]:
 
 
 def _admin_job_trim_locked() -> None:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     with closing(_admin_connect()) as conn:
         cur = conn.cursor()
         try:
@@ -64,7 +62,7 @@ def _admin_job_trim_locked() -> None:
             if not rows:
                 return
 
-            to_delete: List[str] = []
+            to_delete: list[str] = []
             terminal_statuses = {"done", "error"}
             remaining = len(rows)
 
@@ -122,7 +120,7 @@ def _admin_make_job_log_handler(job_id: str, **kwargs) -> logging.Handler:
     return _AdminJobThreadLogHandler(job_id=job_id)
 
 
-def _admin_finalize_created_job_locked(job_id: str) -> Dict[str, Any]:
+def _admin_finalize_created_job_locked(job_id: str) -> dict[str, Any]:
     cache_entry = _admin_cache_entry_locked(job_id)
     cache_entry["next_log_seq"] = 1
     _admin_job_trim_locked()
@@ -135,9 +133,9 @@ def _admin_finalize_created_job_locked(job_id: str) -> Dict[str, Any]:
 
 def _admin_job_create(
     job_type: str,
-    target_chat_id: Optional[int] = None,
-    target_label: Optional[str] = None,
-) -> Dict[str, Any]:
+    target_chat_id: int | None = None,
+    target_label: str | None = None,
+) -> dict[str, Any]:
     with ADMIN_JOBS_LOCK:
         created_at = _job_runtime._admin_now_iso()
         job_id = uuid.uuid4().hex
@@ -157,10 +155,11 @@ def _admin_job_create(
 
 def _admin_try_create_exclusive_job(
     job_type: str,
-    target_chat_id: Optional[int] = None,
-    target_label: Optional[str] = None,
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    target_chat_id: int | None = None,
+    target_label: str | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     with ADMIN_JOBS_LOCK:
+        _admin_recover_interrupted_jobs_locked(include_foreign_owner=False)
         created_at = _job_runtime._admin_now_iso()
         job_id = uuid.uuid4().hex
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
@@ -172,7 +171,13 @@ def _admin_try_create_exclusive_job(
                 cur.execute("BEGIN IMMEDIATE")
                 cur.execute(
                     """
-                    SELECT job_id, job_type, status, target_chat_id, target_label
+                    SELECT
+                        job_id,
+                        job_type,
+                        status,
+                        target_chat_id,
+                        target_label,
+                        stop_requested
                     FROM admin_jobs
                     WHERE status IN ('queued', 'running')
                     ORDER BY updated_at DESC
@@ -202,9 +207,10 @@ def _admin_try_create_exclusive_job(
 
 
 def _admin_create_chat_job_if_absent(
-    job_type: str, chat_id: int, target_label: Optional[str] = None
-) -> Tuple[Optional[Dict[str, Any]], Optional[Dict[str, Any]]]:
+    job_type: str, chat_id: int, target_label: str | None = None
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     with ADMIN_JOBS_LOCK:
+        _admin_recover_interrupted_jobs_locked(include_foreign_owner=False)
         created_at = _job_runtime._admin_now_iso()
         job_id = uuid.uuid4().hex
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
@@ -216,7 +222,13 @@ def _admin_create_chat_job_if_absent(
                 cur.execute("BEGIN IMMEDIATE")
                 cur.execute(
                     """
-                    SELECT job_id, job_type, status, target_chat_id, target_label
+                    SELECT
+                        job_id,
+                        job_type,
+                        status,
+                        target_chat_id,
+                        target_label,
+                        stop_requested
                     FROM admin_jobs
                     WHERE target_chat_id = ?
                       AND job_type IN ('update', 'delete')
@@ -249,23 +261,124 @@ def _admin_create_chat_job_if_absent(
 
 
 def _admin_has_any_active_job() -> bool:
-    with closing(_admin_connect()) as conn:
-        cur = conn.cursor()
-        try:
-            cur.execute(
-                """
-                SELECT 1
-                FROM admin_jobs
-                WHERE status IN ('queued', 'running')
-                LIMIT 1
-                """
-            )
-            return cur.fetchone() is not None
-        finally:
-            cur.close()
+    with ADMIN_JOBS_LOCK:
+        _admin_recover_interrupted_jobs_locked(include_foreign_owner=False)
+        with closing(_admin_connect()) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT 1
+                    FROM admin_jobs
+                    WHERE status IN ('queued', 'running')
+                    LIMIT 1
+                    """
+                )
+                return cur.fetchone() is not None
+            finally:
+                cur.close()
 
 
-def _admin_job_append_log(job_id: str, message: str) -> Optional[Dict[str, Any]]:
+def _admin_get_active_job() -> dict[str, Any] | None:
+    with ADMIN_JOBS_LOCK:
+        _admin_recover_interrupted_jobs_locked(include_foreign_owner=False)
+        with closing(_admin_connect()) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT
+                        job_id,
+                        job_type,
+                        status,
+                        target_chat_id,
+                        target_label,
+                        stop_requested
+                    FROM admin_jobs
+                    WHERE status IN ('queued', 'running')
+                    ORDER BY updated_at DESC
+                    LIMIT 1
+                    """
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return None
+                return _admin_active_job_summary_from_row(row)
+            finally:
+                cur.close()
+
+
+def _admin_job_stop_requested(job_id: str) -> bool:
+    with ADMIN_JOBS_LOCK:
+        with closing(_admin_connect()) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT stop_requested
+                    FROM admin_jobs
+                    WHERE job_id = ?
+                    LIMIT 1
+                    """,
+                    (str(job_id),),
+                )
+                row = cur.fetchone()
+                return row is not None and int(row["stop_requested"] or 0) == 1
+            finally:
+                cur.close()
+
+
+def _admin_request_job_stop(job_id: str) -> tuple[bool, str | None]:
+    with ADMIN_JOBS_LOCK:
+        updated_at = _job_runtime._admin_now_iso()
+        owner_instance_id = _job_runtime._admin_runtime_instance_id()
+        owner_pid = os.getpid()
+        with closing(_admin_connect()) as conn:
+            cur = conn.cursor()
+            try:
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM admin_jobs
+                    WHERE job_id = ?
+                    LIMIT 1
+                    """,
+                    (str(job_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False, "任务不存在"
+
+                status = str(row["status"] or "").lower()
+                if status not in {"queued", "running"}:
+                    return False, "任务已结束，不能停止"
+
+                cur.execute(
+                    """
+                    UPDATE admin_jobs
+                    SET stop_requested = 1,
+                        updated_at = ?,
+                        owner_instance_id = ?,
+                        owner_pid = ?,
+                        heartbeat_at = ?
+                    WHERE job_id = ?
+                      AND status IN ('queued', 'running')
+                    """,
+                    (
+                        updated_at,
+                        owner_instance_id,
+                        int(owner_pid),
+                        updated_at,
+                        str(job_id),
+                    ),
+                )
+                conn.commit()
+                return int(cur.rowcount or 0) > 0, None
+            finally:
+                cur.close()
+
+
+def _admin_job_append_log(job_id: str, message: str) -> dict[str, Any] | None:
     with ADMIN_JOBS_LOCK:
         snapshot = _admin_job_get_snapshot(job_id)
         if snapshot is None:
@@ -333,8 +446,8 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
 def _admin_job_update_progress(
     job_id: str,
     current: int,
-    total: Optional[int] = None,
-    stage: Optional[str] = None,
+    total: int | None = None,
+    stage: str | None = None,
     log_step: int = 1000,
     force_log: bool = False,
     auto_log: bool = True,
@@ -478,7 +591,7 @@ def _admin_job_heartbeat(job_id: str) -> bool:
                 cur.close()
 
 
-def _admin_job_get_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
+def _admin_job_get_snapshot(job_id: str) -> dict[str, Any] | None:
     row = _admin_fetch_job_snapshot_row(job_id)
     if row is None:
         return None
@@ -491,7 +604,7 @@ def _admin_job_get_snapshot(job_id: str) -> Optional[Dict[str, Any]]:
 
 def _admin_job_get_logs(
     job_id: str, after_seq: int = 0
-) -> Optional[List[Dict[str, Any]]]:
+) -> list[dict[str, Any]] | None:
     snapshot = _admin_job_get_snapshot(job_id)
     if snapshot is None:
         return None
@@ -521,16 +634,16 @@ def _admin_job_get_logs(
             cur.close()
 
 
-def _admin_recover_interrupted_jobs() -> int:
-    with ADMIN_JOBS_LOCK:
-        now = datetime.now(timezone.utc)
-        current_instance_id = _job_runtime._admin_runtime_instance_id()
-        cutoff = (
-            now - timedelta(seconds=_job_runtime.ADMIN_JOB_STALE_AFTER_SECONDS)
-        ).isoformat()
-        with closing(_admin_connect()) as conn:
-            cur = conn.cursor()
-            try:
+def _admin_recover_interrupted_jobs_locked(*, include_foreign_owner: bool) -> int:
+    now = datetime.now(UTC)
+    current_instance_id = _job_runtime._admin_runtime_instance_id()
+    cutoff = (
+        now - timedelta(seconds=_job_runtime.ADMIN_JOB_STALE_AFTER_SECONDS)
+    ).isoformat()
+    with closing(_admin_connect()) as conn:
+        cur = conn.cursor()
+        try:
+            if include_foreign_owner:
                 cur.execute(
                     """
                     SELECT job_id, owner_instance_id
@@ -547,19 +660,35 @@ def _admin_recover_interrupted_jobs() -> int:
                     """,
                     (cutoff, current_instance_id),
                 )
-                rows = cur.fetchall()
-            finally:
-                cur.close()
+            else:
+                cur.execute(
+                    """
+                    SELECT job_id, owner_instance_id
+                    FROM admin_jobs
+                    WHERE status IN ('queued', 'running')
+                      AND COALESCE(heartbeat_at, updated_at, created_at) < ?
+                    ORDER BY created_at ASC
+                    """,
+                    (cutoff,),
+                )
+            rows = cur.fetchall()
+        finally:
+            cur.close()
 
-        recovered = 0
-        for row in rows:
-            job_id = str(row["job_id"] or "")
-            if not job_id:
-                continue
-            _admin_job_set_status(job_id, "error")
-            _admin_job_append_log(
-                job_id,
-                "任务因服务进程重启或退出而中断；已标记为失败，请按需要重新发起。",
-            )
-            recovered += 1
-        return recovered
+    recovered = 0
+    for row in rows:
+        job_id = str(row["job_id"] or "")
+        if not job_id:
+            continue
+        _admin_job_set_status(job_id, "error")
+        _admin_job_append_log(
+            job_id,
+            "任务因服务进程重启或退出而中断；已标记为失败，请按需要重新发起。",
+        )
+        recovered += 1
+    return recovered
+
+
+def _admin_recover_interrupted_jobs() -> int:
+    with ADMIN_JOBS_LOCK:
+        return _admin_recover_interrupted_jobs_locked(include_foreign_owner=True)

@@ -1,27 +1,26 @@
-# -*- coding: utf-8 -*-
 import json
 import logging
 import re
 import unicodedata
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import Any
 
 from tg_harvest.config import AppConfig
 from tg_harvest.domain.normalize import (
-    _safe_lower_nfkc,
+    CONTACT_ID_RE,
+    INVITE_RE,
+    MENTION_RE,
+    OBF_TME_RE,
+    PHONE_RE,
+    QQ_RE,
+    URL_RE,
+    WECHAT_RE,
     _compact_for_detection,
     _light_normalize,
+    _safe_lower_nfkc,
+    make_hash,
     normalize_text_for_hash,
     normalize_text_light,
-    make_hash,
-    URL_RE,
-    INVITE_RE,
-    OBF_TME_RE,
-    MENTION_RE,
-    WECHAT_RE,
-    QQ_RE,
-    PHONE_RE,
-    CONTACT_ID_RE,
 )
 
 logger = logging.getLogger(__name__)
@@ -208,7 +207,7 @@ _DEFAULT_PROMO_RULES = {
 # =========================
 
 
-def _find_promo_rules_file() -> Optional[Path]:
+def _find_promo_rules_file() -> Path | None:
     current_file = Path(__file__).resolve()
     candidates = [
         current_file.parent.parent / "promo_rules.json",
@@ -220,12 +219,12 @@ def _find_promo_rules_file() -> Optional[Path]:
     return None
 
 
-def _load_rules_safely() -> Dict[str, Any]:
+def _load_rules_safely() -> dict[str, Any]:
     rules_file = _find_promo_rules_file()
     if rules_file is None:
         return _DEFAULT_PROMO_RULES
     try:
-        with open(rules_file, "r", encoding="utf-8") as f:
+        with open(rules_file, encoding="utf-8") as f:
             raw = json.load(f)
 
         merged = dict(_DEFAULT_PROMO_RULES)
@@ -263,7 +262,7 @@ PROMO_SCORES = _RULES["promo_scores"]
 
 
 # 预处理紧凑型关键词用于快速匹配
-def _make_compact_set(words: List[str]) -> List[str]:
+def _make_compact_set(words: list[str]) -> list[str]:
     return sorted(
         {
             re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", w).lower())
@@ -281,7 +280,7 @@ CTA_WORDS_COMPACT = _make_compact_set(CTA_WORDS)
 # =========================
 
 
-def _get_hit_stats(text: str) -> Dict[str, int]:
+def _get_hit_stats(text: str) -> dict[str, int]:
     """提取文本中的各类引流信号命中统计"""
     if not text:
         return {
@@ -330,14 +329,14 @@ def _get_hit_stats(text: str) -> Dict[str, int]:
     return hits
 
 
-def _count_compact_hits(compact_text: str, compact_keywords: List[str]) -> int:
+def _count_compact_hits(compact_text: str, compact_keywords: list[str]) -> int:
     if not compact_text:
         return 0
     # 仅统计长度 > 2 的词，防止 vx/tg 等短词在普通文本中误命中（逻辑保持与原版一致但更清晰）
     return len({k for k in compact_keywords if len(k) > 2 and k in compact_text})
 
 
-def _has_hard_signals(text: str, hits: Optional[Dict[str, int]] = None) -> bool:
+def _has_hard_signals(text: str, hits: dict[str, int] | None = None) -> bool:
     """判定是否包含明确的引流硬信号"""
     if not hits:
         hits = _get_hit_stats(text)
@@ -360,10 +359,7 @@ def _has_hard_signals(text: str, hits: Optional[Dict[str, int]] = None) -> bool:
         return True
 
     s_compact = _compact_for_detection(text)
-    if any(m in s_compact for m in COMPACT_MARKERS):
-        return True
-
-    return False
+    return bool(any(m in s_compact for m in COMPACT_MARKERS))
 
 
 # =========================
@@ -372,7 +368,7 @@ def _has_hard_signals(text: str, hits: Optional[Dict[str, int]] = None) -> bool:
 
 
 def _is_protected_caption(
-    text: str, msg_type: str, has_media: bool, hits: Dict[str, int], guard_len: int
+    text: str, msg_type: str, has_media: bool, hits: dict[str, int], guard_len: int
 ) -> bool:
     """判定是否属于受保护的短媒体标题/普通说明"""
     if not has_media or not text:
@@ -393,11 +389,7 @@ def _is_protected_caption(
         return True
 
     # 逻辑 2: 文案长度在阈值内，且关键词/提及数极低
-    if len(text) <= guard_len:
-        if hits["kw"] <= 1 and hits["mention"] <= 1:
-            return True
-
-    return False
+    return len(text) <= guard_len and hits["kw"] <= 1 and hits["mention"] <= 1
 
 
 # =========================
@@ -407,7 +399,7 @@ def _is_protected_caption(
 
 def build_single_promo_features(
     text: str, msg_type: str, has_media: bool, cfg: AppConfig
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     if int(getattr(cfg, "disable_promo_filter", 0)) == 1:
         norm_hash = normalize_text_for_hash(text)
         return {
@@ -516,7 +508,7 @@ def build_single_promo_features(
 
 def build_group_promo_features(
     captions_concat: str, item_count: int, media_sig_hash: str, cfg: AppConfig
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """媒体组广告识别"""
     if int(getattr(cfg, "disable_promo_filter", 0)) == 1:
         text = (captions_concat or "").strip()
@@ -597,7 +589,7 @@ def is_generic_media_caption(
     text: str,
     msg_type: str,
     has_media: bool,
-    promo_stats: Optional[Dict[str, int]] = None,
+    promo_stats: dict[str, int] | None = None,
     guard_len: int = 58,
 ) -> bool:
     # 保持稳定的公共接口

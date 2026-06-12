@@ -1,6 +1,5 @@
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 RUNTIME_ROOT = PROJECT_ROOT / ".runtime"
 RUNTIME_DB_DIR = RUNTIME_ROOT / "db"

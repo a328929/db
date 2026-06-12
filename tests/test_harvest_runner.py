@@ -5,8 +5,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tg_harvest.ingest import runner as harvest_runner_module
-from tg_harvest.ingest.runner import _harvest_messages_for_entity
-from tg_harvest.ingest.runner import _process_entity
+from tg_harvest.ingest.runner import (
+    _build_iter_messages_kwargs,
+    _harvest_messages_for_entity,
+    _process_entity,
+)
 
 
 class _FakeCountResult:
@@ -86,6 +89,24 @@ def _message_stream(*events):
     return _iterator
 
 
+class HarvestRunnerIterMessagesKwargsTests(unittest.TestCase):
+    def test_iter_messages_kwargs_keep_telethon_default_when_wait_time_is_auto(self) -> None:
+        self.assertEqual({"reverse": True}, _build_iter_messages_kwargs(0))
+        self.assertEqual(
+            {"reverse": True, "min_id": 10}, _build_iter_messages_kwargs(10)
+        )
+
+    def test_iter_messages_kwargs_can_override_history_wait_time(self) -> None:
+        self.assertEqual(
+            {"reverse": True, "min_id": 10, "wait_time": 0.2},
+            _build_iter_messages_kwargs(10, history_wait_time=0.2),
+        )
+        self.assertEqual(
+            {"reverse": True, "wait_time": 0.0},
+            _build_iter_messages_kwargs(0, history_wait_time=-1),
+        )
+
+
 class HarvestRunnerReliabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
@@ -117,6 +138,8 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             ),
         ), patch("tg_harvest.ingest.runner.CFG.batch_size", 2), patch(
             "tg_harvest.ingest.runner.CFG.log_every", 1000
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
         ):
             counters, _touched_groups, first_sync = _harvest_messages_for_entity(
                 self.conn, client, object(), 42
@@ -143,9 +166,10 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             "tg_harvest.ingest.runner.get_last_message_id", return_value=10
         ), patch("tg_harvest.ingest.runner.batch_upsert") as batch_upsert_mock, patch(
             "tg_harvest.ingest.runner.CFG.log_every", 1000
-        ):
-            with self.assertRaises(RuntimeError):
-                _harvest_messages_for_entity(self.conn, client, object(), 42)
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
+        ), self.assertRaises(RuntimeError):
+            _harvest_messages_for_entity(self.conn, client, object(), 42)
 
         batch_upsert_mock.assert_not_called()
         self.assertEqual(
@@ -190,9 +214,10 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             "tg_harvest.ingest.runner.get_last_message_id", return_value=10
         ), patch("tg_harvest.ingest.runner.batch_upsert") as batch_upsert_mock, patch(
             "tg_harvest.ingest.runner.CFG.log_every", 1000
-        ), self.assertLogs(level="ERROR") as captured:
-            with self.assertRaisesRegex(RuntimeError, "消息解析失败并已中止当前采集"):
-                _harvest_messages_for_entity(self.conn, client, object(), 42)
+        ), self.assertLogs(level="ERROR") as captured, self.assertRaisesRegex(
+            RuntimeError, "消息解析失败并已中止当前采集"
+        ):
+            _harvest_messages_for_entity(self.conn, client, object(), 42)
 
         batch_upsert_mock.assert_not_called()
         self.assertTrue(

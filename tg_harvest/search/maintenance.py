@@ -1,14 +1,14 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 import threading
 import time
+from collections.abc import Callable
 from contextlib import closing
-from typing import Callable
 
-from tg_harvest.storage.search_terms import backfill_message_search_terms_upgrade_batch
-from tg_harvest.storage.search_terms import drain_message_search_terms_rebuild_queue
-
+from tg_harvest.storage.search_terms import (
+    backfill_message_search_terms_upgrade_batch,
+    drain_message_search_terms_rebuild_queue,
+)
 
 _SEARCH_TERM_MAINTENANCE_LOCK = threading.Lock()
 _SEARCH_TERM_MAINTENANCE_EVENT = threading.Event()

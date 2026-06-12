@@ -1,13 +1,12 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 import threading
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Optional, Tuple
+from typing import Any
 
 from tg_harvest.runtime.paths import resolve_db_path as _resolve_runtime_db_path
-
 
 DB_WRITE_LOCK = threading.RLock()
 
@@ -34,12 +33,12 @@ def synchronized_write(func):
 @dataclass
 class SqliteFeatures:
     version_str: str
-    version_tuple: Tuple[int, int, int]
+    version_tuple: tuple[int, int, int]
     supports_strict: bool
     supports_fts5: bool
 
 
-def parse_version(v: str) -> Tuple[int, int, int]:
+def parse_version(v: str) -> tuple[int, int, int]:
     try:
         p = v.split(".")
         return (int(p[0]), int(p[1]), int(p[2]))
@@ -92,8 +91,11 @@ def _open_connection(db_name: str) -> sqlite3.Connection:
     return conn
 
 
-def _apply_core_pragmas(cur: sqlite3.Cursor, cache_mb: int = 256):
-    cur.execute("PRAGMA journal_mode=WAL;")
+def _apply_core_pragmas(
+    cur: sqlite3.Cursor, cache_mb: int = 256, *, set_journal_mode: bool = True
+):
+    if set_journal_mode:
+        cur.execute("PRAGMA journal_mode=WAL;")
     cur.execute("PRAGMA synchronous=NORMAL;")
     cur.execute("PRAGMA temp_store=MEMORY;")
     cur.execute("PRAGMA foreign_keys=ON;")
@@ -106,21 +108,25 @@ def _apply_core_pragmas(cur: sqlite3.Cursor, cache_mb: int = 256):
 
 
 def _apply_optional_pragmas(cur: sqlite3.Cursor, mmap_mb: int = 512):
-    try:
+    with suppress(Exception):
         mmap_bytes = mmap_mb * 1024 * 1024
         cur.execute(f"PRAGMA mmap_size={mmap_bytes};")
-    except Exception:
-        pass
-    try:
+    with suppress(Exception):
         cur.execute("PRAGMA journal_size_limit=67108864;")
-    except Exception:
-        pass
 
 
-def _apply_pragmas(conn: sqlite3.Connection, cache_mb: int = 256, mmap_mb: int = 512):
+def _apply_pragmas(
+    conn: sqlite3.Connection,
+    cache_mb: int = 256,
+    mmap_mb: int = 512,
+    *,
+    set_journal_mode: bool = True,
+):
     cur = conn.cursor()
     try:
-        _apply_core_pragmas(cur, cache_mb=cache_mb)
+        _apply_core_pragmas(
+            cur, cache_mb=cache_mb, set_journal_mode=set_journal_mode
+        )
         _apply_optional_pragmas(cur, mmap_mb=mmap_mb)
     finally:
         cur.close()
@@ -131,15 +137,21 @@ def _load_sqlite_features(conn: sqlite3.Connection) -> SqliteFeatures:
 
 
 def connect_db(
-    db_name: str, cache_mb: int = 256, mmap_mb: int = 512
-) -> Tuple[sqlite3.Connection, SqliteFeatures]:
+    db_name: str,
+    cache_mb: int = 256,
+    mmap_mb: int = 512,
+    *,
+    set_journal_mode: bool = True,
+) -> tuple[sqlite3.Connection, SqliteFeatures]:
     conn = _open_connection(db_name)
-    _apply_pragmas(conn, cache_mb=cache_mb, mmap_mb=mmap_mb)
+    _apply_pragmas(
+        conn, cache_mb=cache_mb, mmap_mb=mmap_mb, set_journal_mode=set_journal_mode
+    )
     feats = _load_sqlite_features(conn)
     return conn, feats
 
 
-def _resolve_runtime_cfg(cfg: Optional[Any] = None) -> Any:
+def _resolve_runtime_cfg(cfg: Any | None = None) -> Any:
     if cfg is not None:
         return cfg
     from tg_harvest.config import CFG
@@ -147,7 +159,7 @@ def _resolve_runtime_cfg(cfg: Optional[Any] = None) -> Any:
     return CFG
 
 
-def connect_configured_db(*, cfg: Optional[Any] = None) -> Tuple[sqlite3.Connection, SqliteFeatures]:
+def connect_configured_db(*, cfg: Any | None = None) -> tuple[sqlite3.Connection, SqliteFeatures]:
     runtime_cfg = _resolve_runtime_cfg(cfg)
     return connect_db(
         str(runtime_cfg.db_name),
@@ -158,10 +170,10 @@ def connect_configured_db(*, cfg: Optional[Any] = None) -> Tuple[sqlite3.Connect
 
 def ensure_configured_db(
     *,
-    cfg: Optional[Any] = None,
-    force_heal_fts: Optional[int] = None,
-    skip_fts_auto_heal: Optional[int] = None,
-) -> Tuple[sqlite3.Connection, SqliteFeatures]:
+    cfg: Any | None = None,
+    force_heal_fts: int | None = None,
+    skip_fts_auto_heal: int | None = None,
+) -> tuple[sqlite3.Connection, SqliteFeatures]:
     runtime_cfg = _resolve_runtime_cfg(cfg)
     conn, feats = connect_configured_db(cfg=runtime_cfg)
     from .schema import create_schema

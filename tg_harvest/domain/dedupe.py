@@ -1,21 +1,21 @@
-# -*- coding: utf-8 -*-
 import logging
 import sqlite3
 import time
-from typing import List, Optional, Tuple, Set
-from datetime import datetime, timezone
 import uuid
-from tg_harvest.storage.connection import synchronized_write
+from contextlib import suppress
+from datetime import UTC, datetime
+
 from tg_harvest.domain.normalize import make_hash
+from tg_harvest.storage.connection import synchronized_write
 
 
 def build_media_fingerprint(
-    file_unique_id: Optional[str],
-    mime_type: Optional[str],
-    file_size: Optional[int],
-    width: Optional[int],
-    height: Optional[int],
-    duration_sec: Optional[int],
+    file_unique_id: str | None,
+    mime_type: str | None,
+    file_size: int | None,
+    width: int | None,
+    height: int | None,
+    duration_sec: int | None,
 ) -> str:
     if file_unique_id:
         return "fid:" + str(file_unique_id)
@@ -30,7 +30,7 @@ def build_media_fingerprint(
 
 
 def make_media_group_signature(
-    media_fingerprints: List[str], msg_types: List[str], item_count: int
+    media_fingerprints: list[str], msg_types: list[str], item_count: int
 ) -> str:
     fps = [x for x in media_fingerprints if x]
     if not fps:
@@ -40,7 +40,7 @@ def make_media_group_signature(
 
 
 def build_message_dedupe_hash(
-    text_pure_hash: str, has_media: bool, media_fingerprint: Optional[str]
+    text_pure_hash: str, has_media: bool, media_fingerprint: str | None
 ) -> str:
     if text_pure_hash:
         return text_pure_hash
@@ -125,7 +125,7 @@ def _count_rows(cur: sqlite3.Cursor, table_name: str) -> int:
 
 def _create_dup_hash_tables(
     cur: sqlite3.Cursor, chat_id: int, threshold: int
-) -> Tuple[int, int, int]:
+) -> tuple[int, int, int]:
     _create_temp_dup_hashes_solo(cur, chat_id, threshold)
     _create_temp_dup_hashes_group_txt(cur, chat_id, threshold)
     _create_temp_dup_hashes_group_med(cur, chat_id, threshold)
@@ -347,7 +347,7 @@ def _prepare_dedupe_targets(
     chat_id: int,
     mode: str,
     threshold: int,
-) -> Tuple[int, int, int, int]:
+) -> tuple[int, int, int, int]:
     dup_hash_count_solo, dup_hash_count_group_txt, dup_hash_count_group_med = (
         _create_dup_hash_tables(cur, chat_id, threshold)
     )
@@ -381,7 +381,7 @@ def _insert_dedupe_actions(cur: sqlite3.Cursor, batch_id: str):
     )
 
 
-def _collect_affected_group_ids(cur: sqlite3.Cursor) -> Set[int]:
+def _collect_affected_group_ids(cur: sqlite3.Cursor) -> set[int]:
     cur.execute(
         """
         SELECT DISTINCT grouped_id
@@ -423,7 +423,7 @@ def _delete_target_messages(cur: sqlite3.Cursor):
         # 注意：由于我们在同一个大事务中，这主要是为了防止单条 SQL 语句过大导致的解析瓶颈。
 
 
-def _record_actions_and_delete_targets(cur: sqlite3.Cursor, batch_id: str) -> Set[int]:
+def _record_actions_and_delete_targets(cur: sqlite3.Cursor, batch_id: str) -> set[int]:
     _insert_dedupe_actions(cur, batch_id)
     affected_group_ids = _collect_affected_group_ids(cur)
     _delete_target_messages(cur)
@@ -462,10 +462,10 @@ def dedupe_promotional_duplicates(
     mode: str = "PURGE_ALL",
     threshold: int = 2,
     promo_score_threshold: int = 3,
-) -> Tuple[int, int, int, int, Set[int]]:
+) -> tuple[int, int, int, int, set[int]]:
     """promo_score_threshold 仅用于审计记录，实际筛选依赖 is_promo/dedupe_eligible。"""
     started_at = time.perf_counter()
-    batch_id = f"dedupe_{chat_id}_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
+    batch_id = f"dedupe_{chat_id}_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S_%f')}_{uuid.uuid4().hex[:8]}"
     mode = (mode or "PURGE_ALL").upper()
     cur = conn.cursor()
 
@@ -530,8 +530,6 @@ def dedupe_promotional_duplicates(
             affected_group_ids,
         )
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise

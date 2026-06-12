@@ -1,9 +1,7 @@
-# -*- coding: utf-8 -*-
 import os
 import uuid
-from datetime import datetime, timezone
-from typing import Any, Optional
-
+from datetime import UTC, datetime
+from typing import Any
 
 ADMIN_JOB_ALLOWED_STATUSES = {"queued", "running", "done", "error"}
 
@@ -24,7 +22,7 @@ _ADMIN_RUNTIME_INSTANCE_ID = f"pid-{os.getpid()}-{uuid.uuid4().hex[:8]}"
 
 
 def _admin_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _admin_parse_timestamp(value: Any, default: datetime) -> datetime:
@@ -33,11 +31,11 @@ def _admin_parse_timestamp(value: Any, default: datetime) -> datetime:
     except Exception:
         return default
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
-def configure_admin_job_runtime(instance_id: Optional[str] = None) -> str:
+def configure_admin_job_runtime(instance_id: str | None = None) -> str:
     global _ADMIN_RUNTIME_INSTANCE_ID
 
     normalized = str(instance_id or "").strip()
@@ -58,7 +56,7 @@ def _normalize_status(status: str) -> str:
     return normalized
 
 
-def _safe_progress_total(value: Any) -> Optional[int]:
+def _safe_progress_total(value: Any) -> int | None:
     if isinstance(value, int) and value >= 0:
         return value
     return None

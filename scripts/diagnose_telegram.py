@@ -1,15 +1,11 @@
-# -*- coding: utf-8 -*-
 import socket
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from telethon.sync import TelegramClient
-
-from tg_harvest.config import CFG
+PROJECT_ROOT_STR = str(PROJECT_ROOT)
+if PROJECT_ROOT_STR not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_STR)
 
 PROBE_ENDPOINTS = [
     ("149.154.167.51", 443),
@@ -19,6 +15,14 @@ PROBE_ENDPOINTS = [
 
 def _print_header(title: str) -> None:
     print(f"\n=== {title} ===")
+
+
+def _runtime_deps():
+    from telethon.sync import TelegramClient
+
+    from tg_harvest.config import CFG
+
+    return CFG, TelegramClient
 
 
 def _probe_socket() -> bool:
@@ -38,6 +42,7 @@ def _probe_socket() -> bool:
 
 
 def _check_config() -> bool:
+    CFG, _TelegramClient = _runtime_deps()
     _print_header("配置检查")
     ok = True
     if not CFG.api_id:
@@ -58,9 +63,12 @@ def _check_config() -> bool:
 
 
 def _check_telethon() -> bool:
+    CFG, TelegramClient = _runtime_deps()
     _print_header("Telegram 鉴权检查")
     try:
-        with TelegramClient(CFG.session_name, CFG.api_id, CFG.api_hash, receive_updates=False) as client:
+        with TelegramClient(
+            CFG.session_name, CFG.api_id, CFG.api_hash, receive_updates=False
+        ) as client:
             if not client.is_user_authorized():
                 print("[FAIL] 已连接 Telegram，但当前 session 未授权或已失效")
                 return False

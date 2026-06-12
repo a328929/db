@@ -1,11 +1,18 @@
-# -*- coding: utf-8 -*-
-from typing import List
 
 
-def candidate_chat_entity_ids(chat_id: int) -> List[int]:
+def stored_chat_id_from_entity_id(entity_id: int) -> int:
+    """Return the positive chat id shape used by the local database."""
+    value = abs(int(entity_id))
+    raw = str(value)
+    if raw.startswith("100") and len(raw) > 3:
+        return int(raw[3:])
+    return value
+
+
+def candidate_chat_entity_ids(chat_id: int) -> list[int]:
     """Return Telethon entity ids worth trying for a stored chat id."""
     raw = int(chat_id)
-    candidates: List[int] = [raw]
+    candidates: list[int] = [raw]
     abs_id = abs(raw)
 
     if raw > 0:
@@ -20,7 +27,7 @@ def candidate_chat_entity_ids(chat_id: int) -> List[int]:
             candidates.append(int(f"-100{abs_id}"))
         candidates.append(abs_id)
 
-    deduped: List[int] = []
+    deduped: list[int] = []
     seen = set()
     for candidate in candidates:
         if candidate in seen:

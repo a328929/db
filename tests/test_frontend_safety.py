@@ -1,7 +1,6 @@
 import pathlib
 import unittest
 
-
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
@@ -17,7 +16,9 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin_manage_shared.js", template)
         self.assertIn("admin_manage.css", template)
         self.assertNotIn("admin-incremental-checkbox", template)
+        self.assertIn("admin-delete-empty-chats-btn", template)
         self.assertIn("/admin/channels", template)
+        self.assertIn("/admin/recovery", template)
 
     def test_admin_channels_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_channels.html").read_text(
@@ -32,6 +33,30 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-scan-restricted-btn", template)
         self.assertIn("admin-restricted-filter-select", template)
         self.assertNotIn("搜索框", template)
+
+    def test_admin_recovery_template_loads_shared_helpers(self) -> None:
+        template = (ROOT / "templates" / "admin_recovery.html").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("admin_manage_shared.js", template)
+        self.assertIn("admin_recovery.js", template)
+        self.assertIn("admin_recovery.css", template)
+        self.assertIn("admin-recovery-scan-btn", template)
+        self.assertIn("admin-recovery-restore-all-btn", template)
+        self.assertIn("admin-recovery-list", template)
+
+    def test_admin_login_template_uses_standalone_login_script(self) -> None:
+        template = (ROOT / "templates" / "admin_login.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_login.js").read_text(encoding="utf-8")
+        self.assertIn('id="admin-login-page"', template)
+        self.assertIn("admin_login.js", template)
+        self.assertIn("data-next-path", template)
+        self.assertIn("ALLOWED_NEXT_PATHS", source)
+        self.assertIn("/admin/recovery", source)
+        self.assertIn("window.location.assign(getNextPath(elements));", source)
+        self.assertIn("payload.error.trim()", source)
 
     def test_page_templates_load_page_specific_stylesheets(self) -> None:
         context_template = (ROOT / "templates" / "context.html").read_text(encoding="utf-8")
@@ -160,6 +185,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("incrementalCheckbox", source)
         self.assertIn("function createJobAndStartPolling", source)
         self.assertIn("function confirmAction", source)
+        self.assertIn("function handleDeleteEmptyChatsClick", source)
+        self.assertIn("/api/admin/jobs/delete-empty-chats", source)
         self.assertIn("function getTargetScopeLabel", source)
         self.assertIn("function buildSnapshotProgressMessage", source)
         self.assertIn("shared.buildSnapshotProgressMessage", source)
@@ -168,8 +195,15 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("shared.getSelectedOptionLabel", source)
         self.assertIn("shared.setDialogOpenState", source)
         self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn("elements && elements.loginDialog", source)
         self.assertNotIn("任务创建成功但缺少 job_id", source)
         self.assertEqual(1, shared_source.count("任务创建成功但缺少 job_id"))
+
+    def test_admin_channels_traps_login_dialog_focus(self) -> None:
+        source = (ROOT / "static" / "admin_channels.js").read_text(encoding="utf-8")
+        self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn("document.addEventListener('keydown'", source)
+        self.assertIn("trapFocusWithin(elements.loginDialog, event);", source)
 
     def test_admin_progress_copy_avoids_failed_fraction_wording(self) -> None:
         source = (ROOT / "static" / "admin_manage.js").read_text(encoding="utf-8")
@@ -202,6 +236,71 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("alert(", channels_source)
         self.assertNotIn("window.location.reload", manage_source)
         self.assertNotIn("window.location.reload", channels_source)
+
+    def test_admin_recovery_traps_login_dialog_focus(self) -> None:
+        source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
+        self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn("document.addEventListener('keydown'", source)
+        self.assertIn("trapFocusWithin(elements.loginDialog, event);", source)
+        self.assertNotIn("alert(", source)
+        self.assertNotIn("window.location.reload", source)
+
+    def test_admin_recovery_ready_filter_requires_empty_database_chat(self) -> None:
+        source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
+        self.assertIn(
+            "return !isCandidatePending(item) && Number((item && item.message_count) || 0) <= 0;",
+            source,
+        )
+        self.assertIn("return items.filter(isCandidateReady);", source)
+
+    def test_admin_recovery_busy_state_keeps_readonly_controls_enabled(self) -> None:
+        source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
+        self.assertIn("data-recovery-job-action", source)
+        self.assertIn("var isJobAction = button.getAttribute('data-recovery-job-action') === 'true';", source)
+        self.assertNotIn("setElementDisabled(elements.refreshBtn, disabled);", source)
+        self.assertNotIn("setElementDisabled(elements.filterSelect, disabled);", source)
+        self.assertNotIn("setElementDisabled(elements.listToggleBtn, disabled);", source)
+        self.assertNotIn("copyBtn.disabled = recoveryState.busy;", source)
+
+    def test_admin_shared_fetch_attaches_csrf_header_to_write_requests(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("var adminCsrfToken = '';", source)
+        self.assertIn("function setAdminCsrfToken(token)", source)
+        self.assertIn("function buildFetchHeaders(url, requestOptions)", source)
+        self.assertIn("headers['X-CSRF-Token'] = adminCsrfToken;", source)
+        self.assertIn("setAdminCsrfToken(payload.csrf_token);", source)
+        self.assertIn("return normalizedUrl !== '/api/admin/auth/login';", source)
+
+    def test_admin_shared_fetch_prefers_server_error_message(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function buildResponseErrorMessage(response, payload)", source)
+        self.assertIn("return serverMessage;", source)
+        self.assertNotIn("数据库忙或系统异常", source)
+
+    def test_recover_missing_media_requires_explicit_execute_for_writes(self) -> None:
+        source = (ROOT / "tools" / "recover_missing_media.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn('"--execute"', source)
+        self.assertIn("当前为 dry-run", source)
+        self.assertIn("if not args.execute:", source)
+        self.assertIn("iter_missing_message_id_chunks", source)
+
+    def test_admin_login_overlay_hides_background_from_focus_and_assistive_tech(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("function setPageInteractionState(pageElement, interactive)", source)
+        self.assertIn("pageElement.setAttribute('aria-hidden', 'true');", source)
+        self.assertIn("pageElement.setAttribute('inert', '');", source)
+        self.assertIn("pageElement.inert = true;", source)
+        self.assertIn("pageElement.removeAttribute('aria-hidden');", source)
+        self.assertIn("pageElement.removeAttribute('inert');", source)
+        self.assertIn("pageElement.inert = false;", source)
 
 
 if __name__ == "__main__":

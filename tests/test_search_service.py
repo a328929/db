@@ -6,16 +6,18 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tg_harvest.search.params import SearchParams
-from tg_harvest.search.params import MAX_SEARCH_PAGE
-from tg_harvest.search.params import _parse_search_params
+from tg_harvest.search.cache import (
+    _format_data_version,
+    _make_count_cache_key,
+    _read_database_fingerprint,
+)
+from tg_harvest.search.params import MAX_SEARCH_PAGE, SearchParams, _parse_search_params
+from tg_harvest.search.service import (
+    _build_payload_from_spec,
+    _search_payload_service,
+    _try_fast_count,
+)
 from tg_harvest.search.sql_builder import _build_search_query_spec
-from tg_harvest.search.service import _search_payload_service
-from tg_harvest.search.service import _build_payload_from_spec
-from tg_harvest.search.service import _try_fast_count
-from tg_harvest.search.cache import _format_data_version
-from tg_harvest.search.cache import _make_count_cache_key
-from tg_harvest.search.cache import _read_database_fingerprint
 
 
 class SearchServiceFastCountTests(unittest.TestCase):

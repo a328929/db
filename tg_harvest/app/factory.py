@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import logging
 import os
 import sqlite3
@@ -6,33 +5,40 @@ import threading
 from datetime import timedelta
 from pathlib import Path
 
-from flask import Flask
+from flask import Flask, request
 
-from tg_harvest.admin_jobs.core import (
-    _admin_create_chat_job_if_absent,
-    _admin_has_any_active_job,
-    _admin_job_append_log,
-    _admin_job_create,
-    _admin_job_get_logs,
-    _admin_job_get_snapshot,
-    _admin_job_set_status,
-    _admin_make_job_log_handler,
-    _admin_recover_interrupted_jobs,
-    _admin_try_create_exclusive_job,
-)
-from tg_harvest.admin_jobs.runtime import configure_admin_job_runtime
-from tg_harvest.admin_jobs.runners import (
-    _admin_start_cleanup_empty_job_thread,
-    _admin_start_cleanup_job_thread,
-    _admin_start_delete_job_thread,
-    _admin_start_harvest_job_thread,
-    _admin_start_update_job_thread,
-)
 from tg_harvest.admin_jobs.channel_inventory import (
     _admin_start_absent_chats_scan_job_thread,
     _admin_start_missing_chats_scan_job_thread,
     _admin_start_restricted_chats_scan_job_thread,
 )
+from tg_harvest.admin_jobs.core import (
+    _admin_create_chat_job_if_absent,
+    _admin_get_active_job,
+    _admin_has_any_active_job,
+    _admin_job_append_log,
+    _admin_job_create,
+    _admin_job_get_logs,
+    _admin_job_get_snapshot,
+    _admin_request_job_stop,
+    _admin_job_set_status,
+    _admin_make_job_log_handler,
+    _admin_recover_interrupted_jobs,
+    _admin_try_create_exclusive_job,
+)
+from tg_harvest.admin_jobs.runners import (
+    _admin_start_cleanup_empty_job_thread,
+    _admin_start_cleanup_job_thread,
+    _admin_start_delete_empty_chats_job_thread,
+    _admin_start_delete_job_thread,
+    _admin_start_harvest_job_thread,
+    _admin_start_update_job_thread,
+)
+from tg_harvest.admin_jobs.recovery import (
+    _admin_start_recovery_restore_job_thread,
+    _admin_start_recovery_scan_job_thread,
+)
+from tg_harvest.admin_jobs.runtime import configure_admin_job_runtime
 from tg_harvest.app.admin_payloads import (
     build_admin_chats_payload,
     build_admin_stats_payload,
@@ -44,21 +50,26 @@ from tg_harvest.app.services import AdminRouteServices, RouteRegistryServices
 from tg_harvest.config import CFG
 from tg_harvest.domain.meta_payload import _build_meta_payload
 from tg_harvest.ingest.parse import setup_logging
-from tg_harvest.search.params import _parse_search_params
-from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.search.maintenance import (
     configure_message_search_maintenance,
     schedule_message_search_maintenance,
 )
+from tg_harvest.search.params import _parse_search_params
+from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.search.service import _search_payload_service
+from tg_harvest.storage.access import FROM_SQL, has_fts
+from tg_harvest.storage.access import get_conn as runtime_get_conn
 from tg_harvest.storage.channel_management import (
     list_absent_chat_scan_results,
     list_database_channels,
     list_missing_chat_scan_results,
     list_restricted_chat_scan_results,
 )
-from tg_harvest.storage.access import FROM_SQL, get_conn as runtime_get_conn, has_fts
 from tg_harvest.storage.connection import connect_db, ensure_configured_db
+from tg_harvest.storage.recovery import (
+    build_recovery_overview,
+    list_recovery_chat_candidates,
+)
 from tg_harvest.web.telegram_links import build_telegram_chat_link_bundle
 
 logger = logging.getLogger(__name__)
@@ -73,12 +84,100 @@ MAX_COUNT = 50000000
 
 ADMIN_HARVEST_TARGET_MAX_LEN = 300
 ADMIN_CLEANUP_KEYWORD_MAX_LEN = 120
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+_FALSE_ENV_VALUES = {"0", "false", "no", "off"}
+_PRODUCTION_ENV_VALUES = {"prod", "production"}
+_DB_FREE_ENDPOINTS = frozenset(
+    {
+        None,
+        "static",
+        "index",
+        "admin_login_page",
+        "admin_manage_page",
+        "admin_channels_page",
+        "admin_recovery_page",
+        "chat_context_page",
+        "api_auth_check",
+        "api_auth_login",
+        "api_auth_logout",
+    }
+)
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None:
+        return bool(default)
+    normalized = raw.strip().lower()
+    if normalized in _TRUE_ENV_VALUES:
+        return True
+    if normalized in _FALSE_ENV_VALUES:
+        return False
+    return bool(default)
+
+
+def _is_production_runtime() -> bool:
+    if _env_flag("TG_REQUIRE_SECURE_CONFIG", False):
+        return True
+    for name in ("TG_ENV", "APP_ENV", "FLASK_ENV", "ENV"):
+        if os.getenv(name, "").strip().lower() in _PRODUCTION_ENV_VALUES:
+            return True
+    return False
+
+
+def _configured_flask_secret_key() -> str:
+    return os.getenv("FLASK_SECRET_KEY", "").strip()
+
+
+def _validate_secure_runtime_config(*, production: bool) -> None:
+    if not production:
+        return
+
+    missing = []
+    if not _configured_flask_secret_key():
+        missing.append("FLASK_SECRET_KEY")
+    if not str(CFG.admin_password or "").strip():
+        missing.append("TG_ADMIN_PASSWORD")
+    if missing:
+        raise RuntimeError(
+            "生产环境缺少必需安全配置: " + ", ".join(sorted(missing))
+        )
+
+
+def _build_flask_secret_key(*, production: bool) -> str:
+    configured = _configured_flask_secret_key()
+    if configured:
+        return configured
+    _validate_secure_runtime_config(production=production)
+    logger.warning(
+        "FLASK_SECRET_KEY 未配置，当前进程将使用临时随机密钥；"
+        "生产环境请显式设置以保证登录态稳定"
+    )
+    return os.urandom(32).hex()
+
+
+def _should_use_secure_session_cookie(*, production: bool) -> bool:
+    raw = os.getenv("TG_SESSION_COOKIE_SECURE")
+    if raw is not None:
+        return _env_flag("TG_SESSION_COOKIE_SECURE", production)
+    return bool(production)
+
+
+def _connect_runtime_db(
+    db_path: str, *, cache_mb: int, mmap_mb: int
+) -> tuple[sqlite3.Connection, object]:
+    return connect_db(
+        db_path,
+        cache_mb=cache_mb,
+        mmap_mb=mmap_mb,
+        set_journal_mode=False,
+    )
 
 
 def get_conn() -> sqlite3.Connection:
     return runtime_get_conn(
         db_path=DB_PATH,
-        connect_db_fn=connect_db,
+        connect_db_fn=_connect_runtime_db,
         cache_mb=CFG.sqlite_cache_mb,
         mmap_mb=CFG.sqlite_mmap_mb,
     )
@@ -109,6 +208,14 @@ def _ensure_runtime_db(app: Flask) -> None:
         app.extensions["tg_db_ready"] = True
 
 
+def _request_requires_runtime_db() -> bool:
+    if str(request.path or "").startswith("/api/admin/"):
+        from tg_harvest.web.auth import is_authenticated
+
+        return is_authenticated()
+    return request.endpoint not in _DB_FREE_ENDPOINTS
+
+
 def _build_route_services() -> RouteRegistryServices:
     admin_services = AdminRouteServices(
         logger=logger,
@@ -120,6 +227,8 @@ def _build_route_services() -> RouteRegistryServices:
         admin_get_chat_brief_fn=get_admin_chat_brief,
         admin_job_get_snapshot_fn=_admin_job_get_snapshot,
         admin_job_get_logs_fn=_admin_job_get_logs,
+        admin_get_active_job_fn=_admin_get_active_job,
+        admin_request_job_stop_fn=_admin_request_job_stop,
         admin_has_any_active_job_fn=_admin_has_any_active_job,
         admin_try_create_exclusive_job_fn=_admin_try_create_exclusive_job,
         admin_create_chat_job_if_absent_fn=_admin_create_chat_job_if_absent,
@@ -128,6 +237,9 @@ def _build_route_services() -> RouteRegistryServices:
         admin_start_harvest_job_thread_fn=_admin_start_harvest_job_thread,
         admin_start_update_job_thread_fn=_admin_start_update_job_thread,
         admin_start_delete_job_thread_fn=_admin_start_delete_job_thread,
+        admin_start_delete_empty_chats_job_thread_fn=(
+            _admin_start_delete_empty_chats_job_thread
+        ),
         admin_start_cleanup_job_thread_fn=_admin_start_cleanup_job_thread,
         admin_start_cleanup_empty_job_thread_fn=_admin_start_cleanup_empty_job_thread,
         admin_make_job_log_handler_fn=_admin_make_job_log_handler,
@@ -151,6 +263,8 @@ def _build_route_services() -> RouteRegistryServices:
         list_missing_chat_scan_results_fn=list_missing_chat_scan_results,
         list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
         list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
+        list_recovery_chat_candidates_fn=list_recovery_chat_candidates,
+        build_recovery_overview_fn=build_recovery_overview,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         admin_start_missing_chats_scan_job_thread_fn=(
             _admin_start_missing_chats_scan_job_thread
@@ -161,10 +275,16 @@ def _build_route_services() -> RouteRegistryServices:
         admin_start_restricted_chats_scan_job_thread_fn=(
             _admin_start_restricted_chats_scan_job_thread
         ),
+        admin_start_recovery_scan_job_thread_fn=_admin_start_recovery_scan_job_thread,
+        admin_start_recovery_restore_job_thread_fn=(
+            _admin_start_recovery_restore_job_thread
+        ),
     )
 
 
 def create_app(*, init_db: bool = False) -> Flask:
+    production = _is_production_runtime()
+    _validate_secure_runtime_config(production=production)
     configure_admin_job_runtime()
     if init_db:
         _ensure_db()
@@ -173,7 +293,7 @@ def create_app(*, init_db: bool = False) -> Flask:
         template_folder=str(PROJECT_ROOT / "templates"),
         static_folder=str(PROJECT_ROOT / "static"),
     )
-    app.secret_key = os.getenv("FLASK_SECRET_KEY", os.urandom(32).hex())
+    app.secret_key = _build_flask_secret_key(production=production)
     app.extensions["tg_db_ready"] = bool(init_db)
     app.extensions["tg_db_ready_lock"] = threading.Lock()
 
@@ -184,9 +304,14 @@ def create_app(*, init_db: bool = False) -> Flask:
     app.config["TG_DB_PATH"] = str(DB_PATH)
     app.config["SESSION_COOKIE_HTTPONLY"] = True
     app.config["SESSION_COOKIE_SAMESITE"] = "Lax"
+    app.config["SESSION_COOKIE_SECURE"] = _should_use_secure_session_cookie(
+        production=production
+    )
 
     @app.before_request
     def _before_request_ensure_db() -> None:
+        if not _request_requires_runtime_db():
+            return
         _ensure_runtime_db(app)
 
     @app.after_request

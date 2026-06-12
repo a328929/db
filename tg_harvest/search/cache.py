@@ -1,13 +1,11 @@
-# -*- coding: utf-8 -*-
 import hashlib
 import os
 import sqlite3
 import threading
-from typing import Any, Dict, List, Tuple
-
+from typing import Any
 
 _COUNT_CACHE_LOCK = threading.Lock()
-_COUNT_CACHE: Dict[Tuple[Any, ...], Tuple[int, bool, int]] = {}
+_COUNT_CACHE: dict[tuple[Any, ...], tuple[int, bool, int]] = {}
 _COUNT_CACHE_MAX_ENTRIES = 256
 
 
@@ -23,7 +21,7 @@ def _read_data_version(conn: sqlite3.Connection) -> int:
         cur.close()
 
 
-def _read_database_fingerprint(conn: sqlite3.Connection) -> Tuple[Any, ...]:
+def _read_database_fingerprint(conn: sqlite3.Connection) -> tuple[Any, ...]:
     cur = conn.cursor()
     try:
         cur.execute("PRAGMA database_list")
@@ -44,7 +42,7 @@ def _read_database_fingerprint(conn: sqlite3.Connection) -> Tuple[Any, ...]:
         return ("memory", _read_data_version(conn))
 
     main_path = os.path.abspath(main_path)
-    stats: List[Tuple[str, int | None, int | None]] = []
+    stats: list[tuple[str, int | None, int | None]] = []
     for path in (main_path, f"{main_path}-wal"):
         is_wal = path == f"{main_path}-wal"
         try:
@@ -60,7 +58,7 @@ def _read_database_fingerprint(conn: sqlite3.Connection) -> Tuple[Any, ...]:
     return ("file", tuple(stats))
 
 
-def _format_data_version(fingerprint: Tuple[Any, ...]) -> str:
+def _format_data_version(fingerprint: tuple[Any, ...]) -> str:
     raw = repr(fingerprint).encode("utf-8", "surrogatepass")
     return hashlib.blake2b(raw, digest_size=12).hexdigest()
 
@@ -69,10 +67,10 @@ def _make_count_cache_key(
     conn: sqlite3.Connection,
     *,
     count_sql: str,
-    sql_params: List[Any],
+    sql_params: list[Any],
     count_limit: int,
     page_size: int,
-) -> Tuple[Any, ...]:
+) -> tuple[Any, ...]:
     return (
         _read_database_fingerprint(conn),
         count_sql,
@@ -83,14 +81,14 @@ def _make_count_cache_key(
 
 
 def _get_cached_count(
-    cache_key: Tuple[Any, ...],
-) -> Tuple[int, bool, int] | None:
+    cache_key: tuple[Any, ...],
+) -> tuple[int, bool, int] | None:
     with _COUNT_CACHE_LOCK:
         return _COUNT_CACHE.get(cache_key)
 
 
 def _put_cached_count(
-    cache_key: Tuple[Any, ...], value: Tuple[int, bool, int]
+    cache_key: tuple[Any, ...], value: tuple[int, bool, int]
 ) -> None:
     with _COUNT_CACHE_LOCK:
         _COUNT_CACHE[cache_key] = value

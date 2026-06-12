@@ -3,18 +3,19 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tg_harvest.storage.schema import create_schema
-from tg_harvest.storage.connection import ensure_configured_db
-from tg_harvest.storage.connection import detect_sqlite_features
-from tg_harvest.storage.search_terms import backfill_message_search_terms_upgrade_batch
-from tg_harvest.storage.search_terms import drain_message_search_terms_rebuild_queue
-from tg_harvest.storage.search_terms import extract_cjk_bigrams
-from tg_harvest.storage.search_terms import extract_cjk_search_terms
+from tg_harvest.ingest.store import batch_upsert, upsert_chat
+from tg_harvest.app import factory as app_factory
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.storage.access import has_fts
 from tg_harvest.storage import fts as _fts
-from tg_harvest.ingest.store import batch_upsert
-from tg_harvest.ingest.store import upsert_chat
+from tg_harvest.storage.access import has_fts
+from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
+from tg_harvest.storage.schema import create_schema
+from tg_harvest.storage.search_terms import (
+    backfill_message_search_terms_upgrade_batch,
+    drain_message_search_terms_rebuild_queue,
+    extract_cjk_bigrams,
+    extract_cjk_search_terms,
+)
 
 
 class DbSchemaMigrationTests(unittest.TestCase):
@@ -545,6 +546,17 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("last_message_ts", admin_restricted_chat_columns)
         self.assertIn("scanned_at", admin_restricted_chat_columns)
 
+        cur.execute("PRAGMA table_info(admin_recovery_chats)")
+        admin_recovery_chat_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("chat_id", admin_recovery_chat_columns)
+        self.assertIn("chat_title", admin_recovery_chat_columns)
+        self.assertIn("chat_username", admin_recovery_chat_columns)
+        self.assertIn("source_session", admin_recovery_chat_columns)
+        self.assertIn("source_entity_id", admin_recovery_chat_columns)
+        self.assertIn("session_entity_ts", admin_recovery_chat_columns)
+        self.assertIn("recovered_at", admin_recovery_chat_columns)
+        self.assertIn("scanned_at", admin_recovery_chat_columns)
+
         cur.execute("SELECT updated_at FROM message_media WHERE chat_id = 1")
         self.assertTrue(cur.fetchone()["updated_at"])
         cur.execute(
@@ -742,6 +754,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         create_schema(self.conn, feats)
 
+        self.assertTrue(has_fts(self.conn))
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
         self.assertEqual(2, int(cur.fetchone()["c"]))
         cur.execute(
@@ -798,6 +811,26 @@ class DbSchemaMigrationTests(unittest.TestCase):
             fake_conn, fake_feats, force_heal_fts=1, skip_fts_auto_heal=1
         )
 
+    def test_runtime_web_connection_does_not_reset_journal_mode(self) -> None:
+        fake_conn = object()
+        fake_feats = object()
+
+        with patch(
+            "tg_harvest.app.factory.connect_db", return_value=(fake_conn, fake_feats)
+        ) as connect_mock:
+            conn, feats = app_factory._connect_runtime_db(
+                "/tmp/test.db", cache_mb=128, mmap_mb=256
+            )
+
+        self.assertIs(fake_conn, conn)
+        self.assertIs(fake_feats, feats)
+        connect_mock.assert_called_once_with(
+            "/tmp/test.db",
+            cache_mb=128,
+            mmap_mb=256,
+            set_journal_mode=False,
+        )
+
     def test_create_schema_skip_fts_auto_heal_keeps_incremental_triggers(self) -> None:
         feats = detect_sqlite_features(self.conn)
         if not feats.supports_fts5:
@@ -826,6 +859,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         create_schema(self.conn, feats, skip_fts_auto_heal=1)
 
+        self.assertFalse(has_fts(self.conn))
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_messages_fts_%'"
         )
@@ -862,6 +896,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         create_schema(self.conn, feats, force_heal_fts=1, skip_fts_auto_heal=1)
 
+        self.assertTrue(has_fts(self.conn))
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
         self.assertEqual(3, int(cur.fetchone()["c"]))
         cur.execute(
@@ -993,7 +1028,7 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def test_has_fts_returns_false_when_external_content_index_is_empty_but_messages_exist(
+    def test_has_fts_returns_false_when_index_is_not_marked_ready(
         self,
     ) -> None:
         if not self.feats.supports_fts5:
@@ -1001,6 +1036,9 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
 
         cur = self.conn.cursor()
         cur.execute("CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT)")
+        cur.execute(
+            "CREATE TABLE message_search_terms_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         cur.execute(
             """
             CREATE VIRTUAL TABLE messages_fts
@@ -1012,7 +1050,7 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
 
         self.assertFalse(has_fts(self.conn))
 
-    def test_has_fts_returns_false_when_external_content_index_is_partial(
+    def test_has_fts_returns_true_when_schema_marked_index_ready(
         self,
     ) -> None:
         if not self.feats.supports_fts5:
@@ -1020,6 +1058,9 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
 
         cur = self.conn.cursor()
         cur.execute("CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT)")
+        cur.execute(
+            "CREATE TABLE message_search_terms_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
         cur.execute(
             """
             CREATE VIRTUAL TABLE messages_fts
@@ -1031,9 +1072,44 @@ class StorageAccessFtsDetectionTests(unittest.TestCase):
             [(1, "hello"), (2, "world")],
         )
         cur.execute("INSERT INTO messages_fts(rowid, content) VALUES (1, 'hello')")
+        cur.execute(
+            "INSERT INTO message_search_terms_meta(key, value) VALUES ('fts_index_status', 'ready')"
+        )
         self.conn.commit()
 
-        self.assertFalse(has_fts(self.conn))
+        self.assertTrue(has_fts(self.conn))
+
+    def test_has_fts_does_not_count_large_messages_table(self) -> None:
+        if not self.feats.supports_fts5:
+            self.skipTest("SQLite build does not support FTS5")
+
+        cur = self.conn.cursor()
+        cur.execute("CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT)")
+        cur.execute(
+            "CREATE TABLE message_search_terms_meta(key TEXT PRIMARY KEY, value TEXT NOT NULL)"
+        )
+        cur.execute(
+            """
+            CREATE VIRTUAL TABLE messages_fts
+            USING fts5(content, content='messages', content_rowid='pk', tokenize='trigram')
+            """
+        )
+        cur.execute(
+            "INSERT INTO message_search_terms_meta(key, value) VALUES ('fts_index_status', 'ready')"
+        )
+        self.conn.commit()
+
+        statements: list[str] = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            self.assertTrue(has_fts(self.conn))
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertFalse(
+            any("COUNT(*)" in statement.upper() for statement in statements),
+            statements,
+        )
 
 
 class SearchResultMapperTests(unittest.TestCase):

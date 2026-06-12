@@ -1,20 +1,11 @@
-# -*- coding: utf-8 -*-
 import argparse
-import os
 import sys
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from telethon.sync import TelegramClient
-
-from tg_harvest.domain.chat_inventory import find_missing_joined_chats
-from tg_harvest.domain.chat_inventory import load_known_chat_ids
-from tg_harvest.domain.chat_inventory import write_missing_chat_report
-from tg_harvest.config import CFG
-from tg_harvest.storage.connection import ensure_configured_db
+PROJECT_ROOT_STR = str(PROJECT_ROOT)
+if PROJECT_ROOT_STR not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT_STR)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -30,6 +21,16 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def scan() -> int:
+    from telethon.sync import TelegramClient
+
+    from tg_harvest.config import CFG
+    from tg_harvest.domain.chat_inventory import (
+        find_missing_joined_chats,
+        load_known_chat_ids,
+        write_missing_chat_report,
+    )
+    from tg_harvest.storage.connection import ensure_configured_db
+
     args = _build_parser().parse_args()
     conn, _ = ensure_configured_db(cfg=CFG)
     try:

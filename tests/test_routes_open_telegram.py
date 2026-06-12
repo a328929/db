@@ -1,7 +1,7 @@
+import os
 import sqlite3
 import tempfile
 import unittest
-import os
 from pathlib import Path
 
 from flask import Flask

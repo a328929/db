@@ -1,5 +1,5 @@
 import sqlite3
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 try:
     from pypinyin import lazy_pinyin as _lazy_pinyin
@@ -7,7 +7,7 @@ except Exception:
     _lazy_pinyin = None  # type: ignore
 
 
-def _chat_title_or_fallback(chat_id: int, chat_title: Optional[str]) -> str:
+def _chat_title_or_fallback(chat_id: int, chat_title: str | None) -> str:
     title = (chat_title or "").strip()
     return title if title else f"Chat {chat_id}"
 
@@ -27,7 +27,7 @@ def _is_cjk_char(ch: str) -> bool:
     )
 
 
-def _chat_sort_key(chat_title: str, chat_id: int) -> Tuple[int, str, str, int]:
+def _chat_sort_key(chat_title: str, chat_id: int) -> tuple[int, str, str, int]:
     normalized_title = (chat_title or "").strip() or f"Chat {chat_id}"
     first_char = normalized_title[0]
 
@@ -50,7 +50,7 @@ def _chat_sort_key(chat_title: str, chat_id: int) -> Tuple[int, str, str, int]:
     return category, lexical_key, normalized_title.casefold(), chat_id
 
 
-def _build_meta_payload(conn: sqlite3.Connection, *, page_size: int) -> Dict[str, Any]:
+def _build_meta_payload(conn: sqlite3.Connection, *, page_size: int) -> dict[str, Any]:
     cur = conn.cursor()
     try:
         cur.execute("SELECT chat_id, chat_title FROM chats")

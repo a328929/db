@@ -1,8 +1,10 @@
-# -*- coding: utf-8 -*-
 import sqlite3
 from contextlib import closing
-from flask import render_template, request, jsonify
+
+from flask import jsonify, render_template, request
 from werkzeug.routing import BaseConverter
+
+from tg_harvest.web.responses import json_error, logged_json_error
 
 
 class SignedIntConverter(BaseConverter):
@@ -35,9 +37,9 @@ def register_context_routes(
         direction = request.args.get("direction", "around").strip().lower()
 
         if not msg_id_raw.isdigit():
-            return jsonify({"ok": False, "error": "无效的 msg_id"}), 400
+            return json_error("无效的 msg_id", 400)
         if direction not in {"around", "before", "after"}:
-            return jsonify({"ok": False, "error": "无效的 direction"}), 400
+            return json_error("无效的 direction", 400)
 
         msg_id = int(msg_id_raw)
 
@@ -103,8 +105,6 @@ def register_context_routes(
                     cur.close()
 
         except sqlite3.Error:
-            logger.exception("获取上下文失败")
-            return jsonify({"ok": False, "error": "数据库查询失败"}), 500
+            return logged_json_error(logger, "获取上下文失败", "数据库查询失败")
         except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统内部错误"}), 500
+            return logged_json_error(logger, "系统异常", "系统内部错误")

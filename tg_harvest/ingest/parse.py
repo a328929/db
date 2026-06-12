@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 import logging
 import mimetypes
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from tg_harvest.domain.dedupe import build_media_fingerprint
 from tg_harvest.domain.normalize import _safe_json
@@ -29,8 +28,8 @@ class ParsedMessage:
     msg_type: str
     content: str
     has_media: bool
-    grouped_id: Optional[int]
-    media_meta: Optional[Dict[str, Any]] = None
+    grouped_id: int | None
+    media_meta: dict[str, Any] | None = None
 
 
 class MessageParseError(RuntimeError):
@@ -59,7 +58,7 @@ class MessageParser:
     )
 
     @staticmethod
-    def _coerce_int(value: Any) -> Optional[int]:
+    def _coerce_int(value: Any) -> int | None:
         if value is None:
             return None
         try:
@@ -68,7 +67,7 @@ class MessageParser:
             return None
 
     @classmethod
-    def _set_text_if_empty(cls, meta: Dict[str, Any], key: str, value: Any) -> None:
+    def _set_text_if_empty(cls, meta: dict[str, Any], key: str, value: Any) -> None:
         if meta.get(key) or value is None:
             return
         text = str(value).strip()
@@ -76,7 +75,7 @@ class MessageParser:
             meta[key] = text
 
     @classmethod
-    def _set_int_if_empty(cls, meta: Dict[str, Any], key: str, value: Any) -> None:
+    def _set_int_if_empty(cls, meta: dict[str, Any], key: str, value: Any) -> None:
         if meta.get(key) is not None:
             return
         parsed = cls._coerce_int(value)
@@ -84,7 +83,7 @@ class MessageParser:
             meta[key] = parsed
 
     @classmethod
-    def _set_extension_if_empty(cls, meta: Dict[str, Any]) -> None:
+    def _set_extension_if_empty(cls, meta: dict[str, Any]) -> None:
         if meta.get("file_ext"):
             return
         file_name = str(meta.get("file_name") or "").strip()
@@ -101,7 +100,7 @@ class MessageParser:
 
     @classmethod
     def _extract_document_attribute_meta(
-        cls, meta: Dict[str, Any], extra: Dict[str, Any], document: Any
+        cls, meta: dict[str, Any], extra: dict[str, Any], document: Any
     ) -> None:
         for attr in getattr(document, "attributes", None) or []:
             cls._set_text_if_empty(meta, "file_name", getattr(attr, "file_name", None))
@@ -114,7 +113,7 @@ class MessageParser:
                     extra[key] = value
 
     @classmethod
-    def _extract_photo_size_meta(cls, meta: Dict[str, Any], photo: Any) -> None:
+    def _extract_photo_size_meta(cls, meta: dict[str, Any], photo: Any) -> None:
         best_size = None
         best_area = -1
         for size in getattr(photo, "sizes", None) or []:
@@ -132,7 +131,7 @@ class MessageParser:
 
     @classmethod
     def _extract_raw_media_meta(
-        cls, message: Any, meta: Dict[str, Any], extra: Dict[str, Any]
+        cls, message: Any, meta: dict[str, Any], extra: dict[str, Any]
     ) -> None:
         document = getattr(message, "document", None)
         if document:
@@ -149,7 +148,7 @@ class MessageParser:
         cls._set_extension_if_empty(meta)
 
     @classmethod
-    def parse(cls, message: Any) -> Optional[ParsedMessage]:
+    def parse(cls, message: Any) -> ParsedMessage | None:
         dt = getattr(message, "date", None)
         if dt is None:
             return None
@@ -217,8 +216,8 @@ class MessageParser:
         return ""
 
     @classmethod
-    def extract_media_meta(cls, message: Any, msg_type: str) -> Dict[str, Any]:
-        meta: Dict[str, Any] = {
+    def extract_media_meta(cls, message: Any, msg_type: str) -> dict[str, Any]:
+        meta: dict[str, Any] = {
             "media_kind": msg_type,
             "file_unique_id": None,
             "file_name": None,
@@ -295,7 +294,7 @@ class MessageParser:
         return meta
 
 
-def _match_entities_from_dialog_titles(client: Any, target: str) -> List[Any]:
+def _match_entities_from_dialog_titles(client: Any, target: str) -> list[Any]:
     exact_matches = []
     partial_match = None
 
@@ -316,16 +315,14 @@ def _is_entity_lookup_miss(exc: Exception) -> bool:
     exc_message = str(exc).lower()
     if exc_name in {"usernameinvaliderror", "usernamenotoccupiederror"}:
         return True
-    if isinstance(exc, ValueError) and (
+    return isinstance(exc, ValueError) and (
         "could not find the input entity" in exc_message
         or "cannot find any entity" in exc_message
         or "no user has" in exc_message
-    ):
-        return True
-    return False
+    )
 
 
-def _resolve_entity_or_empty(client: Any, key: Any) -> List[Any]:
+def _resolve_entity_or_empty(client: Any, key: Any) -> list[Any]:
     try:
         entity = client.get_entity(key)
     except Exception as exc:
@@ -335,7 +332,7 @@ def _resolve_entity_or_empty(client: Any, key: Any) -> List[Any]:
     return [entity] if entity else []
 
 
-def resolve_target_entities(client: Any, target: str) -> List[Any]:
+def resolve_target_entities(client: Any, target: str) -> list[Any]:
     t = (target or "").strip()
     if not t:
         return []
@@ -365,8 +362,8 @@ class HarvestCounters:
     seen: int = 0
     written: int = 0
     parse_failures: int = 0
-    parse_failure_samples: List[str] = field(default_factory=list)
-    parse_failures_by_type: Dict[str, int] = field(default_factory=dict)
+    parse_failure_samples: list[str] = field(default_factory=list)
+    parse_failures_by_type: dict[str, int] = field(default_factory=dict)
 
     def note_parse_failure(self, err: Exception, message: Any = None):
         self.parse_failures += 1

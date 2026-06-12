@@ -1,11 +1,17 @@
-# -*- coding: utf-8 -*-
 import sqlite3
 from contextlib import closing
-from typing import Any, Optional
+from typing import Any
 
 from flask import jsonify, request
+
 from tg_harvest.app.services import AdminRouteServices
 from tg_harvest.web.auth import admin_login_required
+from tg_harvest.web.responses import (
+    create_exclusive_job_or_response,
+    created_job_snapshot_response,
+    json_error,
+    require_json_dict,
+)
 
 
 class AdminRoutesHandler:
@@ -14,7 +20,7 @@ class AdminRoutesHandler:
     def __init__(
         self,
         *,
-        services: Optional[AdminRouteServices] = None,
+        services: AdminRouteServices | None = None,
         **kwargs,
     ):
         self.services = services or AdminRouteServices(**kwargs)
@@ -23,53 +29,31 @@ class AdminRoutesHandler:
         return getattr(self.services, name)
 
     def _json_error(self, message: str, status_code: int):
-        return jsonify({"ok": False, "error": str(message)}), int(status_code)
+        return json_error(message, status_code)
 
     def _require_json_dict(self):
-        if not request.is_json:
-            return None, self._json_error("请求必须为 JSON", 400)
-
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            return None, self._json_error("请求 JSON 格式错误", 400)
-        return data, None
-
-    def _conflict_response(self, existing_job: Any):
-        return (
-            jsonify(
-                {
-                    "ok": False,
-                    "error": "当前已有进行中的任务，请等待完成后再试",
-                    "existing_job": existing_job,
-                }
-            ),
-            409,
-        )
+        return require_json_dict()
 
     def _created_job_snapshot_response(self, job_id: str, **extra):
-        snapshot = self.admin_job_get_snapshot_fn(job_id)
-        if snapshot is None:
-            return self._json_error("任务创建失败", 500)
-
-        payload = {"ok": True, "job": snapshot}
-        payload.update(extra)
-        return jsonify(payload)
+        return created_job_snapshot_response(
+            job_id,
+            self.admin_job_get_snapshot_fn,
+            **extra,
+        )
 
     def _create_exclusive_job_or_response(
         self,
         job_type: str,
         *,
-        target_chat_id: Optional[int] = None,
-        target_label: Optional[str] = None,
+        target_chat_id: int | None = None,
+        target_label: str | None = None,
     ):
-        job, existing_job = self.admin_try_create_exclusive_job_fn(
+        return create_exclusive_job_or_response(
+            self.admin_try_create_exclusive_job_fn,
             job_type,
             target_chat_id=target_chat_id,
             target_label=target_label,
         )
-        if existing_job is not None:
-            return None, self._conflict_response(existing_job)
-        return str(job.get("job_id") or ""), None
 
     def _load_chat_brief_or_response(self, chat_id: int):
         try:
@@ -121,6 +105,19 @@ class AdminRoutesHandler:
             return self._json_error("confirm 参数不匹配", 400)
         return None
 
+    def _append_scope_target_logs(
+        self,
+        job_id: str,
+        *,
+        scope: str,
+        chat_id: int | None,
+        target_label: str,
+    ) -> None:
+        scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
+        chat_suffix = "" if chat_id is None else f" ({chat_id})"
+        self.admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
+        self.admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
+
     @admin_login_required
     def api_admin_chats(self):
         try:
@@ -129,17 +126,17 @@ class AdminRoutesHandler:
             return jsonify(payload)
         except sqlite3.Error:
             self.logger.exception("读取后台群列表失败")
-            return jsonify({"ok": False, "error": "读取后台群列表失败"}), 500
+            return self._json_error("读取后台群列表失败", 500)
         except Exception:
             self.logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return self._json_error("系统异常", 500)
 
     @admin_login_required
     def api_admin_stats(self):
         try:
             chat_id = self.parse_admin_chat_id_fn(request.args.get("chat_id"))
         except (ValueError, TypeError):
-            return jsonify({"ok": False, "error": "chat_id 参数非法"}), 400
+            return self._json_error("chat_id 参数非法", 400)
 
         try:
             with closing(self.get_conn_fn()) as conn:
@@ -147,16 +144,16 @@ class AdminRoutesHandler:
             return jsonify(payload), status_code
         except sqlite3.Error:
             self.logger.exception("读取后台统计失败")
-            return jsonify({"ok": False, "error": "读取后台统计失败"}), 500
+            return self._json_error("读取后台统计失败", 500)
         except Exception:
             self.logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return self._json_error("系统异常", 500)
 
     @admin_login_required
     def api_admin_job_snapshot(self, job_id: str):
         snapshot = self.admin_job_get_snapshot_fn(job_id)
         if snapshot is None:
-            return jsonify({"ok": False, "error": "任务不存在"}), 404
+            return self._json_error("任务不存在", 404)
         return jsonify({"ok": True, "job": snapshot})
 
     @admin_login_required
@@ -167,14 +164,43 @@ class AdminRoutesHandler:
             if after_seq < 0:
                 raise ValueError()
         except (ValueError, TypeError):
-            return jsonify({"ok": False, "error": "after_seq 参数非法"}), 400
+            return self._json_error("after_seq 参数非法", 400)
 
         logs = self.admin_job_get_logs_fn(job_id, after_seq=after_seq)
         if logs is None:
-            return jsonify({"ok": False, "error": "任务不存在"}), 404
+            return self._json_error("任务不存在", 404)
         return jsonify(
             {"ok": True, "job_id": job_id, "after_seq": after_seq, "logs": logs}
         )
+
+    @admin_login_required
+    def api_admin_active_job(self):
+        active_job = self.admin_get_active_job_fn()
+        if active_job is None:
+            return jsonify({"ok": True, "job": None})
+
+        job_id = str(active_job.get("job_id") or "")
+        snapshot = self.admin_job_get_snapshot_fn(job_id) if job_id else None
+        return jsonify({"ok": True, "job": snapshot or active_job})
+
+    @admin_login_required
+    def api_admin_job_stop(self, job_id: str):
+        snapshot = self.admin_job_get_snapshot_fn(job_id)
+        if snapshot is None:
+            return self._json_error("任务不存在", 404)
+
+        status = str(snapshot.get("status") or "").lower()
+        if status not in {"queued", "running"}:
+            return self._json_error("任务已结束，不能停止", 409)
+
+        ok, error_message = self.admin_request_job_stop_fn(job_id)
+        if not ok:
+            status_code = 404 if error_message == "任务不存在" else 409
+            return self._json_error(error_message or "停止请求失败", status_code)
+
+        self.admin_job_append_log_fn(job_id, "已收到停止请求，当前群组完成后停止派发新群组")
+        snapshot = self.admin_job_get_snapshot_fn(job_id)
+        return jsonify({"ok": True, "job": snapshot})
 
     @admin_login_required
     def api_admin_job_create_harvest(self):
@@ -314,6 +340,33 @@ class AdminRoutesHandler:
         return self._created_job_snapshot_response(job_id)
 
     @admin_login_required
+    def api_admin_job_create_delete_empty_chats(self):
+        data, error_response = self._require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        error_response = self._require_confirmation(data, "DELETE_EMPTY_CHATS")
+        if error_response is not None:
+            return error_response
+
+        job_id, error_response = self._create_exclusive_job_or_response(
+            "delete_empty_chats",
+            target_chat_id=None,
+            target_label="零消息群组",
+        )
+        if error_response is not None:
+            return error_response
+
+        self.admin_job_append_log_fn(job_id, "已接收零消息群组删除请求")
+        self.admin_start_delete_empty_chats_job_thread_fn(
+            job_id,
+            get_conn_fn=self.get_conn_fn,
+            admin_job_set_status_fn=self.admin_job_set_status_fn,
+            admin_job_append_log_fn=self.admin_job_append_log_fn,
+        )
+        return self._created_job_snapshot_response(job_id)
+
+    @admin_login_required
     def api_admin_job_create_cleanup(self):
         data, error_response = self._require_json_dict()
         if error_response is not None:
@@ -354,10 +407,12 @@ class AdminRoutesHandler:
             return error_response
 
         self.admin_job_append_log_fn(job_id, "已接收垃圾清理请求")
-        scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
-        self.admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
-        chat_suffix = "" if chat_id is None else f" ({chat_id})"
-        self.admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
+        self._append_scope_target_logs(
+            job_id,
+            scope=scope,
+            chat_id=chat_id,
+            target_label=target_label,
+        )
         self.admin_job_append_log_fn(job_id, f"关键字：{keyword}")
         self.admin_start_cleanup_job_thread_fn(
             job_id=job_id,
@@ -407,10 +462,12 @@ class AdminRoutesHandler:
             return error_response
 
         self.admin_job_append_log_fn(job_id, "已接收不可搜索数据清理请求")
-        scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
-        self.admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
-        chat_suffix = "" if chat_id is None else f" ({chat_id})"
-        self.admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
+        self._append_scope_target_logs(
+            job_id,
+            scope=scope,
+            chat_id=chat_id,
+            target_label=target_label,
+        )
         self.admin_start_cleanup_empty_job_thread_fn(
             job_id=job_id,
             scope=scope,
@@ -430,16 +487,21 @@ class AdminRoutesHandler:
         )
 
 
-def register_admin_routes(app, *, services: Optional[AdminRouteServices] = None, **kwargs) -> None:
+def register_admin_routes(app, *, services: AdminRouteServices | None = None, **kwargs) -> None:
     handler = AdminRoutesHandler(services=services, **kwargs)
 
     app.get("/api/admin/chats")(handler.api_admin_chats)
     app.get("/api/admin/stats")(handler.api_admin_stats)
+    app.get("/api/admin/jobs/active")(handler.api_admin_active_job)
     app.get("/api/admin/jobs/<job_id>")(handler.api_admin_job_snapshot)
     app.get("/api/admin/jobs/<job_id>/logs")(handler.api_admin_job_logs)
+    app.post("/api/admin/jobs/<job_id>/stop")(handler.api_admin_job_stop)
     app.post("/api/admin/jobs/harvest")(handler.api_admin_job_create_harvest)
     app.post("/api/admin/jobs/update")(handler.api_admin_job_create_update)
     app.post("/api/admin/jobs/delete")(handler.api_admin_job_create_delete)
+    app.post("/api/admin/jobs/delete-empty-chats")(
+        handler.api_admin_job_create_delete_empty_chats
+    )
     app.post("/api/admin/jobs/cleanup")(handler.api_admin_job_create_cleanup)
     app.post("/api/admin/jobs/cleanup-empty")(
         handler.api_admin_job_create_cleanup_empty

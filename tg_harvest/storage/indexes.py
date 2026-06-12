@@ -1,10 +1,10 @@
-# -*- coding: utf-8 -*-
 import re
 import sqlite3
 
-from tg_harvest.storage.search_text_state import SEARCH_TEXT_PRESENT_COLUMN
-from tg_harvest.storage.search_text_state import table_has_column
-
+from tg_harvest.storage.search_text_state import (
+    SEARCH_TEXT_PRESENT_COLUMN,
+    table_has_column,
+)
 
 _OBSOLETE_INDEXES = (
     # Covered by sqlite_autoindex_messages_1 (UNIQUE(chat_id, message_id)).
@@ -427,6 +427,33 @@ def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_recovery_chats_scanned",
+        "CREATE INDEX idx_admin_recovery_chats_scanned "
+        "ON admin_recovery_chats(scanned_at DESC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_recovery_chats_title",
+        "CREATE INDEX idx_admin_recovery_chats_title "
+        "ON admin_recovery_chats(chat_title COLLATE NOCASE)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_recovery_chats_recovered",
+        "CREATE INDEX idx_admin_recovery_chats_recovered "
+        "ON admin_recovery_chats(recovered_at, chat_title COLLATE NOCASE)"
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_recovery_chats_session_ts",
+        "CREATE INDEX idx_admin_recovery_chats_session_ts "
+        "ON admin_recovery_chats(session_entity_ts DESC)"
+    )
+
+
 def _create_indexes(cur: sqlite3.Cursor):
     _drop_obsolete_indexes(cur)
     _create_chat_indexes(cur)
@@ -439,3 +466,4 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_missing_chat_indexes(cur)
     _create_admin_absent_chat_indexes(cur)
     _create_admin_restricted_chat_indexes(cur)
+    _create_admin_recovery_chat_indexes(cur)

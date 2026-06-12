@@ -1,9 +1,14 @@
-# -*- coding: utf-8 -*-
 from __future__ import annotations
 
+import re
+import sqlite3
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Iterable, List, Mapping, Sequence, Set
+from typing import Any
+
+from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
 
 
 @dataclass(frozen=True)
@@ -33,7 +38,26 @@ class RestrictedChatInventoryRow:
     last_message_ts: int | None = None
 
 
-def load_known_chat_ids(conn: Any) -> Set[int]:
+@dataclass(frozen=True)
+class SessionChatRecoveryRow:
+    chat_id: int
+    chat_title: str
+    chat_username: str = ""
+    chat_type: str = "SessionEntity"
+    is_public: int = 0
+    source_session: str = ""
+    source_entity_id: int | None = None
+    source_access_hash: int | None = None
+    session_entity_date: str = ""
+    session_entity_ts: int | None = None
+
+
+_RESTRICTION_TOKEN_SPLIT_RE = re.compile(r"[、,，;；|/]+")
+UNAVAILABLE_RESTRICTION_PLATFORM = "all"
+UNAVAILABLE_RESTRICTION_REASONS = frozenset({"terms", "tos"})
+
+
+def load_known_chat_ids(conn: Any) -> set[int]:
     cur = conn.cursor()
     try:
         cur.execute("SELECT chat_id FROM chats")
@@ -51,6 +75,15 @@ def _chat_id_identity(raw_chat_id: Any) -> int:
     return value
 
 
+def _optional_int(value: Any) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 def _is_joined_group_or_channel(dialog: Any) -> bool:
     entity = getattr(dialog, "entity", None)
     if entity is None:
@@ -66,9 +99,7 @@ def _is_joined_group_or_channel(dialog: Any) -> bool:
 
     if bool(getattr(entity, "left", False)):
         return False
-    if bool(getattr(entity, "deactivated", False)):
-        return False
-    return True
+    return not bool(getattr(entity, "deactivated", False))
 
 
 def _dialog_unavailable_reason(dialog: Any) -> str:
@@ -123,9 +154,9 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
     )
 
 
-def load_joined_chat_inventory(dialogs: Iterable[Any]) -> List[ChatInventoryRow]:
-    rows: List[ChatInventoryRow] = []
-    seen_chat_ids: Set[int] = set()
+def load_joined_chat_inventory(dialogs: Iterable[Any]) -> list[ChatInventoryRow]:
+    rows: list[ChatInventoryRow] = []
+    seen_chat_ids: set[int] = set()
 
     for dialog in dialogs:
         row = _row_from_dialog(dialog)
@@ -140,9 +171,9 @@ def load_joined_chat_inventory(dialogs: Iterable[Any]) -> List[ChatInventoryRow]
     return rows
 
 
-def _dedupe_nonempty(values: Iterable[Any]) -> List[str]:
-    items: List[str] = []
-    seen: Set[str] = set()
+def _dedupe_nonempty(values: Iterable[Any]) -> list[str]:
+    items: list[str] = []
+    seen: set[str] = set()
     for value in values:
         text = str(value or "").strip()
         if not text:
@@ -177,6 +208,27 @@ def _restriction_reason_parts(entity: Any) -> tuple[str, str, str]:
     )
 
 
+def _split_restriction_tokens(value: Any) -> list[str]:
+    text = str(value or "").strip()
+    if not text:
+        return []
+    return [
+        part.strip().lower()
+        for part in _RESTRICTION_TOKEN_SPLIT_RE.split(text)
+        if part.strip()
+    ]
+
+
+def entity_has_all_platform_terms_restriction(entity: Any) -> bool:
+    platforms, reasons, _reason_text = _restriction_reason_parts(entity)
+    platform_tokens = _split_restriction_tokens(platforms)
+    reason_tokens = _split_restriction_tokens(reasons)
+    return (
+        UNAVAILABLE_RESTRICTION_PLATFORM in platform_tokens
+        and any(reason in UNAVAILABLE_RESTRICTION_REASONS for reason in reason_tokens)
+    )
+
+
 def _entity_risk_flags(entity: Any) -> str:
     flag_labels = [
         ("restricted", "restricted"),
@@ -188,9 +240,9 @@ def _entity_risk_flags(entity: Any) -> str:
     )
 
 
-def find_restricted_joined_chats(dialogs: Iterable[Any]) -> List[RestrictedChatInventoryRow]:
-    rows: List[RestrictedChatInventoryRow] = []
-    seen_chat_ids: Set[int] = set()
+def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatInventoryRow]:
+    rows: list[RestrictedChatInventoryRow] = []
+    seen_chat_ids: set[int] = set()
 
     for dialog in dialogs:
         base_row = _row_from_dialog(dialog)
@@ -233,9 +285,9 @@ def find_restricted_joined_chats(dialogs: Iterable[Any]) -> List[RestrictedChatI
 
 
 def find_missing_joined_chats(
-    dialogs: Iterable[Any], known_chat_ids: Set[int]
-) -> List[ChatInventoryRow]:
-    rows: List[ChatInventoryRow] = []
+    dialogs: Iterable[Any], known_chat_ids: set[int]
+) -> list[ChatInventoryRow]:
+    rows: list[ChatInventoryRow] = []
     known_identities = {_chat_id_identity(chat_id) for chat_id in known_chat_ids}
 
     for row in load_joined_chat_inventory(dialogs):
@@ -249,6 +301,45 @@ def find_missing_joined_chats(
     return rows
 
 
+def _generic_row_value(row: Any, key: str, default: Any = "") -> Any:
+    if isinstance(row, Mapping):
+        return _mapping_value(row, key, default)
+    try:
+        value = row[key]
+    except Exception:
+        value = getattr(row, key, default)
+    return default if value is None else value
+
+
+def filter_database_chats_to_joined(
+    database_rows: Iterable[Any], joined_rows: Iterable[ChatInventoryRow]
+) -> list[Any]:
+    joined_identities = {
+        _chat_id_identity(row.chat_id)
+        for row in joined_rows
+        if not str(row.unavailable_reason or "").strip()
+    }
+    rows: list[Any] = []
+    seen_chat_identities: set[int] = set()
+
+    for row in database_rows:
+        try:
+            chat_id = int(_generic_row_value(row, "chat_id", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if chat_id == 0:
+            continue
+        identity = _chat_id_identity(chat_id)
+        if identity in seen_chat_identities:
+            continue
+        seen_chat_identities.add(identity)
+        if identity not in joined_identities:
+            continue
+        rows.append(row)
+
+    return rows
+
+
 def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
     value = row.get(key, default)
     return default if value is None else value
@@ -256,17 +347,17 @@ def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
 
 def find_database_chats_not_joined(
     database_rows: Iterable[Mapping[str, Any]],
-    joined_chat_ids: Set[int],
+    joined_chat_ids: set[int],
     unavailable_chat_reasons: Mapping[int, str] | None = None,
-) -> List[dict]:
+) -> list[dict]:
     joined_identities = {_chat_id_identity(chat_id) for chat_id in joined_chat_ids}
     unavailable_reasons = {
         _chat_id_identity(chat_id): str(reason or "").strip()
         for chat_id, reason in (unavailable_chat_reasons or {}).items()
         if str(reason or "").strip()
     }
-    rows: List[dict] = []
-    seen_chat_ids: Set[int] = set()
+    rows: list[dict] = []
+    seen_chat_ids: set[int] = set()
 
     for row in database_rows:
         chat_id = int(_mapping_value(row, "chat_id", 0) or 0)
@@ -310,3 +401,124 @@ def write_missing_chat_report(
             f.write(f"{row.chat_title} | ID: {row.chat_id}\n")
 
     return path
+
+
+def discover_session_files(base_session_name: str | Path) -> list[Path]:
+    base = Path(str(base_session_name))
+    if base.suffix != ".session":
+        base = Path(str(base) + ".session")
+
+    candidates: dict[str, Path] = {}
+    if base.exists() and base.is_file():
+        candidates[str(base.resolve())] = base.resolve()
+
+    parent = base.parent
+    if parent.exists():
+        for path in parent.glob("*.session"):
+            if path.is_file():
+                candidates[str(path.resolve())] = path.resolve()
+
+    return sorted(
+        candidates.values(),
+        key=lambda path: (
+            0 if path.name == base.name else 1,
+            path.name.casefold(),
+        ),
+    )
+
+
+def _session_entity_date_fields(raw_ts: Any) -> tuple[str, int | None]:
+    try:
+        ts = int(raw_ts)
+    except (TypeError, ValueError):
+        return "", None
+    if ts <= 0:
+        return "", None
+    try:
+        dt = datetime.fromtimestamp(ts, UTC)
+        return dt.strftime("%Y-%m-%d %H:%M:%S"), ts
+    except Exception:
+        return "", ts
+
+
+def _read_session_entity_rows(path: Path) -> list[SessionChatRecoveryRow]:
+    uri = path.resolve().as_uri() + "?mode=ro"
+    conn = sqlite3.connect(uri, uri=True)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                SELECT id, hash, username, name, date
+                FROM entities
+                WHERE id < 0
+                ORDER BY date DESC, name COLLATE NOCASE ASC, id ASC
+                """
+            )
+            rows: list[SessionChatRecoveryRow] = []
+            for row in cur.fetchall():
+                source_entity_id = int(row["id"])
+                chat_id = stored_chat_id_from_entity_id(source_entity_id)
+                if chat_id <= 0:
+                    continue
+                username = str(row["username"] or "").strip().lstrip("@")
+                title = str(row["name"] or "").strip()
+                if not title:
+                    title = username or f"Chat {chat_id}"
+                date_text, date_ts = _session_entity_date_fields(row["date"])
+                rows.append(
+                    SessionChatRecoveryRow(
+                        chat_id=chat_id,
+                        chat_title=title,
+                        chat_username=username,
+                        chat_type="SessionEntity",
+                        is_public=1 if username else 0,
+                        source_session=path.name,
+                        source_entity_id=source_entity_id,
+                        source_access_hash=_optional_int(row["hash"]),
+                        session_entity_date=date_text,
+                        session_entity_ts=date_ts,
+                    )
+                )
+            return rows
+        finally:
+            cur.close()
+    finally:
+        conn.close()
+
+
+def _recovery_row_sort_key(row: SessionChatRecoveryRow) -> tuple[int, int, str]:
+    return (
+        -(row.session_entity_ts or 0),
+        0 if row.chat_username else 1,
+        row.chat_title.casefold(),
+    )
+
+
+def scan_session_chat_recovery_rows(
+    session_files: Iterable[str | Path],
+) -> tuple[list[SessionChatRecoveryRow], list[str]]:
+    rows_by_chat_id: dict[int, SessionChatRecoveryRow] = {}
+    errors: list[str] = []
+
+    for raw_path in session_files:
+        path = Path(str(raw_path))
+        try:
+            source_rows = _read_session_entity_rows(path)
+        except Exception as exc:
+            errors.append(f"{path.name}: {type(exc).__name__}: {exc}")
+            continue
+
+        for row in source_rows:
+            existing = rows_by_chat_id.get(row.chat_id)
+            if existing is None or _recovery_row_sort_key(row) < _recovery_row_sort_key(
+                existing
+            ):
+                rows_by_chat_id[row.chat_id] = row
+
+    rows = sorted(
+        rows_by_chat_id.values(),
+        key=lambda row: (row.chat_title.casefold(), row.chat_id),
+    )
+    return rows, errors

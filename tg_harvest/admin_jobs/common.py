@@ -1,6 +1,6 @@
-# -*- coding: utf-8 -*-
 import threading
-from typing import Any, Callable, Optional
+from collections.abc import Callable
+from typing import Any
 
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
 
@@ -21,7 +21,7 @@ def admin_error_message(exc: Exception) -> str:
 
 
 def resolve_chat_entity(
-    client: Any, chat_id: int, chat_username: Optional[str] = None
+    client: Any, chat_id: int, chat_username: str | None = None
 ) -> Any:
     try:
         return client.get_entity(chat_id)
@@ -61,7 +61,7 @@ def start_admin_job_thread(target, *args, **kwargs):
 
 def read_chat_username(
     get_conn_fn: Callable[[], Any], chat_id: int
-) -> Optional[str]:
+) -> str | None:
     conn = None
     try:
         conn = get_conn_fn()

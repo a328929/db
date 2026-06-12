@@ -1,8 +1,6 @@
 import unittest
 
-from tg_harvest.search.expression import expr_to_debug_dict
-from tg_harvest.search.expression import parse_query
-from tg_harvest.search.expression import to_fts_match
+from tg_harvest.search.expression import expr_to_debug_dict, parse_query, to_fts_match
 from tg_harvest.search.params import SearchParams
 from tg_harvest.search.sql_builder import _build_search_query_spec
 

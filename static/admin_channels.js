@@ -11,10 +11,21 @@
   var setElementDisabled = shared.setElementDisabled;
   var setPageInteractionState = shared.setPageInteractionState;
   var syncClearLogsButtonVisibility = shared.syncClearLogsButtonVisibility;
+  var trapFocusWithin = shared.trapFocusWithin;
 
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
   var JOB_POLL_RETRY_BASE_MS = 3000;
+  var LIST_INITIAL_RENDER_BATCH_SIZE = 40;
+  var LIST_RENDER_BATCH_SIZE = 40;
+  var LIST_RENDER_STATUS_INTERVAL_MS = 250;
+
+  var listRenderTokens = {
+    channels: 0,
+    missing: 0,
+    absent: 0,
+    restricted: 0
+  };
 
   var jobPollState = {
     jobId: '',
@@ -175,6 +186,15 @@
     elements.clearLogsBtn.addEventListener('click', function () {
       clearLogs(elements);
     });
+
+    document.addEventListener('keydown', function (event) {
+      if (!elements || !elements.loginDialog || elements.loginDialog.hidden) {
+        return;
+      }
+      if (event.key === 'Tab') {
+        trapFocusWithin(elements.loginDialog, event);
+      }
+    });
   }
 
   async function checkAuth(elements) {
@@ -294,6 +314,86 @@
     setListCollapsed(toggleButton, listElement, !listElement.hidden);
   }
 
+  function setListRenderBusy(container, isBusy) {
+    if (!container || typeof container.setAttribute !== 'function') return;
+    container.setAttribute('aria-busy', isBusy ? 'true' : 'false');
+  }
+
+  function nextListRenderToken(key) {
+    listRenderTokens[key] = (listRenderTokens[key] || 0) + 1;
+    return listRenderTokens[key];
+  }
+
+  function stopListRendering(key, container) {
+    nextListRenderToken(key);
+    setListRenderBusy(container, false);
+  }
+
+  function isListRenderCurrent(key, token) {
+    return listRenderTokens[key] === token;
+  }
+
+  function scheduleListRender(callback) {
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(callback, { timeout: 120 });
+      return;
+    }
+    window.setTimeout(callback, 16);
+  }
+
+  function renderItemsInBatches(options) {
+    var key = options.key;
+    var container = options.container;
+    var items = Array.isArray(options.items) ? options.items : [];
+    var createItem = options.createItem;
+    var statusElement = options.statusElement;
+    var progressText = options.progressText;
+    var doneText = options.doneText;
+    var token = nextListRenderToken(key);
+    var total = items.length;
+    var index = 0;
+    var lastStatusUpdateAt = 0;
+
+    container.textContent = '';
+    setListRenderBusy(container, true);
+
+    function setProgressStatus(force) {
+      if (!statusElement || typeof progressText !== 'function') return;
+      var now = Date.now();
+      if (!force && index < total && now - lastStatusUpdateAt < LIST_RENDER_STATUS_INTERVAL_MS) {
+        return;
+      }
+      lastStatusUpdateAt = now;
+      statusElement.textContent = progressText(index, total);
+    }
+
+    function appendBatch() {
+      if (!isListRenderCurrent(key, token)) return;
+
+      var fragment = document.createDocumentFragment();
+      var batchSize = index === 0 ? LIST_INITIAL_RENDER_BATCH_SIZE : LIST_RENDER_BATCH_SIZE;
+      var end = Math.min(index + batchSize, total);
+      while (index < end) {
+        fragment.appendChild(createItem(items[index], index));
+        index += 1;
+      }
+      container.appendChild(fragment);
+
+      if (index < total) {
+        setProgressStatus(false);
+        scheduleListRender(appendBatch);
+        return;
+      }
+
+      setListRenderBusy(container, false);
+      if (statusElement && typeof doneText === 'function') {
+        statusElement.textContent = doneText(total);
+      }
+    }
+
+    appendBatch();
+  }
+
   function createInfoPill(label, value) {
     var pill = document.createElement('span');
     pill.className = 'channel-info-pill';
@@ -374,7 +474,7 @@
       deleteBtn.textContent = '删除数据';
       deleteBtn.setAttribute('aria-label', '从数据库删除该群组或频道的全部数据');
       deleteBtn.addEventListener('click', function () {
-        handleDeleteAbsentChannel(elements, item);
+        handleDeleteChannelData(elements, item);
       });
       actions.appendChild(deleteBtn);
     }
@@ -382,6 +482,7 @@
   }
 
   function renderChannels(elements, channels) {
+    stopListRendering('channels', elements.channelList);
     elements.channelList.textContent = '';
     if (!Array.isArray(channels) || channels.length === 0) {
       var empty = document.createElement('div');
@@ -392,12 +493,22 @@
       return;
     }
 
-    channels.forEach(function (channel) {
-      var parts = [];
-      if (channel.chat_username) parts.push('@' + channel.chat_username);
-      if (channel.chat_type) parts.push(channel.chat_type);
-      elements.channelList.appendChild(
-        createChannelRecordItem({
+    renderItemsInBatches({
+      key: 'channels',
+      container: elements.channelList,
+      items: channels,
+      statusElement: elements.channelCount,
+      progressText: function (visible, total) {
+        return '正在显示 ' + visible + '/' + total + ' 个群组/频道...';
+      },
+      doneText: function (total) {
+        return '共 ' + total + ' 个群组/频道。';
+      },
+      createItem: function (channel) {
+        var parts = [];
+        if (channel.chat_username) parts.push('@' + channel.chat_username);
+        if (channel.chat_type) parts.push(channel.chat_type);
+        return createChannelRecordItem({
           title: channel.chat_title || ('Chat ' + channel.chat_id),
           subtitle: parts.join(' | '),
           metrics: [
@@ -409,17 +520,17 @@
             { label: '用户名', value: channel.chat_username ? '@' + channel.chat_username : '' },
             { label: '类型', value: channel.chat_type || '' },
           ],
-          actions: createChannelActions(channel, elements),
+          actions: createChannelActions(channel, elements, { allowDelete: true }),
           note: channel.has_public_link
             ? ''
             : '私有群组通常没有稳定网页入口；客户端链接不可用时可复制信息后在 Telegram 中定位。'
-        })
-      );
+        });
+      }
     });
-    elements.channelCount.textContent = '共 ' + channels.length + ' 个群组/频道。';
   }
 
   async function loadChannels(elements) {
+    stopListRendering('channels', elements.channelList);
     elements.channelCount.textContent = '正在读取列表...';
     try {
       var data = await fetchJSON(
@@ -428,11 +539,13 @@
       if (!data.ok) throw new Error(data.error || '读取失败');
       renderChannels(elements, data.channels || []);
     } catch (error) {
+      stopListRendering('channels', elements.channelList);
       elements.channelCount.textContent = '读取列表失败：' + error.message;
     }
   }
 
   function renderMissingChannels(elements, items) {
+    stopListRendering('missing', elements.missingList);
     elements.missingList.textContent = '';
     if (!Array.isArray(items) || items.length === 0) {
       var empty = document.createElement('div');
@@ -443,13 +556,23 @@
       return;
     }
 
-    items.forEach(function (item) {
-      var metaParts = [];
-      if (item.chat_username) metaParts.push('@' + item.chat_username);
-      if (item.chat_type) metaParts.push(item.chat_type);
+    renderItemsInBatches({
+      key: 'missing',
+      container: elements.missingList,
+      items: items,
+      statusElement: elements.missingStatus,
+      progressText: function (visible, total) {
+        return '正在显示 ' + visible + '/' + total + ' 个未入库扫描结果...';
+      },
+      doneText: function (total) {
+        return '发现 ' + total + ' 个已加入但未入库的群组/频道。';
+      },
+      createItem: function (item) {
+        var metaParts = [];
+        if (item.chat_username) metaParts.push('@' + item.chat_username);
+        if (item.chat_type) metaParts.push(item.chat_type);
 
-      elements.missingList.appendChild(
-        createChannelRecordItem({
+        return createChannelRecordItem({
           title: item.chat_title || ('Chat ' + item.chat_id),
           subtitle: metaParts.join(' | '),
           metrics: [
@@ -466,10 +589,9 @@
           note: item.has_public_link
             ? ''
             : '私有群组通常没有稳定网页入口；客户端链接不可用时可复制信息后在 Telegram 中定位。'
-        })
-      );
+        });
+      }
     });
-    elements.missingStatus.textContent = '发现 ' + items.length + ' 个已加入但未入库的群组/频道。';
   }
 
   function copyChannelInfo(item, elements) {
@@ -491,16 +613,20 @@
   }
 
   async function loadMissingChannels(elements) {
+    stopListRendering('missing', elements.missingList);
+    elements.missingStatus.textContent = '正在读取扫描结果...';
     try {
       var data = await fetchJSON('/api/admin/channels/missing');
       if (!data.ok) throw new Error(data.error || '读取失败');
       renderMissingChannels(elements, data.items || []);
     } catch (error) {
+      stopListRendering('missing', elements.missingList);
       elements.missingStatus.textContent = '读取扫描结果失败：' + error.message;
     }
   }
 
   function renderAbsentChannels(elements, items) {
+    stopListRendering('absent', elements.absentList);
     elements.absentList.textContent = '';
     if (!Array.isArray(items) || items.length === 0) {
       var empty = document.createElement('div');
@@ -511,13 +637,23 @@
       return;
     }
 
-    items.forEach(function (item) {
-      var metaParts = [];
-      if (item.chat_username) metaParts.push('@' + item.chat_username);
-      if (item.chat_type) metaParts.push(item.chat_type);
+    renderItemsInBatches({
+      key: 'absent',
+      container: elements.absentList,
+      items: items,
+      statusElement: elements.absentStatus,
+      progressText: function (visible, total) {
+        return '正在显示 ' + visible + '/' + total + ' 个账号外数据库扫描结果...';
+      },
+      doneText: function (total) {
+        return '发现 ' + total + ' 个数据库中存在但账号未加入或不可用的群组/频道。';
+      },
+      createItem: function (item) {
+        var metaParts = [];
+        if (item.chat_username) metaParts.push('@' + item.chat_username);
+        if (item.chat_type) metaParts.push(item.chat_type);
 
-      elements.absentList.appendChild(
-        createChannelRecordItem({
+        return createChannelRecordItem({
           title: item.chat_title || ('Chat ' + item.chat_id),
           subtitle: metaParts.join(' | '),
           metrics: [
@@ -540,18 +676,20 @@
                   ? ''
                   : '私有群组通常没有稳定网页入口；删除前可复制信息核对目标。'
               )
-        })
-      );
+        });
+      }
     });
-    elements.absentStatus.textContent = '发现 ' + items.length + ' 个数据库中存在但账号未加入或不可用的群组/频道。';
   }
 
   async function loadAbsentChannels(elements) {
+    stopListRendering('absent', elements.absentList);
+    elements.absentStatus.textContent = '正在读取扫描结果...';
     try {
       var data = await fetchJSON('/api/admin/channels/absent');
       if (!data.ok) throw new Error(data.error || '读取失败');
       renderAbsentChannels(elements, data.items || []);
     } catch (error) {
+      stopListRendering('absent', elements.absentList);
       elements.absentStatus.textContent = '读取扫描结果失败：' + error.message;
     }
   }
@@ -670,6 +808,7 @@
 
   function renderRestrictedChannels(elements) {
     var items = filterRestrictedItems(restrictedState.items);
+    stopListRendering('restricted', elements.restrictedList);
     elements.restrictedList.textContent = '';
     if (!Array.isArray(restrictedState.items) || restrictedState.items.length === 0) {
       var empty = document.createElement('div');
@@ -688,14 +827,34 @@
       return;
     }
 
-    items.forEach(function (item) {
-      var metaParts = [];
-      if (item.chat_username) metaParts.push('@' + item.chat_username);
-      if (item.chat_type) metaParts.push(item.chat_type);
-      if (item.risk_flags) metaParts.push(item.risk_flags);
+    renderItemsInBatches({
+      key: 'restricted',
+      container: elements.restrictedList,
+      items: items,
+      statusElement: elements.restrictedStatus,
+      progressText: function (visible, total) {
+        if ((restrictedState.filterValue || '__all__') === '__all__') {
+          return '正在显示 ' + visible + '/' + total + ' 个内容限制/风险标记结果...';
+        }
+        return '正在显示当前类型 ' + visible + '/' + total + ' 个，共 '
+          + restrictedState.items.length
+          + ' 个内容限制/风险标记结果...';
+      },
+      doneText: function (total) {
+        if ((restrictedState.filterValue || '__all__') === '__all__') {
+          return '发现 ' + total + ' 个带 Telegram 内容限制/风险标记的群组/频道。';
+        }
+        return '当前类型 ' + total + ' 个，共 '
+          + restrictedState.items.length
+          + ' 个内容限制/风险标记结果。';
+      },
+      createItem: function (item) {
+        var metaParts = [];
+        if (item.chat_username) metaParts.push('@' + item.chat_username);
+        if (item.chat_type) metaParts.push(item.chat_type);
+        if (item.risk_flags) metaParts.push(item.risk_flags);
 
-      elements.restrictedList.appendChild(
-        createChannelRecordItem({
+        return createChannelRecordItem({
           title: item.chat_title || ('Chat ' + item.chat_id),
           subtitle: metaParts.join(' | '),
           metrics: [
@@ -713,17 +872,14 @@
           ],
           actions: createChannelActions(item, elements),
           note: buildRestrictedNote(item)
-        })
-      );
+        });
+      }
     });
-    if ((restrictedState.filterValue || '__all__') === '__all__') {
-      elements.restrictedStatus.textContent = '发现 ' + items.length + ' 个带 Telegram 内容限制/风险标记的群组/频道。';
-    } else {
-      elements.restrictedStatus.textContent = '当前类型 ' + items.length + ' 个，共 ' + restrictedState.items.length + ' 个内容限制/风险标记结果。';
-    }
   }
 
   async function loadRestrictedChannels(elements) {
+    stopListRendering('restricted', elements.restrictedList);
+    elements.restrictedStatus.textContent = '正在读取扫描结果...';
     try {
       var data = await fetchJSON('/api/admin/channels/restricted');
       if (!data.ok) throw new Error(data.error || '读取失败');
@@ -731,6 +887,7 @@
       updateRestrictedFilterOptions(elements);
       renderRestrictedChannels(elements);
     } catch (error) {
+      stopListRendering('restricted', elements.restrictedList);
       elements.restrictedStatus.textContent = '读取扫描结果失败：' + error.message;
     }
   }
@@ -804,7 +961,7 @@
     }
   }
 
-  async function handleDeleteAbsentChannel(elements, item) {
+  async function handleDeleteChannelData(elements, item) {
     if (jobPollState.isPolling) {
       appendLog(elements, '已有任务进行中，请等待完成后再删除');
       return;

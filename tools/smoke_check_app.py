@@ -4,11 +4,12 @@
 from __future__ import annotations
 
 import sys
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Iterable, Set
 
 REQUIRED_ROUTES = {
     "/",
+    "/admin/login",
     "/admin/manage",
     "/admin/channels",
     "/api/meta",
@@ -28,7 +29,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 
-def _collect_routes(app) -> Set[str]:
+def _collect_routes(app) -> set[str]:
     return {rule.rule for rule in app.url_map.iter_rules()}
 
 

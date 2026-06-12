@@ -9,49 +9,62 @@ import tempfile
 import threading
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
-from tg_harvest.admin_jobs.core import _admin_job_append_log
-from tg_harvest.admin_jobs.core import _admin_job_create
-from tg_harvest.admin_jobs.core import _admin_job_get_logs
-from tg_harvest.admin_jobs.core import _admin_job_get_snapshot
-from tg_harvest.admin_jobs.core import _admin_job_set_status
-from tg_harvest.admin_jobs.core import _admin_try_create_exclusive_job
-from tg_harvest.admin_jobs.core import _admin_recover_interrupted_jobs
-from tg_harvest.admin_jobs.core import _AdminJobThreadLogHandler
-from tg_harvest.admin_jobs.core import job_context
-from tg_harvest.admin_jobs.core import job_log_passthrough_enabled
-from tg_harvest.admin_jobs.store import _admin_fetch_job_snapshot_row
 from tg_harvest.admin_jobs import core as admin_jobs_core
-from tg_harvest.admin_jobs import store as admin_jobs_store
 from tg_harvest.admin_jobs import runtime as admin_jobs_runtime
+from tg_harvest.admin_jobs import store as admin_jobs_store
+from tg_harvest.admin_jobs.cleanup import (
+    _build_cleanup_like_patterns,
+    _build_cleanup_targets_table,
+    _execute_cleanup_deletion_batches,
+)
 from tg_harvest.admin_jobs.common import admin_error_message
+from tg_harvest.admin_jobs.core import (
+    _admin_get_active_job,
+    _admin_job_append_log,
+    _admin_job_create,
+    _admin_job_get_logs,
+    _admin_job_get_snapshot,
+    _admin_job_set_status,
+    _admin_job_stop_requested,
+    _admin_recover_interrupted_jobs,
+    _admin_request_job_stop,
+    _admin_try_create_exclusive_job,
+    _AdminJobThreadLogHandler,
+    job_context,
+    job_log_passthrough_enabled,
+)
+from tg_harvest.admin_jobs.runners import (
+    _admin_get_chat_message_count,
+    _admin_harvest_job_runner,
+    _admin_process_single_chat_update,
+    _admin_update_all_chats,
+    _delete_chat_data,
+    _delete_empty_chats_data,
+)
 from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
-from tg_harvest.admin_jobs.runners import _admin_harvest_job_runner
-from tg_harvest.admin_jobs.runners import _admin_get_chat_message_count
-from tg_harvest.admin_jobs.runners import _admin_process_single_chat_update
-from tg_harvest.admin_jobs.runners import _admin_update_all_chats
-from tg_harvest.admin_jobs.runners import _delete_chat_data
+from tg_harvest.admin_jobs.store import _admin_fetch_job_snapshot_row
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
-from tg_harvest.admin_jobs.cleanup import _build_cleanup_targets_table
-from tg_harvest.storage.connection import detect_sqlite_features
-from tg_harvest.storage.schema import create_schema
-from tg_harvest.storage.schema import refresh_chat_message_counts
 from tg_harvest.domain.dedupe import dedupe_promotional_duplicates
-from tg_harvest.domain.normalize import make_hash
-from tg_harvest.domain.normalize import normalize_text_for_hash
-from tg_harvest.domain.normalize import normalize_text_light
-from tg_harvest.ingest.runner import _format_harvest_progress_message
-from tg_harvest.ingest.runner import _read_target_message_total
+from tg_harvest.domain.normalize import (
+    make_hash,
+    normalize_text_for_hash,
+    normalize_text_light,
+)
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
-from tg_harvest.ingest.store import backfill_message_search_text_from_filenames
-from tg_harvest.ingest.store import batch_upsert
-from tg_harvest.ingest.store import load_grouped_ids_for_messages
-from tg_harvest.admin_jobs.cleanup import _build_cleanup_like_patterns
-from tg_harvest.admin_jobs.cleanup import _execute_cleanup_deletion_batches
-
+from tg_harvest.ingest.runner import (
+    _format_harvest_progress_message,
+    _read_target_message_total,
+)
+from tg_harvest.ingest.store import (
+    backfill_message_search_text_from_filenames,
+    batch_upsert,
+    load_grouped_ids_for_messages,
+)
+from tg_harvest.storage.connection import detect_sqlite_features
+from tg_harvest.storage.schema import create_schema, refresh_chat_message_counts
 
 _BACKFILL_MODULE_PATH = (
     pathlib.Path(__file__).resolve().parent.parent
@@ -271,9 +284,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             with patch(
                 "tg_harvest.admin_jobs.update_writer.CLOSE_JOIN_TIMEOUT_SEC",
                 0.01,
-            ):
-                with self.assertRaisesRegex(RuntimeError, "写入线程关闭超时"):
-                    coordinator.close()
+            ), self.assertRaisesRegex(RuntimeError, "写入线程关闭超时"):
+                coordinator.close()
         finally:
             release.set()
             coordinator._thread.join(timeout=1.0)
@@ -292,9 +304,10 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         )
         try:
             coordinator._queue.put_nowait({"kind": "batch", "chat_id": 1})
-            with patch.object(coordinator._queue, "put", side_effect=queue.Full):
-                with self.assertRaisesRegex(RuntimeError, "无法发送停止信号"):
-                    coordinator.close()
+            with patch.object(
+                coordinator._queue, "put", side_effect=queue.Full
+            ), self.assertRaisesRegex(RuntimeError, "无法发送停止信号"):
+                coordinator.close()
         finally:
             release.set()
             coordinator._thread.join(timeout=1.0)
@@ -361,6 +374,9 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ), patch(
             "tg_harvest.admin_jobs.runners._admin_job_update_progress",
             side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
         ):
             ok = _admin_update_all_chats(
                 "job-1",
@@ -377,6 +393,90 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(any("失败列表：bad (ID=2)" in line for line in logs))
         self.assertTrue(any(kwargs.get("total") == 2 for _, kwargs in progress_calls))
         self.assertTrue(any(kwargs.get("stage") == "updating" for _, kwargs in progress_calls))
+
+    def test_all_chat_update_stop_request_does_not_submit_remaining_chats(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": None},
+            {"chat_id": 2, "chat_title": "two", "chat_username": None},
+            {"chat_id": 3, "chat_title": "three", "chat_username": None},
+            {"chat_id": 4, "chat_title": "four", "chat_username": None},
+        ]
+        cfg = SimpleNamespace(admin_update_concurrency=2, session_name="sess")
+        logs = []
+        submitted_chat_ids = []
+        stop_checks = []
+
+        def append_log(_job_id, message):
+            logs.append(str(message))
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **_kwargs):
+            submitted_chat_ids.append(int(entity.id))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        def stop_requested(_job_id):
+            stop_checks.append(True)
+            return len(stop_checks) > 2
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_FakeClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            side_effect=stop_requested,
+        ):
+            ok = _admin_update_all_chats(
+                "job-1",
+                None,
+                lambda: _FakeConn(rows),
+                append_log,
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual([1, 2], sorted(submitted_chat_ids))
+        self.assertTrue(any("已收到停止请求" in line for line in logs))
+        self.assertTrue(any("未启动 2 个" in line for line in logs))
 
     def test_all_chat_update_clears_stale_username_when_chat_becomes_private(self) -> None:
         rows = [
@@ -436,6 +536,9 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ), patch(
             "tg_harvest.admin_jobs.runners._admin_job_update_progress",
             return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
         ):
             ok = _admin_update_all_chats(
                 "job-1",
@@ -603,18 +706,17 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         with patch(
             "tg_harvest.ingest.runner._harvest_messages_for_entity",
             side_effect=fake_harvest,
-        ):
-            with self.assertRaisesRegex(RuntimeError, "network break"):
-                stream_entity_harvest_to_writer(
-                    write_coordinator=coordinator,
-                    get_conn_fn=lambda: _FakeConn([]),
-                    client=object(),
-                    entity=SimpleNamespace(id=7, title="partial", username=None),
-                    idx=1,
-                    total=1,
-                    skip_postprocess_if_unchanged=True,
-                    enable_dedupe=False,
-                )
+        ), self.assertRaisesRegex(RuntimeError, "network break"):
+            stream_entity_harvest_to_writer(
+                write_coordinator=coordinator,
+                get_conn_fn=lambda: _FakeConn([]),
+                client=object(),
+                entity=SimpleNamespace(id=7, title="partial", username=None),
+                idx=1,
+                total=1,
+                skip_postprocess_if_unchanged=True,
+                enable_dedupe=False,
+            )
 
         self.assertEqual([7], coordinator.registered)
         self.assertEqual(1, len(coordinator.batches))
@@ -850,17 +952,18 @@ class BackfillRetryTests(unittest.TestCase):
     def test_fetch_chunk_messages_raises_after_retry_exhausted(self) -> None:
         client = _RetryClient([RuntimeError("a"), RuntimeError("b")])
 
-        with patch.object(_BACKFILL_MODULE.asyncio, "sleep", new=AsyncMock()):
-            with self.assertRaises(RuntimeError):
-                asyncio.run(
-                    _fetch_chunk_messages(
-                        client,
-                        object(),
-                        [11, 10],
-                        chat_id=7,
-                        max_retries=2,
-                    )
+        with patch.object(
+            _BACKFILL_MODULE.asyncio, "sleep", new=AsyncMock()
+        ), self.assertRaises(RuntimeError):
+            asyncio.run(
+                _fetch_chunk_messages(
+                    client,
+                    object(),
+                    [11, 10],
+                    chat_id=7,
+                    max_retries=2,
                 )
+            )
 
         self.assertEqual(2, client.calls)
 
@@ -1504,6 +1607,25 @@ class PersistentAdminJobsTests(unittest.TestCase):
         assert snapshot is not None
         self.assertEqual("running", snapshot["status"])
 
+    def test_request_job_stop_marks_active_job(self) -> None:
+        job = _admin_job_create("update", target_chat_id=None, target_label="all")
+        job_id = str(job["job_id"])
+        _admin_job_set_status(job_id, "running")
+
+        ok, error_message = _admin_request_job_stop(job_id)
+        snapshot = _admin_job_get_snapshot(job_id)
+        active_job = _admin_get_active_job()
+
+        self.assertTrue(ok)
+        self.assertIsNone(error_message)
+        self.assertTrue(_admin_job_stop_requested(job_id))
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertTrue(snapshot["stop_requested"])
+        self.assertIsNotNone(active_job)
+        assert active_job is not None
+        self.assertTrue(active_job["stop_requested"])
+
     def test_recover_interrupted_jobs_marks_previous_runtime_job_immediately(self) -> None:
         admin_jobs_runtime.configure_admin_job_runtime("old-runtime")
         job = _admin_job_create("update", target_chat_id=654, target_label="chat-654")
@@ -1535,6 +1657,94 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertIsNotNone(second_existing)
         assert second_existing is not None
         self.assertEqual("cleanup", second_existing["job_type"])
+
+    def test_try_create_exclusive_job_keeps_fresh_previous_runtime_job_as_conflict(self) -> None:
+        admin_jobs_runtime.configure_admin_job_runtime("old-runtime")
+        old_job = _admin_job_create("cleanup", target_chat_id=None, target_label="old")
+        old_job_id = str(old_job["job_id"])
+        _admin_job_set_status(old_job_id, "running")
+
+        admin_jobs_runtime.configure_admin_job_runtime("new-runtime")
+        admin_jobs_core.ADMIN_JOBS.clear()
+
+        new_job, existing = _admin_try_create_exclusive_job(
+            "cleanup_empty", target_chat_id=None, target_label="new"
+        )
+
+        self.assertIsNone(new_job)
+        self.assertIsNotNone(existing)
+        assert existing is not None
+        self.assertEqual(old_job_id, existing["job_id"])
+        old_snapshot = _admin_job_get_snapshot(old_job_id)
+        self.assertIsNotNone(old_snapshot)
+        assert old_snapshot is not None
+        self.assertEqual("running", old_snapshot["status"])
+
+    def test_try_create_exclusive_job_recovers_stale_job_before_conflict_check(self) -> None:
+        old_job = _admin_job_create("cleanup", target_chat_id=None, target_label="old")
+        old_job_id = str(old_job["job_id"])
+        _admin_job_set_status(old_job_id, "running")
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE admin_jobs
+                SET heartbeat_at = '2000-01-01T00:00:00+00:00',
+                    updated_at = '2000-01-01T00:00:00+00:00'
+                WHERE job_id = ?
+                """,
+                (old_job_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        admin_jobs_core.ADMIN_JOBS.clear()
+        new_job, existing = _admin_try_create_exclusive_job(
+            "cleanup_empty", target_chat_id=None, target_label="new"
+        )
+
+        self.assertIsNotNone(new_job)
+        self.assertIsNone(existing)
+        old_snapshot = _admin_job_get_snapshot(old_job_id)
+        self.assertIsNotNone(old_snapshot)
+        assert old_snapshot is not None
+        self.assertEqual("error", old_snapshot["status"])
+
+    def test_has_any_active_job_keeps_fresh_running_job_active(self) -> None:
+        job = _admin_job_create("cleanup", target_chat_id=None, target_label="fresh")
+        _admin_job_set_status(str(job["job_id"]), "running")
+
+        self.assertTrue(admin_jobs_core._admin_has_any_active_job())
+
+    def test_has_any_active_job_recovers_stale_job_before_reporting_active_state(self) -> None:
+        old_job = _admin_job_create("cleanup", target_chat_id=None, target_label="old")
+        old_job_id = str(old_job["job_id"])
+        _admin_job_set_status(old_job_id, "running")
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE admin_jobs
+                SET heartbeat_at = '2000-01-01T00:00:00+00:00',
+                    updated_at = '2000-01-01T00:00:00+00:00'
+                WHERE job_id = ?
+                """,
+                (old_job_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        admin_jobs_core.ADMIN_JOBS.clear()
+
+        self.assertFalse(admin_jobs_core._admin_has_any_active_job())
+        old_snapshot = _admin_job_get_snapshot(old_job_id)
+        self.assertIsNotNone(old_snapshot)
+        assert old_snapshot is not None
+        self.assertEqual("error", old_snapshot["status"])
 
     def test_job_trim_handles_legacy_naive_sqlite_timestamps(self) -> None:
         conn = sqlite3.connect(self.db_path)
@@ -1920,6 +2130,104 @@ class WriteConsistencyTests(unittest.TestCase):
         self.assertEqual(0, int(cur.fetchone()["c"]))
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
         self.assertEqual(0, int(cur.fetchone()["c"]))
+
+    def test_delete_chat_data_bulk_path_keeps_fts_clean_and_restores_triggers(self) -> None:
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+            )
+            if cur.fetchone() is None:
+                self.skipTest("SQLite build does not provide FTS5")
+            cur.execute(
+                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+                ("hello",),
+            )
+            self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+        finally:
+            cur.close()
+
+        with patch("tg_harvest.admin_jobs.runners.DELETE_CHAT_FAST_PATH_THRESHOLD", 1):
+            deleted = _delete_chat_data(self.conn, 1)
+
+        self.assertEqual(1, deleted)
+        cur = self.conn.cursor()
+        try:
+            cur.execute(
+                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+                ("hello",),
+            )
+            self.assertEqual([], cur.fetchall())
+            cur.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type='trigger'
+                  AND name IN ('trg_messages_fts_delete', 'trg_message_terms_delete')
+                """
+            )
+            self.assertEqual(
+                {"trg_messages_fts_delete", "trg_message_terms_delete"},
+                {row["name"] for row in cur.fetchall()},
+            )
+        finally:
+            cur.close()
+
+    def test_delete_empty_chats_only_removes_chats_with_no_messages(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO chats(chat_id, chat_title, message_count)
+            VALUES (2, 'Empty', 0)
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO chats(chat_id, chat_title, message_count)
+            VALUES (3, 'Stale Count', 0)
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media, is_promo, dedupe_eligible
+            )
+            VALUES (3, 30, '2026-01-01 00:00:00', 30, 'TEXT', 'keep', 'keep', 0, 0, 0)
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO admin_absent_chats(
+                chat_id, chat_title, message_count, scanned_at
+            )
+            VALUES (2, 'Empty', 0, '2026-01-01 00:00:00')
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO media_groups(chat_id, grouped_id, item_count, active_items)
+            VALUES (2, 77, 0, 0)
+            """
+        )
+        self.conn.commit()
+
+        stats = _delete_empty_chats_data(self.conn)
+
+        self.assertEqual(1, stats["deleted_chats"])
+        cur = self.conn.cursor()
+        try:
+            cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 2")
+            self.assertEqual(0, int(cur.fetchone()["c"]))
+            cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 3")
+            self.assertEqual(1, int(cur.fetchone()["c"]))
+            cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 3")
+            self.assertEqual(1, int(cur.fetchone()["c"]))
+            cur.execute("SELECT COUNT(*) AS c FROM admin_absent_chats WHERE chat_id = 2")
+            self.assertEqual(0, int(cur.fetchone()["c"]))
+            cur.execute("SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 2")
+            self.assertEqual(0, int(cur.fetchone()["c"]))
+        finally:
+            cur.close()
 
 
 class _SQLiteSideEffectLogHandler(logging.Handler):

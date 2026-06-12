@@ -1,11 +1,15 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
-from tg_harvest.domain.chat_inventory import ChatInventoryRow
-from tg_harvest.domain.chat_inventory import find_database_chats_not_joined
-from tg_harvest.domain.chat_inventory import find_missing_joined_chats
-from tg_harvest.domain.chat_inventory import find_restricted_joined_chats
-from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
-from tg_harvest.domain.chat_inventory import write_missing_chat_report
+from tg_harvest.domain.chat_inventory import (
+    ChatInventoryRow,
+    entity_has_all_platform_terms_restriction,
+    filter_database_chats_to_joined,
+    find_database_chats_not_joined,
+    find_missing_joined_chats,
+    find_restricted_joined_chats,
+    load_joined_chat_inventory,
+    write_missing_chat_report,
+)
 
 
 class _Entity:
@@ -88,7 +92,7 @@ def test_joined_chat_inventory_extracts_dialog_last_message_time():
             message=type(
                 "Message",
                 (),
-                {"date": datetime(2026, 4, 1, 10, 0, 0, tzinfo=timezone.utc)},
+                {"date": datetime(2026, 4, 1, 10, 0, 0, tzinfo=UTC)},
             )(),
         )
     ]
@@ -124,6 +128,28 @@ def test_find_database_chats_not_joined_filters_by_joined_identity():
     assert rows[0]["chat_username"] == "absent"
     assert rows[0]["message_count"] == 12
     assert rows[0]["scan_reason"] == "账号未加入"
+
+
+def test_filter_database_chats_to_joined_keeps_only_accessible_dialogs():
+    database_rows = [
+        {"chat_id": 1, "chat_title": "Joined"},
+        {"chat_id": 2, "chat_title": "Recovered But Not Joined"},
+        {"chat_id": -1003, "chat_title": "Stored As Entity Id"},
+        {"chat_id": 4, "chat_title": "Forbidden"},
+    ]
+    joined_rows = [
+        ChatInventoryRow(chat_id=1, chat_title="Joined"),
+        ChatInventoryRow(chat_id=3, chat_title="Stored As Positive Id"),
+        ChatInventoryRow(
+            chat_id=4,
+            chat_title="Forbidden",
+            unavailable_reason="Telegram 返回该会话不可访问",
+        ),
+    ]
+
+    rows = filter_database_chats_to_joined(database_rows, joined_rows)
+
+    assert [row["chat_id"] for row in rows] == [1, -1003]
 
 
 def test_restricted_joined_chats_still_count_as_joined():
@@ -218,6 +244,41 @@ def test_find_restricted_joined_chats_reports_reasons_and_risk_flags():
     assert "pornographic content" in rows_by_id[1].restriction_text
     assert rows_by_id[1].risk_flags == "restricted"
     assert rows_by_id[2].risk_flags == "scam"
+
+
+def test_all_platform_terms_restriction_marks_entity_unavailable():
+    assert entity_has_all_platform_terms_restriction(
+        _Entity(
+            1,
+            restriction_reason=[
+                _RestrictionReason(platform="all", reason="terms"),
+            ],
+        )
+    )
+    assert entity_has_all_platform_terms_restriction(
+        _Entity(
+            2,
+            restriction_reason=[
+                _RestrictionReason(platform="all", reason="tos"),
+            ],
+        )
+    )
+    assert not entity_has_all_platform_terms_restriction(
+        _Entity(
+            3,
+            restriction_reason=[
+                _RestrictionReason(platform="all", reason="porn"),
+            ],
+        )
+    )
+    assert not entity_has_all_platform_terms_restriction(
+        _Entity(
+            4,
+            restriction_reason=[
+                _RestrictionReason(platform="ios", reason="terms"),
+            ],
+        )
+    )
 
 
 def test_write_missing_chat_report(tmp_path):

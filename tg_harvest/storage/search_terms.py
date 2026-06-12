@@ -1,8 +1,7 @@
-# -*- coding: utf-8 -*-
 import logging
 import re
 import sqlite3
-from typing import List, Tuple
+from contextlib import suppress
 
 from tg_harvest.storage.connection import synchronized_write
 
@@ -20,14 +19,14 @@ _CJK_CHAR_RE = re.compile(
 )
 
 
-def extract_cjk_bigrams(text: str) -> List[str]:
+def extract_cjk_bigrams(text: str) -> list[str]:
     raw = str(text or "")
     compact = "".join(raw.split())
     if len(compact) < 2:
         return []
 
     seen = set()
-    out: List[str] = []
+    out: list[str] = []
     for idx in range(len(compact) - 1):
         token = compact[idx : idx + 2]
         if len(token) != 2:
@@ -41,14 +40,14 @@ def extract_cjk_bigrams(text: str) -> List[str]:
     return out
 
 
-def extract_cjk_search_terms(text: str) -> List[str]:
+def extract_cjk_search_terms(text: str) -> list[str]:
     raw = str(text or "")
     compact = "".join(raw.split())
     if not compact:
         return []
 
     seen = set()
-    out: List[str] = []
+    out: list[str] = []
 
     for ch in compact:
         if not _CJK_CHAR_RE.fullmatch(ch):
@@ -67,7 +66,7 @@ def extract_cjk_search_terms(text: str) -> List[str]:
     return out
 
 
-def _extract_cjk_unigrams(text: str) -> List[str]:
+def _extract_cjk_unigrams(text: str) -> list[str]:
     return [term for term in extract_cjk_search_terms(text) if len(term) == 1]
 
 
@@ -172,7 +171,7 @@ def _sync_message_search_terms_from_scratch(conn: sqlite3.Connection) -> None:
             if not rows:
                 break
 
-            inserts: List[Tuple[str, int]] = []
+            inserts: list[tuple[str, int]] = []
             for row in rows:
                 pk = int(row["pk"])
                 last_pk = pk
@@ -211,7 +210,7 @@ def _backfill_message_search_term_unigrams(conn: sqlite3.Connection) -> None:
             if not rows:
                 break
 
-            inserts: List[Tuple[str, int]] = []
+            inserts: list[tuple[str, int]] = []
             for row in rows:
                 pk = int(row["pk"])
                 last_pk = pk
@@ -278,7 +277,7 @@ def backfill_message_search_terms_upgrade_batch(
             conn.commit()
             return 0
 
-        inserts: List[Tuple[str, int]] = []
+        inserts: list[tuple[str, int]] = []
         next_last_pk = last_pk
         for row in rows:
             pk = int(row["pk"])
@@ -303,10 +302,8 @@ def backfill_message_search_terms_upgrade_batch(
         conn.commit()
         return len(rows)
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
@@ -397,7 +394,7 @@ def drain_message_search_terms_rebuild_queue(
             pks,
         )
 
-        inserts: List[Tuple[str, int]] = []
+        inserts: list[tuple[str, int]] = []
         for row in rows:
             pk = int(row["pk"])
             for token in extract_cjk_search_terms(str(row["search_text"] or "")):
@@ -415,10 +412,8 @@ def drain_message_search_terms_rebuild_queue(
         conn.commit()
         return len(pks)
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()

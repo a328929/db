@@ -251,6 +251,17 @@ body {
   box-shadow: 0 10px 22px rgba(49, 95, 163, 0.2);
 }
 
+.btn.danger {
+  background: #fff6f5;
+  border-color: #e0a39b;
+  color: var(--danger);
+}
+
+.btn.danger:hover {
+  background: #ffeceb;
+  border-color: #d26f65;
+}
+
 .btn:disabled {
   opacity: 0.55;
   cursor: not-allowed;

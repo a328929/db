@@ -1,19 +1,21 @@
-# -*- coding: utf-8 -*-
 import sqlite3
-import time
 import threading
+import time
 from collections import deque
+from collections.abc import Callable
 from contextlib import closing
-from typing import Any, Callable, Dict
+from typing import Any
 
 from flask import jsonify, request
+
+from tg_harvest.web.responses import json_error, logged_json_error, require_json_dict
 
 # 简单的 IP 限流字典：{bucket:ip: deque([timestamps])}
 # 普通搜索与后台 count_only 统计分桶限流，避免互相挤占额度。
 SEARCH_RATE_LIMIT = 20
 SEARCH_COUNT_ONLY_RATE_LIMIT = 60
 SEARCH_WINDOW_SEC = 60
-_search_rate_tracker: Dict[str, deque] = {}
+_search_rate_tracker: dict[str, deque] = {}
 _rate_lock = threading.Lock()
 
 
@@ -76,11 +78,9 @@ def register_search_routes(
 ) -> None:
     @app.post("/api/search")
     def api_search():
-        if not request.is_json:
-            return jsonify({"ok": False, "error": "请求必须为 JSON"}), 400
-        data = request.get_json(silent=True)
-        if not isinstance(data, dict):
-            return jsonify({"ok": False, "error": "请求 JSON 格式错误"}), 400
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
 
         # 前端一次可见搜索会再发起一次 count_only 后台统计；它不应额外消耗用户搜索额度。
         # 但 count_only 仍会触发数据库统计，必须单独限流，避免被直接调用拖垮数据库。
@@ -89,7 +89,7 @@ def register_search_routes(
             "count_only" if _request_flag_is_true(data.get("count_only")) else "search"
         )
         if _is_rate_limited(ip, bucket=rate_bucket):
-            return jsonify({"ok": False, "error": "查询过于频繁，请稍后再试"}), 429
+            return json_error("查询过于频繁，请稍后再试", 429)
 
         try:
             params = parse_search_params_fn(data)
@@ -111,10 +111,8 @@ def register_search_routes(
             return jsonify(payload)
         except (ValueError, TypeError) as exc:
             message = str(exc).strip() or "参数格式错误"
-            return jsonify({"ok": False, "error": message}), 400
+            return json_error(message, 400)
         except sqlite3.Error:
-            logger.exception("查询失败")
-            return jsonify({"ok": False, "error": "查询失败"}), 500
+            return logged_json_error(logger, "查询失败", "查询失败")
         except Exception:
-            logger.exception("系统异常")
-            return jsonify({"ok": False, "error": "系统异常"}), 500
+            return logged_json_error(logger, "系统异常", "系统异常")

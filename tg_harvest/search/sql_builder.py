@@ -1,21 +1,20 @@
-# -*- coding: utf-8 -*-
 import re
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
-from tg_harvest.search.expression import build_candidate_fts_match
-from tg_harvest.search.expression import compile_like_clause
-from tg_harvest.search.expression import parse_query
-from tg_harvest.search.expression import SearchExprNode
-from tg_harvest.search.params import SearchParams
-from tg_harvest.search.params import split_query_media_duration
-
+from tg_harvest.search.expression import (
+    SearchExprNode,
+    build_candidate_fts_match,
+    compile_like_clause,
+    parse_query,
+)
+from tg_harvest.search.params import SearchParams, split_query_media_duration
 
 _CJK_CHAR_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ceaf]"
 )
 
 
-def _safe_split_from_sql(from_sql: str) -> Tuple[str, str]:
+def _safe_split_from_sql(from_sql: str) -> tuple[str, str]:
     """
     安全地将 FROM 子句拆分为 (基础部分, 连接部分)。
     例如: "FROM messages m LEFT JOIN chats c ..." -> ("FROM messages m", "LEFT JOIN chats c ...")
@@ -68,7 +67,7 @@ def _compile_candidate_node(
     node: SearchExprNode,
     *,
     universe_sql: str,
-) -> Optional[Tuple[str, List[Any]]]:
+) -> tuple[str, list[Any]] | None:
     if node.kind in {"TERM", "PHRASE"}:
         if _term_supports_cjk_aux_candidate(node.value):
             return (
@@ -178,19 +177,19 @@ def _compile_candidate_node(
 
 
 def _build_candidate_fts_sql(
-    expr: Optional[SearchExprNode],
-) -> Optional[Tuple[str, List[Any]]]:
+    expr: SearchExprNode | None,
+) -> tuple[str, list[Any]] | None:
     if expr is None:
         return None
     return _compile_candidate_node(expr, universe_sql="SELECT pk FROM messages")
 
 
-def _candidate_uses_auxiliary_terms_only(candidate_sql: Optional[str]) -> bool:
+def _candidate_uses_auxiliary_terms_only(candidate_sql: str | None) -> bool:
     sql = str(candidate_sql or "")
     return "message_search_terms" in sql and "messages_fts" not in sql
 
 
-def _single_auxiliary_term(expr: Optional[SearchExprNode]) -> Optional[str]:
+def _single_auxiliary_term(expr: SearchExprNode | None) -> str | None:
     if expr is None:
         return None
     if expr.kind not in {"TERM", "PHRASE"}:
@@ -200,7 +199,7 @@ def _single_auxiliary_term(expr: Optional[SearchExprNode]) -> Optional[str]:
     return "".join(str(expr.value or "").split())
 
 
-def _has_boolean_structure(expr: Optional[SearchExprNode]) -> bool:
+def _has_boolean_structure(expr: SearchExprNode | None) -> bool:
     if expr is None:
         return False
     return expr.kind in {"AND", "OR", "NOT"}
@@ -213,7 +212,7 @@ def _build_search_query_spec(
     fts_enabled: bool,
     max_count: int,
     force_like: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     raw_query = (params.raw_query or "").strip()
     parsed_text_query, parsed_duration_sec = split_query_media_duration(raw_query)
     duration_sec = (
@@ -222,8 +221,8 @@ def _build_search_query_spec(
         else parsed_duration_sec
     )
     text_query = (params.text_query or parsed_text_query or "").strip()
-    where_parts: List[str] = ["1=1"]
-    sql_params: List[Any] = []
+    where_parts: list[str] = ["1=1"]
+    sql_params: list[Any] = []
 
     has_text_filter = False
     expr = parse_query(text_query) if text_query else None
@@ -232,8 +231,8 @@ def _build_search_query_spec(
     actual_from_sql = from_sql
 
     use_fts_join = False
-    candidate_sql: Optional[str] = None
-    candidate_params: List[Any] = []
+    candidate_sql: str | None = None
+    candidate_params: list[Any] = []
     auxiliary_only_candidate = False
     # 搜索统一走规范化文本：优先 content_norm，缺失时回退 content。
     # 这样每个词只做一次 LIKE 扫描，避免对同一行重复匹配两遍。
@@ -336,7 +335,7 @@ def _build_search_query_spec(
         LIMIT ?
     """
 
-    query_cte_parts: List[str] = []
+    query_cte_parts: list[str] = []
     if candidate_sql:
         query_cte_parts.append(f"candidate_pks AS ({candidate_sql})")
     query_cte_parts.append(
@@ -372,7 +371,7 @@ def _build_search_query_spec(
         ORDER BY {final_order_clause}
     """
 
-    query_sql_skip: Optional[str] = None
+    query_sql_skip: str | None = None
     single_auxiliary_term = _single_auxiliary_term(expr)
     if (
         effective_sort == "time"
@@ -474,7 +473,7 @@ def _build_search_query_spec(
 
 
 def _append_scope_filters(
-    where_parts: List[str], sql_params: List[Any], params: SearchParams
+    where_parts: list[str], sql_params: list[Any], params: SearchParams
 ) -> None:
     if params.chat_id is not None:
         where_parts.append("m.chat_id = ?")
@@ -494,7 +493,7 @@ def _append_scope_filters(
         sql_params.extend(type_params)
 
 
-def _make_type_clause(search_type: str) -> Tuple[str, List[Any]]:
+def _make_type_clause(search_type: str) -> tuple[str, list[Any]]:
     st = (search_type or "all").lower()
     if st == "text":
         return "m.msg_type = 'TEXT'", []
@@ -507,7 +506,7 @@ def _make_type_clause(search_type: str) -> Tuple[str, List[Any]]:
     return "", []
 
 
-def _choose_sort(search_type: str, sort_by: str, order: str) -> Tuple[str, str, str]:
+def _choose_sort(search_type: str, sort_by: str, order: str) -> tuple[str, str, str]:
     st = (search_type or "all").lower()
     sb = (sort_by or "time").lower()
     od = "ASC" if str(order).lower() == "asc" else "DESC"

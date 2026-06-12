@@ -1,13 +1,16 @@
-# -*- coding: utf-8 -*-
 import sqlite3
-from typing import Any, List, Optional, Set, Tuple
+from contextlib import suppress
+from typing import Any
 
 from tg_harvest.domain.dedupe import build_message_dedupe_hash
 from tg_harvest.domain.normalize import _safe_json
 from tg_harvest.domain.promo import build_single_promo_features
 from tg_harvest.storage.connection import synchronized_write
-from tg_harvest.storage.search_text_state import indexed_messages_from_clause
-from tg_harvest.storage.search_text_state import indexed_unsearchable_message_predicate
+from tg_harvest.storage.introspection import table_columns as _table_columns
+from tg_harvest.storage.search_text_state import (
+    indexed_messages_from_clause,
+    indexed_unsearchable_message_predicate,
+)
 
 UPSERT_CHAT_SQL = """
 INSERT INTO chats(chat_id, chat_title, chat_username, is_public, chat_type, first_seen_at, last_seen_at)
@@ -93,20 +96,20 @@ def upsert_chat(conn: sqlite3.Connection, row: tuple):
     conn.commit()
 
 
-def _batch_upsert_messages(cur: sqlite3.Cursor, msg_rows: List[tuple]):
+def _batch_upsert_messages(cur: sqlite3.Cursor, msg_rows: list[tuple]):
     if not msg_rows:
         return
     cur.executemany(UPSERT_MESSAGE_SQL, msg_rows)
 
 
-def _batch_upsert_media(cur: sqlite3.Cursor, media_rows: List[tuple]):
+def _batch_upsert_media(cur: sqlite3.Cursor, media_rows: list[tuple]):
     if not media_rows:
         return
     cur.executemany(UPSERT_MEDIA_SQL, media_rows)
 
 
 def _delete_stale_media_for_non_media_messages(
-    cur: sqlite3.Cursor, msg_rows: List[tuple], media_rows: List[tuple]
+    cur: sqlite3.Cursor, msg_rows: list[tuple], media_rows: list[tuple]
 ) -> None:
     if not msg_rows:
         return
@@ -121,7 +124,7 @@ def _delete_stale_media_for_non_media_messages(
     for start in range(0, len(stale_keys), _DELETE_MEDIA_KEY_BATCH_SIZE):
         batch = stale_keys[start : start + _DELETE_MEDIA_KEY_BATCH_SIZE]
         placeholders = ",".join(["(?, ?)"] * len(batch))
-        params: List[int] = []
+        params: list[int] = []
         for chat_id, message_id in batch:
             params.extend([chat_id, message_id])
         cur.execute(
@@ -135,12 +138,12 @@ def _delete_stale_media_for_non_media_messages(
 
 @synchronized_write
 def _backfill_message_media_placeholders_batch(
-    conn: sqlite3.Connection, *, chat_id: Optional[int], batch_size: int
+    conn: sqlite3.Connection, *, chat_id: int | None, batch_size: int
 ) -> int:
     cur = conn.cursor()
     try:
         where_sql = "m.has_media = 1 AND mm.chat_id IS NULL"
-        params: List[Any] = []
+        params: list[Any] = []
         if chat_id is not None:
             where_sql += " AND m.chat_id = ?"
             params.append(int(chat_id))
@@ -183,10 +186,8 @@ def _backfill_message_media_placeholders_batch(
         conn.commit()
         return inserted
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
@@ -195,9 +196,9 @@ def _backfill_message_media_placeholders_batch(
 def backfill_missing_message_media_placeholders(
     conn: sqlite3.Connection,
     *,
-    chat_id: Optional[int] = None,
+    chat_id: int | None = None,
     batch_size: int = 50000,
-    log_fn: Optional[Any] = None,
+    log_fn: Any | None = None,
 ) -> int:
     total_inserted = 0
     safe_batch_size = max(100, int(batch_size))
@@ -218,19 +219,8 @@ def backfill_missing_message_media_placeholders(
     return total_inserted
 
 
-def _table_columns(cur: sqlite3.Cursor, table_name: str) -> Set[str]:
-    try:
-        cur.execute(f"PRAGMA table_xinfo({table_name})")
-    except sqlite3.Error:
-        cur.execute(f"PRAGMA table_info({table_name})")
-    return {
-        str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        for row in cur.fetchall()
-    }
-
-
 def _message_filename_backfill_update_sql(
-    message_columns: Set[str], update_unsearchable_predicate: str
+    message_columns: set[str], update_unsearchable_predicate: str
 ) -> str:
     assignments = [
         "content = ?",
@@ -261,7 +251,7 @@ def _message_filename_backfill_update_sql(
 
 
 def _message_filename_backfill_params(
-    message_columns: Set[str], row: sqlite3.Row, cfg: Optional[Any]
+    message_columns: set[str], row: sqlite3.Row, cfg: Any | None
 ) -> tuple:
     file_name = str(row["file_name"] or "").strip()
     msg_type = str(row["msg_type"] or "FILE")
@@ -274,7 +264,7 @@ def _message_filename_backfill_params(
         cfg=cfg,
     )
 
-    params: List[Any] = [
+    params: list[Any] = [
         file_name,
         features["content_norm"],
     ]
@@ -309,11 +299,11 @@ def _message_filename_backfill_params(
 def _backfill_message_search_text_from_filenames_batch(
     conn: sqlite3.Connection,
     *,
-    chat_id: Optional[int],
+    chat_id: int | None,
     batch_size: int,
     after_pk: int,
-    cfg: Optional[Any],
-) -> Tuple[int, int]:
+    cfg: Any | None,
+) -> tuple[int, int]:
     cur = conn.cursor()
     try:
         message_columns = _table_columns(cur, "messages")
@@ -333,7 +323,7 @@ def _backfill_message_search_text_from_filenames_batch(
             AND COALESCE(NULLIF(TRIM(mm.file_name), ''), '') <> ''
             AND m.pk > ?
         """
-        params: List[Any] = [int(after_pk)]
+        params: list[Any] = [int(after_pk)]
         if chat_id is not None:
             where_sql += " AND m.chat_id = ?"
             params.append(int(chat_id))
@@ -382,10 +372,8 @@ def _backfill_message_search_text_from_filenames_batch(
         conn.commit()
         return int(cur.rowcount or 0), last_pk
     except Exception:
-        try:
+        with suppress(Exception):
             conn.rollback()
-        except Exception:
-            pass
         raise
     finally:
         cur.close()
@@ -394,10 +382,10 @@ def _backfill_message_search_text_from_filenames_batch(
 def backfill_message_search_text_from_filenames(
     conn: sqlite3.Connection,
     *,
-    chat_id: Optional[int] = None,
+    chat_id: int | None = None,
     batch_size: int = 5000,
-    log_fn: Optional[Any] = None,
-    cfg: Optional[Any] = None,
+    log_fn: Any | None = None,
+    cfg: Any | None = None,
 ) -> int:
     if cfg is None:
         from tg_harvest.config import CFG
@@ -430,18 +418,18 @@ def backfill_message_search_text_from_filenames(
 
 
 def load_grouped_ids_for_messages(
-    conn: sqlite3.Connection, message_keys: List[Tuple[int, int]]
-) -> Set[int]:
+    conn: sqlite3.Connection, message_keys: list[tuple[int, int]]
+) -> set[int]:
     if not message_keys:
         return set()
     unique_keys = sorted({(int(chat_id), int(message_id)) for chat_id, message_id in message_keys})
     cur = conn.cursor()
     try:
-        grouped_ids: Set[int] = set()
+        grouped_ids: set[int] = set()
         for start in range(0, len(unique_keys), 400):
             part = unique_keys[start : start + 400]
             placeholders = ",".join(["(?, ?)"] * len(part))
-            params: List[int] = []
+            params: list[int] = []
             for chat_id, message_id in part:
                 params.extend([chat_id, message_id])
             cur.execute(
@@ -467,7 +455,7 @@ def load_grouped_ids_for_messages(
 
 @synchronized_write
 def batch_upsert(
-    conn: sqlite3.Connection, msg_rows: List[tuple], media_rows: List[tuple]
+    conn: sqlite3.Connection, msg_rows: list[tuple], media_rows: list[tuple]
 ):
     if not msg_rows and not media_rows:
         return
@@ -480,10 +468,8 @@ def batch_upsert(
             _delete_stale_media_for_non_media_messages(cur, msg_rows, media_rows)
             conn.commit()
         except Exception:
-            try:
+            with suppress(Exception):
                 conn.rollback()
-            except Exception:
-                pass
             raise
     finally:
         cur.close()
