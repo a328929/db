@@ -355,15 +355,25 @@
     return String((item && item.chat_title) || (item && item.chat_id) || '').trim();
   }
 
+  function getCandidateActionLabel(item) {
+    return String(
+      (item && item.chat_title)
+      || (item && item.chat_username && ('@' + item.chat_username))
+      || (item && item.chat_id && ('Chat ' + item.chat_id))
+      || '该群组或频道'
+    ).trim();
+  }
+
   function createCandidateActions(elements, item) {
     var actions = document.createElement('div');
+    var candidateLabel = getCandidateActionLabel(item);
     actions.className = 'recovery-actions';
 
     if (item.telegram_app_link) {
       var appLink = document.createElement('a');
       appLink.href = item.telegram_app_link;
       appLink.textContent = '打开客户端';
-      appLink.setAttribute('aria-label', '使用 Telegram 客户端打开该群组或频道');
+      appLink.setAttribute('aria-label', '使用 Telegram 客户端打开 ' + candidateLabel);
       actions.appendChild(appLink);
     }
 
@@ -373,12 +383,14 @@
       webLink.target = '_blank';
       webLink.rel = 'noopener noreferrer';
       webLink.textContent = '网页入口';
+      webLink.setAttribute('aria-label', '在新标签页打开 ' + candidateLabel + ' 的 Telegram 网页入口');
       actions.appendChild(webLink);
     }
 
     var copyBtn = document.createElement('button');
     copyBtn.type = 'button';
     copyBtn.textContent = '复制信息';
+    copyBtn.setAttribute('aria-label', '复制 ' + candidateLabel + ' 的恢复候选信息');
     copyBtn.addEventListener('click', function () {
       copyCandidateInfo(elements, item);
     });
@@ -391,7 +403,7 @@
       restoreBtn.textContent = '恢复摘要';
       restoreBtn.disabled = recoveryState.busy;
       restoreBtn.setAttribute('data-recovery-job-action', 'true');
-      restoreBtn.setAttribute('aria-label', '恢复该群组或频道摘要到数据库');
+      restoreBtn.setAttribute('aria-label', '恢复 ' + candidateLabel + ' 的群组或频道摘要到数据库');
       restoreBtn.addEventListener('click', function () {
         handleRestoreOneClick(elements, item);
       });
@@ -403,7 +415,7 @@
       addBtn.textContent = '添加入库';
       addBtn.disabled = recoveryState.busy;
       addBtn.setAttribute('data-recovery-job-action', 'true');
-      addBtn.setAttribute('aria-label', '复用添加群组链路抓取该群组或频道并写入数据库');
+      addBtn.setAttribute('aria-label', '复用添加群组链路抓取 ' + candidateLabel + ' 并写入数据库');
       addBtn.addEventListener('click', function () {
         handleAddCandidateToDatabaseClick(elements, item);
       });
@@ -413,6 +425,7 @@
       importedBtn.type = 'button';
       importedBtn.textContent = '已在库';
       importedBtn.disabled = true;
+      importedBtn.setAttribute('aria-label', candidateLabel + ' 已在数据库中');
       actions.appendChild(importedBtn);
     }
 

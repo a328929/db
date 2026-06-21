@@ -454,6 +454,71 @@ def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_admin_clone_run_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_clone_runs_source_updated",
+        "CREATE INDEX idx_admin_clone_runs_source_updated "
+        "ON admin_clone_runs(source_chat_id, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_runs_status_updated",
+        "CREATE INDEX idx_admin_clone_runs_status_updated "
+        "ON admin_clone_runs(status, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_runs_target",
+        "CREATE INDEX idx_admin_clone_runs_target "
+        "ON admin_clone_runs(target_chat_id, target_title COLLATE NOCASE)",
+    )
+
+
+def _create_admin_clone_plan_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_clone_plans_run_updated",
+        "CREATE INDEX idx_admin_clone_plans_run_updated "
+        "ON admin_clone_plans(run_id, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_plans_status_updated",
+        "CREATE INDEX idx_admin_clone_plans_status_updated "
+        "ON admin_clone_plans(status, updated_at DESC)",
+    )
+
+
+def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_admin_clone_migrations_run_updated",
+        "CREATE INDEX idx_admin_clone_migrations_run_updated "
+        "ON admin_clone_migrations(run_id, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_migrations_status_updated",
+        "CREATE INDEX idx_admin_clone_migrations_status_updated "
+        "ON admin_clone_migrations(status, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_message_map_source",
+        "CREATE INDEX idx_admin_clone_message_map_source "
+        "ON admin_clone_message_map("
+        "run_id, source_chat_id, source_message_id, chunk_index, mode"
+        ")",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_message_map_migration",
+        "CREATE INDEX idx_admin_clone_message_map_migration "
+        "ON admin_clone_message_map(migration_id, status, updated_at DESC)",
+    )
+
+
 def _create_indexes(cur: sqlite3.Cursor):
     _drop_obsolete_indexes(cur)
     _create_chat_indexes(cur)
@@ -467,3 +532,6 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_absent_chat_indexes(cur)
     _create_admin_restricted_chat_indexes(cur)
     _create_admin_recovery_chat_indexes(cur)
+    _create_admin_clone_run_indexes(cur)
+    _create_admin_clone_plan_indexes(cur)
+    _create_admin_clone_migration_indexes(cur)

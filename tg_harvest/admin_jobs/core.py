@@ -19,6 +19,11 @@ from tg_harvest.admin_jobs.store import (
     _admin_snapshot_from_row,
 )
 from tg_harvest.config import CFG
+from tg_harvest.ops_bot.notify import (
+    maybe_notify_admin_job_log,
+    notify_admin_job_created,
+    notify_admin_job_status,
+)
 
 # 核心：使用 contextvars 确保日志与任务绑定，无视线程池复用和异步切换。
 job_context: contextvars.ContextVar[str] = contextvars.ContextVar("job_id", default="")
@@ -128,6 +133,10 @@ def _admin_finalize_created_job_locked(job_id: str) -> dict[str, Any]:
     snapshot = _admin_job_get_snapshot(job_id)
     if snapshot is None:
         raise RuntimeError("任务创建后无法读取快照")
+    try:
+        notify_admin_job_created(job_id, snapshot)
+    except Exception:
+        logging.exception("运维机器人任务创建通知失败")
     return snapshot
 
 
@@ -309,23 +318,22 @@ def _admin_get_active_job() -> dict[str, Any] | None:
 
 
 def _admin_job_stop_requested(job_id: str) -> bool:
-    with ADMIN_JOBS_LOCK:
-        with closing(_admin_connect()) as conn:
-            cur = conn.cursor()
-            try:
-                cur.execute(
-                    """
+    with ADMIN_JOBS_LOCK, closing(_admin_connect()) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
                     SELECT stop_requested
                     FROM admin_jobs
                     WHERE job_id = ?
                     LIMIT 1
                     """,
-                    (str(job_id),),
-                )
-                row = cur.fetchone()
-                return row is not None and int(row["stop_requested"] or 0) == 1
-            finally:
-                cur.close()
+                (str(job_id),),
+            )
+            row = cur.fetchone()
+            return row is not None and int(row["stop_requested"] or 0) == 1
+        finally:
+            cur.close()
 
 
 def _admin_request_job_stop(job_id: str) -> tuple[bool, str | None]:
@@ -402,6 +410,10 @@ def _admin_job_append_log(job_id: str, message: str) -> dict[str, Any] | None:
                 owner_pid=os.getpid(),
             )
             cache_entry["next_log_seq"] = int(next_log_seq) + 1
+            try:
+                maybe_notify_admin_job_log(job_id, str(message))
+            except Exception:
+                logging.exception("运维机器人任务日志通知失败")
             return log_item
 
 
@@ -411,9 +423,23 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
         updated_at = _job_runtime._admin_now_iso()
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        previous_status = ""
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
             try:
+                cur.execute(
+                    """
+                    SELECT status
+                    FROM admin_jobs
+                    WHERE job_id = ?
+                    LIMIT 1
+                    """,
+                    (str(job_id),),
+                )
+                row = cur.fetchone()
+                if row is None:
+                    return False
+                previous_status = str(row["status"] or "").lower()
                 cur.execute(
                     """
                     UPDATE admin_jobs
@@ -430,7 +456,7 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
                         owner_instance_id,
                         int(owner_pid),
                         updated_at,
-                        job_id,
+                        str(job_id),
                     ),
                 )
                 conn.commit()
@@ -440,6 +466,12 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
 
         if updated and normalized_status in {"done", "error"}:
             _admin_job_trim_locked()
+            if previous_status != normalized_status:
+                snapshot = _admin_job_get_snapshot(str(job_id))
+                try:
+                    notify_admin_job_status(str(job_id), normalized_status, snapshot)
+                except Exception:
+                    logging.exception("运维机器人任务状态通知失败")
         return updated
 
 

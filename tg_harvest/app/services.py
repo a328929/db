@@ -50,6 +50,21 @@ class RouteRegistryServices:
     list_absent_chat_scan_results_fn: Any
     list_restricted_chat_scan_results_fn: Any
     list_recovery_chat_candidates_fn: Any
+    list_clone_source_chats_fn: Any
+    build_clone_preflight_report_fn: Any
+    create_clone_run_fn: Any
+    load_clone_run_fn: Any
+    list_clone_runs_fn: Any
+    count_clone_runs_fn: Any
+    load_clone_run_detail_fn: Any
+    list_clone_message_mappings_fn: Any
+    count_clone_message_mappings_fn: Any
+    delete_clone_run_fn: Any
+    create_clone_plan_fn: Any
+    load_latest_clone_plan_fn: Any
+    create_clone_migration_fn: Any
+    load_latest_clone_migration_fn: Any
+    build_clone_timeline_replay_preview_fn: Any
     build_recovery_overview_fn: Any
     build_telegram_chat_link_bundle_fn: Any
     admin_start_missing_chats_scan_job_thread_fn: Any
@@ -57,3 +72,6 @@ class RouteRegistryServices:
     admin_start_restricted_chats_scan_job_thread_fn: Any
     admin_start_recovery_scan_job_thread_fn: Any
     admin_start_recovery_restore_job_thread_fn: Any
+    admin_start_clone_structure_job_thread_fn: Any
+    admin_start_clone_deep_preflight_job_thread_fn: Any
+    admin_start_clone_timeline_migration_job_thread_fn: Any

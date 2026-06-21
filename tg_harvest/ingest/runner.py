@@ -13,6 +13,12 @@ from tg_harvest.domain.dedupe import (
 )
 from tg_harvest.domain.normalize import _safe_json
 from tg_harvest.domain.promo import build_single_promo_features
+from tg_harvest.ingest.flood_wait import (
+    AccountFloodWaitError,
+    flood_sleep_threshold_kwargs,
+    flood_wait_seconds,
+    raise_if_long_flood_wait,
+)
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.parse import (
     HarvestCounters,
@@ -43,6 +49,11 @@ def _read_target_message_total(
         total = int(getattr(result, "total", 0) or 0)
         return max(total, 0)
     except Exception as exc:
+        raise_if_long_flood_wait(
+            exc,
+            threshold_seconds=CFG.flood_wait_switch_threshold,
+            scope="read-target-total",
+        )
         logging.warning(f"读取目标总消息数失败，改用无总量进度日志: {exc}")
         return None
 
@@ -113,6 +124,24 @@ def _resolve_entity_by_chat_id(client: Any, chat_id: int) -> Any:
             except Exception:
                 pass
         raise exc
+
+
+def _resolve_same_entity_for_client(client: Any, entity: Any) -> Any:
+    username = str(getattr(entity, "username", "") or "").strip().lstrip("@")
+    if username:
+        try:
+            return client.get_entity(username)
+        except Exception:
+            pass
+
+    entity_id = int(getattr(entity, "id", 0) or 0)
+    for candidate_id in candidate_chat_entity_ids(entity_id):
+        try:
+            return client.get_entity(candidate_id)
+        except Exception:
+            pass
+
+    raise RuntimeError("备用账号无法解析到同一群组/频道")
 
 
 def collect_target_entities(
@@ -310,13 +339,19 @@ def _harvest_messages_for_entity(
 
         except FloodWaitError as e:
             msg_rows, media_rows = [], []
-            logging.warning(f"触发 FloodWait: 等待 {e.seconds}s")
+            raise_if_long_flood_wait(
+                e,
+                threshold_seconds=CFG.flood_wait_switch_threshold,
+                scope=f"chat:{chat_id}",
+            )
+            wait_seconds = flood_wait_seconds(e)
+            logging.warning(f"触发 FloodWait: 等待 {wait_seconds}s")
             retry_count += 1
             if retry_count >= max_retries:
                 raise RuntimeError(
-                    f"采集触发 FloodWait 且重试耗尽 (chat_id={chat_id}, wait={e.seconds}s)"
+                    f"采集触发 FloodWait 且重试耗尽 (chat_id={chat_id}, wait={wait_seconds}s)"
                 ) from e
-            time.sleep(e.seconds)
+            time.sleep(wait_seconds)
         except (RPCError, ConnectionError) as e:
             msg_rows, media_rows = [], []
             # P0 级修复：专门处理 MsgidDecreaseRetryError 等位点冲突错误
@@ -547,7 +582,11 @@ def run_harvest():
 
         Path(str(CFG.session_name)).parent.mkdir(parents=True, exist_ok=True)
         with TelegramClient(
-            CFG.session_name, CFG.api_id, CFG.api_hash, receive_updates=False
+            CFG.session_name,
+            CFG.api_id,
+            CFG.api_hash,
+            receive_updates=False,
+            **flood_sleep_threshold_kwargs(CFG),
         ) as client:
             entities = collect_target_entities(conn, client, CFG)
             if not entities:
@@ -555,6 +594,27 @@ def run_harvest():
                 return
 
             for idx, ent in enumerate(entities, 1):
-                _process_entity(conn, client, ent, idx, len(entities))
+                try:
+                    _process_entity(conn, client, ent, idx, len(entities))
+                except AccountFloodWaitError as exc:
+                    secondary_session = str(CFG.secondary_session_name or "").strip()
+                    if not secondary_session or secondary_session == str(CFG.session_name):
+                        raise
+                    logging.warning(
+                        "主账号触发长时间 FloodWait，切换第二账号继续当前目标: wait=%ss threshold=%ss",
+                        exc.seconds,
+                        exc.threshold_seconds,
+                    )
+                    with TelegramClient(
+                        secondary_session,
+                        CFG.api_id,
+                        CFG.api_hash,
+                        receive_updates=False,
+                        **flood_sleep_threshold_kwargs(CFG),
+                    ) as secondary_client:
+                        secondary_entity = _resolve_same_entity_for_client(
+                            secondary_client, ent
+                        )
+                        _process_entity(conn, secondary_client, secondary_entity, idx, len(entities))
     finally:
         conn.close()

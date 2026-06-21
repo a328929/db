@@ -3,8 +3,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tg_harvest.ingest.store import batch_upsert, upsert_chat
 from tg_harvest.app import factory as app_factory
+from tg_harvest.ingest.store import batch_upsert, upsert_chat
 from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.storage import fts as _fts
 from tg_harvest.storage.access import has_fts
@@ -556,6 +556,89 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("session_entity_ts", admin_recovery_chat_columns)
         self.assertIn("recovered_at", admin_recovery_chat_columns)
         self.assertIn("scanned_at", admin_recovery_chat_columns)
+
+        cur.execute("PRAGMA table_info(admin_clone_runs)")
+        admin_clone_run_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("run_id", admin_clone_run_columns)
+        self.assertIn("job_id", admin_clone_run_columns)
+        self.assertIn("source_chat_id", admin_clone_run_columns)
+        self.assertIn("source_title", admin_clone_run_columns)
+        self.assertIn("target_chat_id", admin_clone_run_columns)
+        self.assertIn("target_access_hash", admin_clone_run_columns)
+        self.assertIn("target_title", admin_clone_run_columns)
+        self.assertIn("target_kind", admin_clone_run_columns)
+        self.assertIn("target_owner_session", admin_clone_run_columns)
+        self.assertIn("phase", admin_clone_run_columns)
+        self.assertIn("status", admin_clone_run_columns)
+        self.assertIn("plan_json", admin_clone_run_columns)
+        self.assertIn("completed_at", admin_clone_run_columns)
+        self.assertIn("updated_at", admin_clone_run_columns)
+
+        cur.execute("PRAGMA table_info(admin_clone_plans)")
+        admin_clone_plan_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("plan_id", admin_clone_plan_columns)
+        self.assertIn("run_id", admin_clone_plan_columns)
+        self.assertIn("job_id", admin_clone_plan_columns)
+        self.assertIn("status", admin_clone_plan_columns)
+        self.assertIn("source_access", admin_clone_plan_columns)
+        self.assertIn("target_access", admin_clone_plan_columns)
+        self.assertIn("primary_session_status", admin_clone_plan_columns)
+        self.assertIn("secondary_session_status", admin_clone_plan_columns)
+        self.assertIn("migration_account", admin_clone_plan_columns)
+        self.assertIn("text_strategy", admin_clone_plan_columns)
+        self.assertIn("media_strategy", admin_clone_plan_columns)
+        self.assertIn("media_group_strategy", admin_clone_plan_columns)
+        self.assertIn("avatar_strategy", admin_clone_plan_columns)
+        self.assertIn("blocking_issues_json", admin_clone_plan_columns)
+        self.assertIn("warnings_json", admin_clone_plan_columns)
+        self.assertIn("capabilities_json", admin_clone_plan_columns)
+        self.assertIn("plan_json", admin_clone_plan_columns)
+        self.assertIn("completed_at", admin_clone_plan_columns)
+        self.assertIn("updated_at", admin_clone_plan_columns)
+
+        cur.execute("PRAGMA table_info(admin_clone_migrations)")
+        admin_clone_migration_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("migration_id", admin_clone_migration_columns)
+        self.assertIn("run_id", admin_clone_migration_columns)
+        self.assertIn("plan_id", admin_clone_migration_columns)
+        self.assertIn("job_id", admin_clone_migration_columns)
+        self.assertIn("mode", admin_clone_migration_columns)
+        self.assertIn("status", admin_clone_migration_columns)
+        self.assertIn("phase", admin_clone_migration_columns)
+        self.assertIn("target_chat_id", admin_clone_migration_columns)
+        self.assertIn("target_write_account", admin_clone_migration_columns)
+        self.assertIn("requested_limit", admin_clone_migration_columns)
+        self.assertIn("send_delay_ms", admin_clone_migration_columns)
+        self.assertIn("text_total", admin_clone_migration_columns)
+        self.assertIn("text_sent", admin_clone_migration_columns)
+        self.assertIn("text_skipped", admin_clone_migration_columns)
+        self.assertIn("text_failed", admin_clone_migration_columns)
+        self.assertIn("media_total", admin_clone_migration_columns)
+        self.assertIn("media_sent", admin_clone_migration_columns)
+        self.assertIn("media_skipped", admin_clone_migration_columns)
+        self.assertIn("media_failed", admin_clone_migration_columns)
+        self.assertIn("media_group_total", admin_clone_migration_columns)
+        self.assertIn("media_group_sent", admin_clone_migration_columns)
+        self.assertIn("media_group_skipped", admin_clone_migration_columns)
+        self.assertIn("media_group_failed", admin_clone_migration_columns)
+        self.assertIn("plan_json", admin_clone_migration_columns)
+        self.assertIn("completed_at", admin_clone_migration_columns)
+
+        cur.execute("PRAGMA table_info(admin_clone_message_map)")
+        admin_clone_message_map_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("migration_id", admin_clone_message_map_columns)
+        self.assertIn("run_id", admin_clone_message_map_columns)
+        self.assertIn("plan_id", admin_clone_message_map_columns)
+        self.assertIn("source_chat_id", admin_clone_message_map_columns)
+        self.assertIn("source_message_id", admin_clone_message_map_columns)
+        self.assertIn("source_msg_date_ts", admin_clone_message_map_columns)
+        self.assertIn("target_chat_id", admin_clone_message_map_columns)
+        self.assertIn("target_message_id", admin_clone_message_map_columns)
+        self.assertIn("chunk_index", admin_clone_message_map_columns)
+        self.assertIn("chunk_count", admin_clone_message_map_columns)
+        self.assertIn("mode", admin_clone_message_map_columns)
+        self.assertIn("status", admin_clone_message_map_columns)
+        self.assertIn("sent_at", admin_clone_message_map_columns)
 
         cur.execute("SELECT updated_at FROM message_media WHERE chat_id = 1")
         self.assertTrue(cur.fetchone()["updated_at"])

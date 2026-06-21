@@ -1,7 +1,7 @@
 import sqlite3
 from contextlib import closing
 
-from flask import jsonify, render_template, request
+from flask import jsonify, render_template
 
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (

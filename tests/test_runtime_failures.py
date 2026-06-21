@@ -8,6 +8,7 @@ import sqlite3
 import tempfile
 import threading
 import unittest
+from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -19,7 +20,7 @@ from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_targets_table,
     _execute_cleanup_deletion_batches,
 )
-from tg_harvest.admin_jobs.common import admin_error_message
+from tg_harvest.admin_jobs.common import admin_error_message, resolve_chat_entity
 from tg_harvest.admin_jobs.core import (
     _admin_get_active_job,
     _admin_job_append_log,
@@ -35,13 +36,22 @@ from tg_harvest.admin_jobs.core import (
     job_context,
     job_log_passthrough_enabled,
 )
+from tg_harvest.admin_jobs.range_streaming import (
+    RangeHarvestAccount,
+    stream_entity_ranges_to_writer,
+)
 from tg_harvest.admin_jobs.runners import (
+    _ACCOUNT_FLOOD_COOLDOWNS,
     _admin_get_chat_message_count,
     _admin_harvest_job_runner,
     _admin_process_single_chat_update,
     _admin_update_all_chats,
+    _build_admin_update_account_assignments,
     _delete_chat_data,
     _delete_empty_chats_data,
+    _resolve_harvest_target_entities,
+    _resolve_target_entities_for_account,
+    _try_stream_new_chat_multi_account_ranges,
 )
 from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
 from tg_harvest.admin_jobs.store import _admin_fetch_job_snapshot_row
@@ -53,7 +63,9 @@ from tg_harvest.domain.normalize import (
     normalize_text_for_hash,
     normalize_text_light,
 )
+from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
+from tg_harvest.ingest.parse import HarvestCounters
 from tg_harvest.ingest.runner import (
     _format_harvest_progress_message,
     _read_target_message_total,
@@ -242,6 +254,9 @@ class MediaMetadataBackfillTargetTests(unittest.TestCase):
 
 
 class AdminUpdateRunnerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        _ACCOUNT_FLOOD_COOLDOWNS.clear()
+
     def test_chat_message_count_reads_chat_summary_not_messages_count(self) -> None:
         statements = []
 
@@ -393,6 +408,958 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(any("失败列表：bad (ID=2)" in line for line in logs))
         self.assertTrue(any(kwargs.get("total") == 2 for _, kwargs in progress_calls))
         self.assertTrue(any(kwargs.get("stage") == "updating" for _, kwargs in progress_calls))
+
+    def test_all_chat_update_uses_database_rows_without_joined_inventory_filter(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "joined", "chat_username": "joined_name"},
+            {"chat_id": 2, "chat_title": "not-joined", "chat_username": "stored_name"},
+        ]
+        cfg = SimpleNamespace(admin_update_concurrency=1, session_name="sess")
+        logs = []
+        submitted_chat_ids = []
+
+        def append_log(_job_id, message):
+            logs.append(str(message))
+
+        class _NoInventoryClient:
+            def get_entity(self, chat_id):
+                return SimpleNamespace(id=chat_id, title=f"chat-{chat_id}", username=None)
+
+            def iter_dialogs(self):
+                raise AssertionError("batch update should not scan joined dialogs")
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **_kwargs):
+            submitted_chat_ids.append(int(entity.id))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_NoInventoryClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-1",
+                None,
+                lambda: _FakeConn(rows),
+                append_log,
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual([1, 2], submitted_chat_ids)
+        self.assertTrue(any("按数据库清单逐一尝试更新" in line for line in logs))
+        self.assertFalse(any("本次仅更新" in line for line in logs))
+
+    def test_all_chat_update_round_robins_secondary_account(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+            {"chat_id": 3, "chat_title": "three", "chat_username": "three_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, chat_id):
+                return SimpleNamespace(
+                    id=chat_id,
+                    title=f"{self.label}-{chat_id}",
+                    username=None,
+                )
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-accounts",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [
+                ("main_sess", 1),
+                ("secondary_sess", 2),
+                ("main_sess", 3),
+            ],
+            harvest_calls,
+        )
+        self.assertTrue(any("第二账号已加入批量更新调度" in line for line in logs))
+        self.assertTrue(any("账号数：2" in line for line in logs))
+
+    def test_all_chat_update_prefers_primary_for_rows_without_username(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "private-ish", "chat_username": None},
+            {"chat_id": 2, "chat_title": "public-a", "chat_username": "public_a"},
+            {"chat_id": 3, "chat_title": "public-b", "chat_username": "public_b"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, chat_id):
+                return SimpleNamespace(
+                    id=chat_id,
+                    title=f"{self.label}-{chat_id}",
+                    username=None,
+                )
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-public-plan",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [
+                ("main_sess", 1),
+                ("main_sess", 2),
+                ("secondary_sess", 3),
+            ],
+            harvest_calls,
+        )
+        self.assertTrue(any("缺少公开用户名" in line for line in logs))
+
+    def test_all_chat_update_retries_primary_when_secondary_fails(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, chat_id):
+                return SimpleNamespace(
+                    id=chat_id,
+                    title=f"{self.label}-{chat_id}",
+                    username=None,
+                )
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            if client.label == "secondary_sess" and int(entity.id) == 2:
+                raise RuntimeError("secondary cannot read")
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-fallback",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [
+                ("main_sess", 1),
+                ("secondary_sess", 2),
+                ("main_sess", 2),
+            ],
+            harvest_calls,
+        )
+        self.assertTrue(any("第二账号更新失败，切换其他账号重试" in line for line in logs))
+        self.assertTrue(any("成功 2 个，失败 0 个" in line for line in logs))
+
+    def test_all_chat_update_switches_to_secondary_when_primary_fails(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, chat_id):
+                return SimpleNamespace(
+                    id=chat_id,
+                    title=f"{self.label}-{chat_id}",
+                    username=None,
+                )
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            if client.label == "main_sess":
+                raise RuntimeError("primary cannot read")
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-primary-general-fallback",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual([("main_sess", 1), ("secondary_sess", 1)], harvest_calls)
+        self.assertTrue(any("主账号更新失败，切换其他账号重试" in line for line in logs))
+        self.assertTrue(any("已切换账号完成采集" in line for line in logs))
+
+    def test_all_chat_update_assignment_uses_cache_before_public_username(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "cached-private", "chat_username": None},
+            {"chat_id": 2, "chat_title": "public-a", "chat_username": "public_a"},
+            {"chat_id": 3, "chat_title": "public-b", "chat_username": "public_b"},
+            {"chat_id": 4, "chat_title": "public-c", "chat_username": "public_c"},
+        ]
+        primary = SimpleNamespace(key="primary", label="主账号")
+        secondary = SimpleNamespace(key="secondary", label="第二账号")
+
+        assignments, counts = _build_admin_update_account_assignments(
+            list(enumerate(rows, start=1)),
+            [primary, secondary],
+            secondary_cached_chat_ids={1},
+        )
+
+        secondary_indexes = {
+            idx for idx, account in assignments.items() if account.key == "secondary"
+        }
+        self.assertIn(1, secondary_indexes)
+        self.assertEqual(2, len(secondary_indexes))
+        self.assertEqual(1, counts["secondary_cached"])
+        self.assertEqual(1, counts["secondary_public"])
+        self.assertEqual(3, counts["secondary_public_candidates"])
+
+    def test_all_chat_update_allows_secondary_public_username_resolve(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        secondary_username_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, key):
+                if self.label == "secondary_sess":
+                    if isinstance(key, str):
+                        secondary_username_calls.append(key)
+                        return SimpleNamespace(id=2, title=f"{self.label}-{key}")
+                    raise ValueError("could not find the input entity")
+                return SimpleNamespace(id=int(key), title=f"{self.label}-{key}")
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-secondary-limited-username",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(["two_name"], secondary_username_calls)
+        self.assertEqual([("main_sess", 1), ("secondary_sess", 2)], harvest_calls)
+        self.assertTrue(any("双账号协同策略" in line for line in logs))
+
+    def test_all_chat_update_switches_to_secondary_when_primary_flood_waits(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, chat_id):
+                return SimpleNamespace(
+                    id=chat_id,
+                    title=f"{self.label}-{chat_id}",
+                    username=None,
+                )
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            if client.label == "main_sess":
+                raise AccountFloodWaitError(
+                    seconds=70,
+                    threshold_seconds=30,
+                    account_label="primary",
+                    scope="test",
+                )
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-primary-flood",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(
+            [("main_sess", 1), ("secondary_sess", 1)],
+            harvest_calls,
+        )
+        self.assertTrue(any("主账号 进入长等待冷却" in line for line in logs))
+        self.assertTrue(any("已切换账号完成采集" in line for line in logs))
+
+    def test_all_chat_update_reuses_account_after_short_cooldown(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": None},
+            {"chat_id": 2, "chat_title": "two", "chat_username": None},
+            {"chat_id": 3, "chat_title": "three", "chat_username": None},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            admin_update_max_cooldown_wait_seconds=5,
+            session_name="main_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        now = [100.0]
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **_kwargs):
+            chat_id = int(entity.id)
+            harvest_calls.append(chat_id)
+            if chat_id == 1:
+                raise AccountFloodWaitError(
+                    seconds=2,
+                    threshold_seconds=1,
+                    account_label="primary",
+                    scope="test",
+                )
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        def fake_sleep(seconds):
+            now[0] += float(seconds)
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_FakeClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.time",
+            side_effect=lambda: now[0],
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            side_effect=fake_sleep,
+        ):
+            ok = _admin_update_all_chats(
+                "job-short-cooldown",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual([1, 2, 3], harvest_calls)
+        self.assertTrue(any("等待约 2s 后继续启动剩余群组" in line for line in logs))
+        self.assertTrue(any("成功 2 个，失败 0 个，暂缓 1 个" in line for line in logs))
+
+    def test_all_chat_update_stops_submitting_when_all_accounts_long_cooldown(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": None},
+            {"chat_id": 2, "chat_title": "two", "chat_username": None},
+            {"chat_id": 3, "chat_title": "three", "chat_username": None},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            admin_update_max_cooldown_wait_seconds=5,
+            session_name="main_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        now = [100.0]
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **_kwargs):
+            harvest_calls.append(int(entity.id))
+            raise AccountFloodWaitError(
+                seconds=120,
+                threshold_seconds=1,
+                account_label="primary",
+                scope="test",
+            )
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_FakeClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.time",
+            side_effect=lambda: now[0],
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-long-cooldown",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual([1], harvest_calls)
+        self.assertTrue(any("停止启动剩余群组" in line for line in logs))
+        self.assertTrue(any("暂缓 1 个" in line for line in logs))
+        self.assertTrue(any("未启动 2 个" in line for line in logs))
+        self.assertFalse(
+            any("没有可用账号执行当前群组" in line for line in logs)
+        )
 
     def test_all_chat_update_stop_request_does_not_submit_remaining_chats(self) -> None:
         rows = [
@@ -726,6 +1693,366 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertFalse(coordinator.finalized[0]["enable_dedupe"])
         self.assertEqual([7], coordinator.waited)
 
+    def test_streaming_helper_binds_client_event_loop_for_single_chat_harvest(
+        self,
+    ) -> None:
+        class _CoordinatorStub:
+            def __init__(self):
+                self.finalized = []
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **kwargs):
+                self.finalized.append(kwargs)
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+        previous_loop = asyncio.new_event_loop()
+        client_loop = asyncio.new_event_loop()
+        client = SimpleNamespace(_tg_harvest_loop=client_loop)
+        observed = []
+
+        def fake_harvest(_conn, harvest_client, _entity, _chat_id, **_kwargs):
+            observed.append(asyncio.get_event_loop() is harvest_client._tg_harvest_loop)
+            return HarvestCounters(seen=1, written=0), set(), False
+
+        try:
+            asyncio.set_event_loop(previous_loop)
+            coordinator = _CoordinatorStub()
+            with patch(
+                "tg_harvest.ingest.runner._harvest_messages_for_entity",
+                side_effect=fake_harvest,
+            ):
+                stream_entity_harvest_to_writer(
+                    write_coordinator=coordinator,
+                    get_conn_fn=lambda: _FakeConn([]),
+                    client=client,
+                    entity=SimpleNamespace(id=7, title="looped", username=None),
+                    idx=1,
+                    total=1,
+                    skip_postprocess_if_unchanged=True,
+                    enable_dedupe=False,
+                )
+
+            self.assertEqual([True], observed)
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+            self.assertEqual(1, len(coordinator.finalized))
+        finally:
+            asyncio.set_event_loop(None)
+            client_loop.close()
+            previous_loop.close()
+
+    def test_resolve_chat_entity_binds_client_event_loop(self) -> None:
+        previous_loop = asyncio.new_event_loop()
+        client_loop = asyncio.new_event_loop()
+        observed = []
+
+        class _Client:
+            _tg_harvest_loop = client_loop
+
+            def get_entity(self, chat_id):
+                observed.append(asyncio.get_event_loop() is self._tg_harvest_loop)
+                return SimpleNamespace(id=chat_id, title="resolved")
+
+        try:
+            asyncio.set_event_loop(previous_loop)
+            entity = resolve_chat_entity(_Client(), 123)
+
+            self.assertEqual(123, entity.id)
+            self.assertEqual([True], observed)
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+        finally:
+            asyncio.set_event_loop(None)
+            client_loop.close()
+            previous_loop.close()
+
+    def test_target_resolution_binds_client_event_loop(self) -> None:
+        previous_loop = asyncio.new_event_loop()
+        client_loop = asyncio.new_event_loop()
+        client = SimpleNamespace(_tg_harvest_loop=client_loop)
+        expected_entity = SimpleNamespace(id=321)
+        observed = []
+
+        def fake_resolve_entities(resolve_client, _target):
+            observed.append(asyncio.get_event_loop() is resolve_client._tg_harvest_loop)
+            return [expected_entity]
+
+        try:
+            asyncio.set_event_loop(previous_loop)
+            with patch(
+                "tg_harvest.ingest.parse.resolve_target_entities",
+                side_effect=fake_resolve_entities,
+            ):
+                entities = _resolve_target_entities_for_account(
+                    client,
+                    "target",
+                    cfg=SimpleNamespace(flood_wait_switch_threshold=30),
+                    account_label="primary",
+                    scope="test-resolve",
+                )
+
+            self.assertEqual([expected_entity], entities)
+            self.assertEqual([True], observed)
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+        finally:
+            asyncio.set_event_loop(None)
+            client_loop.close()
+            previous_loop.close()
+
+    def test_new_chat_dual_account_probe_binds_client_event_loops(self) -> None:
+        previous_loop = asyncio.new_event_loop()
+        primary_loop = asyncio.new_event_loop()
+        secondary_loop = asyncio.new_event_loop()
+        primary_client = SimpleNamespace(_tg_harvest_loop=primary_loop)
+        secondary_client = SimpleNamespace(_tg_harvest_loop=secondary_loop)
+        entity = SimpleNamespace(id=44, title="new", username="new_name")
+        secondary_entity = SimpleNamespace(id=44, title="new", username="new_name")
+        observed = []
+
+        class _CoordinatorStub:
+            pass
+
+        def fake_probe(client, _entity, **kwargs):
+            observed.append(
+                (
+                    kwargs["account_label"],
+                    asyncio.get_event_loop() is client._tg_harvest_loop,
+                )
+            )
+            return SimpleNamespace(
+                can_read_history=True,
+                latest_message_id=6000,
+                reason="",
+            )
+
+        try:
+            asyncio.set_event_loop(previous_loop)
+            with patch(
+                "tg_harvest.admin_jobs.runners._get_last_message_id",
+                return_value=0,
+            ), patch(
+                "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+                return_value=True,
+            ), patch(
+                "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+                return_value=secondary_client,
+            ), patch(
+                "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+                return_value=None,
+            ), patch(
+                "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+                return_value=None,
+            ), patch(
+                "tg_harvest.admin_jobs.runners._resolve_matching_entity_for_account",
+                return_value=secondary_entity,
+            ), patch(
+                "tg_harvest.admin_jobs.runners.probe_history_access",
+                side_effect=fake_probe,
+            ), patch(
+                "tg_harvest.admin_jobs.runners.stream_entity_ranges_to_writer",
+                return_value=SimpleNamespace(submitted_message_count=0),
+            ) as stream_ranges_mock:
+                used_ranges = _try_stream_new_chat_multi_account_ranges(
+                    job_id="job-loop-probe",
+                    target="new_name",
+                    cfg=SimpleNamespace(
+                        session_name="main_sess",
+                        secondary_session_name="secondary_sess",
+                        api_id=1,
+                        api_hash="hash",
+                        flood_wait_switch_threshold=30,
+                        multi_account_min_message_id=5000,
+                        multi_account_range_chunk_size=1000,
+                    ),
+                    get_conn_fn=lambda: _FakeConn([]),
+                    admin_job_append_log_fn=lambda *_args: None,
+                    write_coordinator=_CoordinatorStub(),
+                    primary_client=primary_client,
+                    entity=entity,
+                    entity_title="new",
+                    idx=1,
+                    total=1,
+                )
+
+            self.assertTrue(used_ranges)
+            self.assertEqual(
+                [("primary", True), ("secondary", True)],
+                observed,
+            )
+            self.assertTrue(stream_ranges_mock.called)
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+        finally:
+            asyncio.set_event_loop(None)
+            secondary_loop.close()
+            primary_loop.close()
+            previous_loop.close()
+
+    def test_range_streaming_requeues_chunk_when_account_flood_waits(self) -> None:
+        class _SyncExecutor:
+            def __init__(self, max_workers=None):
+                self.max_workers = max_workers
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+            def submit(self, fn, *args, **kwargs):
+                future = Future()
+                try:
+                    future.set_result(fn(*args, **kwargs))
+                except Exception as exc:
+                    future.set_exception(exc)
+                return future
+
+        class _CoordinatorStub:
+            def __init__(self):
+                self.finalized = []
+                self.registered = []
+
+            def register_chat(self, chat_id):
+                self.registered.append(chat_id)
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **kwargs):
+                self.finalized.append(kwargs)
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+        calls = []
+
+        def fake_harvest_range(**kwargs):
+            label = kwargs["account_label"]
+            message_range = kwargs["message_range"]
+            calls.append((label, message_range.start_id, message_range.end_id))
+            if label == "primary":
+                raise AccountFloodWaitError(
+                    seconds=70,
+                    threshold_seconds=30,
+                    account_label=label,
+                    scope="test-range",
+                )
+            return HarvestCounters(seen=1, written=1), set()
+
+        coordinator = _CoordinatorStub()
+        with patch(
+            "tg_harvest.admin_jobs.range_streaming.ThreadPoolExecutor",
+            _SyncExecutor,
+        ), patch(
+            "tg_harvest.admin_jobs.range_streaming.harvest_message_id_range",
+            side_effect=fake_harvest_range,
+        ):
+            result = stream_entity_ranges_to_writer(
+                job_id="job-range-flood",
+                write_coordinator=coordinator,
+                accounts=[
+                    RangeHarvestAccount("primary", object(), object()),
+                    RangeHarvestAccount("secondary", object(), object()),
+                ],
+                idx=1,
+                total=1,
+                chat_id=99,
+                chat_title="range",
+                chat_username="range_name",
+                chat_type="Channel",
+                latest_message_id=20,
+                chunk_size=10,
+                enable_dedupe=False,
+            )
+
+        self.assertEqual("primary", calls[0][0])
+        self.assertTrue(all(call[0] == "secondary" for call in calls[1:]))
+        self.assertEqual(2, result.counters.written)
+        self.assertEqual([99], coordinator.registered)
+        self.assertEqual(1, len(coordinator.finalized))
+        self.assertEqual(2, coordinator.finalized[0]["counters"].written)
+
+    def test_range_streaming_binds_client_event_loop_in_worker_threads(self) -> None:
+        class _CoordinatorStub:
+            def __init__(self):
+                self.finalized = []
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **kwargs):
+                self.finalized.append(kwargs)
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+        primary_loop = asyncio.new_event_loop()
+        secondary_loop = asyncio.new_event_loop()
+        primary_client = SimpleNamespace(_tg_harvest_loop=primary_loop)
+        secondary_client = SimpleNamespace(_tg_harvest_loop=secondary_loop)
+        barrier = threading.Barrier(2)
+        observed = []
+
+        def fake_harvest_range(**kwargs):
+            barrier.wait(timeout=5)
+            observed.append(
+                (
+                    kwargs["account_label"],
+                    asyncio.get_event_loop() is kwargs["client"]._tg_harvest_loop,
+                )
+            )
+            return HarvestCounters(seen=1, written=1), set()
+
+        try:
+            coordinator = _CoordinatorStub()
+            with patch(
+                "tg_harvest.admin_jobs.range_streaming.harvest_message_id_range",
+                side_effect=fake_harvest_range,
+            ):
+                result = stream_entity_ranges_to_writer(
+                    job_id="job-range-loop",
+                    write_coordinator=coordinator,
+                    accounts=[
+                        RangeHarvestAccount("primary", primary_client, object()),
+                        RangeHarvestAccount("secondary", secondary_client, object()),
+                    ],
+                    idx=1,
+                    total=1,
+                    chat_id=99,
+                    chat_title="range",
+                    chat_username="range_name",
+                    chat_type="Channel",
+                    latest_message_id=2,
+                    chunk_size=1,
+                    enable_dedupe=False,
+                )
+        finally:
+            primary_loop.close()
+            secondary_loop.close()
+
+        self.assertEqual(2, result.counters.written)
+        self.assertEqual(
+            [("primary", True), ("secondary", True)],
+            sorted(observed),
+        )
+        self.assertEqual(1, len(coordinator.finalized))
+
     def test_harvest_job_runner_streams_new_targets_through_shared_writer(self) -> None:
         statuses = []
         logs = []
@@ -824,6 +2151,591 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         )
         self.assertTrue(any("边抓取边写入" in line for line in logs))
         self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_job_runner_switches_to_secondary_when_primary_stream_fails(
+        self,
+    ) -> None:
+        statuses = []
+        logs = []
+        progress_calls = []
+        primary_entity = SimpleNamespace(id=11, title="new-1", username="u1")
+        secondary_entity = SimpleNamespace(id=11, title="new-1", username="u1")
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, key):
+                if str(key).strip().lstrip("@") == "u1":
+                    return secondary_entity
+                raise ValueError("could not find the input entity")
+
+        primary_client = _AccountClient("main_sess")
+        secondary_client = _AccountClient("secondary_sess")
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+        stream_calls = []
+
+        def fake_stream(**kwargs):
+            client = kwargs["client"]
+            entity = kwargs["entity"]
+            stream_calls.append((client.label, entity.id))
+            if client.label == "main_sess":
+                raise RuntimeError("primary stream failed")
+            return SimpleNamespace(
+                chat_id=entity.id,
+                chat_title=entity.title,
+                chat_username=entity.username,
+                counters=SimpleNamespace(written=0),
+                touched_groups=set(),
+                first_sync=True,
+                submitted_message_count=0,
+            )
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=[primary_client, secondary_client],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[[primary_entity], [secondary_entity]],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._try_stream_new_chat_multi_account_ranges",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_harvest_to_writer",
+            side_effect=fake_stream,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            _admin_harvest_job_runner(
+                "job-new-fallback",
+                "u1",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                ),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
+                admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(
+            [("main_sess", 11), ("secondary_sess", 11)],
+            stream_calls,
+        )
+        self.assertTrue(_CoordinatorStub.instances[0].closed)
+        self.assertTrue(any("主账号新增采集失败" in line for line in logs))
+        self.assertTrue(any("已切换账号继续新增采集" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_job_runner_uses_dual_account_ranges_for_large_new_target(self) -> None:
+        statuses = []
+        logs = []
+        progress_calls = []
+        primary_client = object()
+        secondary_entity = SimpleNamespace(id=11, title="new-1", username="u1")
+
+        class _SecondaryClient:
+            def get_entity(self, key):
+                if str(key).strip().lstrip("@") == "u1":
+                    return secondary_entity
+                raise ValueError("could not find the input entity")
+
+        secondary_client = _SecondaryClient()
+        entity = SimpleNamespace(id=11, title="new-1", username="u1")
+        entities = [entity]
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            side_effect=[True, True],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=[primary_client, secondary_client],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[entities, []],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._get_last_message_id",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.probe_history_access",
+            side_effect=[
+                SimpleNamespace(
+                    can_read_history=True,
+                    latest_message_id=6000,
+                    reason="",
+                ),
+                SimpleNamespace(
+                    can_read_history=True,
+                    latest_message_id=6000,
+                    reason="",
+                ),
+            ],
+        ) as probe_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_ranges_to_writer",
+            return_value=SimpleNamespace(
+                chat_id=11,
+                chat_title="new-1",
+                chat_username="u1",
+                counters=SimpleNamespace(written=0),
+                touched_groups=set(),
+                first_sync=True,
+                submitted_message_count=0,
+            ),
+        ) as stream_ranges_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_harvest_to_writer"
+        ) as stream_single_mock, patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            _admin_harvest_job_runner(
+                "job-range",
+                "target",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                    multi_account_min_message_id=6000,
+                    multi_account_range_chunk_size=777,
+                ),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
+                admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertTrue(_CoordinatorStub.instances[0].closed)
+        self.assertEqual(2, probe_mock.call_count)
+        self.assertTrue(
+            all(
+                call.kwargs["min_history_message_id"] == 6000
+                for call in probe_mock.call_args_list
+            )
+        )
+        self.assertEqual(1, stream_ranges_mock.call_count)
+        self.assertFalse(stream_single_mock.called)
+        self.assertEqual(6000, stream_ranges_mock.call_args.kwargs["latest_message_id"])
+        self.assertEqual(777, stream_ranges_mock.call_args.kwargs["chunk_size"])
+        self.assertTrue(any("双账号区间拉取" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_job_runner_falls_back_when_secondary_resolve_flood_waits(self) -> None:
+        statuses = []
+        logs = []
+        progress_calls = []
+        primary_client = object()
+        secondary_client = object()
+        entity = SimpleNamespace(id=11, title="new-1", username="u1")
+
+        class _FloodWaitError(Exception):
+            seconds = 68816
+
+            def __str__(self):
+                return (
+                    "A wait of 68816 seconds is required "
+                    "(caused by InvokeWithoutUpdatesRequest(ResolveUsernameRequest))"
+                )
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            side_effect=[True, True],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=[primary_client, secondary_client],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[[entity], _FloodWaitError()],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._get_last_message_id",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.probe_history_access",
+            return_value=SimpleNamespace(
+                can_read_history=True,
+                latest_message_id=6000,
+                reason="",
+            ),
+        ) as probe_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_ranges_to_writer",
+            return_value=None,
+        ) as stream_ranges_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_harvest_to_writer",
+            return_value=None,
+        ) as stream_single_mock, patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            _admin_harvest_job_runner(
+                "job-secondary-resolve-flood",
+                "https://t.me/fancha07",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                    flood_wait_switch_threshold=30,
+                    multi_account_min_message_id=5000,
+                    multi_account_range_chunk_size=777,
+                ),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
+                admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertTrue(_CoordinatorStub.instances[0].closed)
+        self.assertEqual(1, probe_mock.call_count)
+        self.assertFalse(stream_ranges_mock.called)
+        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertIs(stream_single_mock.call_args.kwargs["client"], primary_client)
+        self.assertTrue(any("第二账号解析目标触发长等待" in line for line in logs))
+        self.assertTrue(any("回退主账号单账号拉取" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_job_runner_uses_secondary_when_primary_target_resolve_flood_waits(
+        self,
+    ) -> None:
+        statuses = []
+        logs = []
+        progress_calls = []
+        primary_client = object()
+        secondary_client = object()
+        secondary_entity = SimpleNamespace(id=55, title="secondary-target", username="sec")
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            side_effect=[True, True],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=[primary_client, secondary_client],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[
+                AccountFloodWaitError(
+                    seconds=30153,
+                    threshold_seconds=30,
+                    account_label="primary",
+                    scope="resolve-harvest-target",
+                ),
+                [secondary_entity],
+            ],
+        ) as resolve_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_harvest_to_writer",
+            return_value=None,
+        ) as stream_single_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_ranges_to_writer"
+        ) as stream_ranges_mock, patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            _admin_harvest_job_runner(
+                "job-primary-resolve-flood",
+                "https://t.me/sec",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                    flood_wait_switch_threshold=30,
+                    multi_account_min_message_id=5000,
+                    multi_account_range_chunk_size=777,
+                ),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
+                admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(2, resolve_mock.call_count)
+        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertIs(stream_single_mock.call_args.kwargs["client"], secondary_client)
+        self.assertIs(stream_single_mock.call_args.kwargs["entity"], secondary_entity)
+        self.assertFalse(stream_ranges_mock.called)
+        self.assertTrue(_CoordinatorStub.instances[0].closed)
+        self.assertTrue(any("主账号处于长等待，第二账号已解析目标" in line for line in logs))
+        self.assertTrue(any("账号=第二账号" in line for line in logs))
+        self.assertFalse(any("主账号确认第二账号解析结果" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_job_runner_uses_secondary_when_primary_confirmation_flood_waits(
+        self,
+    ) -> None:
+        statuses = []
+        logs = []
+        progress_calls = []
+        primary_client = object()
+        secondary_client = object()
+        secondary_entity = SimpleNamespace(id=56, title="secondary-title", username="sec2")
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def close(self):
+                self.closed = True
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            side_effect=[True, True],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=[primary_client, secondary_client],
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[
+                [],
+                [secondary_entity],
+                AccountFloodWaitError(
+                    seconds=30150,
+                    threshold_seconds=30,
+                    account_label="primary",
+                    scope="resolve-matching-target",
+                ),
+            ],
+        ), patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_harvest_to_writer",
+            return_value=None,
+        ) as stream_single_mock, patch(
+            "tg_harvest.admin_jobs.runners.stream_entity_ranges_to_writer"
+        ) as stream_ranges_mock, patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            side_effect=lambda *args, **kwargs: progress_calls.append((args, kwargs)) or True,
+        ):
+            _admin_harvest_job_runner(
+                "job-primary-confirm-flood",
+                "secondary-title",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                    flood_wait_switch_threshold=30,
+                    multi_account_min_message_id=5000,
+                    multi_account_range_chunk_size=777,
+                ),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
+                admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertIs(stream_single_mock.call_args.kwargs["client"], secondary_client)
+        self.assertIs(stream_single_mock.call_args.kwargs["entity"], secondary_entity)
+        self.assertFalse(stream_ranges_mock.called)
+        self.assertTrue(_CoordinatorStub.instances[0].closed)
+        self.assertTrue(any("改用第二账号直接采集" in line for line in logs))
+        self.assertTrue(any("账号=第二账号" in line for line in logs))
+        self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
+
+    def test_harvest_target_resolution_can_start_from_secondary_title_match(self) -> None:
+        logs = []
+        primary_entity = SimpleNamespace(id=22, title="public-title", username="public_chan")
+        secondary_entity = SimpleNamespace(id=22, title="public-title", username="public_chan")
+
+        class _PrimaryClient:
+            def get_entity(self, key):
+                if str(key).strip().lstrip("@") == "public_chan":
+                    return primary_entity
+                raise ValueError("could not find the input entity")
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=object(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._disconnect_worker_client",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.parse.resolve_target_entities",
+            side_effect=[
+                [],
+                [secondary_entity],
+                [],
+            ],
+        ):
+            entities = _resolve_harvest_target_entities(
+                job_id="job-resolve",
+                target="public-title",
+                cfg=SimpleNamespace(
+                    session_name="main_sess",
+                    secondary_session_name="secondary_sess",
+                    api_id=1,
+                    api_hash="hash",
+                ),
+                primary_client=_PrimaryClient(),
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            )
+
+        self.assertEqual([primary_entity], entities)
+        self.assertTrue(any("第二账号解析并在主账号确认" in line for line in logs))
 
 
 class _CountResult:
@@ -1459,6 +3371,9 @@ class AdminRunnerHelperTests(unittest.TestCase):
             def __init__(self):
                 self.closed = False
 
+            def is_closed(self):
+                return self.closed
+
             def close(self):
                 self.closed = True
 
@@ -1476,6 +3391,67 @@ class AdminRunnerHelperTests(unittest.TestCase):
 
         self.assertTrue(client.disconnected)
         self.assertTrue(client._tg_harvest_loop.closed)
+
+    def test_disconnect_worker_client_restores_previous_event_loop(self) -> None:
+        previous_loop = asyncio.new_event_loop()
+        worker_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(previous_loop)
+
+            class _Client:
+                def __init__(self):
+                    self.disconnected = False
+                    self._tg_harvest_loop = worker_loop
+                    self._tg_harvest_previous_loop = previous_loop
+
+                def disconnect(self):
+                    self.disconnected = True
+
+            client = _Client()
+
+            _disconnect_worker_client(client)
+
+            self.assertTrue(client.disconnected)
+            self.assertTrue(worker_loop.is_closed())
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+            self.assertFalse(previous_loop.is_closed())
+        finally:
+            asyncio.set_event_loop(None)
+            if not worker_loop.is_closed():
+                worker_loop.close()
+            if not previous_loop.is_closed():
+                previous_loop.close()
+
+    def test_disconnect_worker_client_without_saved_previous_loop_keeps_current_loop(
+        self,
+    ) -> None:
+        previous_loop = asyncio.new_event_loop()
+        worker_loop = asyncio.new_event_loop()
+        try:
+            asyncio.set_event_loop(previous_loop)
+
+            class _Client:
+                def __init__(self):
+                    self.disconnected = False
+                    self._tg_harvest_loop = worker_loop
+
+                def disconnect(self):
+                    self.disconnected = True
+
+            client = _Client()
+
+            _disconnect_worker_client(client)
+
+            self.assertTrue(client.disconnected)
+            self.assertTrue(worker_loop.is_closed())
+            self.assertIs(asyncio.get_event_loop(), previous_loop)
+            self.assertFalse(previous_loop.is_closed())
+        finally:
+            asyncio.set_event_loop(None)
+            if not worker_loop.is_closed():
+                worker_loop.close()
+            if not previous_loop.is_closed():
+                previous_loop.close()
 
 
 class PersistentAdminJobsTests(unittest.TestCase):

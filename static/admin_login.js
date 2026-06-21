@@ -2,7 +2,13 @@
   'use strict';
 
   var DEFAULT_NEXT_PATH = '/admin/manage';
-  var ALLOWED_NEXT_PATHS = ['/admin/manage', '/admin/channels', '/admin/recovery'];
+  var ALLOWED_NEXT_PATHS = [
+    '/admin/manage',
+    '/admin/channels',
+    '/admin/clone',
+    '/admin/clone/runs/manage',
+    '/admin/recovery'
+  ];
 
   document.addEventListener('DOMContentLoaded', function () {
     var elements = getElements();

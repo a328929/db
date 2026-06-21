@@ -437,16 +437,27 @@
     return item;
   }
 
+  function getChannelActionLabel(item) {
+    return String(
+      (item && item.chat_title)
+      || (item && item.title)
+      || (item && item.chat_username && ('@' + item.chat_username))
+      || (item && item.chat_id && ('Chat ' + item.chat_id))
+      || '该群组或频道'
+    ).trim();
+  }
+
   function createChannelActions(item, elements, options) {
     var actions = document.createElement('div');
     var actionOptions = options || {};
+    var channelLabel = getChannelActionLabel(item);
     actions.className = 'channel-actions';
 
     if (item.telegram_app_link) {
       var appLink = document.createElement('a');
       appLink.href = item.telegram_app_link;
       appLink.textContent = '打开客户端';
-      appLink.setAttribute('aria-label', '使用 Telegram 客户端打开该群组或频道');
+      appLink.setAttribute('aria-label', '使用 Telegram 客户端打开 ' + channelLabel);
       actions.appendChild(appLink);
     }
 
@@ -456,12 +467,14 @@
       webLink.target = '_blank';
       webLink.rel = 'noopener noreferrer';
       webLink.textContent = '网页入口';
+      webLink.setAttribute('aria-label', '在新标签页打开 ' + channelLabel + ' 的 Telegram 网页入口');
       actions.appendChild(webLink);
     }
 
     var copyBtn = document.createElement('button');
     copyBtn.type = 'button';
     copyBtn.textContent = '复制信息';
+    copyBtn.setAttribute('aria-label', '复制 ' + channelLabel + ' 的群组或频道信息');
     copyBtn.addEventListener('click', function () {
       copyChannelInfo(item, elements);
     });
@@ -472,7 +485,7 @@
       deleteBtn.type = 'button';
       deleteBtn.className = 'danger-action';
       deleteBtn.textContent = '删除数据';
-      deleteBtn.setAttribute('aria-label', '从数据库删除该群组或频道的全部数据');
+      deleteBtn.setAttribute('aria-label', '从数据库删除 ' + channelLabel + ' 的全部数据');
       deleteBtn.addEventListener('click', function () {
         handleDeleteChannelData(elements, item);
       });
@@ -870,7 +883,7 @@
             { label: '标记', value: item.risk_flags || '' },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
-          actions: createChannelActions(item, elements),
+          actions: createChannelActions(item, elements, { allowDelete: true }),
           note: buildRestrictedNote(item)
         });
       }
@@ -1002,6 +1015,7 @@
         onDone: async function () {
           await loadChannels(elements);
           await loadAbsentChannels(elements);
+          await loadRestrictedChannels(elements);
         }
       });
     } catch (error) {

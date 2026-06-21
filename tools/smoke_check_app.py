@@ -12,6 +12,8 @@ REQUIRED_ROUTES = {
     "/admin/login",
     "/admin/manage",
     "/admin/channels",
+    "/admin/clone",
+    "/admin/clone/runs/manage",
     "/api/meta",
     "/api/search",
     "/api/admin/chats",
@@ -22,6 +24,16 @@ REQUIRED_ROUTES = {
     "/api/admin/channels/absent/scan",
     "/api/admin/channels/restricted",
     "/api/admin/channels/restricted/scan",
+    "/api/admin/clone/chats",
+    "/api/admin/clone/runs",
+    "/api/admin/clone/preflight",
+    "/api/admin/clone/jobs",
+    "/api/admin/clone/runs/<run_id>/plan",
+    "/api/admin/clone/runs/<run_id>/detail",
+    "/api/admin/clone/runs/<run_id>/messages",
+    "/api/admin/clone/runs/<run_id>/migration",
+    "/api/admin/clone/runs/<run_id>/deep-preflight",
+    "/api/admin/clone/runs/<run_id>/migrate-timeline",
 }
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]

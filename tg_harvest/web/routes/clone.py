@@ -1,0 +1,1039 @@
+import sqlite3
+from contextlib import closing
+from typing import Any
+
+from flask import jsonify, render_template, request
+
+from tg_harvest.admin_jobs.clone import (
+    CLONE_TARGET_TITLE_MAX_LEN,
+    normalize_clone_target_kind,
+    normalize_clone_target_title,
+)
+from tg_harvest.domain.clone_plan import (
+    CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
+    CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
+    CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS,
+    CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
+    CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
+    clone_plan_blocking_issues,
+    clone_plan_media_migration_account,
+    clone_plan_media_relay_ready,
+    clone_plan_target_write_account,
+)
+from tg_harvest.web.auth import admin_login_required, admin_page_login_required
+from tg_harvest.web.responses import (
+    create_exclusive_job_or_response,
+    created_job_snapshot_response,
+    json_error,
+    logged_json_error,
+    require_json_dict,
+)
+
+_TARGET_KIND_ALIASES = {"channel", "broadcast", "megagroup", "supergroup", "group"}
+_ALLOWED_MEDIA_STRATEGIES = {
+    CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
+    CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
+}
+
+
+def _plan_media_relay(latest_plan: dict | None) -> dict:
+    if not isinstance(latest_plan, dict):
+        return {}
+    media_relay = latest_plan.get("media_relay")
+    if isinstance(media_relay, dict):
+        return media_relay
+    plan_payload = latest_plan.get("plan")
+    if isinstance(plan_payload, dict) and isinstance(plan_payload.get("media_relay"), dict):
+        return plan_payload["media_relay"]
+    capabilities = latest_plan.get("capabilities")
+    if isinstance(capabilities, dict) and isinstance(capabilities.get("media_relay"), dict):
+        return capabilities["media_relay"]
+    return {}
+
+
+def _plan_media_relay_ready(latest_plan: dict | None) -> bool:
+    return bool(isinstance(latest_plan, dict) and clone_plan_media_relay_ready(latest_plan))
+
+
+def _media_execution_label(latest_plan: dict | None, fallback_account: str) -> str:
+    media_relay = _plan_media_relay(latest_plan)
+    if (
+        str((latest_plan or {}).get("media_strategy") or "").strip()
+        == CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION
+        and _plan_media_relay_ready(latest_plan)
+    ):
+        return (
+            str(media_relay.get("source_account") or "").strip()
+            + "->relay->"
+            + str(media_relay.get("target_account") or "").strip()
+        )
+    return str(fallback_account or "").strip()
+
+
+def _with_chat_links(rows, build_telegram_chat_link_bundle_fn):
+    items = []
+    for row in rows:
+        item = dict(row)
+        bundle = build_telegram_chat_link_bundle_fn(
+            chat_id=int(item["chat_id"]),
+            chat_username=item.get("chat_username"),
+        )
+        item["telegram_app_link"] = bundle.app_link
+        item["telegram_web_link"] = bundle.web_link
+        item["has_public_link"] = bool(item["telegram_web_link"])
+        items.append(item)
+    return items
+
+
+def _with_clone_run_links(rows, build_telegram_chat_link_bundle_fn):
+    items = []
+    for row in rows:
+        item = dict(row)
+        source_chat_id = int(item.get("source_chat_id") or 0)
+        if source_chat_id:
+            source_bundle = build_telegram_chat_link_bundle_fn(
+                chat_id=source_chat_id,
+                chat_username=item.get("source_chat_username"),
+            )
+            item["source_telegram_app_link"] = source_bundle.app_link
+            item["source_telegram_web_link"] = source_bundle.web_link
+            item["source_has_public_link"] = bool(source_bundle.web_link)
+        else:
+            item["source_telegram_app_link"] = ""
+            item["source_telegram_web_link"] = ""
+            item["source_has_public_link"] = False
+
+        target_chat_id = item.get("target_chat_id")
+        if target_chat_id:
+            target_bundle = build_telegram_chat_link_bundle_fn(
+                chat_id=int(target_chat_id),
+                chat_username=item.get("target_username"),
+            )
+            item["target_telegram_app_link"] = target_bundle.app_link
+            item["target_telegram_web_link"] = target_bundle.web_link
+            item["target_has_public_link"] = bool(target_bundle.web_link)
+        else:
+            item["target_telegram_app_link"] = ""
+            item["target_telegram_web_link"] = ""
+            item["target_has_public_link"] = False
+        items.append(item)
+    return items
+
+
+def _with_clone_run_link(row, build_telegram_chat_link_bundle_fn):
+    items = _with_clone_run_links([row], build_telegram_chat_link_bundle_fn)
+    return items[0] if items else dict(row)
+
+
+def _parse_chat_id(raw_chat_id: Any):
+    try:
+        chat_id = int(raw_chat_id)
+    except (TypeError, ValueError):
+        return None, json_error("chat_id 参数非法", 400)
+    if chat_id == 0:
+        return None, json_error("chat_id 参数非法", 400)
+    return chat_id, None
+
+
+def _parse_optional_limit(raw_limit: Any, *, default: int = 20):
+    text = str(raw_limit or "").strip()
+    if not text:
+        return default, None
+    try:
+        limit = int(text)
+    except (TypeError, ValueError):
+        return None, json_error("limit 参数非法", 400)
+    if limit <= 0:
+        return None, json_error("limit 参数非法", 400)
+    return min(limit, 100), None
+
+
+def _parse_optional_offset(raw_offset: Any):
+    text = str(raw_offset or "").strip()
+    if not text:
+        return 0, None
+    try:
+        offset = int(text)
+    except (TypeError, ValueError):
+        return None, json_error("offset 参数非法", 400)
+    if offset < 0:
+        return None, json_error("offset 参数非法", 400)
+    return offset, None
+
+
+def _clone_run_delete_confirm_text(run: dict) -> str:
+    return "DELETE-CLONE-RUN:" + str(run.get("run_id") or "").strip()
+
+
+def _normalize_requested_target_kind(raw_kind: Any, *, source_chat_type: Any):
+    normalized_raw = str(raw_kind or "").strip().lower()
+    if normalized_raw and normalized_raw not in _TARGET_KIND_ALIASES:
+        return None, json_error("target_kind 参数必须为 channel 或 megagroup", 400)
+    return (
+        normalize_clone_target_kind(
+            normalized_raw,
+            source_chat_type=source_chat_type,
+        ),
+        None,
+    )
+
+
+def _normalize_requested_target_title(raw_title: Any, *, fallback_title: str):
+    if raw_title is not None and not isinstance(raw_title, str):
+        return None, json_error("target_title 参数必须为字符串", 400)
+
+    title = str(raw_title or "").strip()
+    if len(title) > CLONE_TARGET_TITLE_MAX_LEN:
+        return (
+            None,
+            json_error(f"target_title 长度不能超过 {CLONE_TARGET_TITLE_MAX_LEN}", 400),
+        )
+    return normalize_clone_target_title(title, fallback_title=fallback_title), None
+
+
+def _parse_optional_nonnegative_int(
+    raw_value: Any,
+    *,
+    field_name: str,
+    default: int = 0,
+    max_value: int,
+):
+    if raw_value in (None, ""):
+        return int(default), None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None, json_error(f"{field_name} 参数必须为非负整数", 400)
+    if value < 0:
+        return None, json_error(f"{field_name} 参数必须为非负整数", 400)
+    if value > max_value:
+        return None, json_error(f"{field_name} 参数不能超过 {max_value}", 400)
+    return value, None
+
+
+def _parse_timeline_migration_options():
+    data = request.get_json(silent=True) if request.is_json else {}
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return None, json_error("请求 JSON 格式错误", 400)
+
+    message_limit, error_response = _parse_optional_nonnegative_int(
+        data.get("message_limit"),
+        field_name="message_limit",
+        default=0,
+        max_value=CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
+    )
+    if error_response is not None:
+        return None, error_response
+
+    send_delay_ms, error_response = _parse_optional_nonnegative_int(
+        data.get("send_delay_ms"),
+        field_name="send_delay_ms",
+        default=CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS,
+        max_value=CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
+    )
+    if error_response is not None:
+        return None, error_response
+
+    return {
+        "message_limit": int(message_limit or 0),
+        "send_delay_ms": int(send_delay_ms or 0),
+    }, None
+
+
+def _timeline_migration_readiness(
+    clone_run: dict,
+    latest_plan: dict | None,
+    timeline_preview: dict | None = None,
+) -> dict:
+    reasons: list[str] = []
+    target_write_account = (
+        clone_plan_target_write_account(latest_plan) if latest_plan is not None else ""
+    )
+    migration_account = (
+        clone_plan_media_migration_account(latest_plan)
+        if latest_plan is not None
+        else ""
+    )
+    relay_ready = _plan_media_relay_ready(latest_plan)
+    text_remaining = 0
+    media_remaining = 0
+    if isinstance(timeline_preview, dict):
+        try:
+            text_remaining = int(timeline_preview.get("text_remaining") or 0)
+            media_remaining = int(timeline_preview.get("media_remaining") or 0)
+        except (TypeError, ValueError):
+            text_remaining = 0
+            media_remaining = 0
+
+    if clone_run.get("status") != "done" or not clone_run.get("target_chat_id"):
+        reasons.append("目标副本尚未创建完成，不能执行完整时间线迁移")
+    if latest_plan is None:
+        reasons.append("请先执行在线深度预检并生成迁移计划")
+    else:
+        if latest_plan.get("status") != "done":
+            reasons.append("迁移计划尚未完成，不能执行完整时间线迁移")
+        if clone_plan_blocking_issues(latest_plan):
+            reasons.append("迁移计划存在阻断项，不能执行完整时间线迁移")
+        if latest_plan.get("target_access") != "ok":
+            reasons.append("目标副本不可访问，不能执行完整时间线迁移")
+        if text_remaining > 0:
+            if latest_plan.get("text_strategy") != "database_replay":
+                reasons.append("迁移计划不允许数据库文本重放")
+            if not target_write_account:
+                reasons.append("迁移计划缺少可写目标账号，请重新执行在线深度预检")
+        if media_remaining > 0:
+            media_strategy = str(latest_plan.get("media_strategy") or "")
+            if latest_plan.get("source_access") != "ok":
+                reasons.append("源群不可访问，不能执行媒体时间线复制")
+            if media_strategy not in _ALLOWED_MEDIA_STRATEGIES:
+                reasons.append("迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检")
+            elif (
+                media_strategy == CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION
+                and not relay_ready
+            ):
+                reasons.append("固定中转频道桥接计划未就绪，请重新执行在线深度预检")
+            elif (
+                media_strategy == CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION
+                and not migration_account
+            ):
+                reasons.append("迁移计划缺少同时访问源群与目标副本的媒体迁移账号")
+
+    if isinstance(timeline_preview, dict) and text_remaining + media_remaining <= 0:
+        reasons.append("没有剩余可迁移时间线消息")
+
+    media_execution_account = _media_execution_label(
+        latest_plan,
+        str(migration_account),
+    )
+    execution_parts = []
+    if target_write_account:
+        execution_parts.append(f"text:{target_write_account}")
+    if media_execution_account:
+        execution_parts.append(f"media:{media_execution_account}")
+    return {
+        "can_migrate_timeline": not reasons,
+        "readiness_reasons": reasons,
+        "target_write_account": target_write_account,
+        "migration_account": migration_account,
+        "media_execution_account": media_execution_account,
+        "execution_label": "; ".join(execution_parts),
+        "media_relay": _plan_media_relay(latest_plan),
+        "plan_id": str((latest_plan or {}).get("plan_id") or ""),
+        "plan_status": str((latest_plan or {}).get("status") or ""),
+        "text_strategy": str((latest_plan or {}).get("text_strategy") or ""),
+        "media_strategy": str((latest_plan or {}).get("media_strategy") or ""),
+        "source_access": str((latest_plan or {}).get("source_access") or ""),
+        "target_access": str((latest_plan or {}).get("target_access") or ""),
+    }
+
+
+def register_clone_routes(
+    app,
+    *,
+    logger,
+    get_conn_fn,
+    cfg,
+    list_clone_source_chats_fn,
+    build_clone_preflight_report_fn,
+    create_clone_run_fn,
+    load_clone_run_fn,
+    list_clone_runs_fn,
+    count_clone_runs_fn,
+    load_clone_run_detail_fn,
+    list_clone_message_mappings_fn,
+    count_clone_message_mappings_fn,
+    delete_clone_run_fn,
+    create_clone_plan_fn,
+    load_latest_clone_plan_fn,
+    create_clone_migration_fn,
+    load_latest_clone_migration_fn,
+    build_clone_timeline_replay_preview_fn,
+    build_telegram_chat_link_bundle_fn,
+    admin_try_create_exclusive_job_fn,
+    admin_job_get_snapshot_fn,
+    admin_job_append_log_fn,
+    admin_job_set_status_fn,
+    admin_start_clone_structure_job_thread_fn,
+    admin_start_clone_deep_preflight_job_thread_fn,
+    admin_start_clone_timeline_migration_job_thread_fn,
+) -> None:
+    @app.get("/admin/clone")
+    @admin_page_login_required
+    def admin_clone_page():
+        return render_template("admin_clone.html")
+
+    @app.get("/admin/clone/runs/manage")
+    @admin_page_login_required
+    def admin_clone_runs_manage_page():
+        return render_template("admin_clone_runs.html")
+
+    @app.get("/api/admin/clone/chats")
+    @admin_login_required
+    def api_admin_clone_chats():
+        try:
+            sort = request.args.get("sort", "")
+            with closing(get_conn_fn()) as conn:
+                rows = list_clone_source_chats_fn(conn, sort=sort)
+            return jsonify(
+                {
+                    "ok": True,
+                    "items": _with_chat_links(
+                        rows,
+                        build_telegram_chat_link_bundle_fn,
+                    ),
+                    "count": len(rows),
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆源群组列表失败",
+                "读取克隆源群组列表失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs")
+    @admin_login_required
+    def api_admin_clone_runs():
+        raw_source_chat_id = str(request.args.get("source_chat_id", "") or "").strip()
+        source_chat_id = None
+        if raw_source_chat_id:
+            source_chat_id, error_response = _parse_chat_id(raw_source_chat_id)
+            if error_response is not None:
+                return error_response
+
+        limit, error_response = _parse_optional_limit(request.args.get("limit"))
+        if error_response is not None:
+            return error_response
+        offset, error_response = _parse_optional_offset(request.args.get("offset"))
+        if error_response is not None:
+            return error_response
+        status = str(request.args.get("status", "") or "").strip()
+        query = str(request.args.get("q", "") or "").strip()
+        sort = str(request.args.get("sort", "") or "").strip()
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                rows = list_clone_runs_fn(
+                    conn,
+                    source_chat_id=source_chat_id,
+                    limit=limit,
+                    offset=offset,
+                    status=status,
+                    q=query,
+                    sort=sort,
+                )
+                total = count_clone_runs_fn(
+                    conn,
+                    source_chat_id=source_chat_id,
+                    status=status,
+                    q=query,
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "items": _with_clone_run_links(
+                        rows,
+                        build_telegram_chat_link_bundle_fn,
+                    ),
+                    "count": len(rows),
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆运行记录失败",
+                "读取克隆运行记录失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs/<run_id>/plan")
+    @admin_login_required
+    def api_admin_clone_run_latest_plan(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+                if clone_run is None:
+                    return json_error("克隆运行记录不存在", 404)
+                plan = load_latest_clone_plan_fn(conn, normalized_run_id)
+            return jsonify({"ok": True, "plan": plan})
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆迁移计划失败",
+                "读取克隆迁移计划失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs/<run_id>/detail")
+    @admin_login_required
+    def api_admin_clone_run_detail(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                detail = load_clone_run_detail_fn(conn, normalized_run_id)
+                if detail is None:
+                    return json_error("克隆运行记录不存在", 404)
+            run = _with_clone_run_link(
+                detail["run"],
+                build_telegram_chat_link_bundle_fn,
+            )
+            return jsonify(
+                {
+                    "ok": True,
+                    "run": run,
+                    "plan": detail.get("plan"),
+                    "migration": detail.get("migration"),
+                    "timeline_preview": detail.get("timeline_preview"),
+                    "mapping_summary": detail.get("mapping_summary"),
+                    "recent_mappings": detail.get("recent_mappings") or [],
+                    "failure_items": detail.get("failure_items") or [],
+                    "delete_confirm": _clone_run_delete_confirm_text(run),
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆记录详情失败",
+                "读取克隆记录详情失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs/<run_id>/messages")
+    @admin_login_required
+    def api_admin_clone_run_messages(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+        limit, error_response = _parse_optional_limit(
+            request.args.get("limit"),
+            default=100,
+        )
+        if error_response is not None:
+            return error_response
+        offset, error_response = _parse_optional_offset(request.args.get("offset"))
+        if error_response is not None:
+            return error_response
+        status = str(request.args.get("status", "") or "").strip()
+        mode = str(request.args.get("mode", "") or "").strip()
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+                if clone_run is None:
+                    return json_error("克隆运行记录不存在", 404)
+                rows = list_clone_message_mappings_fn(
+                    conn,
+                    run_id=normalized_run_id,
+                    status=status,
+                    mode=mode,
+                    limit=limit,
+                    offset=offset,
+                )
+                total = count_clone_message_mappings_fn(
+                    conn,
+                    run_id=normalized_run_id,
+                    status=status,
+                    mode=mode,
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "items": rows,
+                    "count": len(rows),
+                    "total": total,
+                    "limit": limit,
+                    "offset": offset,
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆消息映射失败",
+                "读取克隆消息映射失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.delete("/api/admin/clone/runs/<run_id>")
+    @admin_login_required
+    def api_admin_clone_run_delete(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+                if clone_run is None:
+                    return json_error("克隆运行记录不存在", 404)
+                expected_confirm = _clone_run_delete_confirm_text(clone_run)
+                if str(data.get("confirm") or "").strip() != expected_confirm:
+                    return json_error("confirm 参数不匹配", 400)
+                deleted = delete_clone_run_fn(conn, run_id=normalized_run_id)
+            if not deleted:
+                return json_error("克隆运行记录不存在", 404)
+            return jsonify(
+                {
+                    "ok": True,
+                    "deleted": True,
+                    "run_id": normalized_run_id,
+                    "telegram_target_deleted": False,
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "删除克隆本地记录失败",
+                "删除克隆本地记录失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs/<run_id>/migration")
+    @admin_login_required
+    def api_admin_clone_run_latest_migration(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+                if clone_run is None:
+                    return json_error("克隆运行记录不存在", 404)
+                timeline_migration = load_latest_clone_migration_fn(
+                    conn,
+                    normalized_run_id,
+                    mode="timeline_replay",
+                )
+                latest_plan = load_latest_clone_plan_fn(conn, normalized_run_id)
+                source_chat_id = int(clone_run.get("source_chat_id") or 0)
+                timeline_preview = build_clone_timeline_replay_preview_fn(
+                    conn,
+                    run_id=normalized_run_id,
+                    source_chat_id=source_chat_id,
+                )
+            timeline_preview.update(
+                _timeline_migration_readiness(
+                    clone_run,
+                    latest_plan,
+                    timeline_preview,
+                )
+            )
+            if timeline_migration is not None:
+                timeline_preview["latest_migration_id"] = timeline_migration.get(
+                    "migration_id"
+                )
+                timeline_preview["latest_migration_status"] = timeline_migration.get(
+                    "status"
+                )
+                timeline_preview["latest_migration_phase"] = timeline_migration.get(
+                    "phase"
+                )
+            return jsonify(
+                {
+                    "ok": True,
+                    "migration": timeline_migration,
+                    "timeline_migration": timeline_migration,
+                    "timeline_preview": timeline_preview,
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆迁移记录失败",
+                "读取克隆迁移记录失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.post("/api/admin/clone/runs/<run_id>/deep-preflight")
+    @admin_login_required
+    def api_admin_clone_run_deep_preflight(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取克隆运行记录失败",
+                "读取克隆运行记录失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+        if clone_run is None:
+            return json_error("克隆运行记录不存在", 404)
+
+        source_chat_id = int(clone_run.get("source_chat_id") or 0)
+        source_title = str(clone_run.get("source_title") or source_chat_id)
+        target_title = str(clone_run.get("target_title") or "未创建目标")
+        target_label = f"{source_title} -> {target_title}"
+        job_id, error_response = create_exclusive_job_or_response(
+            admin_try_create_exclusive_job_fn,
+            "clone_deep_preflight",
+            target_chat_id=source_chat_id if source_chat_id else None,
+            target_label=target_label,
+        )
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                plan = create_clone_plan_fn(
+                    conn,
+                    plan_id=job_id,
+                    run_id=normalized_run_id,
+                    job_id=job_id,
+                    status="queued",
+                    plan={
+                        "run_id": normalized_run_id,
+                        "source_chat_id": source_chat_id,
+                        "target_chat_id": clone_run.get("target_chat_id"),
+                    },
+                )
+        except sqlite3.Error:
+            admin_job_append_log_fn(job_id, "克隆迁移计划创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return logged_json_error(
+                logger,
+                "创建克隆迁移计划失败",
+                "创建克隆迁移计划失败",
+            )
+        except Exception as exc:
+            admin_job_append_log_fn(job_id, "克隆迁移计划创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return json_error(str(exc) or "创建克隆迁移计划失败", 400)
+
+        admin_job_append_log_fn(job_id, "已接收克隆深度预检请求")
+        admin_job_append_log_fn(job_id, f"运行记录：{normalized_run_id}")
+        admin_job_append_log_fn(job_id, f"预检目标：{target_label}")
+        admin_start_clone_deep_preflight_job_thread_fn(
+            job_id,
+            run_id=normalized_run_id,
+            plan_id=plan["plan_id"],
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+            admin_job_append_log_fn=admin_job_append_log_fn,
+        )
+        return created_job_snapshot_response(
+            job_id,
+            admin_job_get_snapshot_fn,
+            request={
+                "run_id": normalized_run_id,
+                "source_chat_id": source_chat_id,
+                "source_title": source_title,
+                "target_title": target_title,
+                "mode": "deep_preflight",
+            },
+            plan=plan,
+        )
+
+    @app.post("/api/admin/clone/runs/<run_id>/migrate-timeline")
+    @admin_login_required
+    def api_admin_clone_run_migrate_timeline(run_id):
+        normalized_run_id = str(run_id or "").strip()
+        if not normalized_run_id:
+            return json_error("run_id 参数非法", 400)
+        options, error_response = _parse_timeline_migration_options()
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = load_clone_run_fn(conn, normalized_run_id)
+                latest_plan = load_latest_clone_plan_fn(conn, normalized_run_id)
+                timeline_preview = (
+                    build_clone_timeline_replay_preview_fn(
+                        conn,
+                        run_id=normalized_run_id,
+                        source_chat_id=int((clone_run or {}).get("source_chat_id") or 0),
+                    )
+                    if clone_run is not None
+                    else None
+                )
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "读取完整时间线迁移上下文失败",
+                "读取完整时间线迁移上下文失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+        if clone_run is None:
+            return json_error("克隆运行记录不存在", 404)
+        readiness = _timeline_migration_readiness(
+            clone_run,
+            latest_plan,
+            timeline_preview,
+        )
+        if not readiness["can_migrate_timeline"]:
+            return json_error(readiness["readiness_reasons"][0], 400)
+        execution_label = str(readiness["execution_label"] or "")
+
+        source_chat_id = int(clone_run.get("source_chat_id") or 0)
+        source_title = str(clone_run.get("source_title") or source_chat_id)
+        target_title = str(clone_run.get("target_title") or "未创建目标")
+        target_label = f"{source_title} -> {target_title}"
+        job_id, error_response = create_exclusive_job_or_response(
+            admin_try_create_exclusive_job_fn,
+            "clone_timeline_migration",
+            target_chat_id=source_chat_id if source_chat_id else None,
+            target_label=target_label,
+        )
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                migration = create_clone_migration_fn(
+                    conn,
+                    migration_id=job_id,
+                    run_id=normalized_run_id,
+                    plan_id=latest_plan["plan_id"],
+                    job_id=job_id,
+                    mode="timeline_replay",
+                    status="queued",
+                    phase="queued",
+                    target_chat_id=clone_run.get("target_chat_id"),
+                    target_title=target_title,
+                    target_write_account=execution_label,
+                    requested_limit=options["message_limit"],
+                    send_delay_ms=options["send_delay_ms"],
+                    text_total=int((timeline_preview or {}).get("text_total") or 0),
+                    media_total=int((timeline_preview or {}).get("media_total") or 0),
+                    media_group_total=int(
+                        (timeline_preview or {}).get("media_group_total") or 0
+                    ),
+                    plan=latest_plan,
+                )
+        except sqlite3.Error:
+            admin_job_append_log_fn(job_id, "完整时间线迁移记录创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return logged_json_error(
+                logger,
+                "创建完整时间线迁移记录失败",
+                "创建完整时间线迁移记录失败",
+            )
+        except Exception as exc:
+            admin_job_append_log_fn(job_id, "完整时间线迁移记录创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return json_error(str(exc) or "创建完整时间线迁移记录失败", 400)
+
+        admin_job_append_log_fn(job_id, "已接收完整时间线迁移请求")
+        admin_job_append_log_fn(job_id, f"运行记录：{normalized_run_id}")
+        admin_job_append_log_fn(job_id, f"迁移目标：{target_label}")
+        admin_job_append_log_fn(
+            job_id,
+            "迁移策略：按原群顺序混合迁移文本、媒体和相册；媒体隐藏来源，不带原群跳转",
+        )
+        admin_job_append_log_fn(
+            job_id,
+            "迁移参数："
+            f"本次上限={options['message_limit'] or '全部'}，"
+            f"发送间隔={options['send_delay_ms']}ms",
+        )
+        admin_start_clone_timeline_migration_job_thread_fn(
+            job_id,
+            run_id=normalized_run_id,
+            plan_id=latest_plan["plan_id"],
+            migration_id=migration["migration_id"],
+            message_limit=options["message_limit"],
+            send_delay_ms=options["send_delay_ms"],
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+            admin_job_append_log_fn=admin_job_append_log_fn,
+        )
+        return created_job_snapshot_response(
+            job_id,
+            admin_job_get_snapshot_fn,
+            request={
+                "run_id": normalized_run_id,
+                "plan_id": latest_plan["plan_id"],
+                "source_chat_id": source_chat_id,
+                "source_title": source_title,
+                "target_title": target_title,
+                "mode": "timeline_replay",
+                "message_limit": options["message_limit"],
+                "send_delay_ms": options["send_delay_ms"],
+            },
+            migration=migration,
+            timeline_preview=timeline_preview,
+        )
+
+
+    @app.post("/api/admin/clone/preflight")
+    @admin_login_required
+    def api_admin_clone_preflight():
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        chat_id, error_response = _parse_chat_id(data.get("chat_id"))
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                report = build_clone_preflight_report_fn(
+                    conn,
+                    chat_id=chat_id,
+                    cfg=cfg,
+                )
+            return jsonify({"ok": True, "report": report})
+        except ValueError as exc:
+            return json_error(str(exc), 404)
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "执行克隆预检失败",
+                "执行克隆预检失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+    @app.post("/api/admin/clone/jobs")
+    @admin_login_required
+    def api_admin_clone_job_create():
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        chat_id, error_response = _parse_chat_id(data.get("chat_id"))
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                report = build_clone_preflight_report_fn(
+                    conn,
+                    chat_id=chat_id,
+                    cfg=cfg,
+                )
+        except ValueError as exc:
+            return json_error(str(exc), 404)
+        except sqlite3.Error:
+            return logged_json_error(
+                logger,
+                "执行克隆启动前预检失败",
+                "执行克隆启动前预检失败",
+            )
+        except Exception:
+            return logged_json_error(logger, "系统异常", "系统异常")
+
+        expected_confirm = str(report.get("confirm") or "")
+        if str(data.get("confirm") or "").strip() != expected_confirm:
+            return json_error("confirm 参数不匹配", 400)
+
+        account = report.get("account") if isinstance(report, dict) else {}
+        if not bool((account or {}).get("secondary_session_distinct")):
+            return json_error("第二账号未就绪，不能开始结构克隆", 400)
+
+        source = report.get("source") if isinstance(report, dict) else {}
+        target = report.get("target") if isinstance(report, dict) else {}
+        fallback_title = str((target or {}).get("default_title") or "")
+        target_title, error_response = _normalize_requested_target_title(
+            data.get("target_title"),
+            fallback_title=fallback_title,
+        )
+        if error_response is not None:
+            return error_response
+
+        target_kind, error_response = _normalize_requested_target_kind(
+            data.get("target_kind"),
+            source_chat_type=(source or {}).get("chat_type"),
+        )
+        if error_response is not None:
+            return error_response
+
+        target_owner_session = str(
+            getattr(cfg, "secondary_session_name", "") or ""
+        ).strip()
+        source_title = str((source or {}).get("chat_title") or chat_id)
+        job_id, error_response = create_exclusive_job_or_response(
+            admin_try_create_exclusive_job_fn,
+            "clone_structure",
+            target_chat_id=chat_id,
+            target_label=target_title,
+        )
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(get_conn_fn()) as conn:
+                clone_run = create_clone_run_fn(
+                    conn,
+                    run_id=job_id,
+                    job_id=job_id,
+                    source_chat=source,
+                    target_title=target_title,
+                    target_kind=target_kind,
+                    target_owner_session=target_owner_session,
+                    plan=report,
+                )
+        except sqlite3.Error:
+            admin_job_append_log_fn(job_id, "克隆运行记录创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return logged_json_error(
+                logger,
+                "创建克隆运行记录失败",
+                "创建克隆运行记录失败",
+            )
+        except Exception as exc:
+            admin_job_append_log_fn(job_id, "克隆运行记录创建失败，任务未启动")
+            admin_job_set_status_fn(job_id, "error")
+            return json_error(str(exc) or "创建克隆运行记录失败", 400)
+
+        admin_job_append_log_fn(job_id, "已接收结构克隆请求")
+        admin_job_append_log_fn(job_id, f"源群组：{source_title} ({chat_id})")
+        admin_job_append_log_fn(job_id, f"目标：{target_title} / {target_kind}")
+        admin_start_clone_structure_job_thread_fn(
+            job_id,
+            source_chat_id=chat_id,
+            target_title=target_title,
+            target_kind=target_kind,
+            clone_run_id=clone_run["run_id"],
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+            admin_job_append_log_fn=admin_job_append_log_fn,
+        )
+        return created_job_snapshot_response(
+            job_id,
+            admin_job_get_snapshot_fn,
+            request={
+                "chat_id": chat_id,
+                "source_title": source_title,
+                "target_title": target_title,
+                "target_kind": target_kind,
+                "mode": "structure_only",
+            },
+            clone_run=clone_run,
+        )

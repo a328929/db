@@ -241,6 +241,14 @@ class AuthRoutesValidationTests(unittest.TestCase):
             auth_module.normalize_admin_next_path("/admin/recovery"),
         )
         self.assertEqual(
+            "/admin/clone",
+            auth_module.normalize_admin_next_path("/admin/clone"),
+        )
+        self.assertEqual(
+            "/admin/clone/runs/manage",
+            auth_module.normalize_admin_next_path("/admin/clone/runs/manage"),
+        )
+        self.assertEqual(
             "/admin/manage",
             auth_module.normalize_admin_next_path("/api/admin/chats"),
         )
@@ -292,10 +300,18 @@ class AdminPageRoutesTests(unittest.TestCase):
     def test_authenticated_login_page_redirects_to_allowed_next_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
-            response = self.client.get("/admin/login?next=/admin/channels")
+            response = self.client.get("/admin/login?next=/admin/clone")
 
         self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/channels", response.location)
+        self.assertEqual("/admin/clone", response.location)
+
+    def test_authenticated_login_page_redirects_to_clone_runs_manage_page(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/login?next=/admin/clone/runs/manage")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/clone/runs/manage", response.location)
 
     def test_authenticated_admin_manage_page_renders(self) -> None:
         with self._auth_config_patch():

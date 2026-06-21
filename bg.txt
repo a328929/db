@@ -1,0 +1,143 @@
+2026-06-14 04:00:19 CST +0800 scheduled SQLite compaction job started
+2026-06-14 04:00:19 CST +0800 python=3.14.4 sqlite=3.46.1
+2026-06-14 04:00:19 CST +0800 pid=828977
+2026-06-14 04:00:19 CST +0800 $ docker inspect -f {{.State.Running}} db
+2026-06-14 04:00:19 CST +0800 exit_code=0
+2026-06-14 04:00:19 CST +0800 $ docker stop --time 60 db
+2026-06-14 04:01:19 CST +0800 progress stage=stop_container compact=0B free=16.3GiB read_rate=0B/s write_rate=0B/s
+2026-06-14 04:01:20 CST +0800 stdout: Flag --time has been deprecated, use --timeout instead
+db
+2026-06-14 04:01:20 CST +0800 exit_code=0
+2026-06-14 04:01:20 CST +0800 source_path=/root/db/.runtime/db/tg_data.db
+2026-06-14 04:01:20 CST +0800 before stats={'page_size': 4096, 'page_count': 5639063, 'freelist_count': 1786280, 'auto_vacuum': 0, 'journal_mode': 'wal'}
+2026-06-14 04:01:20 CST +0800 source_size=21.5GiB
+2026-06-14 04:01:20 CST +0800 estimated_compact_size=14.7GiB
+2026-06-14 04:01:20 CST +0800 estimated_reclaim=6.8GiB
+2026-06-14 04:01:20 CST +0800 filesystem_free_before=16.3GiB
+2026-06-14 04:01:20 CST +0800 wal_checkpoint(TRUNCATE)=(0, 0, 0)
+2026-06-14 04:01:20 CST +0800 VACUUM INTO start
+2026-06-14 04:02:19 CST +0800 progress stage=vacuum compact=349.4MiB compact_pct=2.3% free=16.0GiB read_rate=11.7MiB/s write_rate=5.8MiB/s
+2026-06-14 04:03:19 CST +0800 progress stage=vacuum compact=670.4MiB compact_pct=4.5% free=15.7GiB read_rate=17.1MiB/s write_rate=5.3MiB/s
+2026-06-14 04:04:19 CST +0800 progress stage=vacuum compact=965.7MiB compact_pct=6.4% free=15.4GiB read_rate=14.4MiB/s write_rate=4.9MiB/s
+2026-06-14 04:05:19 CST +0800 progress stage=vacuum compact=1.2GiB compact_pct=7.9% free=15.2GiB read_rate=9.4MiB/s write_rate=3.7MiB/s
+2026-06-14 04:06:19 CST +0800 progress stage=vacuum compact=1.3GiB compact_pct=8.8% free=15.0GiB read_rate=3.0MiB/s write_rate=2.4MiB/s
+2026-06-14 04:07:19 CST +0800 progress stage=vacuum compact=1.5GiB compact_pct=10.2% free=14.8GiB read_rate=3.9MiB/s write_rate=3.4MiB/s
+2026-06-14 04:08:19 CST +0800 progress stage=vacuum compact=1.7GiB compact_pct=11.3% free=14.7GiB read_rate=7.0MiB/s write_rate=2.7MiB/s
+2026-06-14 04:09:19 CST +0800 progress stage=vacuum compact=1.8GiB compact_pct=12.0% free=14.5GiB read_rate=6.7MiB/s write_rate=1.9MiB/s
+2026-06-14 04:10:19 CST +0800 progress stage=vacuum compact=1.9GiB compact_pct=12.7% free=14.4GiB read_rate=5.8MiB/s write_rate=1.7MiB/s
+2026-06-14 04:11:19 CST +0800 progress stage=vacuum compact=2.0GiB compact_pct=13.4% free=14.3GiB read_rate=5.7MiB/s write_rate=1.8MiB/s
+2026-06-14 04:12:19 CST +0800 progress stage=vacuum compact=2.2GiB compact_pct=14.7% free=14.2GiB read_rate=7.9MiB/s write_rate=3.2MiB/s
+2026-06-14 04:13:19 CST +0800 progress stage=vacuum compact=2.4GiB compact_pct=16.4% free=13.9GiB read_rate=8.4MiB/s write_rate=4.1MiB/s
+2026-06-14 04:14:19 CST +0800 progress stage=vacuum compact=2.6GiB compact_pct=17.4% free=13.8GiB read_rate=7.1MiB/s write_rate=2.6MiB/s
+2026-06-14 04:15:19 CST +0800 progress stage=vacuum compact=3.0GiB compact_pct=20.7% free=13.3GiB read_rate=30.3MiB/s write_rate=8.4MiB/s
+2026-06-14 04:16:19 CST +0800 progress stage=vacuum compact=3.4GiB compact_pct=23.2% free=12.9GiB read_rate=24.8MiB/s write_rate=6.3MiB/s
+2026-06-14 04:17:19 CST +0800 progress stage=vacuum compact=3.7GiB compact_pct=25.2% free=12.6GiB read_rate=8.4MiB/s write_rate=4.8MiB/s
+2026-06-14 04:18:19 CST +0800 progress stage=vacuum compact=3.9GiB compact_pct=26.8% free=12.4GiB read_rate=7.2MiB/s write_rate=4.2MiB/s
+2026-06-14 04:19:19 CST +0800 progress stage=vacuum compact=4.2GiB compact_pct=28.4% free=12.1GiB read_rate=6.0MiB/s write_rate=4.0MiB/s
+2026-06-14 04:20:19 CST +0800 progress stage=vacuum compact=4.4GiB compact_pct=29.9% free=11.9GiB read_rate=6.1MiB/s write_rate=3.7MiB/s
+2026-06-14 04:21:19 CST +0800 progress stage=vacuum compact=5.0GiB compact_pct=33.8% free=11.4GiB read_rate=25.1MiB/s write_rate=9.7MiB/s
+2026-06-14 04:22:19 CST +0800 progress stage=vacuum compact=5.2GiB compact_pct=35.5% free=11.1GiB read_rate=9.2MiB/s write_rate=4.4MiB/s
+2026-06-14 04:23:19 CST +0800 progress stage=vacuum compact=6.2GiB compact_pct=42.1% free=10.1GiB read_rate=58.1MiB/s write_rate=16.4MiB/s
+2026-06-14 04:24:19 CST +0800 progress stage=vacuum compact=6.5GiB compact_pct=44.5% free=9.8GiB read_rate=11.3MiB/s write_rate=6.1MiB/s
+2026-06-14 04:25:19 CST +0800 progress stage=vacuum compact=6.8GiB compact_pct=46.2% free=9.5GiB read_rate=5.4MiB/s write_rate=4.2MiB/s
+2026-06-14 04:26:19 CST +0800 progress stage=vacuum compact=7.0GiB compact_pct=47.9% free=9.3GiB read_rate=5.4MiB/s write_rate=4.2MiB/s
+2026-06-14 04:27:19 CST +0800 progress stage=vacuum compact=7.3GiB compact_pct=49.6% free=9.0GiB read_rate=4.5MiB/s write_rate=4.2MiB/s
+2026-06-14 04:28:19 CST +0800 progress stage=vacuum compact=7.8GiB compact_pct=53.4% free=8.5GiB read_rate=35.8MiB/s write_rate=9.5MiB/s
+2026-06-14 04:29:19 CST +0800 progress stage=vacuum compact=8.2GiB compact_pct=55.8% free=8.1GiB read_rate=14.1MiB/s write_rate=6.1MiB/s
+2026-06-14 04:30:19 CST +0800 progress stage=vacuum compact=8.4GiB compact_pct=57.5% free=7.9GiB read_rate=5.2MiB/s write_rate=4.3MiB/s
+2026-06-14 04:31:19 CST +0800 progress stage=vacuum compact=8.7GiB compact_pct=58.9% free=7.7GiB read_rate=4.0MiB/s write_rate=3.4MiB/s
+2026-06-14 04:32:19 CST +0800 progress stage=vacuum compact=8.9GiB compact_pct=60.6% free=7.4GiB read_rate=5.1MiB/s write_rate=4.3MiB/s
+2026-06-14 04:33:19 CST +0800 progress stage=vacuum compact=9.1GiB compact_pct=62.1% free=7.2GiB read_rate=4.6MiB/s write_rate=3.7MiB/s
+2026-06-14 04:34:19 CST +0800 progress stage=vacuum compact=9.3GiB compact_pct=63.4% free=7.0GiB read_rate=3.9MiB/s write_rate=3.2MiB/s
+2026-06-14 04:35:19 CST +0800 progress stage=vacuum compact=9.5GiB compact_pct=65.0% free=6.8GiB read_rate=5.1MiB/s write_rate=4.0MiB/s
+2026-06-14 04:36:19 CST +0800 progress stage=vacuum compact=9.8GiB compact_pct=66.4% free=6.5GiB read_rate=4.9MiB/s write_rate=3.7MiB/s
+2026-06-14 04:37:19 CST +0800 progress stage=vacuum compact=10.0GiB compact_pct=67.9% free=6.3GiB read_rate=4.8MiB/s write_rate=3.6MiB/s
+2026-06-14 04:38:19 CST +0800 progress stage=vacuum compact=10.2GiB compact_pct=69.4% free=6.1GiB read_rate=4.7MiB/s write_rate=3.9MiB/s
+2026-06-14 04:39:19 CST +0800 progress stage=vacuum compact=10.4GiB compact_pct=70.8% free=5.9GiB read_rate=4.1MiB/s write_rate=3.4MiB/s
+2026-06-14 04:40:19 CST +0800 progress stage=vacuum compact=10.6GiB compact_pct=72.3% free=5.7GiB read_rate=4.6MiB/s write_rate=3.7MiB/s
+2026-06-14 04:41:19 CST +0800 progress stage=vacuum compact=10.8GiB compact_pct=73.5% free=5.5GiB read_rate=4.4MiB/s write_rate=3.0MiB/s
+2026-06-14 04:42:19 CST +0800 progress stage=vacuum compact=11.0GiB compact_pct=75.1% free=5.3GiB read_rate=4.9MiB/s write_rate=4.1MiB/s
+2026-06-14 04:43:19 CST +0800 progress stage=vacuum compact=11.3GiB compact_pct=77.0% free=5.0GiB read_rate=5.9MiB/s write_rate=4.6MiB/s
+2026-06-14 04:44:19 CST +0800 progress stage=vacuum compact=11.6GiB compact_pct=79.0% free=4.7GiB read_rate=9.3MiB/s write_rate=5.2MiB/s
+2026-06-14 04:45:19 CST +0800 progress stage=vacuum compact=11.9GiB compact_pct=81.2% free=4.4GiB read_rate=8.4MiB/s write_rate=5.6MiB/s
+2026-06-14 04:46:19 CST +0800 progress stage=vacuum compact=12.2GiB compact_pct=83.2% free=4.1GiB read_rate=8.2MiB/s write_rate=4.9MiB/s
+2026-06-14 04:47:19 CST +0800 progress stage=vacuum compact=12.6GiB compact_pct=85.7% free=3.7GiB read_rate=10.9MiB/s write_rate=6.3MiB/s
+2026-06-14 04:47:48 CST +0800 VACUUM INTO done compact_size=12.8GiB
+2026-06-14 04:47:48 CST +0800 candidate stats={'page_size': 4096, 'page_count': 3362267, 'freelist_count': 0, 'auto_vacuum': 0, 'journal_mode': 'delete'}
+2026-06-14 04:47:48 CST +0800 candidate quick_check start
+2026-06-14 04:48:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=10.2MiB/s write_rate=3.9MiB/s
+2026-06-14 04:49:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=7.2MiB/s write_rate=68B/s
+2026-06-14 04:50:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.8MiB/s write_rate=68B/s
+2026-06-14 04:51:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.2MiB/s write_rate=68B/s
+2026-06-14 04:52:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.8MiB/s write_rate=136B/s
+2026-06-14 04:53:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.7MiB/s write_rate=68B/s
+2026-06-14 04:54:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.0MiB/s write_rate=68B/s
+2026-06-14 04:55:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 04:56:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.6MiB/s write_rate=68B/s
+2026-06-14 04:57:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 04:58:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.3MiB/s write_rate=68B/s
+2026-06-14 04:59:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.1MiB/s write_rate=68B/s
+2026-06-14 05:00:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.8MiB/s write_rate=68B/s
+2026-06-14 05:01:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.4MiB/s write_rate=68B/s
+2026-06-14 05:02:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.9MiB/s write_rate=68B/s
+2026-06-14 05:03:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 05:04:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 05:05:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.2MiB/s write_rate=68B/s
+2026-06-14 05:06:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.8MiB/s write_rate=68B/s
+2026-06-14 05:07:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.1MiB/s write_rate=68B/s
+2026-06-14 05:08:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.4MiB/s write_rate=68B/s
+2026-06-14 05:09:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.7MiB/s write_rate=68B/s
+2026-06-14 05:10:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.1MiB/s write_rate=68B/s
+2026-06-14 05:11:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.8MiB/s write_rate=68B/s
+2026-06-14 05:12:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.6MiB/s write_rate=68B/s
+2026-06-14 05:13:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 05:14:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.6MiB/s write_rate=68B/s
+2026-06-14 05:15:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.3MiB/s write_rate=68B/s
+2026-06-14 05:16:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=2.6MiB/s write_rate=68B/s
+2026-06-14 05:17:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.5MiB/s write_rate=68B/s
+2026-06-14 05:18:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.5MiB/s write_rate=68B/s
+2026-06-14 05:19:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.8MiB/s write_rate=68B/s
+2026-06-14 05:20:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.5MiB/s write_rate=68B/s
+2026-06-14 05:21:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.0MiB/s write_rate=68B/s
+2026-06-14 05:22:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.4MiB/s write_rate=68B/s
+2026-06-14 05:23:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.7MiB/s write_rate=136B/s
+2026-06-14 05:24:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.6MiB/s write_rate=68B/s
+2026-06-14 05:25:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=3.9MiB/s write_rate=68B/s
+2026-06-14 05:26:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.9MiB/s write_rate=68B/s
+2026-06-14 05:27:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.4MiB/s write_rate=68B/s
+2026-06-14 05:28:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.7MiB/s write_rate=68B/s
+2026-06-14 05:29:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.6MiB/s write_rate=68B/s
+2026-06-14 05:30:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=5.2MiB/s write_rate=68B/s
+2026-06-14 05:31:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.9MiB/s write_rate=68B/s
+2026-06-14 05:32:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=4.0MiB/s write_rate=68B/s
+2026-06-14 05:33:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=24.1MiB/s write_rate=68B/s
+2026-06-14 05:34:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=134.8MiB/s write_rate=68B/s
+2026-06-14 05:35:19 CST +0800 progress stage=candidate_quick_check compact=12.8GiB free=3.5GiB read_rate=12.4MiB/s write_rate=68B/s
+2026-06-14 05:35:23 CST +0800 candidate quick_check=ok
+2026-06-14 05:35:23 CST +0800 rename source to backup tg_data.db.before-compact-20260614-053523
+2026-06-14 05:35:23 CST +0800 rename compact candidate to live database
+2026-06-14 05:35:23 CST +0800 live journal_mode=wal
+2026-06-14 05:35:23 CST +0800 live stats={'page_size': 4096, 'page_count': 3362267, 'freelist_count': 0, 'auto_vacuum': 0, 'journal_mode': 'wal'}
+2026-06-14 05:35:23 CST +0800 remove old database backup tg_data.db.before-compact-20260614-053523 size=21.5GiB
+2026-06-14 05:35:24 CST +0800 filesystem_free_after=25.0GiB
+2026-06-14 05:35:24 CST +0800 live_size_after=12.8GiB
+2026-06-14 05:35:24 CST +0800 scheduled SQLite compaction job completed successfully
+2026-06-14 05:35:24 CST +0800 $ docker inspect -f {{.State.Running}} db
+2026-06-14 05:35:24 CST +0800 exit_code=0
+2026-06-14 05:35:24 CST +0800 $ docker start db
+2026-06-14 05:35:24 CST +0800 stdout: db
+2026-06-14 05:35:24 CST +0800 exit_code=0
+2026-06-14 05:35:34 CST +0800 $ curl -sS -I --max-time 15 http://127.0.0.1:8890/admin/login
+2026-06-14 05:35:34 CST +0800 stdout: HTTP/1.1 200 OK
+Server: Werkzeug/3.1.8 Python/3.12.12
+Date: Sat, 13 Jun 2026 21:35:34 GMT
+Content-Type: text/html; charset=utf-8
+Content-Length: 1288
+Content-Security-Policy: default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'self'; frame-ancestors 'none'
+Referrer-Policy: strict-origin-when-cross-origin
+X-Content-Type-Options: nosniff
+X-Frame-Options: DENY
+Vary: Cookie
+Connection: close
+2026-06-14 05:35:34 CST +0800 exit_code=0
+2026-06-14 05:35:34 CST +0800 scheduled SQLite compaction job finished

@@ -314,6 +314,139 @@ def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
+def _create_admin_clone_runs_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_clone_runs (
+        run_id                   TEXT PRIMARY KEY,
+        job_id                   TEXT NOT NULL UNIQUE,
+        source_chat_id           INTEGER NOT NULL,
+        source_title             TEXT NOT NULL,
+        source_chat_username     TEXT,
+        source_chat_type         TEXT,
+        source_message_count     INTEGER NOT NULL DEFAULT 0,
+        source_last_message_at   TEXT,
+        source_last_message_ts   INTEGER,
+        target_chat_id           INTEGER,
+        target_access_hash       TEXT,
+        target_title             TEXT NOT NULL,
+        target_kind              TEXT NOT NULL,
+        target_username          TEXT,
+        target_owner_session     TEXT,
+        phase                    TEXT NOT NULL DEFAULT 'queued',
+        status                   TEXT NOT NULL DEFAULT 'queued',
+        plan_json                TEXT,
+        error_message            TEXT,
+        target_created_at        TEXT,
+        completed_at             TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL
+    ){strict_suffix}
+    """)
+
+
+def _create_admin_clone_plans_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_clone_plans (
+        plan_id                  TEXT PRIMARY KEY,
+        run_id                   TEXT NOT NULL,
+        job_id                   TEXT,
+        status                   TEXT NOT NULL DEFAULT 'queued',
+        source_access            TEXT NOT NULL DEFAULT 'unknown',
+        target_access            TEXT NOT NULL DEFAULT 'unknown',
+        primary_session_status   TEXT NOT NULL DEFAULT 'unknown',
+        secondary_session_status TEXT NOT NULL DEFAULT 'unknown',
+        migration_account        TEXT NOT NULL DEFAULT '',
+        text_strategy            TEXT NOT NULL DEFAULT '',
+        media_strategy           TEXT NOT NULL DEFAULT '',
+        media_group_strategy     TEXT NOT NULL DEFAULT '',
+        avatar_strategy          TEXT NOT NULL DEFAULT '',
+        blocking_issues_json     TEXT NOT NULL DEFAULT '[]',
+        warnings_json            TEXT NOT NULL DEFAULT '[]',
+        capabilities_json        TEXT NOT NULL DEFAULT '{{}}',
+        plan_json                TEXT NOT NULL DEFAULT '{{}}',
+        error_message            TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL,
+        completed_at             TEXT,
+        FOREIGN KEY(run_id) REFERENCES admin_clone_runs(run_id) ON DELETE CASCADE
+    ){strict_suffix}
+    """)
+
+
+def _create_admin_clone_migrations_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_clone_migrations (
+        migration_id             TEXT PRIMARY KEY,
+        run_id                   TEXT NOT NULL,
+        plan_id                  TEXT,
+        job_id                   TEXT,
+        mode                     TEXT NOT NULL DEFAULT 'text_replay',
+        status                   TEXT NOT NULL DEFAULT 'queued',
+        phase                    TEXT NOT NULL DEFAULT 'queued',
+        target_chat_id           INTEGER,
+        target_title             TEXT,
+        target_write_account     TEXT NOT NULL DEFAULT '',
+        requested_limit          INTEGER NOT NULL DEFAULT 0,
+        send_delay_ms            INTEGER NOT NULL DEFAULT 0,
+        text_total               INTEGER NOT NULL DEFAULT 0,
+        text_sent                INTEGER NOT NULL DEFAULT 0,
+        text_skipped             INTEGER NOT NULL DEFAULT 0,
+        text_failed              INTEGER NOT NULL DEFAULT 0,
+        media_total              INTEGER NOT NULL DEFAULT 0,
+        media_sent               INTEGER NOT NULL DEFAULT 0,
+        media_skipped            INTEGER NOT NULL DEFAULT 0,
+        media_failed             INTEGER NOT NULL DEFAULT 0,
+        media_group_total        INTEGER NOT NULL DEFAULT 0,
+        media_group_sent         INTEGER NOT NULL DEFAULT 0,
+        media_group_skipped      INTEGER NOT NULL DEFAULT 0,
+        media_group_failed       INTEGER NOT NULL DEFAULT 0,
+        plan_json                TEXT NOT NULL DEFAULT '{{}}',
+        error_message            TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL,
+        completed_at             TEXT,
+        FOREIGN KEY(run_id) REFERENCES admin_clone_runs(run_id) ON DELETE CASCADE,
+        FOREIGN KEY(plan_id) REFERENCES admin_clone_plans(plan_id) ON DELETE SET NULL
+    ){strict_suffix}
+    """)
+
+
+def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_clone_message_map (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        migration_id             TEXT NOT NULL,
+        run_id                   TEXT NOT NULL,
+        plan_id                  TEXT,
+        source_chat_id           INTEGER NOT NULL,
+        source_message_id        INTEGER NOT NULL,
+        source_msg_date_ts       INTEGER,
+        source_msg_date_text     TEXT,
+        target_chat_id           INTEGER NOT NULL,
+        target_message_id        INTEGER,
+        chunk_index              INTEGER NOT NULL DEFAULT 0,
+        chunk_count              INTEGER NOT NULL DEFAULT 1,
+        mode                     TEXT NOT NULL DEFAULT 'text_replay',
+        status                   TEXT NOT NULL DEFAULT 'done',
+        error_message            TEXT,
+        sent_at                  TEXT,
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL,
+        UNIQUE(
+            run_id,
+            source_chat_id,
+            source_message_id,
+            chunk_index,
+            mode
+        ),
+        FOREIGN KEY(migration_id) REFERENCES admin_clone_migrations(migration_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(run_id) REFERENCES admin_clone_runs(run_id) ON DELETE CASCADE,
+        FOREIGN KEY(plan_id) REFERENCES admin_clone_plans(plan_id) ON DELETE SET NULL
+    ){strict_suffix}
+    """)
+
+
 def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_chats_table(cur, strict_suffix)
     _create_messages_table(cur, strict_suffix)
@@ -328,6 +461,10 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_absent_chats_table(cur, strict_suffix)
     _create_admin_restricted_chats_table(cur, strict_suffix)
     _create_admin_recovery_chats_table(cur, strict_suffix)
+    _create_admin_clone_runs_table(cur, strict_suffix)
+    _create_admin_clone_plans_table(cur, strict_suffix)
+    _create_admin_clone_migrations_table(cur, strict_suffix)
+    _create_admin_clone_message_map_table(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
@@ -603,6 +740,147 @@ def _ensure_admin_recovery_chats_schema(cur: sqlite3.Cursor) -> None:
     )
 
 
+def _ensure_admin_clone_runs_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_clone_runs",
+        [
+            ("job_id", "job_id TEXT"),
+            ("source_chat_id", "source_chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("source_title", "source_title TEXT NOT NULL DEFAULT ''"),
+            ("source_chat_username", "source_chat_username TEXT"),
+            ("source_chat_type", "source_chat_type TEXT"),
+            (
+                "source_message_count",
+                "source_message_count INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("source_last_message_at", "source_last_message_at TEXT"),
+            ("source_last_message_ts", "source_last_message_ts INTEGER"),
+            ("target_chat_id", "target_chat_id INTEGER"),
+            ("target_access_hash", "target_access_hash TEXT"),
+            ("target_title", "target_title TEXT NOT NULL DEFAULT ''"),
+            ("target_kind", "target_kind TEXT NOT NULL DEFAULT 'channel'"),
+            ("target_username", "target_username TEXT"),
+            ("target_owner_session", "target_owner_session TEXT"),
+            ("phase", "phase TEXT NOT NULL DEFAULT 'queued'"),
+            ("status", "status TEXT NOT NULL DEFAULT 'queued'"),
+            ("plan_json", "plan_json TEXT"),
+            ("error_message", "error_message TEXT"),
+            ("target_created_at", "target_created_at TEXT"),
+            ("completed_at", "completed_at TEXT"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
+def _ensure_admin_clone_plans_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_clone_plans",
+        [
+            ("run_id", "run_id TEXT NOT NULL DEFAULT ''"),
+            ("job_id", "job_id TEXT"),
+            ("status", "status TEXT NOT NULL DEFAULT 'queued'"),
+            ("source_access", "source_access TEXT NOT NULL DEFAULT 'unknown'"),
+            ("target_access", "target_access TEXT NOT NULL DEFAULT 'unknown'"),
+            (
+                "primary_session_status",
+                "primary_session_status TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+            (
+                "secondary_session_status",
+                "secondary_session_status TEXT NOT NULL DEFAULT 'unknown'",
+            ),
+            ("migration_account", "migration_account TEXT NOT NULL DEFAULT ''"),
+            ("text_strategy", "text_strategy TEXT NOT NULL DEFAULT ''"),
+            ("media_strategy", "media_strategy TEXT NOT NULL DEFAULT ''"),
+            (
+                "media_group_strategy",
+                "media_group_strategy TEXT NOT NULL DEFAULT ''",
+            ),
+            ("avatar_strategy", "avatar_strategy TEXT NOT NULL DEFAULT ''"),
+            (
+                "blocking_issues_json",
+                "blocking_issues_json TEXT NOT NULL DEFAULT '[]'",
+            ),
+            ("warnings_json", "warnings_json TEXT NOT NULL DEFAULT '[]'"),
+            ("capabilities_json", "capabilities_json TEXT NOT NULL DEFAULT '{}'"),
+            ("plan_json", "plan_json TEXT NOT NULL DEFAULT '{}'"),
+            ("error_message", "error_message TEXT"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("completed_at", "completed_at TEXT"),
+        ],
+    )
+
+
+def _ensure_admin_clone_migrations_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_clone_migrations",
+        [
+            ("run_id", "run_id TEXT NOT NULL DEFAULT ''"),
+            ("plan_id", "plan_id TEXT"),
+            ("job_id", "job_id TEXT"),
+            ("mode", "mode TEXT NOT NULL DEFAULT 'text_replay'"),
+            ("status", "status TEXT NOT NULL DEFAULT 'queued'"),
+            ("phase", "phase TEXT NOT NULL DEFAULT 'queued'"),
+            ("target_chat_id", "target_chat_id INTEGER"),
+            ("target_title", "target_title TEXT"),
+            (
+                "target_write_account",
+                "target_write_account TEXT NOT NULL DEFAULT ''",
+            ),
+            ("requested_limit", "requested_limit INTEGER NOT NULL DEFAULT 0"),
+            ("send_delay_ms", "send_delay_ms INTEGER NOT NULL DEFAULT 0"),
+            ("text_total", "text_total INTEGER NOT NULL DEFAULT 0"),
+            ("text_sent", "text_sent INTEGER NOT NULL DEFAULT 0"),
+            ("text_skipped", "text_skipped INTEGER NOT NULL DEFAULT 0"),
+            ("text_failed", "text_failed INTEGER NOT NULL DEFAULT 0"),
+            ("media_total", "media_total INTEGER NOT NULL DEFAULT 0"),
+            ("media_sent", "media_sent INTEGER NOT NULL DEFAULT 0"),
+            ("media_skipped", "media_skipped INTEGER NOT NULL DEFAULT 0"),
+            ("media_failed", "media_failed INTEGER NOT NULL DEFAULT 0"),
+            ("media_group_total", "media_group_total INTEGER NOT NULL DEFAULT 0"),
+            ("media_group_sent", "media_group_sent INTEGER NOT NULL DEFAULT 0"),
+            ("media_group_skipped", "media_group_skipped INTEGER NOT NULL DEFAULT 0"),
+            ("media_group_failed", "media_group_failed INTEGER NOT NULL DEFAULT 0"),
+            ("plan_json", "plan_json TEXT NOT NULL DEFAULT '{}'"),
+            ("error_message", "error_message TEXT"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("completed_at", "completed_at TEXT"),
+        ],
+    )
+
+
+def _ensure_admin_clone_message_map_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_clone_message_map",
+        [
+            ("migration_id", "migration_id TEXT NOT NULL DEFAULT ''"),
+            ("run_id", "run_id TEXT NOT NULL DEFAULT ''"),
+            ("plan_id", "plan_id TEXT"),
+            ("source_chat_id", "source_chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("source_message_id", "source_message_id INTEGER NOT NULL DEFAULT 0"),
+            ("source_msg_date_ts", "source_msg_date_ts INTEGER"),
+            ("source_msg_date_text", "source_msg_date_text TEXT"),
+            ("target_chat_id", "target_chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("target_message_id", "target_message_id INTEGER"),
+            ("chunk_index", "chunk_index INTEGER NOT NULL DEFAULT 0"),
+            ("chunk_count", "chunk_count INTEGER NOT NULL DEFAULT 1"),
+            ("mode", "mode TEXT NOT NULL DEFAULT 'text_replay'"),
+            ("status", "status TEXT NOT NULL DEFAULT 'done'"),
+            ("error_message", "error_message TEXT"),
+            ("sent_at", "sent_at TEXT"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
 def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:
     if not _column_exists(cur, "chats", "message_count"):
         cur.execute(
@@ -844,6 +1122,10 @@ def create_schema(
         _ensure_admin_absent_chats_schema(cur)
         _ensure_admin_restricted_chats_schema(cur)
         _ensure_admin_recovery_chats_schema(cur)
+        _ensure_admin_clone_runs_schema(cur)
+        _ensure_admin_clone_plans_schema(cur)
+        _ensure_admin_clone_migrations_schema(cur)
+        _ensure_admin_clone_message_map_schema(cur)
         _ensure_chat_summary_columns(cur)
         _heal_chat_message_counts_if_needed(cur)
         _indexes._create_indexes(cur)

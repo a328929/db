@@ -4,16 +4,59 @@ import shutil
 import sqlite3
 import threading
 from collections.abc import Callable
-from contextlib import suppress
+from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
 from telethon.sync import TelegramClient
 
+from tg_harvest.ingest.flood_wait import flood_sleep_threshold_kwargs
+
 JOB_HEARTBEAT_INTERVAL_SEC = 30.0
 
 
+def _current_event_loop_or_none() -> asyncio.AbstractEventLoop | None:
+    try:
+        return asyncio.get_event_loop()
+    except RuntimeError:
+        return None
+
+
+def _is_open_asyncio_loop(loop: Any) -> bool:
+    return isinstance(loop, asyncio.AbstractEventLoop) and not loop.is_closed()
+
+
+def _restore_event_loop(loop: Any | None) -> None:
+    if _is_open_asyncio_loop(loop):
+        asyncio.set_event_loop(loop)
+        return
+    asyncio.set_event_loop(None)
+
+
+def _client_event_loop(client: Any) -> asyncio.AbstractEventLoop | None:
+    loop = getattr(client, "_tg_harvest_loop", None)
+    if _is_open_asyncio_loop(loop):
+        return loop
+    return None
+
+
+@contextmanager
+def bind_client_event_loop(client: Any):
+    loop = _client_event_loop(client)
+    if loop is None:
+        yield
+        return
+
+    previous_loop = _current_event_loop_or_none()
+    asyncio.set_event_loop(loop)
+    try:
+        yield
+    finally:
+        _restore_event_loop(previous_loop)
+
+
 def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -> bool:
+    previous_loop = _current_event_loop_or_none()
     loop = None
     client = None
     try:
@@ -22,7 +65,8 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         asyncio.set_event_loop(loop)
         client = TelegramClient(
             str(cfg.session_name), cfg.api_id, cfg.api_hash, loop=loop,
-            receive_updates=False
+            receive_updates=False,
+            **flood_sleep_threshold_kwargs(cfg),
         )
         client.connect()
         if not client.is_user_authorized():
@@ -48,6 +92,7 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         if loop is not None:
             with suppress(Exception):
                 loop.close()
+        _restore_event_loop(previous_loop)
 
 
 def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
@@ -62,6 +107,7 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
             with suppress(Exception):
                 shutil.copy2(src, dst)
 
+    previous_loop = _current_event_loop_or_none()
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     client = None
@@ -74,9 +120,11 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
             request_retries=5,
             connection_retries=5,
             timeout=15,
-            receive_updates=False
+            receive_updates=False,
+            **flood_sleep_threshold_kwargs(cfg),
         )
         client._tg_harvest_loop = loop
+        client._tg_harvest_previous_loop = previous_loop
         client.connect()
         return client
     except Exception:
@@ -85,17 +133,27 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
                 client.disconnect()
         with suppress(Exception):
             loop.close()
+        _restore_event_loop(previous_loop)
         raise
 
 
 def _disconnect_worker_client(client: Any) -> None:
     loop = getattr(client, "_tg_harvest_loop", None)
+    missing_previous_loop = object()
+    previous_loop = getattr(client, "_tg_harvest_previous_loop", missing_previous_loop)
     try:
-        client.disconnect()
+        with bind_client_event_loop(client):
+            client.disconnect()
     finally:
         if loop is not None:
+            close_loop = getattr(loop, "close", None)
             with suppress(Exception):
-                loop.close()
+                if callable(close_loop):
+                    close_loop()
+        if previous_loop is not missing_previous_loop:
+            _restore_event_loop(previous_loop)
+        elif _current_event_loop_or_none() is loop:
+            _restore_event_loop(None)
 
 
 def _cleanup_isolated_worker_session(cfg: Any, worker_id: str):

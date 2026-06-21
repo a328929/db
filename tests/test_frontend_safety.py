@@ -18,6 +18,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("admin-incremental-checkbox", template)
         self.assertIn("admin-delete-empty-chats-btn", template)
         self.assertIn("/admin/channels", template)
+        self.assertIn("/admin/clone", template)
+        self.assertIn("/admin/clone/runs/manage", template)
         self.assertIn("/admin/recovery", template)
 
     def test_admin_channels_template_loads_shared_helpers(self) -> None:
@@ -45,6 +47,74 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-recovery-restore-all-btn", template)
         self.assertIn("admin-recovery-list", template)
 
+    def test_admin_clone_template_loads_shared_helpers(self) -> None:
+        template = (ROOT / "templates" / "admin_clone.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+        self.assertIn("admin_manage_shared.js", template)
+        self.assertIn("admin_clone.js", template)
+        self.assertIn("admin_clone.css", template)
+        self.assertIn("admin-clone-source-select", template)
+        self.assertIn("admin-clone-preflight-btn", template)
+        self.assertIn("admin-clone-start-btn", template)
+        self.assertIn("admin-clone-runs-list", template)
+        self.assertIn("默认显示最近克隆记录", template)
+        self.assertIn("全部源群组 / 最近副本", source)
+        self.assertIn("admin-clone-deep-preflight-btn", template)
+        self.assertIn("admin-clone-timeline-migration-btn", template)
+        self.assertNotIn("admin-clone-text-migration-btn", template)
+        self.assertNotIn("admin-clone-media-resolve-btn", template)
+        self.assertNotIn("admin-clone-media-migration-btn", template)
+        self.assertIn("admin-clone-message-limit-input", template)
+        self.assertNotIn("admin-clone-text-limit-input", template)
+        self.assertIn("admin-clone-send-delay-input", template)
+        self.assertIn("admin-clone-plan-summary", template)
+        self.assertIn("admin-clone-timeline-summary", template)
+        self.assertNotIn("admin-clone-migration-summary", template)
+        self.assertNotIn("admin-clone-media-summary", template)
+        self.assertIn("function getPlanTargetWriteAccount", source)
+        self.assertIn("function getPlanMediaMigrationAccount", source)
+        self.assertIn("function buildTimelineMigrationOptions", source)
+        self.assertEqual(1, source.count("message_limit:"))
+        self.assertIn("send_delay_ms:", source)
+        self.assertIn("source_copy_without_attribution", source)
+        self.assertIn("隐藏来源复制转发", source)
+        self.assertNotIn("/resolve-media", source)
+        self.assertNotIn("/migrate-media", source)
+        self.assertNotIn("/migrate-text", source)
+        self.assertIn("/migrate-timeline", source)
+        self.assertNotIn("clone_media_resolve_preflight", source)
+        self.assertNotIn("clone_media_migration", source)
+        self.assertNotIn("clone_text_migration", source)
+        self.assertIn("clone_timeline_migration", source)
+        self.assertIn("function renderTimelineMigration", source)
+        self.assertIn("function isTimelineMigrationAllowed", source)
+        self.assertIn("cloneState.timelineMigration = payload && payload.timeline_migration", source)
+        self.assertIn("function appendTimelinePreviewSummary", source)
+        self.assertIn("'剩余时间线'", source)
+        self.assertIn("'文本剩余'", source)
+        self.assertIn("'数据库风险组'", source)
+
+    def test_admin_clone_runs_template_loads_shared_helpers(self) -> None:
+        template = (ROOT / "templates" / "admin_clone_runs.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_clone_runs.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("admin_manage_shared.js", template)
+        self.assertIn("admin_clone_runs.js", template)
+        self.assertIn("admin_clone.css", template)
+        self.assertIn("admin-clone-runs-manage-list", template)
+        self.assertIn("admin-clone-runs-detail-summary", template)
+        self.assertIn("admin-clone-run-delete-dialog", template)
+        self.assertIn("/api/admin/clone/runs", source)
+        self.assertIn("/detail", source)
+        self.assertIn("method: 'DELETE'", source)
+        self.assertIn("telegram 目标副本未删除", source.lower())
+        self.assertNotIn("innerHTML", source)
+
     def test_admin_login_template_uses_standalone_login_script(self) -> None:
         template = (ROOT / "templates" / "admin_login.html").read_text(
             encoding="utf-8"
@@ -54,6 +124,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin_login.js", template)
         self.assertIn("data-next-path", template)
         self.assertIn("ALLOWED_NEXT_PATHS", source)
+        self.assertIn("/admin/clone", source)
+        self.assertIn("/admin/clone/runs/manage", source)
         self.assertIn("/admin/recovery", source)
         self.assertIn("window.location.assign(getNextPath(elements));", source)
         self.assertIn("payload.error.trim()", source)
@@ -245,6 +317,21 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("alert(", source)
         self.assertNotIn("window.location.reload", source)
 
+    def test_admin_clone_traps_login_dialog_focus(self) -> None:
+        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+        self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn("document.addEventListener('keydown'", source)
+        self.assertIn("trapFocusWithin(elements.loginDialog, event);", source)
+        self.assertIn("/api/admin/clone/runs", source)
+        self.assertIn("/deep-preflight", source)
+        self.assertNotIn("/migrate-text", source)
+        self.assertIn("/migrate-timeline", source)
+        self.assertIn("clone_timeline_migration", source)
+        self.assertNotIn("clone_text_migration", source)
+        self.assertIn("admin-clone-plan-summary", source)
+        self.assertNotIn("alert(", source)
+        self.assertNotIn("window.location.reload", source)
+
     def test_admin_recovery_ready_filter_requires_empty_database_chat(self) -> None:
         source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
         self.assertIn(
@@ -261,6 +348,44 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("setElementDisabled(elements.filterSelect, disabled);", source)
         self.assertNotIn("setElementDisabled(elements.listToggleBtn, disabled);", source)
         self.assertNotIn("copyBtn.disabled = recoveryState.busy;", source)
+
+    def test_card_action_buttons_have_item_specific_accessible_names(self) -> None:
+        channels_source = (ROOT / "static" / "admin_channels.js").read_text(
+            encoding="utf-8"
+        )
+        recovery_source = (ROOT / "static" / "admin_recovery.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("function getChannelActionLabel(item)", channels_source)
+        self.assertIn(
+            "copyBtn.setAttribute('aria-label', '复制 ' + channelLabel + ' 的群组或频道信息');",
+            channels_source,
+        )
+        self.assertIn(
+            "deleteBtn.setAttribute('aria-label', '从数据库删除 ' + channelLabel + ' 的全部数据');",
+            channels_source,
+        )
+        restricted_start = channels_source.index("function renderRestrictedChannels")
+        restricted_end = channels_source.index("async function loadRestrictedChannels")
+        restricted_render_source = channels_source[restricted_start:restricted_end]
+        self.assertIn(
+            "actions: createChannelActions(item, elements, { allowDelete: true }),",
+            restricted_render_source,
+        )
+        delete_start = channels_source.index("async function handleDeleteChannelData")
+        delete_end = channels_source.index("function startJobPolling")
+        delete_source = channels_source[delete_start:delete_end]
+        self.assertIn("await loadRestrictedChannels(elements);", delete_source)
+        self.assertIn("function getCandidateActionLabel(item)", recovery_source)
+        self.assertIn(
+            "copyBtn.setAttribute('aria-label', '复制 ' + candidateLabel + ' 的恢复候选信息');",
+            recovery_source,
+        )
+        self.assertIn(
+            "restoreBtn.setAttribute('aria-label', '恢复 ' + candidateLabel + ' 的群组或频道摘要到数据库');",
+            recovery_source,
+        )
 
     def test_admin_shared_fetch_attaches_csrf_header_to_write_requests(self) -> None:
         source = (ROOT / "static" / "admin_manage_shared.js").read_text(

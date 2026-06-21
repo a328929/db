@@ -4,7 +4,10 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from telethon.errors import FloodWaitError
+
 from tg_harvest.ingest import runner as harvest_runner_module
+from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.runner import (
     _build_iter_messages_kwargs,
     _harvest_messages_for_entity,
@@ -180,6 +183,27 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             ],
             client.iter_calls,
         )
+
+    def test_long_flood_wait_raises_switch_signal_without_sleeping(self) -> None:
+        client = _FakeClient([FloodWaitError(request=None, capture=70)])
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch("tg_harvest.ingest.runner.batch_upsert") as batch_upsert_mock, patch(
+            "tg_harvest.ingest.runner.CFG.log_every", 1000
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.flood_wait_switch_threshold", 30
+        ), patch(
+            "tg_harvest.ingest.runner.time.sleep"
+        ) as sleep_mock, self.assertRaises(AccountFloodWaitError) as caught:
+            _harvest_messages_for_entity(self.conn, client, object(), 42)
+
+        self.assertEqual(70, caught.exception.seconds)
+        self.assertEqual(30, caught.exception.threshold_seconds)
+        sleep_mock.assert_not_called()
+        batch_upsert_mock.assert_not_called()
 
     def test_harvest_messages_can_delegate_writes_to_external_writer(self) -> None:
         client = _FakeClient([_message_stream(_FakeMessage(11), _FakeMessage(12))])

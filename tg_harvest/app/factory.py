@@ -12,6 +12,13 @@ from tg_harvest.admin_jobs.channel_inventory import (
     _admin_start_missing_chats_scan_job_thread,
     _admin_start_restricted_chats_scan_job_thread,
 )
+from tg_harvest.admin_jobs.clone import _admin_start_clone_structure_job_thread
+from tg_harvest.admin_jobs.clone_preflight import (
+    _admin_start_clone_deep_preflight_job_thread,
+)
+from tg_harvest.admin_jobs.clone_timeline_migration import (
+    _admin_start_clone_timeline_migration_job_thread,
+)
 from tg_harvest.admin_jobs.core import (
     _admin_create_chat_job_if_absent,
     _admin_get_active_job,
@@ -20,11 +27,15 @@ from tg_harvest.admin_jobs.core import (
     _admin_job_create,
     _admin_job_get_logs,
     _admin_job_get_snapshot,
-    _admin_request_job_stop,
     _admin_job_set_status,
     _admin_make_job_log_handler,
     _admin_recover_interrupted_jobs,
+    _admin_request_job_stop,
     _admin_try_create_exclusive_job,
+)
+from tg_harvest.admin_jobs.recovery import (
+    _admin_start_recovery_restore_job_thread,
+    _admin_start_recovery_scan_job_thread,
 )
 from tg_harvest.admin_jobs.runners import (
     _admin_start_cleanup_empty_job_thread,
@@ -33,10 +44,6 @@ from tg_harvest.admin_jobs.runners import (
     _admin_start_delete_job_thread,
     _admin_start_harvest_job_thread,
     _admin_start_update_job_thread,
-)
-from tg_harvest.admin_jobs.recovery import (
-    _admin_start_recovery_restore_job_thread,
-    _admin_start_recovery_scan_job_thread,
 )
 from tg_harvest.admin_jobs.runtime import configure_admin_job_runtime
 from tg_harvest.app.admin_payloads import (
@@ -64,6 +71,23 @@ from tg_harvest.storage.channel_management import (
     list_database_channels,
     list_missing_chat_scan_results,
     list_restricted_chat_scan_results,
+)
+from tg_harvest.storage.clone import (
+    build_clone_preflight_report,
+    build_clone_timeline_replay_preview,
+    count_clone_message_mappings,
+    count_clone_runs,
+    create_clone_migration,
+    create_clone_plan,
+    create_clone_run,
+    delete_clone_run,
+    list_clone_message_mappings,
+    list_clone_runs,
+    list_clone_source_chats,
+    load_clone_run,
+    load_clone_run_detail,
+    load_latest_clone_migration,
+    load_latest_clone_plan,
 )
 from tg_harvest.storage.connection import connect_db, ensure_configured_db
 from tg_harvest.storage.recovery import (
@@ -95,6 +119,8 @@ _DB_FREE_ENDPOINTS = frozenset(
         "admin_login_page",
         "admin_manage_page",
         "admin_channels_page",
+        "admin_clone_page",
+        "admin_clone_runs_manage_page",
         "admin_recovery_page",
         "chat_context_page",
         "api_auth_check",
@@ -264,6 +290,21 @@ def _build_route_services() -> RouteRegistryServices:
         list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
         list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
         list_recovery_chat_candidates_fn=list_recovery_chat_candidates,
+        list_clone_source_chats_fn=list_clone_source_chats,
+        build_clone_preflight_report_fn=build_clone_preflight_report,
+        create_clone_run_fn=create_clone_run,
+        load_clone_run_fn=load_clone_run,
+        list_clone_runs_fn=list_clone_runs,
+        count_clone_runs_fn=count_clone_runs,
+        load_clone_run_detail_fn=load_clone_run_detail,
+        list_clone_message_mappings_fn=list_clone_message_mappings,
+        count_clone_message_mappings_fn=count_clone_message_mappings,
+        delete_clone_run_fn=delete_clone_run,
+        create_clone_plan_fn=create_clone_plan,
+        load_latest_clone_plan_fn=load_latest_clone_plan,
+        create_clone_migration_fn=create_clone_migration,
+        load_latest_clone_migration_fn=load_latest_clone_migration,
+        build_clone_timeline_replay_preview_fn=build_clone_timeline_replay_preview,
         build_recovery_overview_fn=build_recovery_overview,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         admin_start_missing_chats_scan_job_thread_fn=(
@@ -278,6 +319,15 @@ def _build_route_services() -> RouteRegistryServices:
         admin_start_recovery_scan_job_thread_fn=_admin_start_recovery_scan_job_thread,
         admin_start_recovery_restore_job_thread_fn=(
             _admin_start_recovery_restore_job_thread
+        ),
+        admin_start_clone_structure_job_thread_fn=(
+            _admin_start_clone_structure_job_thread
+        ),
+        admin_start_clone_deep_preflight_job_thread_fn=(
+            _admin_start_clone_deep_preflight_job_thread
+        ),
+        admin_start_clone_timeline_migration_job_thread_fn=(
+            _admin_start_clone_timeline_migration_job_thread
         ),
     )
 

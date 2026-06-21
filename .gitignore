@@ -18,3 +18,4 @@ venv/
 logs/
 media/
 downloads/
+benchmark_results/

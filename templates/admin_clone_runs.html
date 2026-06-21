@@ -1,0 +1,222 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>克隆记录管理</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-clone-runs-page">
+    <header class="page-header">
+      <p class="eyebrow">Clone Records</p>
+      <h1>克隆记录管理</h1>
+      <p class="subtle">
+        <a href="/admin/manage" class="admin-link">返回后台管理</a>
+        <a href="/admin/clone" class="admin-link">克隆系统</a>
+      </p>
+    </header>
+
+    <section class="panel clone-panel" aria-labelledby="cloneRunFiltersTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneRunFiltersTitle" class="section-title">筛选记录</h2>
+          <p id="admin-clone-runs-manage-status" class="clone-subline" role="status" aria-live="polite">
+            正在读取克隆记录...
+          </p>
+        </div>
+        <div class="clone-toolbar">
+          <button id="admin-clone-runs-manage-refresh-btn" class="btn" type="button" aria-label="刷新克隆记录">
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <div class="clone-runs-filter-grid">
+        <div class="field">
+          <label for="admin-clone-runs-query-input">搜索</label>
+          <input
+            id="admin-clone-runs-query-input"
+            name="admin-clone-runs-query-input"
+            type="text"
+            autocomplete="off"
+            placeholder="源群、目标、run_id"
+            aria-label="搜索克隆记录"
+          />
+        </div>
+        <div class="field">
+          <label for="admin-clone-runs-status-filter">状态</label>
+          <select id="admin-clone-runs-status-filter" aria-label="按克隆状态筛选">
+            <option value="">全部状态</option>
+            <option value="done">已创建</option>
+            <option value="running">执行中</option>
+            <option value="queued">排队中</option>
+            <option value="error">失败</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="admin-clone-runs-sort-select">排序</label>
+          <select id="admin-clone-runs-sort-select" aria-label="克隆记录排序方式">
+            <option value="updated_desc">最近更新</option>
+            <option value="created_asc">最早创建</option>
+            <option value="source_asc">源群名称</option>
+            <option value="target_asc">目标名称</option>
+            <option value="status_asc">状态</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="admin-clone-runs-limit-select">每页</label>
+          <select id="admin-clone-runs-limit-select" aria-label="每页显示数量">
+            <option value="20">20 条</option>
+            <option value="50">50 条</option>
+            <option value="100">100 条</option>
+          </select>
+        </div>
+      </div>
+    </section>
+
+    <section class="clone-runs-layout" aria-label="克隆记录管理内容">
+      <section class="panel clone-panel clone-runs-list-panel" aria-labelledby="cloneRunsListTitle">
+        <div class="clone-panel-head">
+          <div>
+            <h2 id="cloneRunsListTitle" class="section-title">记录列表</h2>
+            <p id="admin-clone-runs-page-status" class="clone-subline" aria-live="polite">暂无分页信息。</p>
+          </div>
+          <div class="clone-toolbar">
+            <button id="admin-clone-runs-prev-btn" class="btn" type="button" aria-label="上一页">
+              上一页
+            </button>
+            <button id="admin-clone-runs-next-btn" class="btn" type="button" aria-label="下一页">
+              下一页
+            </button>
+          </div>
+        </div>
+        <div id="admin-clone-runs-manage-list" class="clone-run-list clone-run-manage-list" aria-label="克隆记录列表"></div>
+      </section>
+
+      <section class="panel clone-panel clone-runs-detail-panel" aria-labelledby="cloneRunsDetailTitle">
+        <div class="clone-panel-head">
+          <div>
+            <h2 id="cloneRunsDetailTitle" class="section-title">记录详情</h2>
+            <p id="admin-clone-runs-detail-status" class="clone-subline" aria-live="polite">
+              请选择一条克隆记录。
+            </p>
+          </div>
+          <div class="clone-toolbar">
+            <button id="admin-clone-runs-detail-refresh-btn" class="btn" type="button" aria-label="刷新详情">
+              刷新详情
+            </button>
+            <button id="admin-clone-runs-delete-btn" class="btn danger" type="button" aria-label="删除本地克隆记录">
+              删除本地记录
+            </button>
+          </div>
+        </div>
+
+        <dl id="admin-clone-runs-detail-summary" class="clone-summary-grid clone-runs-detail-summary" aria-label="克隆记录详情摘要"></dl>
+        <div class="clone-report-grid clone-runs-detail-grid">
+          <section class="clone-report-block" aria-labelledby="cloneRunProgressTitle">
+            <h3 id="cloneRunProgressTitle">迁移进度</h3>
+            <dl id="admin-clone-runs-progress-summary" class="clone-mini-summary"></dl>
+          </section>
+          <section class="clone-report-block" aria-labelledby="cloneRunFailureTitle">
+            <h3 id="cloneRunFailureTitle">失败样本</h3>
+            <ul id="admin-clone-runs-failure-list" class="clone-warning-list"></ul>
+          </section>
+        </div>
+
+        <section class="clone-report-block clone-runs-mapping-block" aria-labelledby="cloneRunMappingTitle">
+          <div class="clone-mapping-head">
+            <div>
+              <h3 id="cloneRunMappingTitle">消息映射</h3>
+              <p id="admin-clone-runs-mapping-status" class="clone-subline" aria-live="polite">
+                请选择记录后查看消息映射。
+              </p>
+            </div>
+            <div class="clone-toolbar clone-mapping-toolbar">
+              <label for="admin-clone-runs-mapping-status-filter" class="sr-only">映射状态</label>
+              <select id="admin-clone-runs-mapping-status-filter" aria-label="按映射状态筛选">
+                <option value="">全部状态</option>
+                <option value="done">完成</option>
+                <option value="error">失败</option>
+              </select>
+              <label for="admin-clone-runs-mapping-mode-filter" class="sr-only">映射类型</label>
+              <select id="admin-clone-runs-mapping-mode-filter" aria-label="按映射类型筛选">
+                <option value="">全部类型</option>
+                <option value="text_replay">文本</option>
+                <option value="media_copy">媒体</option>
+                <option value="media_group_copy">媒体组</option>
+              </select>
+              <button id="admin-clone-runs-mapping-prev-btn" class="btn" type="button" aria-label="上一页消息映射">
+                上一页
+              </button>
+              <button id="admin-clone-runs-mapping-next-btn" class="btn" type="button" aria-label="下一页消息映射">
+                下一页
+              </button>
+            </div>
+          </div>
+          <div id="admin-clone-runs-mapping-list" class="clone-mapping-list" aria-label="最近消息映射列表"></div>
+        </section>
+      </section>
+    </section>
+  </main>
+
+  <section
+    id="admin-clone-run-delete-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCloneRunDeleteDialogTitle"
+    hidden
+  >
+    <h2 id="adminCloneRunDeleteDialogTitle">删除本地克隆记录</h2>
+    <p class="subtle">只删除本地数据库里的克隆记录、迁移计划、迁移统计和消息映射，不会删除 Telegram 上已经创建的目标副本。</p>
+    <p id="admin-clone-run-delete-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-clone-run-delete-confirm-input">确认码</label>
+      <input
+        id="admin-clone-run-delete-confirm-input"
+        name="admin-clone-run-delete-confirm-input"
+        type="text"
+        autocomplete="off"
+        aria-label="删除本地克隆记录确认码"
+      />
+    </div>
+    <p id="admin-clone-run-delete-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
+    <div aria-label="删除本地克隆记录操作按钮组">
+      <button id="admin-clone-run-delete-cancel-btn" class="btn" type="button" aria-label="取消删除本地克隆记录">取消</button>
+      <button id="admin-clone-run-delete-confirm-btn" class="btn danger" type="button" aria-label="确认删除本地克隆记录">确认删除</button>
+    </div>
+  </section>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminLoginDialogTitle"
+    hidden
+  >
+    <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
+    <p class="subtle">进入克隆记录管理，请先验证管理员密码。</p>
+    <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input
+        id="admin-password-input"
+        name="admin-password-input"
+        type="password"
+        placeholder="请输入管理员密码"
+        aria-label="管理员密码"
+      />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_clone_runs.js') }}"></script>
+</body>
+</html>

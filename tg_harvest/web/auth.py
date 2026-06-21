@@ -19,6 +19,8 @@ ALLOWED_ADMIN_PAGE_PATHS = frozenset(
     {
         "/admin/manage",
         "/admin/channels",
+        "/admin/clone",
+        "/admin/clone/runs/manage",
         "/admin/recovery",
     }
 )

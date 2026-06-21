@@ -187,6 +187,7 @@
   min-width: 140px;
 }
 
+#admin-open-clone-link,
 #admin-open-channel-manage-link,
 #admin-open-recovery-link {
   min-height: 42px;
@@ -205,11 +206,23 @@
   justify-content: center;
 }
 
+#admin-open-clone-link:hover,
 #admin-open-channel-manage-link:hover,
 #admin-open-recovery-link:hover {
   background: #f7fbff;
   border-color: var(--border-strong);
   box-shadow: var(--shadow-soft);
+}
+
+#admin-open-clone-link {
+  border-color: #93c5aa;
+  color: #236049;
+  background: #f4fbf7;
+}
+
+#admin-open-clone-link:hover {
+  border-color: #5da17b;
+  background: #eaf7ef;
 }
 
 #admin-open-add-dialog-btn {

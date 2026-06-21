@@ -36,6 +36,16 @@ bash start_web.sh
 
 - `TG_DB_NAME`: SQLite 数据库路径
 - `TG_SESSION_NAME`: Telegram session 路径基名
+- `TG_SECONDARY_SESSION_NAME`: 可选第二账号 Telegram session 路径基名；配置后新增大群会尝试双账号区间拉取
+- `TG_MULTI_ACCOUNT_MIN_MESSAGE_ID`: 新增目标最后一条消息 ID 达到该值时才尝试双账号区间拉取，默认 `5000`
+- `TG_MULTI_ACCOUNT_RANGE_CHUNK_SIZE`: 双账号区间拉取的 message_id 范围跨度，默认 `1000`
+- `TG_FLOOD_WAIT_SWITCH_THRESHOLD`: Telegram FloodWait 超过该秒数时不再等待，改由后台任务尝试切换另一个账号，默认 `30`
+- `TG_ADMIN_UPDATE_CONCURRENCY`: 后台数据库管理页“批量更新所有群组”的总并发上限，默认 `4`；配置第二账号后运行时按实际可用账号数拆分单账号上限，并在单个群组更新失败时自动切换另一账号重试
+- `TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS`: 批量更新所有群组时，全部账号都处于 FloodWait 后最多短等秒数，默认 `45`；超过该值会提前收尾并保留未启动群组供下次继续，避免把剩余群组批量记为失败
+- `TG_OPS_BOT_ENABLED`: 运维机器人通知开关，默认 `0`；开启后会把后台任务创建、终态和重要长等待日志发到 Telegram
+- `TG_OPS_BOT_TOKEN`: 运维机器人 token，只从环境变量读取
+- `TG_OPS_BOT_NOTIFY_CHAT_ID`: 运维机器人通知目标 chat_id
+- `TG_OPS_BOT_TIMEOUT_SECONDS`: 运维机器人请求超时秒数，默认 `3`
 - `TG_API_ID` / `TG_API_HASH`: Telegram API 凭据
 - `TG_TARGET_GROUP`: 默认采集目标
 - `TG_SQLITE_CACHE_MB`: SQLite cache 大小

@@ -1,7 +1,7 @@
 import sqlite3
 from typing import Any
 
-from tg_harvest.domain.meta_payload import _chat_sort_key, _chat_title_or_fallback
+from tg_harvest.domain.chat_titles import chat_sort_key, chat_title_or_fallback
 
 
 def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -20,7 +20,7 @@ def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         chats = [
             {
                 "chat_id": int(row["chat_id"]),
-                "chat_title": _chat_title_or_fallback(
+                "chat_title": chat_title_or_fallback(
                     int(row["chat_id"]), row["chat_title"]
                 ),
                 "message_count": int(row["message_count"] or 0),
@@ -28,7 +28,7 @@ def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             for row in cur.fetchall()
         ]
         chats.sort(
-            key=lambda item: _chat_sort_key(
+            key=lambda item: chat_sort_key(
                 str(item.get("chat_title") or ""),
                 int(str(item.get("chat_id") or 0)),
             )
@@ -89,7 +89,7 @@ def build_admin_stats_payload(
             "ok": True,
             "scope": "chat",
             "chat_id": int(row["chat_id"]),
-            "chat_title": _chat_title_or_fallback(
+            "chat_title": chat_title_or_fallback(
                 int(row["chat_id"]), row["chat_title"]
             ),
             "message_count": int(row["message_count"] or 0),
@@ -113,7 +113,7 @@ def get_admin_chat_brief(
         actual_chat_id = int(row["chat_id"])
         return {
             "chat_id": actual_chat_id,
-            "chat_title": _chat_title_or_fallback(actual_chat_id, row["chat_title"]),
+            "chat_title": chat_title_or_fallback(actual_chat_id, row["chat_title"]),
         }
     finally:
         cur.close()

@@ -24,6 +24,7 @@ from tg_harvest.admin_jobs.sessions import (
     _disconnect_worker_client,
     _ensure_base_session_valid,
     _start_job_heartbeat,
+    bind_client_event_loop,
 )
 from tg_harvest.domain.chat_inventory import (
     discover_session_files,
@@ -130,7 +131,8 @@ def _resolve_recovery_candidate_entity(client: Any, row: Any) -> Any:
     input_peer = _recovery_row_input_peer(row)
     if input_peer is not None:
         try:
-            return client.get_entity(input_peer)
+            with bind_client_event_loop(client):
+                return client.get_entity(input_peer)
         except Exception as exc:
             exceptions.append(exc)
 
@@ -142,7 +144,8 @@ def _resolve_recovery_candidate_entity(client: Any, row: Any) -> Any:
 
     if chat_username:
         try:
-            return client.get_entity(chat_username)
+            with bind_client_event_loop(client):
+                return client.get_entity(chat_username)
         except Exception as exc:
             exceptions.append(exc)
 
@@ -199,7 +202,8 @@ def _batch_resolve_recovery_channel_entities(
         return None
 
     try:
-        payload = client(GetChannelsRequest([item[2] for item in batch]))
+        with bind_client_event_loop(client):
+            payload = client(GetChannelsRequest([item[2] for item in batch]))
     except Exception:
         return None
 

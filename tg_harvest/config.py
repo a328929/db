@@ -82,6 +82,22 @@ def _load_raw_config_values() -> dict:
         "log_every": _env_int("TG_LOG_EVERY", 1000),
         # Telegram 历史消息请求间隔。空值表示使用 Telethon 默认保护策略。
         "history_wait_time": _env_optional_float("TG_HISTORY_WAIT_TIME"),
+        # Telegram FloodWait 超过该秒数时，不再等待，改由上层尝试切换账号。
+        "flood_wait_switch_threshold": _env_int("TG_FLOOD_WAIT_SWITCH_THRESHOLD", 30),
+        # 可选第二账号会话路径。配置后，新增大群会尝试双账号区间拉取。
+        "secondary_session_name": (
+            resolve_session_name(_env_str("TG_SECONDARY_SESSION_NAME", ""))
+            if _env_str("TG_SECONDARY_SESSION_NAME", "")
+            else ""
+        ),
+        # 克隆媒体中转频道。两个账号都加入该频道后，可解决无单账号同时访问源和目标的问题。
+        "clone_relay_chat_id": _env_int("TG_CLONE_RELAY_CHAT_ID", 0),
+        # 中转频道公开用户名或本地实体兜底名称，可选。
+        "clone_relay_chat_username": _env_str("TG_CLONE_RELAY_CHAT_USERNAME", ""),
+        # 新增目标最后一条消息 ID 达到该阈值时，才考虑双账号区间拉取。
+        "multi_account_min_message_id": _env_int("TG_MULTI_ACCOUNT_MIN_MESSAGE_ID", 5000),
+        # 双账号区间拉取的 message_id 范围跨度。
+        "multi_account_range_chunk_size": _env_int("TG_MULTI_ACCOUNT_RANGE_CHUNK_SIZE", 1000),
         # 数据库页面缓存大小，单位为兆。
         "sqlite_cache_mb": _env_int("TG_SQLITE_CACHE_MB", 512),
         # 数据库内存映射大小，单位为兆。数值零表示关闭。
@@ -91,7 +107,19 @@ def _load_raw_config_values() -> dict:
         # 单个后台任务最大日志行数。
         "admin_job_log_max_lines": _env_int("TG_ADMIN_JOB_LOG_MAX_LINES", 5000),
         # 全部群组更新时的并发数量。
-        "admin_update_concurrency": _env_int("TG_ADMIN_UPDATE_CONCURRENCY", 10),
+        "admin_update_concurrency": _env_int("TG_ADMIN_UPDATE_CONCURRENCY", 4),
+        # 全部群组更新时，全部账号都处于 FloodWait 时最多等待多久。
+        "admin_update_max_cooldown_wait_seconds": _env_int(
+            "TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS", 45
+        ),
+        # 可选运维机器人；默认关闭，只用于任务通知，不参与历史消息采集。
+        "ops_bot_enabled": _env_int("TG_OPS_BOT_ENABLED", 0),
+        # 运维机器人 token，只从环境读取，禁止写入日志。
+        "ops_bot_token": _env_str("TG_OPS_BOT_TOKEN", ""),
+        # 运维机器人通知目标 chat_id；可填个人、群组或频道 ID。
+        "ops_bot_notify_chat_id": _env_str("TG_OPS_BOT_NOTIFY_CHAT_ID", ""),
+        # 运维机器人 HTTP 调用超时秒数。
+        "ops_bot_timeout_seconds": _env_optional_float("TG_OPS_BOT_TIMEOUT_SECONDS"),
         # 启动时是否强制修复全文索引。仅数值一表示开启。
         "force_heal_fts": _env_int("TG_FORCE_HEAL_FTS", 0),
         # 是否跳过启动期 FTS 全量修复。恢复大库且磁盘紧张时可临时开启。
@@ -129,6 +157,15 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["log_every"] = max(1, int(normalized["log_every"]))
     if normalized["history_wait_time"] is not None:
         normalized["history_wait_time"] = max(0.0, float(normalized["history_wait_time"]))
+    normalized["flood_wait_switch_threshold"] = max(
+        1, int(normalized["flood_wait_switch_threshold"])
+    )
+    normalized["multi_account_min_message_id"] = max(
+        0, int(normalized["multi_account_min_message_id"])
+    )
+    normalized["multi_account_range_chunk_size"] = max(
+        100, int(normalized["multi_account_range_chunk_size"])
+    )
     normalized["sqlite_cache_mb"] = max(16, int(normalized["sqlite_cache_mb"]))
     normalized["sqlite_mmap_mb"] = max(0, int(normalized["sqlite_mmap_mb"]))
     normalized["admin_job_max_count"] = max(10, int(normalized["admin_job_max_count"]))
@@ -138,6 +175,18 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["admin_update_concurrency"] = max(
         1, int(normalized["admin_update_concurrency"])
     )
+    normalized["admin_update_max_cooldown_wait_seconds"] = max(
+        0, int(normalized["admin_update_max_cooldown_wait_seconds"])
+    )
+    normalized["ops_bot_enabled"] = (
+        1 if int(normalized["ops_bot_enabled"]) == 1 else 0
+    )
+    if normalized["ops_bot_timeout_seconds"] is None:
+        normalized["ops_bot_timeout_seconds"] = 3.0
+    else:
+        normalized["ops_bot_timeout_seconds"] = max(
+            0.5, float(normalized["ops_bot_timeout_seconds"])
+        )
     normalized["force_heal_fts"] = 1 if int(normalized["force_heal_fts"]) == 1 else 0
     normalized["skip_fts_auto_heal"] = (
         1 if int(normalized["skip_fts_auto_heal"]) == 1 else 0
@@ -163,11 +212,24 @@ def _build_app_config(values: dict) -> "AppConfig":
         disable_promo_filter=values["disable_promo_filter"],
         log_every=values["log_every"],
         history_wait_time=values["history_wait_time"],
+        flood_wait_switch_threshold=values["flood_wait_switch_threshold"],
+        secondary_session_name=values["secondary_session_name"],
+        clone_relay_chat_id=values["clone_relay_chat_id"],
+        clone_relay_chat_username=values["clone_relay_chat_username"],
+        multi_account_min_message_id=values["multi_account_min_message_id"],
+        multi_account_range_chunk_size=values["multi_account_range_chunk_size"],
         sqlite_cache_mb=values["sqlite_cache_mb"],
         sqlite_mmap_mb=values["sqlite_mmap_mb"],
         admin_job_max_count=values["admin_job_max_count"],
         admin_job_log_max_lines=values["admin_job_log_max_lines"],
         admin_update_concurrency=values["admin_update_concurrency"],
+        admin_update_max_cooldown_wait_seconds=values[
+            "admin_update_max_cooldown_wait_seconds"
+        ],
+        ops_bot_enabled=values["ops_bot_enabled"],
+        ops_bot_token=values["ops_bot_token"],
+        ops_bot_notify_chat_id=values["ops_bot_notify_chat_id"],
+        ops_bot_timeout_seconds=values["ops_bot_timeout_seconds"],
         force_heal_fts=values["force_heal_fts"],
         skip_fts_auto_heal=values["skip_fts_auto_heal"],
         admin_password=values["admin_password"],
@@ -199,6 +261,12 @@ class AppConfig:
     disable_promo_filter: int
     log_every: int
     history_wait_time: float | None
+    flood_wait_switch_threshold: int
+    secondary_session_name: str
+    clone_relay_chat_id: int
+    clone_relay_chat_username: str
+    multi_account_min_message_id: int
+    multi_account_range_chunk_size: int
 
     # 数据库
     sqlite_cache_mb: int
@@ -208,6 +276,11 @@ class AppConfig:
     admin_job_max_count: int
     admin_job_log_max_lines: int
     admin_update_concurrency: int
+    admin_update_max_cooldown_wait_seconds: int
+    ops_bot_enabled: int
+    ops_bot_token: str
+    ops_bot_notify_chat_id: str
+    ops_bot_timeout_seconds: float
 
     # 索引维护
     force_heal_fts: int
