@@ -8,7 +8,6 @@ from tg_harvest.domain.chat_inventory import (
     find_missing_joined_chats,
     find_restricted_joined_chats,
     load_joined_chat_inventory,
-    write_missing_chat_report,
 )
 
 
@@ -280,12 +279,3 @@ def test_all_platform_terms_restriction_marks_entity_unavailable():
         )
     )
 
-
-def test_write_missing_chat_report(tmp_path):
-    output = write_missing_chat_report(
-        [ChatInventoryRow(chat_id=100, chat_title="Test Chat")],
-        tmp_path / "missing.txt",
-    )
-
-    assert output.exists()
-    assert output.read_text(encoding="utf-8") == "Test Chat | ID: 100\n"

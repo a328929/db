@@ -15,6 +15,7 @@ __pycache__/
 .venv/
 venv/
 *.log
+bg.txt
 logs/
 media/
 downloads/

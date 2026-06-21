@@ -19,7 +19,7 @@ class ChangeInventoryTests(unittest.TestCase):
             "static/admin_channels.js": "Frontend Admin UX / JS Safety",
             "tg_harvest/search/service.py": "Search / Storage / Ingest Correctness",
             "tg_harvest/runtime/paths.py": "Search / Storage / Ingest Correctness",
-            "tools/recover_missing_media.py": "Operator Tools / Telegram Scripts",
+            "scripts/diagnose_telegram.py": "Operator Tools / Telegram Scripts",
             "docs/change_management.md": "Documentation",
             "tests/test_search_service.py": "Tests",
         }

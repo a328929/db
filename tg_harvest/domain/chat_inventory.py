@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -388,19 +388,6 @@ def find_database_chats_not_joined(
         )
 
     return rows
-
-
-def write_missing_chat_report(
-    rows: Sequence[ChatInventoryRow], output_path: str | Path
-) -> Path:
-    path = Path(output_path).expanduser().resolve()
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-    with path.open("w", encoding="utf-8") as f:
-        for row in rows:
-            f.write(f"{row.chat_title} | ID: {row.chat_id}\n")
-
-    return path
 
 
 def discover_session_files(base_session_name: str | Path) -> list[Path]:

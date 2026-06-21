@@ -406,15 +406,6 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("return serverMessage;", source)
         self.assertNotIn("数据库忙或系统异常", source)
 
-    def test_recover_missing_media_requires_explicit_execute_for_writes(self) -> None:
-        source = (ROOT / "tools" / "recover_missing_media.py").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn('"--execute"', source)
-        self.assertIn("当前为 dry-run", source)
-        self.assertIn("if not args.execute:", source)
-        self.assertIn("iter_missing_message_id_chunks", source)
-
     def test_admin_login_overlay_hides_background_from_focus_and_assistive_tech(self) -> None:
         source = (ROOT / "static" / "admin_manage_shared.js").read_text(
             encoding="utf-8"

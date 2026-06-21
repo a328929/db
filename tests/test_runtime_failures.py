@@ -1,8 +1,6 @@
 import asyncio
-import importlib.util
 import logging
 import os
-import pathlib
 import queue
 import sqlite3
 import tempfile
@@ -10,7 +8,7 @@ import threading
 import unittest
 from concurrent.futures import Future
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 from tg_harvest.admin_jobs import core as admin_jobs_core
 from tg_harvest.admin_jobs import runtime as admin_jobs_runtime
@@ -78,23 +76,6 @@ from tg_harvest.ingest.store import (
 from tg_harvest.storage.connection import detect_sqlite_features
 from tg_harvest.storage.schema import create_schema, refresh_chat_message_counts
 
-_BACKFILL_MODULE_PATH = (
-    pathlib.Path(__file__).resolve().parent.parent
-    / "tools"
-    / "backfill_message_media_from_telegram.py"
-)
-_BACKFILL_SPEC = importlib.util.spec_from_file_location(
-    "backfill_message_media_from_telegram", _BACKFILL_MODULE_PATH
-)
-assert _BACKFILL_SPEC is not None and _BACKFILL_SPEC.loader is not None
-_BACKFILL_MODULE = importlib.util.module_from_spec(_BACKFILL_SPEC)
-_BACKFILL_SPEC.loader.exec_module(_BACKFILL_MODULE)
-_fetch_chunk_messages = _BACKFILL_MODULE._fetch_chunk_messages
-_load_missing_media_targets = _BACKFILL_MODULE._load_missing_targets
-_flush_backfill_write_batch = _BACKFILL_MODULE._flush_write_batch
-_flush_parsed_backfill_write_batch = _BACKFILL_MODULE._flush_parsed_write_batch
-_targets_signature = _BACKFILL_MODULE._targets_signature
-
 
 class _FakeCursor:
     def __init__(self, rows):
@@ -124,133 +105,6 @@ class _FakeClient:
 
     def disconnect(self):
         return None
-
-
-class MediaMetadataBackfillTargetTests(unittest.TestCase):
-    def setUp(self) -> None:
-        self.conn = sqlite3.connect(":memory:")
-        self.conn.row_factory = sqlite3.Row
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE chats (
-                chat_id INTEGER PRIMARY KEY,
-                chat_username TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE messages (
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                msg_type TEXT NOT NULL,
-                has_media INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY(chat_id, message_id)
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE message_media (
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                file_unique_id TEXT,
-                mime_type TEXT,
-                file_size INTEGER,
-                width INTEGER,
-                height INTEGER,
-                duration_sec INTEGER,
-                PRIMARY KEY(chat_id, message_id)
-            )
-            """
-        )
-        cur.execute("INSERT INTO chats(chat_id, chat_username) VALUES (1, 'chan')")
-        cur.executemany(
-            """
-            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
-            VALUES (1, ?, ?, 1)
-            """,
-            [
-                (10, "VIDEO"),
-                (11, "VIDEO"),
-                (12, "PHOTO"),
-                (13, "VIDEO"),
-            ],
-        )
-        cur.executemany(
-            """
-            INSERT INTO message_media(
-                chat_id, message_id, file_unique_id, mime_type,
-                file_size, width, height, duration_sec
-            )
-            VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            [
-                (10, "u10", "video/mp4", None, 1920, 1080, None),
-                (12, "u12", "image/jpeg", None, None, None, None),
-                (13, "u13", "video/mp4", 1000, 1920, 1080, 60),
-            ],
-        )
-        self.conn.commit()
-
-    def tearDown(self) -> None:
-        self.conn.close()
-
-    def test_load_missing_targets_includes_incomplete_video_metadata(self) -> None:
-        targets = _load_missing_media_targets(self.conn, chat_id=None, scan_limit=20)
-
-        self.assertEqual([12, 11, 10], targets[1]["message_ids"])
-        self.assertEqual("chan", targets[1]["chat_username"])
-
-    def test_load_missing_targets_excludes_non_file_media_types(self) -> None:
-        cur = self.conn.cursor()
-        cur.executemany(
-            """
-            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
-            VALUES (1, ?, ?, 1)
-            """,
-            [
-                (20, "POLL"),
-                (21, "CONTACT"),
-                (22, "GEO"),
-            ],
-        )
-        self.conn.commit()
-
-        targets = _load_missing_media_targets(self.conn, chat_id=None, scan_limit=20)
-
-        self.assertNotIn(20, targets[1]["message_ids"])
-        self.assertNotIn(21, targets[1]["message_ids"])
-        self.assertNotIn(22, targets[1]["message_ids"])
-
-    def test_load_missing_targets_identity_mode_ignores_dimension_only_gaps(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO messages(chat_id, message_id, msg_type, has_media)
-            VALUES (1, 14, 'PHOTO', 1)
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO message_media(
-                chat_id, message_id, file_unique_id, mime_type,
-                file_size, width, height, duration_sec
-            )
-            VALUES (1, 14, '', 'image/jpeg', 100, 640, 480, NULL)
-            """
-        )
-        self.conn.commit()
-
-        targets = _load_missing_media_targets(
-            self.conn,
-            chat_id=None,
-            scan_limit=20,
-            target_mode=_BACKFILL_MODULE.TARGET_MODE_IDENTITY,
-        )
-
-        self.assertEqual([14, 11], targets[1]["message_ids"])
 
 
 class AdminUpdateRunnerTests(unittest.TestCase):
@@ -2810,76 +2664,6 @@ class HarvestProgressTests(unittest.TestCase):
         self.assertTrue(any("读取目标总消息数失败" in line for line in captured.output))
 
 
-class _RetryClient:
-    def __init__(self, responses):
-        self._responses = list(responses)
-        self.calls = 0
-
-    async def get_messages(self, entity, ids):
-        self.calls += 1
-        response = self._responses.pop(0)
-        if isinstance(response, Exception):
-            raise response
-        return response
-
-
-class BackfillRetryTests(unittest.TestCase):
-    def test_targets_signature_changes_when_target_ids_change(self) -> None:
-        targets = {
-            1: {"chat_username": "a", "message_ids": [3, 2]},
-            2: {"chat_username": None, "message_ids": [9]},
-        }
-        same_targets = {
-            1: {"chat_username": "renamed", "message_ids": [3, 2]},
-            2: {"chat_username": None, "message_ids": [9]},
-        }
-        changed_targets = {
-            1: {"chat_username": "a", "message_ids": [3, 1]},
-            2: {"chat_username": None, "message_ids": [9]},
-        }
-
-        self.assertEqual(_targets_signature(targets), _targets_signature(same_targets))
-        self.assertNotEqual(
-            _targets_signature(targets),
-            _targets_signature(changed_targets),
-        )
-
-    def test_fetch_chunk_messages_retries_then_succeeds(self) -> None:
-        client = _RetryClient([RuntimeError("temporary"), ["ok"]])
-
-        with patch.object(_BACKFILL_MODULE.asyncio, "sleep", new=AsyncMock()):
-            result = asyncio.run(
-                _fetch_chunk_messages(
-                    client,
-                    object(),
-                    [101, 100],
-                    chat_id=42,
-                    max_retries=3,
-                )
-            )
-
-        self.assertEqual(["ok"], result)
-        self.assertEqual(2, client.calls)
-
-    def test_fetch_chunk_messages_raises_after_retry_exhausted(self) -> None:
-        client = _RetryClient([RuntimeError("a"), RuntimeError("b")])
-
-        with patch.object(
-            _BACKFILL_MODULE.asyncio, "sleep", new=AsyncMock()
-        ), self.assertRaises(RuntimeError):
-            asyncio.run(
-                _fetch_chunk_messages(
-                    client,
-                    object(),
-                    [11, 10],
-                    chat_id=7,
-                    max_retries=2,
-                )
-            )
-
-        self.assertEqual(2, client.calls)
-
-
 class SearchableFilenameBackfillTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
@@ -3043,78 +2827,6 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
         )
 
         self.assertEqual({7001, 7002}, grouped_ids)
-
-    def test_media_backfill_flush_uses_public_batch_upsert_writer(self) -> None:
-        conn = object()
-        media_rows = [("media-row",)]
-
-        with patch.object(
-            _BACKFILL_MODULE, "batch_upsert", return_value=None
-        ) as batch_upsert_mock:
-            flushed = _flush_backfill_write_batch(conn, media_rows)
-
-        self.assertEqual(1, flushed)
-        batch_upsert_mock.assert_called_once_with(conn, [], media_rows)
-
-    def test_parsed_media_backfill_flush_upserts_messages_and_media(self) -> None:
-        msg_rows = [
-            (
-                1,
-                105,
-                "2026-01-01 00:00:00",
-                1,
-                None,
-                "new caption",
-                "new caption",
-                "pure",
-                "dedupe",
-                "PHOTO",
-                7001,
-                1,
-                0,
-                0,
-                "[]",
-                0,
-                None,
-                11,
-            )
-        ]
-        media_rows = [
-            (
-                1,
-                105,
-                "PHOTO",
-                "fid-105",
-                "photo.jpg",
-                ".jpg",
-                "image/jpeg",
-                123,
-                640,
-                480,
-                None,
-                7001,
-                "fid:fid-105",
-                "{}",
-            )
-        ]
-        touched_groups = set()
-        conn = object()
-
-        with patch.object(
-            _BACKFILL_MODULE,
-            "load_grouped_ids_for_messages",
-            return_value={6001},
-        ) as load_grouped_mock, patch.object(
-            _BACKFILL_MODULE, "batch_upsert", return_value=None
-        ) as batch_upsert_mock:
-            flushed_messages, flushed_media = _flush_parsed_backfill_write_batch(
-                conn, msg_rows, media_rows, touched_groups
-            )
-
-        self.assertEqual((1, 1), (flushed_messages, flushed_media))
-        self.assertEqual({6001, 7001}, touched_groups)
-        load_grouped_mock.assert_called_once_with(conn, [(1, 105)])
-        batch_upsert_mock.assert_called_once_with(conn, msg_rows, media_rows)
 
     def test_unsearchable_cleanup_targets_media_with_only_identity_metadata(self) -> None:
         cur = self.conn.cursor()
