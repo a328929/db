@@ -31,7 +31,7 @@ def _admin_parse_timestamp(value: Any, default: datetime) -> datetime:
     except Exception:
         return default
     if parsed.tzinfo is None:
-        return parsed.replace(tzinfo=UTC)
+        return default
     return parsed.astimezone(UTC)
 
 

@@ -43,26 +43,14 @@
         return null;
       }
 
-      var chatTitle = '';
-      if (typeof chat.chat_title === 'string' && chat.chat_title.trim()) {
-        chatTitle = chat.chat_title.trim();
-      } else if (typeof chat.chat_name === 'string' && chat.chat_name.trim()) {
-        chatTitle = chat.chat_name.trim();
-      } else if (typeof chat.title === 'string' && chat.title.trim()) {
-        chatTitle = chat.title.trim();
-      } else {
-        chatTitle = String(chatId);
-      }
-
-      var messageCount = chat.message_count;
-      if (messageCount === undefined || messageCount === null) {
-        messageCount = chat.msg_count;
-      }
+      var chatTitle = (typeof chat.chat_title === 'string' && chat.chat_title.trim())
+        ? chat.chat_title.trim()
+        : String(chatId);
 
       return {
         chat_id: chatId,
         chat_title: chatTitle,
-        message_count: messageCount
+        message_count: chat.message_count
       };
     }
 

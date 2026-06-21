@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from flask import Flask
 
-from tg_harvest.web import auth as auth_module
+import tg_harvest.web.auth as auth_module
 from tg_harvest.web.auth import register_auth_routes
 from tg_harvest.web.routes.recovery import register_recovery_routes
 

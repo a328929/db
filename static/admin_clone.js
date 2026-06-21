@@ -1171,7 +1171,6 @@
     var normalized = String(strategy || '').trim();
     if (normalized === 'source_copy_without_attribution') return '隐藏来源复制转发';
     if (normalized === 'relay_copy_without_attribution') return '固定中转频道桥接';
-    if (normalized === 'source_forward') return '旧策略：需重新预检';
     if (normalized === 'impossible_without_local_vault') return '缺本地媒体保险库';
     if (normalized === 'blocked') return '阻断';
     return normalized || '未生成';

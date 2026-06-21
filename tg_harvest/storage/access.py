@@ -2,7 +2,7 @@ import sqlite3
 from collections.abc import Callable
 from pathlib import Path
 
-from tg_harvest.storage import fts as _fts
+import tg_harvest.storage.fts as _fts
 
 BASE_TABLE = "messages m"
 JOINS = [

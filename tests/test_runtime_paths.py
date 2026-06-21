@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tg_harvest.runtime import paths as runtime_paths
+import tg_harvest.runtime.paths as runtime_paths
 
 
 class RuntimePathsTests(unittest.TestCase):

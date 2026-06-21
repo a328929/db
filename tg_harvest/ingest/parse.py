@@ -258,9 +258,9 @@ class MessageParser:
                 else:
                     extra[k] = v
 
-        # Telethon's convenience .file wrapper is not always populated for older
-        # or refetched messages. The raw document/photo payload usually still
-        # carries size, mime type, dimensions and duration.
+        # Telethon's convenience .file wrapper is not always populated. The raw
+        # document/photo payload usually still carries size, mime type,
+        # dimensions and duration.
         cls._extract_raw_media_meta(message, meta, extra)
 
         # 2. 回退机制：从原始对象提取 ID

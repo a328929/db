@@ -3,11 +3,11 @@ import sqlite3
 from collections.abc import Callable
 from typing import Any
 
-from tg_harvest.search import cache as _search_cache
-from tg_harvest.search import maintenance as _search_maintenance
+import tg_harvest.search.cache as _search_cache
+import tg_harvest.search.maintenance as _search_maintenance
+import tg_harvest.storage.search_terms as _search_terms
 from tg_harvest.search.params import SearchParams
 from tg_harvest.search.sql_builder import _build_search_query_spec, _make_type_clause
-from tg_harvest.storage import search_terms as _search_terms
 
 _CHAT_FACET_LIMIT = 12
 

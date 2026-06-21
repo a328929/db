@@ -481,13 +481,13 @@ def _column_sql_has_dynamic_datetime_default(column_sql: str) -> bool:
     return _DYNAMIC_DATETIME_DEFAULT_RE.search(str(column_sql or "")) is not None
 
 
-def _sqlite_add_column_compatible_sql(column_sql: str) -> str:
+def _sqlite_add_column_sql(column_sql: str) -> str:
     # SQLite cannot ADD COLUMN with DEFAULT(datetime('now')) on existing tables.
-    # Use an ALTER-compatible constant default, then backfill current rows below.
+    # Use a constant default, then populate current rows below.
     return _DYNAMIC_DATETIME_DEFAULT_RE.sub(" DEFAULT ''", str(column_sql or ""))
 
 
-def _add_column_compatible(
+def _add_table_column(
     cur: sqlite3.Cursor, table_name: str, column_name: str, column_sql: str
 ) -> None:
     if not _column_sql_has_dynamic_datetime_default(column_sql):
@@ -495,7 +495,7 @@ def _add_column_compatible(
         return
 
     cur.execute(
-        f"ALTER TABLE {table_name} ADD COLUMN {_sqlite_add_column_compatible_sql(column_sql)}"
+        f"ALTER TABLE {table_name} ADD COLUMN {_sqlite_add_column_sql(column_sql)}"
     )
     cur.execute(
         f"""
@@ -514,7 +514,7 @@ def _ensure_table_columns(
     for column_name, column_sql in column_defs:
         if _column_exists(cur, table_name, column_name):
             continue
-        _add_column_compatible(cur, table_name, column_name, column_sql)
+        _add_table_column(cur, table_name, column_name, column_sql)
 
 
 def _ensure_chats_schema(cur: sqlite3.Cursor) -> None:
@@ -691,12 +691,6 @@ def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
-    )
-    cur.execute(
-        """
-        DELETE FROM admin_absent_chats
-        WHERE scan_reason LIKE 'Telegram 限制显示%'
-        """
     )
 
 
@@ -925,136 +919,12 @@ def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
     return cur.fetchone() is not None
 
 
-def _get_table_sql(cur: sqlite3.Cursor, table_name: str) -> str:
-    cur.execute(
-        "SELECT sql FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
-        (table_name,),
-    )
-    row = cur.fetchone()
-    if not row:
-        return ""
-    return str(row["sql"] if isinstance(row, sqlite3.Row) else row[0] or "")
-
-
-def _drop_messages_compat_objects(cur: sqlite3.Cursor) -> None:
-    cur.execute("DROP VIEW IF EXISTS v_messages_enriched")
-
-
-def _drop_messages_link_column_with_rebuild(
-    cur: sqlite3.Cursor, strict_suffix: str
-) -> None:
-    _drop_messages_compat_objects(cur)
-    cur.execute("DROP TABLE IF EXISTS messages__legacy_drop_link")
-    cur.execute("ALTER TABLE messages RENAME TO messages__legacy_drop_link")
-    _create_messages_table(cur, strict_suffix)
-    cur.execute(
-        """
-        INSERT INTO messages(
-            pk, chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
-            content, content_norm, pure_hash, dedupe_hash,
-            msg_type, grouped_id, has_media,
-            is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason, text_len,
-            visual_hash, visual_hash_algo, visual_embed_ref,
-            created_at, updated_at
-        )
-        SELECT
-            pk, chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
-            content, content_norm, pure_hash, dedupe_hash,
-            msg_type, grouped_id, has_media,
-            is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason, text_len,
-            visual_hash, visual_hash_algo, visual_embed_ref,
-            created_at, updated_at
-        FROM messages__legacy_drop_link
-        """
-    )
-    cur.execute("DROP TABLE messages__legacy_drop_link")
-
-
-def _finalize_messages_link_migration(
-    cur: sqlite3.Cursor, strict_suffix: str
-) -> None:
-    if not _table_exists(cur, "messages__legacy_drop_link"):
-        return
-
-    logging.info("检测到 messages.link 删除迁移未完成，继续执行收尾")
-    _drop_messages_compat_objects(cur)
-    if not _table_exists(cur, "messages"):
-        _create_messages_table(cur, strict_suffix)
-
-    cur.execute(
-        """
-        INSERT OR IGNORE INTO messages(
-            pk, chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
-            content, content_norm, pure_hash, dedupe_hash,
-            msg_type, grouped_id, has_media,
-            is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason, text_len,
-            visual_hash, visual_hash_algo, visual_embed_ref,
-            created_at, updated_at
-        )
-        SELECT
-            pk, chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
-            content, content_norm, pure_hash, dedupe_hash,
-            msg_type, grouped_id, has_media,
-            is_promo, promo_score, promo_reasons, dedupe_eligible, guard_reason, text_len,
-            visual_hash, visual_hash_algo, visual_embed_ref,
-            created_at, updated_at
-        FROM messages__legacy_drop_link
-        """
-    )
-    cur.execute("DROP TABLE messages__legacy_drop_link")
-
-
-def _ensure_messages_schema(cur: sqlite3.Cursor, feats: SqliteFeatures) -> None:
-    strict_suffix = " STRICT" if feats.supports_strict else ""
-    _drop_messages_compat_objects(cur)
-    _finalize_messages_link_migration(cur, strict_suffix)
+def _ensure_messages_schema(cur: sqlite3.Cursor) -> None:
     _ensure_messages_runtime_columns(cur)
 
-    if not _column_exists(cur, "messages", "link"):
-        return
 
-    logging.info("检测到废弃列 messages.link，开始执行迁移删除该列")
-    _drop_messages_compat_objects(cur)
-    try:
-        cur.execute("ALTER TABLE messages DROP COLUMN link")
-    except sqlite3.Error as exc:
-        logging.warning(f"原生 DROP COLUMN 失败，回退到重建 messages 表: {exc}")
-        _drop_messages_link_column_with_rebuild(cur, strict_suffix)
-
-
-def _rebuild_message_media_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
-    cur.execute("DROP TABLE IF EXISTS message_media__legacy_fk_fix")
-    cur.execute("ALTER TABLE message_media RENAME TO message_media__legacy_fk_fix")
-    _create_message_media_table(cur, strict_suffix)
-    cur.execute(
-        """
-        INSERT INTO message_media(
-            chat_id, message_id, media_kind, file_unique_id, file_name, file_ext,
-            mime_type, file_size, width, height, duration_sec, grouped_id,
-            media_fingerprint, meta_json, updated_at
-        )
-        SELECT
-            chat_id, message_id, media_kind, file_unique_id, file_name, file_ext,
-            mime_type, file_size, width, height, duration_sec, grouped_id,
-            media_fingerprint, meta_json, updated_at
-        FROM message_media__legacy_fk_fix
-        """
-    )
-    cur.execute("DROP TABLE message_media__legacy_fk_fix")
-
-
-def _ensure_message_media_schema(cur: sqlite3.Cursor, feats: SqliteFeatures) -> None:
-    strict_suffix = " STRICT" if feats.supports_strict else ""
+def _ensure_message_media_schema(cur: sqlite3.Cursor) -> None:
     _ensure_message_media_runtime_columns(cur)
-    sql = _get_table_sql(cur, "message_media")
-    if not sql:
-        return
-    if "messages__legacy_drop_link" not in sql:
-        return
-    logging.warning(
-        "检测到 message_media 外键仍指向废弃表 messages__legacy_drop_link，开始修复表结构"
-    )
-    _rebuild_message_media_table(cur, strict_suffix)
 
 
 def _refresh_chat_message_counts(
@@ -1113,8 +983,8 @@ def create_schema(
         skip_fts_heal = int(skip_fts_auto_heal) == 1 and int(force_heal_fts) != 1
         _create_tables(cur, strict_suffix)
         _ensure_chats_schema(cur)
-        _ensure_messages_schema(cur, feats)
-        _ensure_message_media_schema(cur, feats)
+        _ensure_messages_schema(cur)
+        _ensure_message_media_schema(cur)
         _ensure_media_groups_runtime_columns(cur)
         _ensure_dedupe_schema(cur)
         _ensure_admin_job_schema(cur)
@@ -1154,7 +1024,7 @@ def create_schema(
                     _fts._sync_fts_from_scratch(cur)
             else:
                 fts_triggers_current = _fts._fts_triggers_are_current(cur)
-                # 确保触发器存在且内容为当前版本（旧库可能缺失或使用 content 而非 content_norm）。
+                # 确保触发器存在且内容为当前版本。
                 _fts._create_fts_triggers(cur)
                 if skip_fts_heal:
                     try:

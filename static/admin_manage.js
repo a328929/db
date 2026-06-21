@@ -490,7 +490,6 @@
 
     if (isChatScopeValue(selectedChatId)) {
       var targetName = pickFirstText(
-        data && data.chat_name,
         data && data.chat_title,
         getSelectedOptionLabel(elements.scopeSelect, selectedChatId),
         '未知目标'
@@ -500,7 +499,6 @@
 
       elements.statMessages.textContent = pickFirstNumber(
         data && data.message_count,
-        data && data.msg_count,
         '--'
       );
       setStatsLineText(elements.statMessages, '消息数量 ', '');
@@ -509,17 +507,12 @@
 
     elements.statScope.textContent = pickFirstNumber(
       data && data.chat_count,
-      data && data.scope_count,
-      data && data.total_chats,
-      data && data.count,
       '--'
     );
     setStatsLineText(elements.statScope, '当前共有 ', ' 个频道/群组');
 
     elements.statMessages.textContent = pickFirstNumber(
       data && data.message_count,
-      data && data.total_messages,
-      data && data.msg_count,
       '--'
     );
     setStatsLineText(elements.statMessages, '消息数量 ', '');

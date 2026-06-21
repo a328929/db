@@ -29,7 +29,7 @@ from tg_harvest.web.responses import (
     require_json_dict,
 )
 
-_TARGET_KIND_ALIASES = {"channel", "broadcast", "megagroup", "supergroup", "group"}
+_ALLOWED_TARGET_KINDS = {"channel", "megagroup"}
 _ALLOWED_MEDIA_STRATEGIES = {
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
@@ -167,7 +167,7 @@ def _clone_run_delete_confirm_text(run: dict) -> str:
 
 def _normalize_requested_target_kind(raw_kind: Any, *, source_chat_type: Any):
     normalized_raw = str(raw_kind or "").strip().lower()
-    if normalized_raw and normalized_raw not in _TARGET_KIND_ALIASES:
+    if normalized_raw and normalized_raw not in _ALLOWED_TARGET_KINDS:
         return None, json_error("target_kind 参数必须为 channel 或 megagroup", 400)
     return (
         normalize_clone_target_kind(
@@ -439,7 +439,6 @@ def register_clone_routes(
                         rows,
                         build_telegram_chat_link_bundle_fn,
                     ),
-                    "count": len(rows),
                     "total": total,
                     "limit": limit,
                     "offset": offset,
@@ -556,7 +555,6 @@ def register_clone_routes(
                 {
                     "ok": True,
                     "items": rows,
-                    "count": len(rows),
                     "total": total,
                     "limit": limit,
                     "offset": offset,

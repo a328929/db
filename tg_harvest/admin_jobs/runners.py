@@ -11,6 +11,8 @@ from threading import Lock, Semaphore
 from types import SimpleNamespace
 from typing import Any
 
+import tg_harvest.storage.fts as _fts
+import tg_harvest.storage.search_terms as _search_terms
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -52,13 +54,8 @@ from tg_harvest.ingest.flood_wait import (
 )
 from tg_harvest.ingest.range_harvest import probe_history_access
 from tg_harvest.ingest.store import (
-    backfill_message_search_text_from_filenames,
-)
-from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
-from tg_harvest.storage import fts as _fts
-from tg_harvest.storage import search_terms as _search_terms
 from tg_harvest.storage.connection import synchronized_write
 
 DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
@@ -2279,19 +2276,6 @@ def _admin_cleanup_job_runner(
             admin_job_set_status_fn(job_id, "done")
             return
 
-        if cleanup_mode == "empty_media":
-            synced = backfill_message_search_text_from_filenames(
-                conn,
-                chat_id=chat_id if scope == "chat" else None,
-                batch_size=5000,
-                log_fn=lambda message: admin_job_append_log_fn(job_id, str(message)),
-            )
-            if synced > 0:
-                admin_job_append_log_fn(
-                    job_id,
-                    f"已先补齐 {synced} 条可搜索文件名文本，用于保留可通过文件名搜索的数据",
-                )
-
         target_count = _build_cleanup_targets_table(
             cur,
             cleanup_mode,
@@ -2674,7 +2658,6 @@ def _admin_start_cleanup_job_thread(
 def _admin_start_cleanup_empty_job_thread(
     job_id, scope, chat_id, target_label, **kwargs
 ):
-    # 修正：必须明确指定 cleanup_mode="empty_media"
     return start_admin_job_thread(
         _admin_cleanup_job_runner,
         job_id,

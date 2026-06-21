@@ -6,19 +6,6 @@ from tg_harvest.storage.search_text_state import (
     table_has_column,
 )
 
-_OBSOLETE_INDEXES = (
-    # Covered by sqlite_autoindex_messages_1 (UNIQUE(chat_id, message_id)).
-    "idx_messages_msg_id",
-    # Covered by the left prefix of idx_messages_chat_date for current lookups.
-    "idx_messages_chat_id",
-    # Exact duplicates of table primary-key autoindexes.
-    "idx_media_file_ref",
-    "idx_dedupe_runs_batch",
-    "idx_admin_job_logs_job_seq",
-    # Historical duplicate of idx_mg_pure_hash.
-    "idx_mg_hash",
-)
-
 
 def _normalize_index_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", str(sql or "").strip()).lower()
@@ -55,11 +42,6 @@ def _ensure_index(cur: sqlite3.Cursor, index_name: str, expected_sql: str) -> No
     if existing_sql and _normalize_index_sql(existing_sql) != _normalize_index_sql(expected_sql):
         cur.execute(f"DROP INDEX IF EXISTS {index_name}")
     cur.execute(_create_index_sql(expected_sql))
-
-
-def _drop_obsolete_indexes(cur: sqlite3.Cursor) -> None:
-    for index_name in _OBSOLETE_INDEXES:
-        cur.execute(f"DROP INDEX IF EXISTS {index_name}")
 
 
 def _create_message_indexes(cur: sqlite3.Cursor):
@@ -520,7 +502,6 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
 
 
 def _create_indexes(cur: sqlite3.Cursor):
-    _drop_obsolete_indexes(cur)
     _create_chat_indexes(cur)
     _create_message_indexes(cur)
     _create_media_indexes(cur)

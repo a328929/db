@@ -311,7 +311,7 @@
       if (query) params.set('q', query);
       var payload = await fetchJSON('/api/admin/clone/runs?' + params.toString());
       state.items = Array.isArray(payload.items) ? payload.items : [];
-      state.total = Number(payload.total || payload.count || 0) || 0;
+      state.total = Number(payload.total || 0) || 0;
       if (state.offset >= state.total && state.total > 0) {
         state.offset = Math.max(0, Math.floor((state.total - 1) / state.limit) * state.limit);
         persistState(elements);
@@ -428,7 +428,7 @@
         '/api/admin/clone/runs/' + encodeURIComponent(runId) + '/messages?' + params.toString()
       );
       state.mappingItems = Array.isArray(payload.items) ? payload.items : [];
-      state.mappingTotal = Number(payload.total || payload.count || 0) || 0;
+      state.mappingTotal = Number(payload.total || 0) || 0;
       if (state.mappingOffset >= state.mappingTotal && state.mappingTotal > 0) {
         state.mappingOffset = Math.max(
           0,

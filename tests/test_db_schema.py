@@ -3,15 +3,13 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tg_harvest.app import factory as app_factory
-from tg_harvest.ingest.store import batch_upsert, upsert_chat
+import tg_harvest.app.factory as app_factory
+import tg_harvest.storage.fts as _fts
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.storage import fts as _fts
 from tg_harvest.storage.access import has_fts
 from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
 from tg_harvest.storage.schema import create_schema
 from tg_harvest.storage.search_terms import (
-    backfill_message_search_terms_upgrade_batch,
     drain_message_search_terms_rebuild_queue,
     extract_cjk_bigrams,
     extract_cjk_search_terms,
@@ -25,76 +23,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
-
-    def test_create_schema_heals_old_messages_and_chat_columns(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE chats (
-                chat_id INTEGER PRIMARY KEY,
-                chat_title TEXT NOT NULL,
-                chat_username TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE messages (
-                pk INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                msg_type TEXT NOT NULL,
-                link TEXT,
-                UNIQUE(chat_id, message_id)
-            )
-            """
-        )
-        cur.execute(
-            "INSERT INTO chats(chat_id, chat_title, chat_username) VALUES (1, 'Legacy Chat', 'legacy')"
-        )
-        cur.execute(
-            "INSERT INTO messages(chat_id, message_id, msg_type, link) VALUES (1, 10, 'TEXT', 'old-link')"
-        )
-        self.conn.commit()
-
-        feats = detect_sqlite_features(self.conn)
-        create_schema(self.conn, feats)
-
-        cur.execute("PRAGMA table_info(chats)")
-        chat_columns = {row[1] for row in cur.fetchall()}
-        self.assertIn("message_count", chat_columns)
-        self.assertIn("is_public", chat_columns)
-        self.assertIn("chat_type", chat_columns)
-        self.assertIn("first_seen_at", chat_columns)
-        self.assertIn("last_seen_at", chat_columns)
-
-        cur.execute("PRAGMA table_xinfo(messages)")
-        message_columns = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("link", message_columns)
-        self.assertIn("msg_date_text", message_columns)
-        self.assertIn("msg_date_ts", message_columns)
-        self.assertIn("content_norm", message_columns)
-        self.assertIn("search_text_present", message_columns)
-        self.assertIn("is_promo", message_columns)
-        self.assertIn("updated_at", message_columns)
-
-        cur.execute("PRAGMA index_list(messages)")
-        message_indexes = {row[1] for row in cur.fetchall()}
-        self.assertIn("idx_messages_unsearchable_pk", message_indexes)
-        self.assertIn("idx_messages_unsearchable_chat", message_indexes)
-
-        cur.execute(
-            "SELECT message_count, first_seen_at, last_seen_at FROM chats WHERE chat_id = 1"
-        )
-        chat_row = cur.fetchone()
-        self.assertEqual(1, int(chat_row["message_count"]))
-        self.assertTrue(chat_row["first_seen_at"])
-        self.assertTrue(chat_row["last_seen_at"])
-
-        cur.execute("SELECT created_at, updated_at FROM messages WHERE chat_id = 1")
-        message_row = cur.fetchone()
-        self.assertTrue(message_row["created_at"])
-        self.assertTrue(message_row["updated_at"])
 
     def test_unsearchable_message_lookup_uses_partial_index(self) -> None:
         cur = self.conn.cursor()
@@ -313,69 +241,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 plan_text = " ".join(str(row[3]) for row in cur.fetchall())
                 self.assertIn(expected_index, plan_text)
                 self.assertNotIn("USE TEMP B-TREE FOR GROUP BY", plan_text)
-
-    def test_migrated_legacy_tables_get_timestamps_on_future_writes(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            CREATE TABLE chats (
-                chat_id INTEGER PRIMARY KEY,
-                chat_title TEXT NOT NULL,
-                chat_username TEXT
-            )
-            """
-        )
-        cur.execute(
-            """
-            CREATE TABLE messages (
-                pk INTEGER PRIMARY KEY AUTOINCREMENT,
-                chat_id INTEGER NOT NULL,
-                message_id INTEGER NOT NULL,
-                msg_type TEXT NOT NULL,
-                UNIQUE(chat_id, message_id)
-            )
-            """
-        )
-        self.conn.commit()
-
-        create_schema(self.conn, detect_sqlite_features(self.conn))
-
-        upsert_chat(self.conn, (2, "New Chat", None, 0, "Channel"))
-        batch_upsert(
-            self.conn,
-            [
-                (
-                    2,
-                    20,
-                    "2026-01-01 00:00:00",
-                    1,
-                    None,
-                    "hello",
-                    "hello",
-                    "hash",
-                    "hash",
-                    "TEXT",
-                    None,
-                    0,
-                    0,
-                    0,
-                    "[]",
-                    0,
-                    None,
-                    5,
-                )
-            ],
-            [],
-        )
-
-        cur.execute("SELECT first_seen_at, last_seen_at FROM chats WHERE chat_id = 2")
-        chat_row = cur.fetchone()
-        self.assertTrue(chat_row["first_seen_at"])
-        self.assertTrue(chat_row["last_seen_at"])
-        cur.execute("SELECT created_at, updated_at FROM messages WHERE chat_id = 2")
-        message_row = cur.fetchone()
-        self.assertTrue(message_row["created_at"])
-        self.assertTrue(message_row["updated_at"])
 
     def test_create_schema_heals_auxiliary_tables(self) -> None:
         cur = self.conn.cursor()
@@ -652,70 +517,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertTrue(cur.fetchone()["started_at"])
         cur.execute("SELECT created_at FROM dedupe_actions WHERE batch_id = 'run-1'")
         self.assertTrue(cur.fetchone()["created_at"])
-
-    def test_create_schema_drops_legacy_restricted_absent_scan_false_positives(self) -> None:
-        create_schema(self.conn, detect_sqlite_features(self.conn))
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO admin_absent_chats(
-                chat_id,
-                chat_title,
-                scan_reason,
-                scanned_at
-            )
-            VALUES
-                (1, 'False Positive', 'Telegram 限制显示：This channel can be opened', '2026-01-01'),
-                (2, 'Forbidden', 'Telegram 返回该会话不可访问', '2026-01-01')
-            """
-        )
-        self.conn.commit()
-
-        create_schema(self.conn, detect_sqlite_features(self.conn))
-
-        cur.execute("SELECT chat_id FROM admin_absent_chats ORDER BY chat_id")
-        self.assertEqual([2], [int(row["chat_id"]) for row in cur.fetchall()])
-
-    def test_create_schema_drops_obsolete_duplicate_indexes(self) -> None:
-        feats = detect_sqlite_features(self.conn)
-        create_schema(self.conn, feats)
-        cur = self.conn.cursor()
-        stale_index_sql = [
-            "CREATE INDEX idx_messages_chat_id ON messages(chat_id)",
-            "CREATE INDEX idx_messages_msg_id ON messages(message_id)",
-            "CREATE INDEX idx_media_file_ref ON message_media(chat_id, message_id)",
-            "CREATE INDEX idx_dedupe_runs_batch ON dedupe_runs(batch_id)",
-            "CREATE INDEX idx_admin_job_logs_job_seq ON admin_job_logs(job_id, seq)",
-            "CREATE INDEX idx_mg_hash ON media_groups(chat_id, pure_hash) WHERE pure_hash <> ''",
-        ]
-        for sql in stale_index_sql:
-            cur.execute(sql)
-        self.conn.commit()
-
-        create_schema(self.conn, feats)
-
-        cur.execute("PRAGMA index_list(messages)")
-        message_indexes = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("idx_messages_chat_id", message_indexes)
-        self.assertNotIn("idx_messages_msg_id", message_indexes)
-        self.assertIn("idx_messages_chat_date", message_indexes)
-
-        cur.execute("PRAGMA index_list(message_media)")
-        media_indexes = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("idx_media_file_ref", media_indexes)
-
-        cur.execute("PRAGMA index_list(dedupe_runs)")
-        dedupe_run_indexes = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("idx_dedupe_runs_batch", dedupe_run_indexes)
-
-        cur.execute("PRAGMA index_list(admin_job_logs)")
-        admin_log_indexes = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("idx_admin_job_logs_job_seq", admin_log_indexes)
-
-        cur.execute("PRAGMA index_list(media_groups)")
-        media_group_indexes = {row[1] for row in cur.fetchall()}
-        self.assertNotIn("idx_mg_hash", media_group_indexes)
-        self.assertIn("idx_mg_pure_hash", media_group_indexes)
 
     def test_create_schema_replaces_stale_named_index_definitions(self) -> None:
         feats = detect_sqlite_features(self.conn)
@@ -1053,54 +854,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
             ('"originalneedle"',),
         )
         self.assertEqual([], cur.fetchall())
-
-    def test_create_schema_upgrades_old_bigram_only_search_terms(self) -> None:
-        feats = detect_sqlite_features(self.conn)
-        create_schema(self.conn, feats)
-        cur = self.conn.cursor()
-        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
-        cur.execute(
-            """
-            INSERT INTO messages(
-                pk, chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
-                content, content_norm, has_media
-            ) VALUES (1, 1, 10, '2026-01-01 00:00:00', 1, 'TEXT', '福利姬', '福利姬', 0)
-            """
-        )
-        cur.execute("DELETE FROM message_search_terms")
-        cur.executemany(
-            "INSERT INTO message_search_terms(pk, term) VALUES (1, ?)",
-            [("福利",), ("利姬",)],
-        )
-        cur.execute(
-            """
-            INSERT INTO message_search_terms_meta(key, value)
-            VALUES ('cjk_terms_version', '1')
-            ON CONFLICT(key) DO UPDATE SET value = excluded.value
-            """
-        )
-        self.conn.commit()
-
-        create_schema(self.conn, feats)
-
-        cur.execute(
-            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_backfill_mode'"
-        )
-        self.assertEqual("unigram", cur.fetchone()["value"])
-
-        self.assertEqual(1, backfill_message_search_terms_upgrade_batch(self.conn))
-        self.assertEqual(0, backfill_message_search_terms_upgrade_batch(self.conn))
-
-        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
-        self.assertEqual(
-            ["利", "利姬", "姬", "福", "福利"],
-            [row["term"] for row in cur.fetchall()],
-        )
-        cur.execute(
-            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_version'"
-        )
-        self.assertEqual("2", cur.fetchone()["value"])
-
 
 class StorageAccessFtsDetectionTests(unittest.TestCase):
     def setUp(self) -> None:

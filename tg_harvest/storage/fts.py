@@ -156,9 +156,8 @@ def _sync_fts_from_scratch(cur: sqlite3.Cursor, *, batch_size: int = 50000) -> N
     cur.execute("DROP TABLE IF EXISTS messages_fts")
     _create_fts_table(cur)
     _write_fts_index_status(cur, ready=False)
-    # Keep triggers installed while historical rows are backfilled. The rebuild
-    # commits in batches, so this prevents a crash or external writer from
-    # leaving new message changes outside the FTS index mid-rebuild.
+    # Keep triggers installed during the batched rebuild so a crash or external
+    # writer cannot leave new message changes outside the FTS index.
     _create_fts_triggers(cur)
 
     conn = cur.connection

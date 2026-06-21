@@ -4,7 +4,7 @@ from unittest.mock import patch
 
 from flask import Flask
 
-from tg_harvest.web import auth as auth_module
+import tg_harvest.web.auth as auth_module
 from tg_harvest.web.auth import register_auth_routes
 from tg_harvest.web.routes.clone import register_clone_routes
 
@@ -591,7 +591,8 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertEqual(1, payload["count"])
+        self.assertEqual(1, payload["total"])
+        self.assertNotIn("count", payload)
         item = payload["items"][0]
         self.assertEqual("run-existing", item["run_id"])
         self.assertEqual("Source Existing Copy", item["target_title"])
@@ -605,9 +606,9 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertEqual(1, payload["count"])
         self.assertEqual("run-existing", payload["items"][0]["run_id"])
         self.assertEqual(1, payload["total"])
+        self.assertNotIn("count", payload)
         self.assertEqual(20, payload["limit"])
         self.assertEqual(0, payload["offset"])
 
@@ -700,8 +701,8 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertEqual(1, payload["count"])
         self.assertEqual(1, payload["total"])
+        self.assertNotIn("count", payload)
         self.assertEqual(2, payload["items"][0]["source_message_id"])
 
     def test_clone_run_delete_requires_confirm(self) -> None:
@@ -769,66 +770,6 @@ class CloneRoutesTests(unittest.TestCase):
             payload["timeline_preview"]["readiness_reasons"],
         )
 
-    def test_clone_run_migration_returns_latest_timeline_migration(self) -> None:
-        self.created_clone_migrations.extend(
-            [
-                {
-                    "migration_id": "migration-legacy-text",
-                    "run_id": "run-existing",
-                    "mode": "text_replay",
-                    "status": "done",
-                    "phase": "done",
-                    "updated_at": "2026-06-18T00:00:00+00:00",
-                },
-                {
-                    "migration_id": "migration-timeline",
-                    "run_id": "run-existing",
-                    "mode": "timeline_replay",
-                    "status": "done",
-                    "phase": "done",
-                    "updated_at": "2026-06-18T00:01:00+00:00",
-                },
-            ]
-        )
-
-        with self._auth_config_patch():
-            self._login_admin()
-            response = self.client.get("/api/admin/clone/runs/run-existing/migration")
-
-        self.assertEqual(200, response.status_code)
-        payload = response.get_json()
-        self.assertEqual("migration-timeline", payload["migration"]["migration_id"])
-        self.assertEqual(
-            "migration-timeline",
-            payload["timeline_migration"]["migration_id"],
-        )
-        self.assertEqual(
-            "migration-timeline",
-            payload["timeline_preview"]["latest_migration_id"],
-        )
-
-    def test_clone_run_migration_ignores_legacy_split_migration_only(self) -> None:
-        self.created_clone_migrations.append(
-            {
-                "migration_id": "migration-legacy-text",
-                "run_id": "run-existing",
-                "mode": "text_replay",
-                "status": "done",
-                "phase": "done",
-                "updated_at": "2026-06-18T00:00:00+00:00",
-            }
-        )
-
-        with self._auth_config_patch():
-            self._login_admin()
-            response = self.client.get("/api/admin/clone/runs/run-existing/migration")
-
-        self.assertEqual(200, response.status_code)
-        payload = response.get_json()
-        self.assertIsNone(payload["migration"])
-        self.assertIsNone(payload["timeline_migration"])
-        self.assertNotIn("latest_migration_id", payload["timeline_preview"])
-
     def test_clone_deep_preflight_rejects_missing_csrf_token(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
@@ -889,24 +830,6 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("run-existing", kwargs["run_id"])
         self.assertEqual("job-clone-1", kwargs["plan_id"])
         self.assertIn(("job-clone-1", "已接收克隆深度预检请求"), self.logs)
-
-    def test_legacy_split_migration_routes_are_removed(self) -> None:
-        with self._auth_config_patch():
-            csrf_token = self._login_admin()
-            for path in (
-                "/api/admin/clone/runs/run-existing/migrate-text",
-                "/api/admin/clone/runs/run-existing/resolve-media",
-                "/api/admin/clone/runs/run-existing/migrate-media",
-            ):
-                response = self.client.post(
-                    path,
-                    json={},
-                    headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
-                )
-                self.assertEqual(404, response.status_code, path)
-
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.created_clone_migrations)
 
     def test_clone_timeline_migration_creates_migration_and_starts_job(self) -> None:
         self._create_done_plan()
@@ -1118,7 +1041,7 @@ class CloneRoutesTests(unittest.TestCase):
                 json={
                     "chat_id": 100,
                     "target_title": "Source Backup",
-                    "target_kind": "group",
+                    "target_kind": "megagroup",
                     "confirm": "CLONE:STRUCTURE:100",
                 },
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},

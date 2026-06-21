@@ -5,10 +5,7 @@ import time
 from collections.abc import Callable
 from contextlib import closing
 
-from tg_harvest.storage.search_terms import (
-    backfill_message_search_terms_upgrade_batch,
-    drain_message_search_terms_rebuild_queue,
-)
+from tg_harvest.storage.search_terms import drain_message_search_terms_rebuild_queue
 
 _SEARCH_TERM_MAINTENANCE_LOCK = threading.Lock()
 _SEARCH_TERM_MAINTENANCE_EVENT = threading.Event()
@@ -16,7 +13,6 @@ _SEARCH_TERM_MAINTENANCE_THREAD: threading.Thread | None = None
 _SEARCH_TERM_MAINTENANCE_GET_CONN_FN: Callable[[], sqlite3.Connection] | None = None
 
 _SEARCH_TERM_MAINTENANCE_BATCH_SIZE = 500
-_SEARCH_TERM_UPGRADE_BATCH_SIZE = 5000
 _SEARCH_TERM_MAINTENANCE_IDLE_SEC = 2.0
 _SEARCH_TERM_MAINTENANCE_INTER_BATCH_SEC = 0.05
 
@@ -69,16 +65,10 @@ def _message_search_maintenance_worker() -> None:
                         conn,
                         batch_size=_SEARCH_TERM_MAINTENANCE_BATCH_SIZE,
                     )
-                    upgraded = 0
-                    if drained <= 0:
-                        upgraded = backfill_message_search_terms_upgrade_batch(
-                            conn,
-                            batch_size=_SEARCH_TERM_UPGRADE_BATCH_SIZE,
-                        )
             except Exception:
                 logging.exception("后台维护中文短词搜索索引失败")
                 break
 
-            if drained <= 0 and upgraded <= 0:
+            if drained <= 0:
                 break
             time.sleep(_SEARCH_TERM_MAINTENANCE_INTER_BATCH_SEC)

@@ -66,14 +66,8 @@ def extract_cjk_search_terms(text: str) -> list[str]:
     return out
 
 
-def _extract_cjk_unigrams(text: str) -> list[str]:
-    return [term for term in extract_cjk_search_terms(text) if len(term) == 1]
-
-
 _MESSAGE_SEARCH_TERMS_VERSION_KEY = "cjk_terms_version"
 _MESSAGE_SEARCH_TERMS_VERSION = "2"
-_MESSAGE_SEARCH_TERMS_BACKFILL_MODE_KEY = "cjk_terms_backfill_mode"
-_MESSAGE_SEARCH_TERMS_BACKFILL_LAST_PK_KEY = "cjk_terms_backfill_last_pk"
 
 
 def _read_message_search_terms_version(cur: sqlite3.Cursor) -> str:
@@ -97,47 +91,6 @@ def _write_message_search_terms_version(cur: sqlite3.Cursor) -> None:
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
         """,
         (_MESSAGE_SEARCH_TERMS_VERSION_KEY, _MESSAGE_SEARCH_TERMS_VERSION),
-    )
-
-
-def _read_message_search_terms_meta(cur: sqlite3.Cursor, key: str) -> str:
-    if not _table_exists(cur, "message_search_terms_meta"):
-        return ""
-    cur.execute(
-        "SELECT value FROM message_search_terms_meta WHERE key = ? LIMIT 1",
-        (key,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return ""
-    return str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "")
-
-
-def _write_message_search_terms_meta(
-    cur: sqlite3.Cursor, key: str, value: str
-) -> None:
-    cur.execute(
-        """
-        INSERT INTO message_search_terms_meta(key, value)
-        VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """,
-        (key, value),
-    )
-
-
-def _delete_message_search_terms_meta(cur: sqlite3.Cursor, key: str) -> None:
-    if not _table_exists(cur, "message_search_terms_meta"):
-        return
-    cur.execute("DELETE FROM message_search_terms_meta WHERE key = ?", (key,))
-
-
-def _mark_message_search_terms_backfill(cur: sqlite3.Cursor, *, mode: str) -> None:
-    _write_message_search_terms_meta(
-        cur, _MESSAGE_SEARCH_TERMS_BACKFILL_MODE_KEY, mode
-    )
-    _write_message_search_terms_meta(
-        cur, _MESSAGE_SEARCH_TERMS_BACKFILL_LAST_PK_KEY, "0"
     )
 
 
@@ -190,125 +143,6 @@ def _sync_message_search_terms_from_scratch(conn: sqlite3.Connection) -> None:
         cur.close()
 
 
-def _backfill_message_search_term_unigrams(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    try:
-        last_pk = 0
-        batch_size = 5000
-        while True:
-            cur.execute(
-                """
-                SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '') AS search_text
-                FROM messages
-                WHERE pk > ?
-                ORDER BY pk ASC
-                LIMIT ?
-                """,
-                (last_pk, batch_size),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                break
-
-            inserts: list[tuple[str, int]] = []
-            for row in rows:
-                pk = int(row["pk"])
-                last_pk = pk
-                for token in _extract_cjk_unigrams(str(row["search_text"] or "")):
-                    inserts.append((token, pk))
-
-            if inserts:
-                cur.executemany(
-                    "INSERT OR IGNORE INTO message_search_terms(term, pk) VALUES (?, ?)",
-                    inserts,
-                )
-            conn.commit()
-
-        _write_message_search_terms_version(cur)
-        conn.commit()
-    finally:
-        cur.close()
-
-
-@synchronized_write
-def backfill_message_search_terms_upgrade_batch(
-    conn: sqlite3.Connection, *, batch_size: int = 5000
-) -> int:
-    cur = conn.cursor()
-    try:
-        if not _table_exists(cur, "message_search_terms_meta"):
-            return 0
-
-        mode = _read_message_search_terms_meta(
-            cur, _MESSAGE_SEARCH_TERMS_BACKFILL_MODE_KEY
-        )
-        if mode not in {"full", "unigram"}:
-            return 0
-
-        raw_last_pk = _read_message_search_terms_meta(
-            cur, _MESSAGE_SEARCH_TERMS_BACKFILL_LAST_PK_KEY
-        )
-        try:
-            last_pk = max(0, int(raw_last_pk or "0"))
-        except ValueError:
-            last_pk = 0
-
-        cur.execute("BEGIN IMMEDIATE")
-        if mode == "full" and last_pk == 0:
-            cur.execute("DELETE FROM message_search_terms")
-
-        cur.execute(
-            """
-            SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '') AS search_text
-            FROM messages
-            WHERE pk > ?
-            ORDER BY pk ASC
-            LIMIT ?
-            """,
-            (last_pk, max(1, int(batch_size))),
-        )
-        rows = cur.fetchall()
-        if not rows:
-            _write_message_search_terms_version(cur)
-            _delete_message_search_terms_meta(cur, _MESSAGE_SEARCH_TERMS_BACKFILL_MODE_KEY)
-            _delete_message_search_terms_meta(
-                cur, _MESSAGE_SEARCH_TERMS_BACKFILL_LAST_PK_KEY
-            )
-            conn.commit()
-            return 0
-
-        inserts: list[tuple[str, int]] = []
-        next_last_pk = last_pk
-        for row in rows:
-            pk = int(row["pk"])
-            next_last_pk = pk
-            search_text = str(row["search_text"] or "")
-            tokens = (
-                extract_cjk_search_terms(search_text)
-                if mode == "full"
-                else _extract_cjk_unigrams(search_text)
-            )
-            for token in tokens:
-                inserts.append((token, pk))
-
-        if inserts:
-            cur.executemany(
-                "INSERT OR IGNORE INTO message_search_terms(term, pk) VALUES (?, ?)",
-                inserts,
-            )
-        _write_message_search_terms_meta(
-            cur, _MESSAGE_SEARCH_TERMS_BACKFILL_LAST_PK_KEY, str(next_last_pk)
-        )
-        conn.commit()
-        return len(rows)
-    except Exception:
-        with suppress(Exception):
-            conn.rollback()
-        raise
-    finally:
-        cur.close()
-
-
 def _heal_message_search_terms_if_needed(
     conn: sqlite3.Connection, *, force_heal: bool = False
 ) -> None:
@@ -338,21 +172,13 @@ def _heal_message_search_terms_if_needed(
         return
 
     if force_heal:
-        logging.warning("配置强制开启中文短词辅助索引后台修复...")
-        mode = "full"
+        logging.warning("配置强制开启中文短词辅助索引重建...")
     elif has_data:
-        logging.info("检测到中文短词辅助索引版本过旧，已安排后台升级单字索引")
-        mode = "unigram"
+        logging.info("检测到中文短词辅助索引版本不一致，正在重建当前版本索引")
     else:
-        logging.info("检测到中文短词辅助索引为空，已安排后台首次同步")
-        mode = "full"
+        logging.info("检测到中文短词辅助索引为空，正在同步当前版本索引")
 
-    cur = conn.cursor()
-    try:
-        _mark_message_search_terms_backfill(cur, mode=mode)
-        conn.commit()
-    finally:
-        cur.close()
+    _sync_message_search_terms_from_scratch(conn)
 
 
 @synchronized_write

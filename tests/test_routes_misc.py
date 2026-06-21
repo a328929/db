@@ -10,11 +10,11 @@ from unittest.mock import patch
 
 from flask import Flask
 
-from tg_harvest.app import factory as app_factory
+import tg_harvest.app.factory as app_factory
+import tg_harvest.web.auth as auth_module
+import tg_harvest.web.routes.search as search_routes_module
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.web import auth as auth_module
 from tg_harvest.web.auth import register_auth_routes
-from tg_harvest.web.routes import search as search_routes_module
 from tg_harvest.web.routes.context import register_context_routes
 from tg_harvest.web.routes.pages import register_page_routes
 from tg_harvest.web.routes.search import register_search_routes
@@ -441,17 +441,24 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
 
         self.assertFalse(app.config["SESSION_COOKIE_SECURE"])
 
-    def test_run_web_server_marks_global_app_ready_after_preinit(self) -> None:
-        app_factory.app.extensions["tg_db_ready"] = False
+    def test_run_web_server_creates_ready_app_for_serving(self) -> None:
+        created_apps = []
+        original_create_app = app_factory.create_app
+
+        def capture_create_app(*, init_db: bool = False):
+            app = original_create_app(init_db=init_db)
+            created_apps.append(app)
+            return app
 
         with patch.object(app_factory, "_ensure_db") as ensure_db_mock, patch.object(
-            app_factory.app, "run", return_value=None
-        ) as run_mock:
+            app_factory, "create_app", side_effect=capture_create_app
+        ), patch("flask.Flask.run", return_value=None) as run_mock:
             app_factory.run_web_server(host="127.0.0.1", port=9999, debug=False)
 
         ensure_db_mock.assert_called_once_with()
         run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=False)
-        self.assertTrue(app_factory.app.extensions["tg_db_ready"])
+        self.assertEqual(1, len(created_apps))
+        self.assertTrue(created_apps[0].extensions["tg_db_ready"])
 
     def test_db_free_routes_do_not_trigger_runtime_db_initialization(self) -> None:
         with patch.dict(

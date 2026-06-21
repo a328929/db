@@ -51,7 +51,7 @@ def _format_missing(items: Iterable[str]) -> str:
 
 def main() -> int:
     try:
-        from tg_harvest import create_app
+        from tg_harvest.app.factory import create_app
     except Exception as exc:  # pragma: no cover - runtime smoke check path
         print(f"[FAIL] import create_app failed: {exc}")
         return 1
@@ -68,7 +68,7 @@ def main() -> int:
         print(f"[FAIL] missing required route(s): {_format_missing(missing)}")
         return 1
 
-    print("[OK] create_app import and app creation succeeded")
+    print("[OK] factory create_app import and app creation succeeded")
     print(f"[OK] required routes present: {_format_missing(REQUIRED_ROUTES)}")
     return 0
 

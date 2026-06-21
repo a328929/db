@@ -20,13 +20,51 @@ class AdminRoutesHandler:
     def __init__(
         self,
         *,
-        services: AdminRouteServices | None = None,
-        **kwargs,
+        services: AdminRouteServices,
     ):
-        self.services = services or AdminRouteServices(**kwargs)
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self.services, name)
+        self.services = services
+        self.logger = services.logger
+        self.cfg = services.cfg
+        self.get_conn_fn = services.get_conn_fn
+        self.parse_admin_chat_id_fn = services.parse_admin_chat_id_fn
+        self.build_admin_chats_payload_fn = services.build_admin_chats_payload_fn
+        self.build_admin_stats_payload_fn = services.build_admin_stats_payload_fn
+        self.admin_get_chat_brief_fn = services.admin_get_chat_brief_fn
+        self.admin_job_get_snapshot_fn = services.admin_job_get_snapshot_fn
+        self.admin_job_get_logs_fn = services.admin_job_get_logs_fn
+        self.admin_get_active_job_fn = services.admin_get_active_job_fn
+        self.admin_request_job_stop_fn = services.admin_request_job_stop_fn
+        self.admin_has_any_active_job_fn = services.admin_has_any_active_job_fn
+        self.admin_try_create_exclusive_job_fn = (
+            services.admin_try_create_exclusive_job_fn
+        )
+        self.admin_create_chat_job_if_absent_fn = (
+            services.admin_create_chat_job_if_absent_fn
+        )
+        self.admin_job_create_fn = services.admin_job_create_fn
+        self.admin_job_append_log_fn = services.admin_job_append_log_fn
+        self.admin_start_harvest_job_thread_fn = (
+            services.admin_start_harvest_job_thread_fn
+        )
+        self.admin_start_update_job_thread_fn = (
+            services.admin_start_update_job_thread_fn
+        )
+        self.admin_start_delete_job_thread_fn = (
+            services.admin_start_delete_job_thread_fn
+        )
+        self.admin_start_delete_empty_chats_job_thread_fn = (
+            services.admin_start_delete_empty_chats_job_thread_fn
+        )
+        self.admin_start_cleanup_job_thread_fn = (
+            services.admin_start_cleanup_job_thread_fn
+        )
+        self.admin_start_cleanup_empty_job_thread_fn = (
+            services.admin_start_cleanup_empty_job_thread_fn
+        )
+        self.admin_make_job_log_handler_fn = services.admin_make_job_log_handler_fn
+        self.admin_job_set_status_fn = services.admin_job_set_status_fn
+        self.admin_harvest_target_max_len = services.admin_harvest_target_max_len
+        self.admin_cleanup_keyword_max_len = services.admin_cleanup_keyword_max_len
 
     def _json_error(self, message: str, status_code: int):
         return json_error(message, status_code)
@@ -487,8 +525,8 @@ class AdminRoutesHandler:
         )
 
 
-def register_admin_routes(app, *, services: AdminRouteServices | None = None, **kwargs) -> None:
-    handler = AdminRoutesHandler(services=services, **kwargs)
+def register_admin_routes(app, *, services: AdminRouteServices) -> None:
+    handler = AdminRoutesHandler(services=services)
 
     app.get("/api/admin/chats")(handler.api_admin_chats)
     app.get("/api/admin/stats")(handler.api_admin_stats)

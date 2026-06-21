@@ -16,7 +16,6 @@ def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             FROM chats c
             """
         )
-        # /api/admin/chats 主字段契约为 chat_id/chat_title/message_count；冗余别名字段已移除（前端兼容在 JS 内处理）。
         chats = [
             {
                 "chat_id": int(row["chat_id"]),

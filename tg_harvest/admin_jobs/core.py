@@ -7,7 +7,7 @@ from contextlib import closing
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from tg_harvest.admin_jobs import runtime as _job_runtime
+import tg_harvest.admin_jobs.runtime as _job_runtime
 from tg_harvest.admin_jobs.store import (
     _admin_active_job_summary_from_row,
     _admin_connect,

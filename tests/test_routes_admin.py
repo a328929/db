@@ -2,6 +2,7 @@ import unittest
 
 from flask import Flask
 
+from tg_harvest.app.services import AdminRouteServices
 from tg_harvest.web.routes.admin import AdminRoutesHandler
 
 
@@ -30,14 +31,21 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         def start_delete_empty_chats(*args, **kwargs):
             self.started_jobs.append({"args": args, **kwargs})
 
-        self.handler = AdminRoutesHandler(
+        self.services = AdminRouteServices(
             logger=_LoggerStub(),
             cfg=object(),
             get_conn_fn=lambda: _ConnStub(),
-            admin_make_job_log_handler_fn=lambda _job_id: None,
-            admin_job_set_status_fn=lambda *_args, **_kwargs: True,
-            admin_job_append_log_fn=append_log,
-            admin_job_get_snapshot_fn=lambda job_id: {"job_id": job_id, "status": "queued"},
+            parse_admin_chat_id_fn=lambda value: value,
+            build_admin_chats_payload_fn=lambda _conn: {"ok": True, "items": []},
+            build_admin_stats_payload_fn=lambda _conn, _chat_id: ({"ok": True}, 200),
+            admin_get_chat_brief_fn=lambda _conn, chat_id: {
+                "chat_id": chat_id,
+                "chat_title": f"chat-{chat_id}",
+            },
+            admin_job_get_snapshot_fn=lambda job_id: {
+                "job_id": job_id,
+                "status": "queued",
+            },
             admin_job_get_logs_fn=lambda *_args, **_kwargs: [],
             admin_get_active_job_fn=lambda: None,
             admin_request_job_stop_fn=lambda *_args, **_kwargs: (True, None),
@@ -46,24 +54,21 @@ class AdminRoutesHandlerTests(unittest.TestCase):
                 {"job_id": "job-1"},
                 None,
             ),
+            admin_create_chat_job_if_absent_fn=lambda *_args, **_kwargs: (None, None),
             admin_job_create_fn=lambda *_args, **_kwargs: {"job_id": "job-1"},
+            admin_job_append_log_fn=append_log,
             admin_start_harvest_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_update_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_delete_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_delete_empty_chats_job_thread_fn=start_delete_empty_chats,
             admin_start_cleanup_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_cleanup_empty_job_thread_fn=start_cleanup_empty,
-            admin_get_chat_brief_fn=lambda _conn, chat_id: {
-                "chat_id": chat_id,
-                "chat_title": f"chat-{chat_id}",
-            },
-            admin_create_chat_job_if_absent_fn=lambda *_args, **_kwargs: (None, None),
-            parse_admin_chat_id_fn=lambda value: value,
-            build_admin_chats_payload_fn=lambda _conn: {"ok": True, "items": []},
-            build_admin_stats_payload_fn=lambda _conn, _chat_id: ({"ok": True}, 200),
+            admin_make_job_log_handler_fn=lambda _job_id: None,
+            admin_job_set_status_fn=lambda *_args, **_kwargs: True,
             admin_harvest_target_max_len=128,
             admin_cleanup_keyword_max_len=64,
         )
+        self.handler = AdminRoutesHandler(services=self.services)
 
     def test_cleanup_empty_requires_json_body(self) -> None:
         with self.app.test_request_context("/api/admin/jobs/cleanup-empty", method="POST"):

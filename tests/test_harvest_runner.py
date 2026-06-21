@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 from telethon.errors import FloodWaitError
 
-from tg_harvest.ingest import runner as harvest_runner_module
+import tg_harvest.ingest.runner as harvest_runner_module
 from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.runner import (
     _build_iter_messages_kwargs,

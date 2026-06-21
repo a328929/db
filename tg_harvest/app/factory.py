@@ -340,6 +340,7 @@ def create_app(*, init_db: bool = False) -> Flask:
         _ensure_db()
     app = Flask(
         "tg_harvest",
+        root_path=str(PROJECT_ROOT),
         template_folder=str(PROJECT_ROOT / "templates"),
         static_folder=str(PROJECT_ROOT / "static"),
     )
@@ -383,14 +384,7 @@ def create_app(*, init_db: bool = False) -> Flask:
     register_all_routes(app, services=_build_route_services())
     return app
 
-
-app = create_app(init_db=False)
-
-
 def run_web_server(*, host: str = "0.0.0.0", port: int = 8890, debug: bool = False) -> None:
-    _ensure_db()
+    app = create_app(init_db=True)
     app.extensions["tg_db_ready"] = True
     app.run(host=host, port=port, debug=debug)
-
-if __name__ == "__main__":
-    run_web_server()

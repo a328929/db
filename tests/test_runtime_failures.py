@@ -10,9 +10,9 @@ from concurrent.futures import Future
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from tg_harvest.admin_jobs import core as admin_jobs_core
-from tg_harvest.admin_jobs import runtime as admin_jobs_runtime
-from tg_harvest.admin_jobs import store as admin_jobs_store
+import tg_harvest.admin_jobs.core as admin_jobs_core
+import tg_harvest.admin_jobs.runtime as admin_jobs_runtime
+import tg_harvest.admin_jobs.store as admin_jobs_store
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -56,11 +56,6 @@ from tg_harvest.admin_jobs.store import _admin_fetch_job_snapshot_row
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.domain.dedupe import dedupe_promotional_duplicates
-from tg_harvest.domain.normalize import (
-    make_hash,
-    normalize_text_for_hash,
-    normalize_text_light,
-)
 from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.parse import HarvestCounters
@@ -69,7 +64,6 @@ from tg_harvest.ingest.runner import (
     _read_target_message_total,
 )
 from tg_harvest.ingest.store import (
-    backfill_message_search_text_from_filenames,
     batch_upsert,
     load_grouped_ids_for_messages,
 )
@@ -2664,7 +2658,7 @@ class HarvestProgressTests(unittest.TestCase):
         self.assertTrue(any("读取目标总消息数失败" in line for line in captured.output))
 
 
-class SearchableFilenameBackfillTests(unittest.TestCase):
+class SearchableMediaCleanupTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
         self.conn.row_factory = sqlite3.Row
@@ -2708,107 +2702,6 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
-
-    def test_backfill_message_search_text_from_filenames_populates_search_text(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO messages(chat_id, message_id, msg_type, content, content_norm, has_media)
-            VALUES (1, 100, 'VIDEO', '', '', 1)
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO message_media(chat_id, message_id, file_name, file_unique_id, media_fingerprint)
-            VALUES (1, 100, 'movie.mp4', 'u1', 'fp1')
-            """
-        )
-        self.conn.commit()
-
-        updated = backfill_message_search_text_from_filenames(self.conn, chat_id=1)
-        self.assertEqual(1, updated)
-
-        cur.execute(
-            "SELECT content, content_norm FROM messages WHERE chat_id = 1 AND message_id = 100"
-        )
-        row = cur.fetchone()
-        self.assertEqual("movie.mp4", row["content"])
-        self.assertEqual("movie.mp4", row["content_norm"])
-
-    def test_backfill_message_search_text_from_filenames_recomputes_message_features(self) -> None:
-        cur = self.conn.cursor()
-        cur.execute(
-            """
-            INSERT INTO messages(
-                chat_id, message_id, msg_type, content, content_norm,
-                pure_hash, dedupe_hash, has_media
-            )
-            VALUES (1, 104, 'VIDEO', '', '', '', 'old-dedupe', 1)
-            """
-        )
-        cur.execute(
-            """
-            INSERT INTO message_media(chat_id, message_id, file_name, file_unique_id, media_fingerprint)
-            VALUES (1, 104, 'Movie File.MP4', 'u104', 'fp104')
-            """
-        )
-        self.conn.commit()
-
-        updated = backfill_message_search_text_from_filenames(self.conn, chat_id=1)
-        self.assertEqual(1, updated)
-
-        expected_norm = normalize_text_light("Movie File.MP4")
-        expected_hash = make_hash(normalize_text_for_hash("Movie File.MP4"))
-        cur.execute(
-            """
-            SELECT content, content_norm, pure_hash, dedupe_hash, text_len
-            FROM messages
-            WHERE chat_id = 1 AND message_id = 104
-            """
-        )
-        row = cur.fetchone()
-        self.assertEqual("Movie File.MP4", row["content"])
-        self.assertEqual(expected_norm, row["content_norm"])
-        self.assertEqual(expected_hash, row["pure_hash"])
-        self.assertEqual(expected_hash, row["dedupe_hash"])
-        self.assertEqual(len("Movie File.MP4"), int(row["text_len"]))
-
-    def test_backfill_message_search_text_from_filenames_advances_by_pk(self) -> None:
-        cur = self.conn.cursor()
-        cur.executemany(
-            """
-            INSERT INTO messages(chat_id, message_id, msg_type, content, content_norm, has_media)
-            VALUES (1, ?, 'PHOTO', '', '', 1)
-            """,
-            [(101,), (102,), (103,)],
-        )
-        cur.executemany(
-            """
-            INSERT INTO message_media(chat_id, message_id, file_name, file_unique_id, media_fingerprint)
-            VALUES (1, ?, ?, ?, ?)
-            """,
-            [
-                (101, "a.jpg", "u101", "fp101"),
-                (102, "", "u102", "fp102"),
-                (103, "c.jpg", "u103", "fp103"),
-            ],
-        )
-        self.conn.commit()
-
-        updated = backfill_message_search_text_from_filenames(
-            self.conn,
-            chat_id=1,
-            batch_size=1,
-        )
-
-        self.assertEqual(2, updated)
-        cur.execute(
-            "SELECT message_id, content FROM messages ORDER BY message_id"
-        )
-        self.assertEqual(
-            [(101, "a.jpg"), (102, ""), (103, "c.jpg")],
-            [(int(row["message_id"]), row["content"]) for row in cur.fetchall()],
-        )
 
     def test_load_grouped_ids_for_messages_reads_existing_album_ids(self) -> None:
         cur = self.conn.cursor()
@@ -2998,44 +2891,6 @@ class SearchableFilenameBackfillTests(unittest.TestCase):
         )
 
         self.assertEqual(0, target_count)
-
-    def test_unsearchable_cleanup_keeps_media_after_filename_backfill(self) -> None:
-        cur = self.conn.cursor()
-        cur.executemany(
-            """
-            INSERT INTO messages(chat_id, message_id, grouped_id, content, content_norm, has_media)
-            VALUES (?, ?, ?, ?, ?, 1)
-            """,
-            [
-                (1, 235, 920, "", ""),
-                (1, 236, 920, "", ""),
-            ],
-        )
-        cur.executemany(
-            """
-            INSERT INTO message_media(chat_id, message_id, file_name, file_unique_id, media_fingerprint)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            [
-                (1, 235, "kept_by_filename.jpg", "u-235", "fp-235"),
-                (1, 236, "", "u-236", "fp-236"),
-            ],
-        )
-        self.conn.commit()
-
-        backfilled = backfill_message_search_text_from_filenames(self.conn, chat_id=1)
-        target_count = _build_cleanup_targets_table(
-            cur,
-            "empty_media",
-            "",
-            [],
-            "",
-        )
-
-        self.assertEqual(1, backfilled)
-        self.assertEqual(1, target_count)
-        cur.execute("SELECT message_id FROM temp_cleanup_targets")
-        self.assertEqual([236], [int(row["message_id"]) for row in cur.fetchall()])
 
     def test_unsearchable_cleanup_targets_blank_non_media_messages(self) -> None:
         cur = self.conn.cursor()
@@ -3433,40 +3288,6 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertIsNotNone(old_snapshot)
         assert old_snapshot is not None
         self.assertEqual("error", old_snapshot["status"])
-
-    def test_job_trim_handles_legacy_naive_sqlite_timestamps(self) -> None:
-        conn = sqlite3.connect(self.db_path)
-        try:
-            conn.execute(
-                """
-                INSERT INTO admin_jobs(
-                    job_id, job_type, status, target_chat_id, target_label,
-                    created_at, updated_at, heartbeat_at,
-                    progress_current, progress_total, progress_stage, last_logged_current
-                )
-                VALUES (
-                    'legacy-naive', 'cleanup', 'done', NULL, 'legacy',
-                    '2000-01-01 00:00:00', '2000-01-01 00:00:00', '2000-01-01 00:00:00',
-                    0, NULL, 'done', 0
-                )
-                """
-            )
-            conn.commit()
-        finally:
-            conn.close()
-
-        created = _admin_job_create("cleanup", target_chat_id=None, target_label="new")
-
-        self.assertTrue(created["job_id"])
-        conn = sqlite3.connect(self.db_path)
-        try:
-            row = conn.execute(
-                "SELECT 1 FROM admin_jobs WHERE job_id = 'legacy-naive'"
-            ).fetchone()
-        finally:
-            conn.close()
-        self.assertIsNone(row)
-
 
 class AdminJobLogHandlerTests(unittest.TestCase):
     def test_handler_skips_passthrough_when_disabled(self) -> None:

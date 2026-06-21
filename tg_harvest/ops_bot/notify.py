@@ -16,7 +16,7 @@ _JOB_TYPE_LABELS = {
     "harvest": "新增群组采集",
     "update": "群组更新",
     "delete": "删除群组",
-    "delete_empty": "删除空群组",
+    "delete_empty_chats": "删除空群组",
     "cleanup": "清理消息",
     "cleanup_empty": "清理空内容",
     "clone_structure": "结构克隆",
@@ -35,11 +35,6 @@ _STATUS_LABELS = {
     "done": "完成",
     "error": "失败",
 }
-
-# Keep backward compatibility with the old key while matching the actual
-# job_type created by the admin route.
-_JOB_TYPE_LABELS["delete_empty_chats"] = _JOB_TYPE_LABELS["delete_empty"]
-
 
 def _snapshot_value(snapshot: dict[str, Any] | None, key: str) -> Any:
     if not isinstance(snapshot, dict):
