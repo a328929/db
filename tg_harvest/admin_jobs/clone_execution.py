@@ -3,10 +3,7 @@ from typing import Any
 from tg_harvest.admin_jobs.clone import _cfg_with_session_name
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.clone_plan import CLONE_TEXT_REPLAY_CHUNK_MAX_LEN
-
-
-def clean_clone_text(value: Any) -> str:
-    return str(value or "").strip()
+from tg_harvest.domain.coerce import clean_text as clean_clone_text
 
 
 def normalize_clone_nonnegative_int(

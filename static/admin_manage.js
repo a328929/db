@@ -50,11 +50,6 @@
     stopRequested: false
   };
 
-  var authState = {
-    authenticated: false,
-    logoutTimer: null
-  };
-
   document.addEventListener('DOMContentLoaded', async function () {
     var elements = getElements();
     if (!elements) {
@@ -65,7 +60,7 @@
     bindEvents(elements);
 
     // 首次进入执行验证检查
-    await checkAuth(elements);
+    await sessionController.checkAuth(elements);
 
     window.AdminManageUI = {
       appendLog: function (message) {
@@ -144,6 +139,10 @@
     return elements;
   }
 
+  function setLoginStatus(elements, message) {
+    shared.setLoginStatus(elements, message);
+  }
+
   function initializeUI(elements) {
     updateControlVisibility(elements);
     setAdminControlsBusy(elements, false);
@@ -156,13 +155,13 @@
   function bindEvents(elements) {
     // 认证相关事件
     elements.loginConfirmBtn.addEventListener('click', function () {
-      handleLogin(elements);
+      sessionController.handleLogin(elements);
     });
 
     elements.passwordInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        handleLogin(elements);
+        sessionController.handleLogin(elements);
       }
     });
 
@@ -249,88 +248,6 @@
         closeActiveDialog(elements);
       }
     });
-  }
-
-  async function checkAuth(elements) {
-    try {
-      var data = await fetchJSON('/api/admin/auth/check');
-      if (data.authenticated) {
-        authState.authenticated = true;
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.remaining);
-        loadInitialReadOnlyData(elements);
-      } else {
-        openLoginDialog(elements);
-      }
-    } catch (e) {
-      openLoginDialog(elements);
-    }
-  }
-
-  async function handleLogin(elements) {
-    var password = elements.passwordInput.value;
-    if (!password) {
-      setLoginStatus(elements, '请输入管理员密码。');
-      elements.passwordInput.focus();
-      return;
-    }
-
-    setLoginStatus(elements, '');
-    setElementDisabled(elements.loginConfirmBtn, true);
-    try {
-      var data = await fetchJSON('/api/admin/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: password })
-      });
-
-      if (data.ok) {
-        authState.authenticated = true;
-        elements.passwordInput.value = '';
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.expiry_duration);
-        loadInitialReadOnlyData(elements);
-        appendLog(elements, '认证成功，欢迎进入管理系统');
-      }
-    } catch (e) {
-      setLoginStatus(elements, '认证失败：' + e.message);
-      elements.passwordInput.focus();
-    } finally {
-      setElementDisabled(elements.loginConfirmBtn, false);
-    }
-  }
-
-  function setupAutoLogout(elements, seconds) {
-    if (authState.logoutTimer) clearTimeout(authState.logoutTimer);
-    if (seconds <= 0) return;
-
-    authState.logoutTimer = setTimeout(function () {
-      authState.authenticated = false;
-      setLoginStatus(elements, '会话已过期，请重新登录。');
-      openLoginDialog(elements);
-    }, seconds * 1000);
-  }
-
-  function setLoginStatus(elements, message) {
-    if (!elements || !elements.loginStatus) {
-      return;
-    }
-    elements.loginStatus.textContent = String(message || '');
-  }
-
-  function openLoginDialog(elements) {
-    setDialogOpenState(elements.loginDialog, true, {
-      focusElement: elements.passwordInput
-    });
-    setPageInteractionState(document.getElementById('admin-manage-page'), false);
-  }
-
-  function closeLoginDialog(elements) {
-    setLoginStatus(elements, '');
-    setDialogOpenState(elements.loginDialog, false, {
-      skipFocusRestore: true
-    });
-    setPageInteractionState(document.getElementById('admin-manage-page'), true);
   }
 
   function getActiveDialog(elements) {
@@ -712,221 +629,122 @@
 
 
   function startJobPolling(elements, jobId) {
-    var normalizedJobId = String(jobId || '').trim();
-    if (!normalizedJobId) {
-      return;
-    }
-
-    stopJobPolling(undefined, elements);
-
-    jobPollState.pollToken += 1;
-    jobPollState.jobId = normalizedJobId;
-    jobPollState.lastSeq = 0;
-    jobPollState.startedAt = Date.now();
-    jobPollState.pollCount = 0;
-    jobPollState.retryCount = 0;
-    jobPollState.lastProgressKey = '';
-    jobPollState.stopRequested = false;
-    jobPollState.isPolling = true;
-    setAdminControlsBusy(elements, true);
-
-    pollJobProgress(elements);
-  }
-
-  function stopJobPolling(expectedToken, elements) {
-    if (typeof expectedToken === 'number' && jobPollState.pollToken !== expectedToken) {
-      return;
-    }
-    if (jobPollState.timerId) {
-      window.clearTimeout(jobPollState.timerId);
-    }
-    jobPollState.timerId = null;
-    jobPollState.isPolling = false;
-    jobPollState.stopRequested = false;
-    setAdminControlsBusy(elements, false);
-  }
-
-  function isPollContextActive(jobId, pollToken) {
-    return jobPollState.isPolling
-      && jobPollState.jobId === jobId
-      && jobPollState.pollToken === pollToken;
-  }
-
-  function scheduleJobPolling(elements, jobId, pollToken) {
-    scheduleJobPollingWithDelay(elements, jobId, pollToken, JOB_POLL_INTERVAL_MS);
-  }
-
-  function scheduleJobPollingWithDelay(elements, jobId, pollToken, delayMs) {
-    if (!isPollContextActive(jobId, pollToken)) {
-      return;
-    }
-    jobPollState.timerId = window.setTimeout(function () {
-      pollJobProgress(elements);
-    }, Math.max(250, Number(delayMs) || JOB_POLL_INTERVAL_MS));
+    jobPollController.start(jobPollState, jobId);
   }
 
   function buildSnapshotProgressMessage(snapshot) {
     return shared.buildSnapshotProgressMessage(snapshot);
   }
 
-  async function pollJobProgress(elements) {
-    if (!jobPollState.isPolling || !jobPollState.jobId) {
-      return;
+  function stopJobPolling(expectedToken, _elements) {
+    jobPollController.stop(jobPollState, expectedToken);
+  }
+
+  async function fetchJSON(url, options) {
+    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+      onUnauthorized: sessionController.handleUnauthorizedResponse
+    }));
+  }
+
+  var sessionController = shared.createAdminSessionController({
+    afterAuth: async function (elements, context) {
+      await loadInitialReadOnlyData(elements);
+      if (context.reason === 'login') {
+        appendLog(elements, '认证成功，欢迎进入管理系统');
+      }
+    },
+    getElements: getElements,
+    getPageElement: function () {
+      return document.getElementById('admin-manage-page');
     }
+  });
 
-    var jobId = jobPollState.jobId;
-    var pollToken = jobPollState.pollToken;
-    if (!isPollContextActive(jobId, pollToken)) {
-      return;
-    }
-
-    jobPollState.pollCount += 1;
-    var elapsed = Date.now() - jobPollState.startedAt;
-    if (jobPollState.pollCount > JOB_POLL_MAX_COUNT || elapsed > JOB_POLL_MAX_DURATION_MS) {
-      if (!isPollContextActive(jobId, pollToken)) {
+  var jobPollController = shared.createAdminJobPollController({
+    appendLog: function (message) {
+      var elements = getElements();
+      if (elements) {
+        appendLog(elements, message);
+      }
+    },
+    fetchJSON: fetchJSON,
+    getDoneMessage: function () {
+      return '任务执行完成';
+    },
+    getElements: getElements,
+    getErrorMessage: function () {
+      return '任务执行失败，请检查日志';
+    },
+    onDone: async function () {
+      var elements = getElements();
+      if (!elements) {
         return;
       }
-      appendLog(elements, '任务日志轮询已停止：达到轮询上限');
-      stopJobPolling(pollToken, elements);
-      return;
-    }
-
-    try {
-      if (!isPollContextActive(jobId, pollToken)) {
-        return;
+      try {
+        await refreshReadOnlyDataAfterJob(elements);
+      } catch (refreshError) {
+        appendLog(elements, '刷新统计失败：' + refreshError.message);
       }
-      var logsPayload = await fetchJSON(
-        '/api/admin/jobs/'
-          + encodeURIComponent(jobId)
-          + '/logs?after_seq='
-          + encodeURIComponent(String(jobPollState.lastSeq || 0))
-      );
-      if (!isPollContextActive(jobId, pollToken)) {
-        return;
+    },
+    onSnapshot: function (snapshot, state) {
+      var elements = getElements();
+      state.stopRequested = !!snapshot.stop_requested;
+      if (elements) {
+        setStopButtonState(elements);
       }
-
-      var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
-      for (var i = 0; i < logs.length; i += 1) {
-        if (!isPollContextActive(jobId, pollToken)) {
-          return;
-        }
-        var line = logs[i];
-        if (!line || typeof line.message !== 'string') {
-          continue;
-        }
-        appendLog(elements, line.message);
-        if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
-          jobPollState.lastSeq = Math.max(jobPollState.lastSeq, line.seq);
-        }
-      }
-
-      var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
-      if (!isPollContextActive(jobId, pollToken)) {
-        return;
-      }
-
+    },
+    onStart: function (state) {
+      state.startedAt = Date.now();
+      state.pollCount = 0;
+      state.stopRequested = false;
+    },
+    onStop: function (state) {
+      state.stopRequested = false;
+    },
+    resolveSnapshot: function (snapshotPayload) {
       var isSnapshotObject = snapshotPayload && typeof snapshotPayload === 'object' && !Array.isArray(snapshotPayload);
       var snapshotOk = isSnapshotObject && snapshotPayload.ok !== false;
       var snapshot = snapshotOk && snapshotPayload.job && typeof snapshotPayload.job === 'object' && !Array.isArray(snapshotPayload.job)
         ? snapshotPayload.job
         : null;
       var status = snapshot && typeof snapshot.status === 'string' ? snapshot.status.trim() : '';
-
       if (!snapshot || !status) {
-        if (!isPollContextActive(jobId, pollToken)) {
-          return;
-        }
-        appendLog(elements, '任务状态响应异常，已停止轮询');
-        stopJobPolling(pollToken, elements);
-        return;
+        return {
+          errorMessage: '任务状态响应异常，已停止轮询',
+          snapshot: null,
+          status: ''
+        };
       }
-
       if (status !== 'queued' && status !== 'running' && status !== 'done' && status !== 'error') {
-        if (!isPollContextActive(jobId, pollToken)) {
-          return;
-        }
-        appendLog(elements, '任务状态异常：' + status + '，已停止轮询');
-        stopJobPolling(pollToken, elements);
-        return;
+        return {
+          errorMessage: '任务状态异常：' + status + '，已停止轮询',
+          snapshot: null,
+          status: ''
+        };
       }
-
-      jobPollState.retryCount = 0;
-      var progressState = buildSnapshotProgressMessage(snapshot);
-      jobPollState.stopRequested = !!snapshot.stop_requested;
-      setStopButtonState(elements);
-      if (progressState.key && progressState.key !== jobPollState.lastProgressKey) {
-        jobPollState.lastProgressKey = progressState.key;
-        if (progressState.message) {
-          appendLog(elements, progressState.message);
-        }
+      return {
+        errorMessage: '',
+        snapshot: snapshot,
+        status: status
+      };
+    },
+    retryBaseMs: JOB_POLL_RETRY_BASE_MS,
+    retryMaxCount: JOB_POLL_RETRY_MAX_COUNT,
+    setBusy: function (elements, isBusy) {
+      if (elements) {
+        setAdminControlsBusy(elements, isBusy);
       }
-
-      if (status === 'done') {
-        if (!isPollContextActive(jobId, pollToken)) {
-          return;
-        }
-        appendLog(elements, '任务执行完成');
-        stopJobPolling(pollToken, elements);
-        try {
-          await refreshReadOnlyDataAfterJob(elements);
-        } catch (refreshError) {
-          appendLog(elements, '刷新统计失败：' + refreshError.message);
-        }
-        return;
+    },
+    shouldContinue: function (state, context) {
+      state.pollCount += 1;
+      var elapsed = Date.now() - Number(state.startedAt || 0);
+      if (state.pollCount <= JOB_POLL_MAX_COUNT && elapsed <= JOB_POLL_MAX_DURATION_MS) {
+        return true;
       }
-      if (status === 'error') {
-        if (!isPollContextActive(jobId, pollToken)) {
-          return;
-        }
-        appendLog(elements, '任务执行失败，请检查日志');
-        stopJobPolling(pollToken, elements);
-        return;
-      }
-    } catch (error) {
-      if (!isPollContextActive(jobId, pollToken)) {
-        return;
-      }
-      jobPollState.retryCount += 1;
-      if (jobPollState.retryCount > JOB_POLL_RETRY_MAX_COUNT) {
-        appendLog(elements, '任务日志轮询失败次数过多，已停止轮询：' + error.message);
-        stopJobPolling(pollToken, elements);
-        return;
-      }
-      appendLog(
-        elements,
-        '任务日志轮询失败，稍后自动重试（'
-          + jobPollState.retryCount
-          + '/'
-          + JOB_POLL_RETRY_MAX_COUNT
-          + '）：'
-          + error.message
-      );
-      scheduleJobPollingWithDelay(
-        elements,
-        jobId,
-        pollToken,
-        JOB_POLL_RETRY_BASE_MS * Math.min(jobPollState.retryCount, 5)
-      );
-      return;
+      context.appendLog('任务日志轮询已停止：达到轮询上限');
+      context.stop();
+      return false;
     }
-
-    scheduleJobPolling(elements, jobId, pollToken);
-  }
-
-  async function fetchJSON(url, options) {
-    return sharedFetchJSON(url, Object.assign({}, options || {}, {
-      onUnauthorized: handleUnauthorizedResponse
-    }));
-  }
-
-  function handleUnauthorizedResponse() {
-    authState.authenticated = false;
-    var els = getElements();
-    if (els) {
-      setLoginStatus(els, '会话已过期，请重新登录。');
-      openLoginDialog(els);
-    }
-  }
+  });
 
   function updateControlVisibility(elements) {
     var scopeValue = String(elements.scopeSelect.value || 'none');

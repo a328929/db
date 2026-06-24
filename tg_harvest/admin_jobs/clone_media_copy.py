@@ -1,21 +1,19 @@
 from contextlib import suppress
 from typing import Any
 
+from tg_harvest.admin_jobs.common import call_with_conn
 from tg_harvest.admin_jobs.clone_forwarding import (
     clone_delete_copied_relay_messages,
     clone_forward_without_source_attribution,
 )
 from tg_harvest.admin_jobs.common import resolve_chat_entity
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
+from tg_harvest.domain.coerce import clean_text as clean_clone_media_text
 from tg_harvest.domain.clone_plan import (
     clone_plan_media_relay,
     clone_plan_media_relay_chat_id,
 )
 from tg_harvest.storage.clone import record_clone_message_mapping
-
-
-def clean_clone_media_text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def clone_sent_message_ids(result: Any) -> list[int | None]:
@@ -179,25 +177,22 @@ def record_clone_media_mapping(
     status: str,
     error_message: str = "",
 ) -> None:
-    conn = get_conn_fn()
-    try:
-        record_clone_message_mapping(
-            conn,
-            migration_id=migration_id,
-            run_id=run_id,
-            plan_id=plan_id,
-            source_chat_id=int(source_message["chat_id"]),
-            source_message_id=int(source_message["message_id"]),
-            source_msg_date_ts=source_message.get("msg_date_ts"),
-            source_msg_date_text=source_message.get("msg_date_text"),
-            target_chat_id=int(target_chat_id),
-            target_message_id=target_message_id,
-            chunk_index=0,
-            chunk_count=1,
-            mode=mode,
-            status=status,
-            error_message=error_message,
-            sent_at=_admin_now_iso() if status == "done" else "",
-        )
-    finally:
-        conn.close()
+    call_with_conn(
+        get_conn_fn,
+        record_clone_message_mapping,
+        migration_id=migration_id,
+        run_id=run_id,
+        plan_id=plan_id,
+        source_chat_id=int(source_message["chat_id"]),
+        source_message_id=int(source_message["message_id"]),
+        source_msg_date_ts=source_message.get("msg_date_ts"),
+        source_msg_date_text=source_message.get("msg_date_text"),
+        target_chat_id=int(target_chat_id),
+        target_message_id=target_message_id,
+        chunk_index=0,
+        chunk_count=1,
+        mode=mode,
+        status=status,
+        error_message=error_message,
+        sent_at=_admin_now_iso() if status == "done" else "",
+    )

@@ -42,18 +42,13 @@
     lastProgressKey: ''
   };
 
-  var authState = {
-    authenticated: false,
-    logoutTimer: null
-  };
-
   document.addEventListener('DOMContentLoaded', async function () {
     var elements = getElements();
     if (!elements) return;
 
     initializeUI(elements);
     bindEvents(elements);
-    await checkAuth(elements);
+    await sessionController.checkAuth(elements);
   });
 
   function getElements() {
@@ -144,6 +139,10 @@
     return elements;
   }
 
+  function setLoginStatus(elements, message) {
+    shared.setLoginStatus(elements, message);
+  }
+
   function initializeUI(elements) {
     restoreConsoleState(elements);
     ensurePlaceholder(elements.logContainer);
@@ -158,12 +157,12 @@
 
   function bindEvents(elements) {
     elements.loginConfirmBtn.addEventListener('click', function () {
-      handleLogin(elements);
+      sessionController.handleLogin(elements);
     });
     elements.passwordInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        handleLogin(elements);
+        sessionController.handleLogin(elements);
       }
     });
     elements.sortSelect.addEventListener('change', function () {
@@ -220,86 +219,6 @@
         trapFocusWithin(elements.loginDialog, event);
       }
     });
-  }
-
-  async function checkAuth(elements) {
-    try {
-      var data = await fetchJSON('/api/admin/auth/check');
-      if (data.authenticated) {
-        authState.authenticated = true;
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.remaining);
-        await loadSourceChats(elements);
-        await loadCloneRuns(elements);
-        await resumeActiveJobPolling(elements);
-        return;
-      }
-      openLoginDialog(elements);
-    } catch (_error) {
-      openLoginDialog(elements);
-    }
-  }
-
-  async function handleLogin(elements) {
-    var password = elements.passwordInput.value;
-    if (!password) {
-      setLoginStatus(elements, '请输入管理员密码。');
-      elements.passwordInput.focus();
-      return;
-    }
-
-    setLoginStatus(elements, '');
-    setElementDisabled(elements.loginConfirmBtn, true);
-    try {
-      var data = await fetchJSON('/api/admin/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: password })
-      });
-      if (data.ok) {
-        authState.authenticated = true;
-        elements.passwordInput.value = '';
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.expiry_duration);
-        appendLog(elements, '认证成功，已进入克隆系统');
-        await loadSourceChats(elements);
-        await loadCloneRuns(elements);
-        await resumeActiveJobPolling(elements);
-      }
-    } catch (error) {
-      setLoginStatus(elements, '认证失败：' + error.message);
-      elements.passwordInput.focus();
-    } finally {
-      setElementDisabled(elements.loginConfirmBtn, false);
-    }
-  }
-
-  function setupAutoLogout(elements, seconds) {
-    if (authState.logoutTimer) window.clearTimeout(authState.logoutTimer);
-    if (seconds <= 0) return;
-    authState.logoutTimer = window.setTimeout(function () {
-      authState.authenticated = false;
-      setLoginStatus(elements, '会话已过期，请重新登录。');
-      openLoginDialog(elements);
-    }, seconds * 1000);
-  }
-
-  function setLoginStatus(elements, message) {
-    if (!elements || !elements.loginStatus) return;
-    elements.loginStatus.textContent = String(message || '');
-  }
-
-  function openLoginDialog(elements) {
-    setDialogOpenState(elements.loginDialog, true, {
-      focusElement: elements.passwordInput
-    });
-    setPageInteractionState(document.getElementById('admin-clone-page'), false);
-  }
-
-  function closeLoginDialog(elements) {
-    setLoginStatus(elements, '');
-    setDialogOpenState(elements.loginDialog, false, { skipFocusRestore: true });
-    setPageInteractionState(document.getElementById('admin-clone-page'), true);
   }
 
   async function loadSourceChats(elements) {
@@ -1558,22 +1477,27 @@
 
   async function fetchJSON(url, options) {
     return sharedFetchJSON(url, Object.assign({}, options || {}, {
-      onUnauthorized: handleUnauthorizedResponse
+      onUnauthorized: sessionController.handleUnauthorizedResponse
     }));
   }
 
   async function postJSON(url, payload) {
     return sharedPostJSON(url, payload, {
-      onUnauthorized: handleUnauthorizedResponse
+      onUnauthorized: sessionController.handleUnauthorizedResponse
     });
   }
 
-  function handleUnauthorizedResponse() {
-    authState.authenticated = false;
-    var elements = getElements();
-    if (elements) {
-      setLoginStatus(elements, '会话已过期，请重新登录。');
-      openLoginDialog(elements);
+  var sessionController = shared.createAdminSessionController({
+    afterAuth: async function (elements, context) {
+      await loadSourceChats(elements);
+      await resumeActiveJobPolling(elements);
+      if (context.reason === 'login') {
+        appendLog(elements, '认证成功，已进入克隆系统');
+      }
+    },
+    getElements: getElements,
+    getPageElement: function () {
+      return document.getElementById('admin-clone-page');
     }
-  }
+  });
 })();

@@ -53,7 +53,13 @@ from tg_harvest.app.admin_payloads import (
     parse_admin_chat_id,
 )
 from tg_harvest.app.routes_registry import register_all_routes
-from tg_harvest.app.services import AdminRouteServices, RouteRegistryServices
+from tg_harvest.app.services import (
+    AdminRouteServices,
+    ChannelRouteServices,
+    CloneRouteServices,
+    RecoveryRouteServices,
+    RouteRegistryServices,
+)
 from tg_harvest.config import CFG
 from tg_harvest.domain.meta_payload import _build_meta_payload
 from tg_harvest.ingest.parse import setup_logging
@@ -242,8 +248,8 @@ def _request_requires_runtime_db() -> bool:
     return request.endpoint not in _DB_FREE_ENDPOINTS
 
 
-def _build_route_services() -> RouteRegistryServices:
-    admin_services = AdminRouteServices(
+def _build_admin_route_services() -> AdminRouteServices:
+    return AdminRouteServices(
         logger=logger,
         cfg=CFG,
         get_conn_fn=get_conn,
@@ -273,23 +279,31 @@ def _build_route_services() -> RouteRegistryServices:
         admin_harvest_target_max_len=ADMIN_HARVEST_TARGET_MAX_LEN,
         admin_cleanup_keyword_max_len=ADMIN_CLEANUP_KEYWORD_MAX_LEN,
     )
-    return RouteRegistryServices(
-        page_size=PAGE_SIZE,
-        logger=logger,
-        get_conn_fn=get_conn,
-        build_meta_payload_fn=_build_meta_payload,
-        has_fts_fn=has_fts,
-        from_sql=FROM_SQL,
-        max_count=MAX_COUNT,
-        map_search_items_fn=_map_search_items,
-        parse_search_params_fn=_parse_search_params,
-        search_payload_service_fn=_search_payload_service,
-        admin=admin_services,
-        list_database_channels_fn=list_database_channels,
-        list_missing_chat_scan_results_fn=list_missing_chat_scan_results,
-        list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
-        list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
-        list_recovery_chat_candidates_fn=list_recovery_chat_candidates,
+
+
+def _shared_route_service_kwargs(admin_services: AdminRouteServices) -> dict[str, object]:
+    return {
+        "logger": logger,
+        "get_conn_fn": get_conn,
+        "cfg": admin_services.cfg,
+    }
+
+
+def _shared_admin_job_route_kwargs(admin_services: AdminRouteServices) -> dict[str, object]:
+    return {
+        "admin_try_create_exclusive_job_fn": (
+            admin_services.admin_try_create_exclusive_job_fn
+        ),
+        "admin_job_get_snapshot_fn": admin_services.admin_job_get_snapshot_fn,
+        "admin_job_append_log_fn": admin_services.admin_job_append_log_fn,
+        "admin_job_set_status_fn": admin_services.admin_job_set_status_fn,
+    }
+
+
+def _build_route_services() -> RouteRegistryServices:
+    admin_services = _build_admin_route_services()
+    clone_services = CloneRouteServices(
+        **_shared_route_service_kwargs(admin_services),
         list_clone_source_chats_fn=list_clone_source_chats,
         build_clone_preflight_report_fn=build_clone_preflight_report,
         create_clone_run_fn=create_clone_run,
@@ -305,8 +319,24 @@ def _build_route_services() -> RouteRegistryServices:
         create_clone_migration_fn=create_clone_migration,
         load_latest_clone_migration_fn=load_latest_clone_migration,
         build_clone_timeline_replay_preview_fn=build_clone_timeline_replay_preview,
-        build_recovery_overview_fn=build_recovery_overview,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
+        **_shared_admin_job_route_kwargs(admin_services),
+        admin_start_clone_structure_job_thread_fn=_admin_start_clone_structure_job_thread,
+        admin_start_clone_deep_preflight_job_thread_fn=(
+            _admin_start_clone_deep_preflight_job_thread
+        ),
+        admin_start_clone_timeline_migration_job_thread_fn=(
+            _admin_start_clone_timeline_migration_job_thread
+        ),
+    )
+    channel_services = ChannelRouteServices(
+        **_shared_route_service_kwargs(admin_services),
+        list_database_channels_fn=list_database_channels,
+        list_missing_chat_scan_results_fn=list_missing_chat_scan_results,
+        list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
+        list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
+        build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
+        **_shared_admin_job_route_kwargs(admin_services),
         admin_start_missing_chats_scan_job_thread_fn=(
             _admin_start_missing_chats_scan_job_thread
         ),
@@ -316,19 +346,33 @@ def _build_route_services() -> RouteRegistryServices:
         admin_start_restricted_chats_scan_job_thread_fn=(
             _admin_start_restricted_chats_scan_job_thread
         ),
+    )
+    recovery_services = RecoveryRouteServices(
+        **_shared_route_service_kwargs(admin_services),
+        list_recovery_chat_candidates_fn=list_recovery_chat_candidates,
+        build_recovery_overview_fn=build_recovery_overview,
+        build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
+        **_shared_admin_job_route_kwargs(admin_services),
         admin_start_recovery_scan_job_thread_fn=_admin_start_recovery_scan_job_thread,
         admin_start_recovery_restore_job_thread_fn=(
             _admin_start_recovery_restore_job_thread
         ),
-        admin_start_clone_structure_job_thread_fn=(
-            _admin_start_clone_structure_job_thread
-        ),
-        admin_start_clone_deep_preflight_job_thread_fn=(
-            _admin_start_clone_deep_preflight_job_thread
-        ),
-        admin_start_clone_timeline_migration_job_thread_fn=(
-            _admin_start_clone_timeline_migration_job_thread
-        ),
+    )
+    return RouteRegistryServices(
+        page_size=PAGE_SIZE,
+        logger=logger,
+        get_conn_fn=get_conn,
+        build_meta_payload_fn=_build_meta_payload,
+        has_fts_fn=has_fts,
+        from_sql=FROM_SQL,
+        max_count=MAX_COUNT,
+        map_search_items_fn=_map_search_items,
+        parse_search_params_fn=_parse_search_params,
+        search_payload_service_fn=_search_payload_service,
+        admin=admin_services,
+        channels=channel_services,
+        recovery=recovery_services,
+        clone=clone_services,
     )
 
 

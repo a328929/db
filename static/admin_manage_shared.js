@@ -259,6 +259,355 @@
     }
   }
 
+  function setLoginStatus(elements, message) {
+    if (!elements || !elements.loginStatus) {
+      return;
+    }
+    elements.loginStatus.textContent = String(message || '');
+  }
+
+  function createAdminSessionController(options) {
+    var opts = options || {};
+    var afterAuth = typeof opts.afterAuth === 'function' ? opts.afterAuth : null;
+    var getElements = typeof opts.getElements === 'function'
+      ? opts.getElements
+      : function () { return null; };
+    var logoutTimerId = null;
+
+    function getPageElement(elements) {
+      if (typeof opts.getPageElement === 'function') {
+        return opts.getPageElement(elements);
+      }
+      return elements && elements.page ? elements.page : null;
+    }
+
+    function clearLogoutTimer() {
+      if (!logoutTimerId) {
+        return;
+      }
+      window.clearTimeout(logoutTimerId);
+      logoutTimerId = null;
+    }
+
+    function openLoginDialog(elements) {
+      setDialogOpenState(elements && elements.loginDialog, true, {
+        focusElement: elements && elements.passwordInput
+      });
+      setPageInteractionState(getPageElement(elements), false);
+    }
+
+    function closeLoginDialog(elements) {
+      setLoginStatus(elements, '');
+      setDialogOpenState(elements && elements.loginDialog, false, {
+        skipFocusRestore: true
+      });
+      setPageInteractionState(getPageElement(elements), true);
+    }
+
+    function showExpiredSession(elements) {
+      setLoginStatus(elements, '会话已过期，请重新登录。');
+      openLoginDialog(elements);
+    }
+
+    function scheduleAutoLogout(seconds) {
+      clearLogoutTimer();
+      if (seconds <= 0) {
+        return;
+      }
+      logoutTimerId = window.setTimeout(function () {
+        showExpiredSession(getElements());
+      }, seconds * 1000);
+    }
+
+    async function runAfterAuth(elements, reason, payload) {
+      if (!afterAuth) {
+        return;
+      }
+      await afterAuth(elements, {
+        reason: reason,
+        payload: payload
+      });
+    }
+
+    async function checkAuth(elements) {
+      var data = null;
+      try {
+        data = await fetchJSON('/api/admin/auth/check');
+      } catch (_error) {
+        openLoginDialog(elements);
+        return;
+      }
+      if (!data || !data.authenticated) {
+        openLoginDialog(elements);
+        return;
+      }
+      closeLoginDialog(elements);
+      scheduleAutoLogout(data.remaining);
+      await runAfterAuth(elements, 'check', data);
+    }
+
+    async function handleLogin(elements) {
+      var password = elements && elements.passwordInput ? elements.passwordInput.value : '';
+      if (!password) {
+        setLoginStatus(elements, '请输入管理员密码。');
+        if (elements && elements.passwordInput) {
+          elements.passwordInput.focus();
+        }
+        return;
+      }
+
+      setLoginStatus(elements, '');
+      setElementDisabled(elements && elements.loginConfirmBtn, true);
+      try {
+        var data = await fetchJSON('/api/admin/auth/login', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ password: password })
+        });
+        if (!data || !data.ok) {
+          throw new Error('登录失败');
+        }
+        if (elements && elements.passwordInput) {
+          elements.passwordInput.value = '';
+        }
+        closeLoginDialog(elements);
+        scheduleAutoLogout(data.expiry_duration);
+        await runAfterAuth(elements, 'login', data);
+      } catch (error) {
+        setLoginStatus(elements, '认证失败：' + error.message);
+        if (elements && elements.passwordInput) {
+          elements.passwordInput.focus();
+        }
+      } finally {
+        setElementDisabled(elements && elements.loginConfirmBtn, false);
+      }
+    }
+
+    function handleUnauthorizedResponse() {
+      clearLogoutTimer();
+      showExpiredSession(getElements());
+    }
+
+    return {
+      checkAuth: checkAuth,
+      closeLoginDialog: closeLoginDialog,
+      handleLogin: handleLogin,
+      handleUnauthorizedResponse: handleUnauthorizedResponse,
+      openLoginDialog: openLoginDialog,
+      setLoginStatus: setLoginStatus
+    };
+  }
+
+  function createAdminJobPollController(options) {
+    var opts = options || {};
+    var fetchJSON = typeof opts.fetchJSON === 'function' ? opts.fetchJSON : null;
+    var appendLog = typeof opts.appendLog === 'function' ? opts.appendLog : function () {};
+    var getElements = typeof opts.getElements === 'function'
+      ? opts.getElements
+      : function () { return null; };
+    var setBusy = typeof opts.setBusy === 'function' ? opts.setBusy : function () {};
+    var onSnapshot = typeof opts.onSnapshot === 'function' ? opts.onSnapshot : null;
+    var onDone = typeof opts.onDone === 'function' ? opts.onDone : null;
+    var onError = typeof opts.onError === 'function' ? opts.onError : null;
+    var setInitialState = typeof opts.setInitialState === 'function'
+      ? opts.setInitialState
+      : function () {};
+    var onStop = typeof opts.onStop === 'function' ? opts.onStop : null;
+    var getDoneMessage = typeof opts.getDoneMessage === 'function'
+      ? opts.getDoneMessage
+      : function (state) { return state.doneMessage || '任务执行完成'; };
+    var getErrorMessage = typeof opts.getErrorMessage === 'function'
+      ? opts.getErrorMessage
+      : function (state) { return state.errorMessage || '任务执行失败，请检查日志'; };
+    var shouldContinue = typeof opts.shouldContinue === 'function'
+      ? opts.shouldContinue
+      : function () { return true; };
+    var resolveSnapshot = typeof opts.resolveSnapshot === 'function'
+      ? opts.resolveSnapshot
+      : function (snapshotPayload) {
+          var snapshot = snapshotPayload && snapshotPayload.job ? snapshotPayload.job : null;
+          var status = snapshot && typeof snapshot.status === 'string' ? snapshot.status.trim() : '';
+          if (!snapshot || !status) {
+            return {
+              errorMessage: '任务状态响应异常，已停止轮询',
+              snapshot: null,
+              status: ''
+            };
+          }
+          return {
+            errorMessage: '',
+            snapshot: snapshot,
+            status: status
+          };
+        };
+    var onStart = typeof opts.onStart === 'function' ? opts.onStart : null;
+    var intervalMs = Math.max(250, Number(opts.intervalMs) || 3000);
+    var retryBaseMs = Math.max(250, Number(opts.retryBaseMs) || 3000);
+    var retryMaxCount = Math.max(1, Number(opts.retryMaxCount) || 20);
+
+    function stop(state, expectedToken) {
+      if (typeof expectedToken === 'number' && state.pollToken !== expectedToken) {
+        return;
+      }
+      if (state.timerId) {
+        window.clearTimeout(state.timerId);
+      }
+      state.timerId = null;
+      state.isPolling = false;
+      if (typeof onStop === 'function') {
+        onStop(state);
+      }
+      setBusy(getElements(), false);
+    }
+
+    function isActive(state, jobId, pollToken) {
+      return state.isPolling
+        && state.jobId === jobId
+        && state.pollToken === pollToken;
+    }
+
+    function schedule(state, jobId, pollToken, delayMs) {
+      if (!isActive(state, jobId, pollToken)) {
+        return;
+      }
+      state.timerId = window.setTimeout(function () {
+        poll(state);
+      }, Math.max(250, Number(delayMs) || intervalMs));
+    }
+
+    async function poll(state) {
+      if (!state.isPolling || !state.jobId || !fetchJSON) {
+        return;
+      }
+
+      var jobId = state.jobId;
+      var pollToken = state.pollToken;
+      if (!shouldContinue(state, {
+        appendLog: appendLog,
+        stop: function () { stop(state, pollToken); }
+      })) {
+        return;
+      }
+      try {
+        var logsPayload = await fetchJSON(
+          '/api/admin/jobs/'
+            + encodeURIComponent(jobId)
+            + '/logs?after_seq='
+            + encodeURIComponent(String(state.lastSeq || 0))
+        );
+        if (!isActive(state, jobId, pollToken)) {
+          return;
+        }
+
+        var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
+        logs.forEach(function (line) {
+          if (!line || typeof line.message !== 'string') {
+            return;
+          }
+          appendLog(line.message);
+          if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
+            state.lastSeq = Math.max(state.lastSeq, line.seq);
+          }
+        });
+
+        var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
+        if (!isActive(state, jobId, pollToken)) {
+          return;
+        }
+
+        var snapshotInfo = resolveSnapshot(snapshotPayload, state);
+        var snapshot = snapshotInfo && snapshotInfo.snapshot ? snapshotInfo.snapshot : null;
+        var status = snapshotInfo && typeof snapshotInfo.status === 'string' ? snapshotInfo.status.trim() : '';
+        if (!snapshot || !status) {
+          appendLog(
+            snapshotInfo && snapshotInfo.errorMessage
+              ? snapshotInfo.errorMessage
+              : '任务状态响应异常，已停止轮询'
+          );
+          stop(state, pollToken);
+          return;
+        }
+
+        state.retryCount = 0;
+        if (typeof onSnapshot === 'function') {
+          onSnapshot(snapshot, state);
+        }
+        var progressState = buildSnapshotProgressMessage(snapshot);
+        if (progressState.key && progressState.key !== state.lastProgressKey) {
+          state.lastProgressKey = progressState.key;
+          if (progressState.message) {
+            appendLog(progressState.message);
+          }
+        }
+
+        if (status === 'done') {
+          appendLog(getDoneMessage(state, snapshot));
+          stop(state, pollToken);
+          if (typeof onDone === 'function') {
+            await onDone(snapshot, state);
+          }
+          return;
+        }
+        if (status === 'error') {
+          appendLog(getErrorMessage(state, snapshot));
+          stop(state, pollToken);
+          if (typeof onError === 'function') {
+            await onError(snapshot, state);
+          }
+          return;
+        }
+      } catch (error) {
+        if (!isActive(state, jobId, pollToken)) {
+          return;
+        }
+        state.retryCount += 1;
+        if (state.retryCount > retryMaxCount) {
+          appendLog('任务日志轮询失败次数过多，已停止轮询：' + error.message);
+          stop(state, pollToken);
+          return;
+        }
+        appendLog(
+          '任务日志轮询失败，稍后自动重试（'
+            + state.retryCount
+            + '/'
+            + retryMaxCount
+            + '）：'
+            + error.message
+        );
+        schedule(state, jobId, pollToken, retryBaseMs * Math.min(state.retryCount, 5));
+        return;
+      }
+      schedule(state, jobId, pollToken, intervalMs);
+    }
+
+    function start(state, jobId, options) {
+      var normalizedJobId = String(jobId || '').trim();
+      if (!normalizedJobId) {
+        return;
+      }
+      stop(state);
+      state.pollToken += 1;
+      state.jobId = normalizedJobId;
+      state.lastSeq = 0;
+      state.retryCount = 0;
+      state.lastProgressKey = '';
+      state.isPolling = true;
+      setInitialState(state, options || {});
+      if (typeof onStart === 'function') {
+        onStart(state, options || {});
+      }
+      setBusy(getElements(), true);
+      poll(state);
+    }
+
+    return {
+      isActive: isActive,
+      schedule: schedule,
+      start: start,
+      stop: stop
+    };
+  }
+
   function isAllScopeValue(value) {
     return String(value || '').trim() === 'all';
   }
@@ -745,6 +1094,8 @@
     clearLogs: clearLogs,
     ensurePlaceholder: ensurePlaceholder,
     fetchJSON: fetchJSON,
+    createAdminSessionController: createAdminSessionController,
+    createAdminJobPollController: createAdminJobPollController,
     getAdminCsrfToken: getAdminCsrfToken,
     getConfirmationTarget: getConfirmationTarget,
     getCreatedJobId: getCreatedJobId,
@@ -767,6 +1118,7 @@
     setDialogOpenState: setDialogOpenState,
     setElementDisabled: setElementDisabled,
     setElementHidden: setElementHidden,
+    setLoginStatus: setLoginStatus,
     setStatsLineText: setStatsLineText,
     setPageInteractionState: setPageInteractionState,
     setAdminCsrfToken: setAdminCsrfToken,

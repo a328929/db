@@ -20,10 +20,13 @@ from tg_harvest.admin_jobs.cleanup import (
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    call_with_conn,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
+    mark_admin_job_running,
     read_chat_username,
     resolve_chat_entity,
+    start_admin_job_heartbeat,
     start_admin_job_thread,
 )
 from tg_harvest.admin_jobs.core import (
@@ -73,6 +76,76 @@ def _close_write_coordinator(
         if not suppress_errors:
             raise
         logging.exception("写入队列关闭失败，保留原始采集异常")
+
+
+def _start_simple_admin_job(
+    job_id: str,
+    *,
+    admin_job_set_status_fn: Callable[[str, str], bool],
+) -> tuple[Any, Any]:
+    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
+    mark_admin_job_running(
+        job_id,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+    )
+    return heartbeat_stop, heartbeat_thread
+
+
+def _cleanup_worker_client(worker_cfg: Any, worker_id: str, worker_client: Any) -> None:
+    if worker_client:
+        with suppress(Exception):
+            _disconnect_worker_client(worker_client)
+    _cleanup_isolated_worker_session(worker_cfg, worker_id)
+
+
+def _run_simple_admin_job_with_conn(
+    job_id: str,
+    *,
+    get_conn_fn: Callable[[], Any],
+    admin_job_set_status_fn: Callable[[str, str], bool],
+    admin_job_append_log_fn: Callable[[str, str], Any],
+    run_fn: Callable[[Any], None],
+    error_prefix: str,
+    log_exception_fn: Callable[[], None] | None = None,
+) -> None:
+    heartbeat_stop, heartbeat_thread = _start_simple_admin_job(
+        job_id,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+    )
+    conn = None
+    try:
+        conn = get_conn_fn()
+        run_fn(conn)
+        admin_job_set_status_fn(job_id, "done")
+    except Exception as exc:
+        if conn:
+            with suppress(Exception):
+                conn.rollback()
+        if log_exception_fn is not None:
+            log_exception_fn()
+        admin_job_append_log_fn(job_id, f"{error_prefix}{exc}")
+        admin_job_set_status_fn(job_id, "error")
+    finally:
+        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
+        if conn:
+            conn.close()
+
+
+def _silent_progress(
+    job_id: str,
+    current: int,
+    *,
+    total: int | None,
+    stage: str,
+) -> None:
+    _admin_job_update_progress(
+        job_id,
+        current,
+        total=total,
+        stage=stage,
+        log_step=0,
+        auto_log=False,
+    )
 
 
 def _row_value(row: Any, key: str, default: Any = None) -> Any:
@@ -447,11 +520,7 @@ def _admin_update_all_chats(
     if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
         return False
 
-    conn = get_conn_fn()
-    try:
-        rows = _load_admin_update_rows(conn)
-    finally:
-        conn.close()
+    rows = call_with_conn(get_conn_fn, _load_admin_update_rows)
 
     if not rows:
         admin_job_append_log_fn(job_id, "当前无可更新群聊，任务结束")
@@ -520,12 +589,11 @@ def _admin_update_all_chats(
             f"{assignment_counts['primary_only']} 个缺少公开用户名且第二账号无缓存，"
             "优先交给主账号；执行中任一账号失败会自动切换另一账号重试",
         )
-    _admin_job_update_progress(
+    _silent_progress(
         job_id,
         0,
         total=total,
         stage="updating",
-        log_step=0,
     )
 
     write_coordinator = ChatUpdateWriteCoordinator(
@@ -661,10 +729,7 @@ def _admin_update_all_chats(
             after_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
             return max(0, after_count - before_count)
         finally:
-            if local_client:
-                with suppress(Exception):
-                    _disconnect_worker_client(local_client)
-            _cleanup_isolated_worker_session(account.cfg, worker_id)
+            _cleanup_worker_client(account.cfg, worker_id, local_client)
             if semaphore is not None:
                 semaphore.release()
 
@@ -959,26 +1024,22 @@ def _admin_update_all_chats(
                             f"[{idx}/{total}] 线程执行异常：群组={chat_label}，错误={err_msg}",
                         )
                     finally:
-                        _admin_job_update_progress(
+                        _silent_progress(
                             job_id,
                             success_count + failed_count + deferred_count,
                             total=total,
                             stage="updating",
-                            log_step=0,
-                            auto_log=False,
                         )
 
                 while len(futures) < effective_concurrency and _submit_next(executor, futures):
                     pass
     finally:
         if success_count + failed_count >= total:
-            _admin_job_update_progress(
+            _silent_progress(
                 job_id,
                 total,
                 total=total,
                 stage="finalizing",
-                log_step=0,
-                auto_log=False,
             )
         write_coordinator.close()
 
@@ -1022,13 +1083,11 @@ def _admin_update_all_chats(
             f"失败切出 {secondary_stats.get('fallback_out', 0)} 个，"
             f"长等待切换 {secondary_stats.get('flood_wait_switches', 0)} 次",
         )
-    _admin_job_update_progress(
+    _silent_progress(
         job_id,
         processed_count if stopped_early else total,
         total=total,
         stage="done" if failed_count == 0 else "error",
-        log_step=0,
-        auto_log=False,
     )
     return failed_count == 0
 
@@ -1070,13 +1129,11 @@ def _admin_process_single_chat_update(
     )
     stream_failed = False
     try:
-        _admin_job_update_progress(
+        _silent_progress(
             job_id,
             0,
             total=1,
             stage="updating",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_append_log_fn(job_id, "启用边抓取边写入：抓取与数据库写入并行执行")
         progress_total = None
@@ -1113,13 +1170,11 @@ def _admin_process_single_chat_update(
             job_id,
             f"[{idx}/{total}] 增量更新完成：群组={chat_label}，扫描 {seen_count} 条，写入 {written_count} 条",
         )
-        _admin_job_update_progress(
+        _silent_progress(
             job_id,
             1,
             total=1,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
     except Exception:
         stream_failed = True
@@ -1221,24 +1276,20 @@ def _run_single_chat_update_with_account_fallback(
                 f"第二账号重试失败：{admin_error_message(secondary_exc)}"
             ) from secondary_exc
     finally:
-        if secondary_client:
-            with suppress(Exception):
-                _disconnect_worker_client(secondary_client)
-        _cleanup_isolated_worker_session(secondary_cfg, secondary_worker_id)
+        _cleanup_worker_client(secondary_cfg, secondary_worker_id, secondary_client)
 
 
 def _admin_get_chat_message_count(get_conn_fn: Callable[[], Any], chat_id: int) -> int:
-    count_conn = get_conn_fn()
-    try:
-        cur = count_conn.cursor()
+    def _load_chat_message_count(conn: Any, target_chat_id: int) -> int:
+        cur = conn.cursor()
         cur.execute(
             "SELECT COALESCE(message_count, 0) AS cnt FROM chats WHERE chat_id = ?",
-            (chat_id,),
+            (target_chat_id,),
         )
         row = cur.fetchone()
         return int(row["cnt"] or 0) if row else 0
-    finally:
-        count_conn.close()
+
+    return call_with_conn(get_conn_fn, _load_chat_message_count, chat_id)
 
 
 def _probe_update_progress_total(
@@ -1326,10 +1377,7 @@ class _HarvestTargetResolution:
 
     def close(self) -> None:
         for worker_cfg, worker_id, worker_client in reversed(self.cleanup_workers):
-            if worker_client:
-                with suppress(Exception):
-                    _disconnect_worker_client(worker_client)
-            _cleanup_isolated_worker_session(worker_cfg, worker_id)
+            _cleanup_worker_client(worker_cfg, worker_id, worker_client)
 
 
 def _primary_harvest_targets(
@@ -1613,9 +1661,7 @@ def _resolve_harvest_targets(
         )
     finally:
         if secondary_client and not keep_secondary_client:
-            with suppress(Exception):
-                _disconnect_worker_client(secondary_client)
-            _cleanup_isolated_worker_session(secondary_cfg, secondary_worker_id)
+            _cleanup_worker_client(secondary_cfg, secondary_worker_id, secondary_client)
 
 
 def _resolve_harvest_target_entities(
@@ -1640,11 +1686,7 @@ def _resolve_harvest_target_entities(
 
 
 def _read_existing_last_message_id(get_conn_fn: Callable[[], Any], chat_id: int) -> int:
-    conn = get_conn_fn()
-    try:
-        return _get_last_message_id(conn, chat_id)
-    finally:
-        conn.close()
+    return call_with_conn(get_conn_fn, _get_last_message_id, chat_id)
 
 
 def _try_stream_new_chat_multi_account_ranges(
@@ -1807,10 +1849,7 @@ def _try_stream_new_chat_multi_account_ranges(
         )
         return True
     finally:
-        if secondary_client:
-            with suppress(Exception):
-                _disconnect_worker_client(secondary_client)
-        _cleanup_isolated_worker_session(secondary_cfg, secondary_worker_id)
+        _cleanup_worker_client(secondary_cfg, secondary_worker_id, secondary_client)
 
 
 def _stream_new_chat_target(
@@ -1908,9 +1947,11 @@ def _resolve_new_chat_fallback_target(
             )
         finally:
             if secondary_client and not keep_secondary_client:
-                with suppress(Exception):
-                    _disconnect_worker_client(secondary_client)
-                _cleanup_isolated_worker_session(secondary_cfg, secondary_worker_id)
+                _cleanup_worker_client(
+                    secondary_cfg,
+                    secondary_worker_id,
+                    secondary_client,
+                )
 
     primary_account = SimpleNamespace(key="primary", label="主账号", cfg=cfg)
     cooldown_remaining = _account_cooldown_remaining(primary_account)
@@ -2105,13 +2146,11 @@ def _admin_harvest_job_runner(
         total = len(harvest_targets)
         admin_job_append_log_fn(job_id, f"目标解析成功：匹配到 {total} 个会话")
         admin_job_append_log_fn(job_id, "启用边抓取边写入：抓取与数据库写入并行执行")
-        _admin_job_update_progress(
+        _silent_progress(
             job_id,
             0,
             total=total,
             stage="harvesting",
-            log_step=0,
-            auto_log=False,
         )
         write_coordinator = ChatUpdateWriteCoordinator(
             job_id=str(job_id),
@@ -2145,13 +2184,11 @@ def _admin_harvest_job_runner(
                         idx=idx,
                         total=total,
                     )
-                    _admin_job_update_progress(
+                    _silent_progress(
                         job_id,
                         idx,
                         total=total,
                         stage="harvesting",
-                        log_step=0,
-                        auto_log=False,
                     )
                     continue
                 try:
@@ -2206,35 +2243,29 @@ def _admin_harvest_job_runner(
                         idx=idx,
                         total=total,
                     )
-                _admin_job_update_progress(
+                _silent_progress(
                     job_id,
                     idx,
                     total=total,
                     stage="harvesting",
-                    log_step=0,
-                    auto_log=False,
                 )
         except Exception:
             stream_failed = True
             raise
         finally:
             if not stream_failed:
-                _admin_job_update_progress(
+                _silent_progress(
                     job_id,
                     total,
                     total=total,
                     stage="finalizing",
-                    log_step=0,
-                    auto_log=False,
                 )
             _close_write_coordinator(write_coordinator, suppress_errors=stream_failed)
-        _admin_job_update_progress(
+        _silent_progress(
             job_id,
             total,
             total=total,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
@@ -2246,10 +2277,7 @@ def _admin_harvest_job_runner(
         if target_resolution is not None:
             with suppress(Exception):
                 target_resolution.close()
-        if local_client:
-            with suppress(Exception):
-                _disconnect_worker_client(local_client)
-        _cleanup_isolated_worker_session(cfg, worker_id)
+        _cleanup_worker_client(cfg, worker_id, local_client)
         root_logger.removeHandler(job_log_handler)
 
 
@@ -2314,10 +2342,7 @@ def _admin_update_job_runner(
         admin_job_set_status_fn(job_id, "error")
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if local_client:
-            with suppress(Exception):
-                _disconnect_worker_client(local_client)
-        _cleanup_isolated_worker_session(cfg, worker_id)
+        _cleanup_worker_client(cfg, worker_id, local_client)
         root_logger.removeHandler(job_log_handler)
 
 
@@ -2330,17 +2355,10 @@ def _admin_delete_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(
-        job_id, _admin_job_heartbeat
-    )
-    conn = None
-    try:
-        admin_job_set_status_fn(job_id, "running")
+    def _run_delete(conn: Any) -> None:
         admin_job_append_log_fn(
             job_id, f"开始删除数据：目标={chat_title}，群组ID={chat_id}"
         )
-        conn = get_conn_fn()
         related_counts = _count_chat_related_rows(conn, int(chat_id))
         admin_job_append_log_fn(
             job_id,
@@ -2359,16 +2377,15 @@ def _admin_delete_job_runner(
         admin_job_append_log_fn(
             job_id, f"删除完成：共清除 {deleted_messages} 条消息"
         )
-        admin_job_set_status_fn(job_id, "done")
-    except Exception as exc:
-        if conn:
-            conn.rollback()
-        admin_job_append_log_fn(job_id, f"删除失败：{exc}")
-        admin_job_set_status_fn(job_id, "error")
-    finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if conn:
-            conn.close()
+
+    _run_simple_admin_job_with_conn(
+        job_id,
+        get_conn_fn=get_conn_fn,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_job_append_log_fn=admin_job_append_log_fn,
+        run_fn=_run_delete,
+        error_prefix="删除失败：",
+    )
 
 
 def _admin_delete_empty_chats_job_runner(
@@ -2378,15 +2395,8 @@ def _admin_delete_empty_chats_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(
-        job_id, _admin_job_heartbeat
-    )
-    conn = None
-    try:
-        admin_job_set_status_fn(job_id, "running")
+    def _run_delete_empty(conn: Any) -> None:
         admin_job_append_log_fn(job_id, "开始删除零消息群组")
-        conn = get_conn_fn()
         stats = _delete_empty_chats_data(conn)
         deleted_chats = int(stats.get("deleted_chats", 0) or 0)
         if deleted_chats <= 0:
@@ -2400,16 +2410,15 @@ def _admin_delete_empty_chats_job_runner(
                 f"媒体记录 {int(stats.get('deleted_media_rows', 0) or 0)} 条，"
                 f"媒体组 {int(stats.get('deleted_media_groups', 0) or 0)} 个",
             )
-        admin_job_set_status_fn(job_id, "done")
-    except Exception as exc:
-        if conn:
-            conn.rollback()
-        admin_job_append_log_fn(job_id, f"删除零消息群组失败：{exc}")
-        admin_job_set_status_fn(job_id, "error")
-    finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if conn:
-            conn.close()
+
+    _run_simple_admin_job_with_conn(
+        job_id,
+        get_conn_fn=get_conn_fn,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_job_append_log_fn=admin_job_append_log_fn,
+        run_fn=_run_delete_empty,
+        error_prefix="删除零消息群组失败：",
+    )
 
 
 def _admin_cleanup_job_runner(
@@ -2424,12 +2433,7 @@ def _admin_cleanup_job_runner(
     admin_job_append_log_fn: Callable[[str, str], Any],
     cleanup_mode: str = "keyword",
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
-    conn = None
-    try:
-        admin_job_set_status_fn(job_id, "running")
-        conn = get_conn_fn()
+    def _run_cleanup(conn: Any) -> None:
         cur = conn.cursor()
 
         # 修正：根据 scope 和 chat_id 构建过滤条件
@@ -2444,7 +2448,6 @@ def _admin_cleanup_job_runner(
         # 安全检查：如果是关键词模式且关键词为空，则直接结束，防止 LIKE '%%' 扫描全库导致崩溃
         if cleanup_mode == "keyword" and not keyword.strip():
             admin_job_append_log_fn(job_id, "关键词不能为空，清理任务取消")
-            admin_job_set_status_fn(job_id, "done")
             return
 
         target_count = _build_cleanup_targets_table(
@@ -2471,15 +2474,15 @@ def _admin_cleanup_job_runner(
         else:
             admin_job_append_log_fn(job_id, "未发现符合条件的数据，任务结束")
 
-        admin_job_set_status_fn(job_id, "done")
-    except Exception as exc:
-        logging.exception(f"清理任务异常 (job_id: {job_id})")
-        admin_job_append_log_fn(job_id, f"清理失败：{exc}")
-        admin_job_set_status_fn(job_id, "error")
-    finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if conn:
-            conn.close()
+    _run_simple_admin_job_with_conn(
+        job_id,
+        get_conn_fn=get_conn_fn,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_job_append_log_fn=admin_job_append_log_fn,
+        run_fn=_run_cleanup,
+        error_prefix="清理失败：",
+        log_exception_fn=lambda: logging.exception(f"清理任务异常 (job_id: {job_id})"),
+    )
 
 
 def _admin_start_harvest_job_thread(job_id, target, **kwargs):

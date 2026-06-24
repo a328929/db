@@ -8,14 +8,13 @@ from telethon.tl.types import InputChannel, InputPeerChannel, InputPeerChat
 
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    call_with_conn,
     finish_job_heartbeat,
+    mark_admin_job_running,
     resolve_chat_entity,
+    start_admin_job_heartbeat,
     start_admin_job_thread,
-)
-from tg_harvest.admin_jobs.core import (
-    _admin_job_heartbeat,
-    _admin_job_update_progress,
-    job_context,
+    update_admin_job_progress,
 )
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
@@ -296,32 +295,30 @@ def _admin_recovery_scan_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
     local_client = None
     worker_id = f"{job_id}_recovery_scan"
     try:
-        admin_job_set_status_fn(job_id, "running")
-        _admin_job_update_progress(
+        mark_admin_job_running(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+        update_admin_job_progress(
             job_id,
             0,
             total=None,
             stage="running",
-            log_step=0,
-            auto_log=False,
         )
 
         admin_job_append_log_fn(job_id, "正在查找本地 Telegram Session 文件...")
         session_files = discover_session_files(getattr(cfg, "session_name", ""))
         if not session_files:
             admin_job_append_log_fn(job_id, "未找到可读取的 .session 文件")
-            _admin_job_update_progress(
+            update_admin_job_progress(
                 job_id,
                 0,
                 total=0,
                 stage="done",
-                log_step=0,
-                auto_log=False,
             )
             admin_job_set_status_fn(job_id, "done")
             return
@@ -350,13 +347,11 @@ def _admin_recovery_scan_job_runner(
                 job_id,
                 "正在连接 Telegram 验证候选是否已解散或不可访问...",
             )
-            _admin_job_update_progress(
+            update_admin_job_progress(
                 job_id,
                 0,
                 total=len(rows),
                 stage="validating",
-                log_step=0,
-                auto_log=False,
             )
             local_client = _create_isolated_worker_client(cfg, worker_id)
             validation_progress_step = 25
@@ -371,13 +366,11 @@ def _admin_recovery_scan_job_runner(
                 ):
                     return
                 last_validation_progress = current
-                _admin_job_update_progress(
+                update_admin_job_progress(
                     job_id,
                     current,
                     total=total,
                     stage="validating",
-                    log_step=0,
-                    auto_log=False,
                 )
 
             rows, filter_stats = _filter_recovery_chat_scan_rows(
@@ -401,33 +394,26 @@ def _admin_recovery_scan_job_runner(
                 f"过滤不可访问 {int(filter_stats.get('unavailable_count') or 0)} 个，"
                 f"验证异常保留 {int(filter_stats.get('warning_count') or 0)} 个",
             )
-            _admin_job_update_progress(
+            update_admin_job_progress(
                 job_id,
                 len(rows),
                 total=len(rows),
                 stage="saving",
-                log_step=0,
-                auto_log=False,
             )
         admin_job_append_log_fn(job_id, "正在保存恢复候选...")
-        conn = get_conn_fn()
-        try:
-            saved_count = replace_recovery_chat_scan_results(
-                conn,
-                rows,
-                scan_job_id=job_id,
-                scanned_at=scanned_at,
-            )
-        finally:
-            conn.close()
+        saved_count = call_with_conn(
+            get_conn_fn,
+            replace_recovery_chat_scan_results,
+            rows,
+            scan_job_id=job_id,
+            scanned_at=scanned_at,
+        )
 
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             saved_count,
             total=saved_count,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_append_log_fn(job_id, f"恢复候选保存完成：{saved_count} 个")
         admin_job_set_status_fn(job_id, "done")
@@ -460,45 +446,40 @@ def _admin_recovery_restore_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
     try:
         normalized_chat_ids = (
             None if chat_ids is None else sorted({int(chat_id) for chat_id in chat_ids})
         )
-        admin_job_set_status_fn(job_id, "running")
-        _admin_job_update_progress(
+        mark_admin_job_running(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+        update_admin_job_progress(
             job_id,
             0,
             total=None if normalized_chat_ids is None else len(normalized_chat_ids),
             stage="running",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_append_log_fn(job_id, f"恢复目标：{target_label}")
         admin_job_append_log_fn(job_id, "正在写入 chats 摘要...")
 
-        conn = get_conn_fn()
-        try:
-            result = recover_chats_from_candidates(
-                conn,
-                chat_ids=normalized_chat_ids,
-                job_id=job_id,
-                recovered_at=_admin_now_iso(),
-            )
-        finally:
-            conn.close()
+        result = call_with_conn(
+            get_conn_fn,
+            recover_chats_from_candidates,
+            chat_ids=normalized_chat_ids,
+            job_id=job_id,
+            recovered_at=_admin_now_iso(),
+        )
 
         candidate_count = int(result["candidate_count"])
         recovered_count = int(result["recovered_count"])
         skipped_count = int(result["skipped_count"])
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             candidate_count,
             total=candidate_count,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_append_log_fn(
             job_id,

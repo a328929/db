@@ -4,17 +4,22 @@ from contextlib import suppress
 from typing import Any
 
 from tg_harvest.admin_jobs.clone import _cfg_with_session_name
+from tg_harvest.admin_jobs.clone_job_state import (
+    _clean_text,
+    _load_required_record,
+    _try_update_record,
+    _update_required_record,
+)
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
+    mark_admin_job_running,
     resolve_chat_entity,
+    start_admin_job_heartbeat,
+    update_admin_job_progress,
 )
-from tg_harvest.admin_jobs.core import (
-    _admin_job_heartbeat,
-    _admin_job_update_progress,
-    job_context,
-)
+from tg_harvest.admin_jobs.core import _admin_job_update_progress
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
@@ -32,11 +37,6 @@ from tg_harvest.domain.clone_plan import (
 from tg_harvest.storage.clone import load_clone_run, update_clone_plan
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
-
-
-def _clean_text(value: Any) -> str:
-    return str(value or "").strip()
-
 
 def _access_error_state(exc: Exception) -> str:
     err = f"{type(exc).__name__}: {exc}".lower()
@@ -486,40 +486,20 @@ def _build_deep_preflight_outcome(
     }
 
 
-def _update_clone_plan_required(
-    *,
-    get_conn_fn: Callable[[], Any],
-    plan_id: str,
-    **kwargs: Any,
-) -> dict:
-    conn = get_conn_fn()
-    try:
-        plan = update_clone_plan(conn, plan_id=plan_id, **kwargs)
-    finally:
-        conn.close()
-    if plan is None:
-        raise RuntimeError("克隆迁移计划不存在，已停止深度预检")
-    return plan
-
-
 def _try_mark_clone_plan_failed(
     *,
     get_conn_fn: Callable[[], Any],
     plan_id: str,
     message: str,
 ) -> None:
-    with suppress(Exception):
-        conn = get_conn_fn()
-        try:
-            update_clone_plan(
-                conn,
-                plan_id=plan_id,
-                status="error",
-                error_message=message,
-                completed_at=_admin_now_iso(),
-            )
-        finally:
-            conn.close()
+    _try_update_record(
+        get_conn_fn=get_conn_fn,
+        update_fn=update_clone_plan,
+        plan_id=plan_id,
+        status="error",
+        error_message=message,
+        completed_at=_admin_now_iso(),
+    )
 
 
 def _load_clone_run_required(
@@ -527,14 +507,12 @@ def _load_clone_run_required(
     get_conn_fn: Callable[[], Any],
     run_id: str,
 ) -> dict[str, Any]:
-    conn = get_conn_fn()
-    try:
-        run = load_clone_run(conn, run_id)
-    finally:
-        conn.close()
-    if run is None:
-        raise RuntimeError("克隆运行记录不存在，无法执行深度预检")
-    return run
+    return _load_required_record(
+        get_conn_fn=get_conn_fn,
+        load_fn=load_clone_run,
+        missing_message="克隆运行记录不存在，无法执行深度预检",
+        run_id=run_id,
+    )
 
 
 def _primary_cfg(cfg: Any) -> Any:
@@ -559,23 +537,25 @@ def _admin_clone_deep_preflight_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
     try:
-        admin_job_set_status_fn(job_id, "running")
-        _update_clone_plan_required(
+        mark_admin_job_running(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+        _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_plan,
+            missing_message="克隆迁移计划不存在，已停止深度预检",
             plan_id=plan_id,
             status="running",
             error_message="",
         )
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             0,
             total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
             stage="running",
-            log_step=0,
-            auto_log=False,
         )
 
         run = _load_clone_run_required(get_conn_fn=get_conn_fn, run_id=run_id)
@@ -583,13 +563,11 @@ def _admin_clone_deep_preflight_job_runner(
             job_id,
             f"开始在线深度预检：run={run_id}，源={run['source_title']}，目标={run.get('target_title') or '未创建'}",
         )
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             1,
             total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
             stage="loaded_run",
-            log_step=0,
-            auto_log=False,
         )
 
         accounts: list[dict[str, Any]] = []
@@ -602,13 +580,11 @@ def _admin_clone_deep_preflight_job_runner(
                 cfg=cfg,
             )
         else:
-            _admin_job_update_progress(
+            update_admin_job_progress(
                 job_id,
                 2,
                 total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
                 stage="checking_accounts",
-                log_step=0,
-                auto_log=False,
             )
             primary_result = _check_account_access(
                 account="primary",
@@ -641,13 +617,11 @@ def _admin_clone_deep_preflight_job_runner(
                     )
                 )
 
-            _admin_job_update_progress(
+            update_admin_job_progress(
                 job_id,
                 4,
                 total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
                 stage="planning",
-                log_step=0,
-                auto_log=False,
             )
             outcome = _build_deep_preflight_outcome(
                 run=run,
@@ -657,8 +631,10 @@ def _admin_clone_deep_preflight_job_runner(
             )
 
         completed_at = _admin_now_iso()
-        plan = _update_clone_plan_required(
+        plan = _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_plan,
+            missing_message="克隆迁移计划不存在，已停止深度预检",
             plan_id=plan_id,
             completed_at=completed_at,
             **outcome,
@@ -671,13 +647,11 @@ def _admin_clone_deep_preflight_job_runner(
             )
         else:
             admin_job_append_log_fn(job_id, "深度预检完成：迁移计划可进入下一阶段")
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
             total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
@@ -689,13 +663,11 @@ def _admin_clone_deep_preflight_job_runner(
             message=message,
         )
         admin_job_append_log_fn(job_id, f"深度预检失败：{message}")
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             0,
             total=CLONE_DEEP_PREFLIGHT_TOTAL_STEPS,
             stage="error",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_set_status_fn(job_id, "error")
     finally:

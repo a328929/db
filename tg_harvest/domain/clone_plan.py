@@ -1,5 +1,7 @@
 from typing import Any
 
+from tg_harvest.domain.coerce import clean_text as _clean_text
+
 CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS = 500
 CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT = 100_000
 CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS = 60_000
@@ -18,10 +20,6 @@ VALID_CLONE_MEDIA_STRATEGIES = frozenset(
         CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
     }
 )
-
-
-def _clean_text(value: Any) -> str:
-    return str(value or "").strip()
 
 
 def clone_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:

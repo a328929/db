@@ -4,6 +4,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from tg_harvest.admin_jobs.common import call_with_conn
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.ingest.parse import HarvestCounters
@@ -121,21 +122,17 @@ def stream_entity_harvest_to_writer(
             chat_username=chat_username,
             chat_type=chat_type,
         )
-
-        read_conn = get_conn_fn()
-        try:
-            with bind_client_event_loop(client):
-                counters, touched_groups, first_sync = _harvest_messages_for_entity(
-                    read_conn,
-                    client,
-                    entity,
-                    chat_id,
-                    write_batch_fn=_submit_harvest_batch,
-                    progress_total=progress_total,
-                    progress_prefix=progress_prefix,
-                )
-        finally:
-            read_conn.close()
+        with bind_client_event_loop(client):
+            counters, touched_groups, first_sync = call_with_conn(
+                get_conn_fn,
+                _harvest_messages_for_entity,
+                client,
+                entity,
+                chat_id,
+                write_batch_fn=_submit_harvest_batch,
+                progress_total=progress_total,
+                progress_prefix=progress_prefix,
+            )
 
         finalize_submitted = True
         write_coordinator.submit_finalize(

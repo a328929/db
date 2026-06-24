@@ -40,11 +40,6 @@
     errorMessage: ''
   };
 
-  var authState = {
-    authenticated: false,
-    logoutTimer: null
-  };
-
   var restrictedState = {
     items: [],
     filterValue: '__all__'
@@ -56,7 +51,7 @@
 
     initializeUI(elements);
     bindEvents(elements);
-    await checkAuth(elements);
+    await sessionController.checkAuth(elements);
   });
 
   function getElements() {
@@ -127,6 +122,10 @@
     return elements;
   }
 
+  function setLoginStatus(elements, message) {
+    shared.setLoginStatus(elements, message);
+  }
+
   function initializeUI(elements) {
     ensurePlaceholder(elements.logContainer);
     syncClearLogsButtonVisibility(elements);
@@ -135,12 +134,12 @@
 
   function bindEvents(elements) {
     elements.loginConfirmBtn.addEventListener('click', function () {
-      handleLogin(elements);
+      sessionController.handleLogin(elements);
     });
     elements.passwordInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        handleLogin(elements);
+        sessionController.handleLogin(elements);
       }
     });
     elements.sortSelect.addEventListener('change', function () {
@@ -195,83 +194,6 @@
         trapFocusWithin(elements.loginDialog, event);
       }
     });
-  }
-
-  async function checkAuth(elements) {
-    try {
-      var data = await fetchJSON('/api/admin/auth/check');
-      if (data.authenticated) {
-        authState.authenticated = true;
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.remaining);
-        await loadInitialData(elements);
-        return;
-      }
-      openLoginDialog(elements);
-    } catch (_error) {
-      openLoginDialog(elements);
-    }
-  }
-
-  async function handleLogin(elements) {
-    var password = elements.passwordInput.value;
-    if (!password) {
-      setLoginStatus(elements, '请输入管理员密码。');
-      elements.passwordInput.focus();
-      return;
-    }
-    setLoginStatus(elements, '');
-    setElementDisabled(elements.loginConfirmBtn, true);
-    try {
-      var data = await fetchJSON('/api/admin/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: password })
-      });
-      if (data.ok) {
-        authState.authenticated = true;
-        elements.passwordInput.value = '';
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.expiry_duration);
-        appendLog(elements, '认证成功，已进入频道管理');
-        await loadInitialData(elements);
-      }
-    } catch (error) {
-      setLoginStatus(elements, '认证失败：' + error.message);
-      elements.passwordInput.focus();
-    } finally {
-      setElementDisabled(elements.loginConfirmBtn, false);
-    }
-  }
-
-  function setupAutoLogout(elements, seconds) {
-    if (authState.logoutTimer) window.clearTimeout(authState.logoutTimer);
-    if (seconds <= 0) return;
-    authState.logoutTimer = window.setTimeout(function () {
-      authState.authenticated = false;
-      setLoginStatus(elements, '会话已过期，请重新登录。');
-      openLoginDialog(elements);
-    }, seconds * 1000);
-  }
-
-  function setLoginStatus(elements, message) {
-    if (!elements || !elements.loginStatus) {
-      return;
-    }
-    elements.loginStatus.textContent = String(message || '');
-  }
-
-  function openLoginDialog(elements) {
-    setDialogOpenState(elements.loginDialog, true, {
-      focusElement: elements.passwordInput
-    });
-    setPageInteractionState(document.getElementById('admin-channels-page'), false);
-  }
-
-  function closeLoginDialog(elements) {
-    setLoginStatus(elements, '');
-    setDialogOpenState(elements.loginDialog, false, { skipFocusRestore: true });
-    setPageInteractionState(document.getElementById('admin-channels-page'), true);
   }
 
   async function loadInitialData(elements) {
@@ -1024,132 +946,11 @@
   }
 
   function startJobPolling(elements, jobId, options) {
-    var normalizedJobId = String(jobId || '').trim();
-    if (!normalizedJobId) return;
-    var pollOptions = options || {};
-    stopJobPolling(undefined, elements);
-    jobPollState.pollToken += 1;
-    jobPollState.jobId = normalizedJobId;
-    jobPollState.lastSeq = 0;
-    jobPollState.retryCount = 0;
-    jobPollState.lastProgressKey = '';
-    jobPollState.onDone = typeof pollOptions.onDone === 'function' ? pollOptions.onDone : null;
-    jobPollState.doneMessage = pollOptions.doneMessage || '任务执行完成';
-    jobPollState.errorMessage = pollOptions.errorMessage || '任务执行失败，请检查日志';
-    jobPollState.isPolling = true;
-    setBusy(elements, true);
-    pollJobProgress(elements);
+    jobPollController.start(jobPollState, jobId, options);
   }
 
-  function stopJobPolling(expectedToken, elements) {
-    if (typeof expectedToken === 'number' && jobPollState.pollToken !== expectedToken) {
-      return;
-    }
-    if (jobPollState.timerId) {
-      window.clearTimeout(jobPollState.timerId);
-    }
-    jobPollState.timerId = null;
-    jobPollState.isPolling = false;
-    jobPollState.onDone = null;
-    jobPollState.doneMessage = '';
-    jobPollState.errorMessage = '';
-    setBusy(elements, false);
-  }
-
-  function isPollContextActive(jobId, pollToken) {
-    return jobPollState.isPolling
-      && jobPollState.jobId === jobId
-      && jobPollState.pollToken === pollToken;
-  }
-
-  function scheduleJobPollingWithDelay(elements, jobId, pollToken, delayMs) {
-    if (!isPollContextActive(jobId, pollToken)) return;
-    jobPollState.timerId = window.setTimeout(function () {
-      pollJobProgress(elements);
-    }, Math.max(250, Number(delayMs) || JOB_POLL_INTERVAL_MS));
-  }
-
-  async function pollJobProgress(elements) {
-    if (!jobPollState.isPolling || !jobPollState.jobId) return;
-
-    var jobId = jobPollState.jobId;
-    var pollToken = jobPollState.pollToken;
-    try {
-      var logsPayload = await fetchJSON(
-        '/api/admin/jobs/'
-          + encodeURIComponent(jobId)
-          + '/logs?after_seq='
-          + encodeURIComponent(String(jobPollState.lastSeq || 0))
-      );
-      if (!isPollContextActive(jobId, pollToken)) return;
-
-      var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
-      logs.forEach(function (line) {
-        if (!line || typeof line.message !== 'string') return;
-        appendLog(elements, line.message);
-        if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
-          jobPollState.lastSeq = Math.max(jobPollState.lastSeq, line.seq);
-        }
-      });
-
-      var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
-      if (!isPollContextActive(jobId, pollToken)) return;
-
-      var snapshot = snapshotPayload && snapshotPayload.job ? snapshotPayload.job : null;
-      var status = snapshot && typeof snapshot.status === 'string' ? snapshot.status.trim() : '';
-      if (!snapshot || !status) {
-        appendLog(elements, '任务状态响应异常，已停止轮询');
-        stopJobPolling(pollToken, elements);
-        return;
-      }
-
-      jobPollState.retryCount = 0;
-      var progressState = shared.buildSnapshotProgressMessage(snapshot);
-      if (progressState.key && progressState.key !== jobPollState.lastProgressKey) {
-        jobPollState.lastProgressKey = progressState.key;
-        if (progressState.message) appendLog(elements, progressState.message);
-      }
-
-      if (status === 'done') {
-        appendLog(elements, jobPollState.doneMessage || '任务执行完成');
-        var onDone = jobPollState.onDone;
-        stopJobPolling(pollToken, elements);
-        if (typeof onDone === 'function') {
-          await onDone();
-        }
-        return;
-      }
-      if (status === 'error') {
-        appendLog(elements, jobPollState.errorMessage || '任务执行失败，请检查日志');
-        stopJobPolling(pollToken, elements);
-        return;
-      }
-    } catch (error) {
-      if (!isPollContextActive(jobId, pollToken)) return;
-      jobPollState.retryCount += 1;
-      if (jobPollState.retryCount > JOB_POLL_RETRY_MAX_COUNT) {
-        appendLog(elements, '任务日志轮询失败次数过多，已停止轮询：' + error.message);
-        stopJobPolling(pollToken, elements);
-        return;
-      }
-      appendLog(
-        elements,
-        '任务日志轮询失败，稍后自动重试（'
-          + jobPollState.retryCount
-          + '/'
-          + JOB_POLL_RETRY_MAX_COUNT
-          + '）：'
-          + error.message
-      );
-      scheduleJobPollingWithDelay(
-        elements,
-        jobId,
-        pollToken,
-        JOB_POLL_RETRY_BASE_MS * Math.min(jobPollState.retryCount, 5)
-      );
-      return;
-    }
-    scheduleJobPollingWithDelay(elements, jobId, pollToken, JOB_POLL_INTERVAL_MS);
+  function stopJobPolling(expectedToken, _elements) {
+    jobPollController.stop(jobPollState, expectedToken);
   }
 
   function setBusy(elements, isBusy) {
@@ -1174,16 +975,58 @@
 
   async function fetchJSON(url, options) {
     return sharedFetchJSON(url, Object.assign({}, options || {}, {
-      onUnauthorized: handleUnauthorizedResponse
+      onUnauthorized: sessionController.handleUnauthorizedResponse
     }));
   }
 
-  function handleUnauthorizedResponse() {
-    authState.authenticated = false;
-    var els = getElements();
-    if (els) {
-      setLoginStatus(els, '会话已过期，请重新登录。');
-      openLoginDialog(els);
+  var sessionController = shared.createAdminSessionController({
+    afterAuth: async function (elements, context) {
+      await loadInitialData(elements);
+      if (context.reason === 'login') {
+        appendLog(elements, '认证成功，已进入频道管理');
+      }
+    },
+    getElements: getElements,
+    getPageElement: function () {
+      return document.getElementById('admin-channels-page');
     }
-  }
+  });
+
+  var jobPollController = shared.createAdminJobPollController({
+    appendLog: function (message) {
+      var elements = getElements();
+      if (elements) {
+        appendLog(elements, message);
+      }
+    },
+    fetchJSON: fetchJSON,
+    getDoneMessage: function (state) {
+      return state.doneMessage || '任务执行完成';
+    },
+    getElements: getElements,
+    getErrorMessage: function (state) {
+      return state.errorMessage || '任务执行失败，请检查日志';
+    },
+    onDone: async function (_snapshot, state) {
+      if (typeof state.onDone === 'function') {
+        await state.onDone();
+      }
+    },
+    onStop: function (state) {
+      state.onDone = null;
+      state.doneMessage = '';
+      state.errorMessage = '';
+    },
+    setBusy: function (elements, isBusy) {
+      if (elements) {
+        setBusy(elements, isBusy);
+      }
+    },
+    setInitialState: function (state, options) {
+      var pollOptions = options || {};
+      state.onDone = typeof pollOptions.onDone === 'function' ? pollOptions.onDone : null;
+      state.doneMessage = pollOptions.doneMessage || '任务执行完成';
+      state.errorMessage = pollOptions.errorMessage || '任务执行失败，请检查日志';
+    }
+  });
 })();

@@ -2,6 +2,12 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from tg_harvest.admin_jobs.core import (
+    _admin_job_heartbeat,
+    _admin_job_update_progress,
+    job_context,
+)
+from tg_harvest.admin_jobs.sessions import _start_job_heartbeat
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
 from tg_harvest.ingest.flood_wait import is_flood_wait_error
@@ -83,6 +89,50 @@ def finish_job_heartbeat(heartbeat_stop, heartbeat_thread) -> None:
     heartbeat_thread.join(timeout=1.0)
 
 
+def start_admin_job_heartbeat(job_id: str):
+    job_context.set(str(job_id))
+    return _start_job_heartbeat(job_id, _admin_job_heartbeat)
+
+
+def mark_admin_job_running(
+    job_id: str,
+    *,
+    admin_job_set_status_fn: Callable[[str, str], bool],
+) -> None:
+    admin_job_set_status_fn(job_id, "running")
+
+
+def update_admin_job_progress(
+    job_id: str,
+    current: int,
+    *,
+    total: int | None,
+    stage: str,
+) -> None:
+    _admin_job_update_progress(
+        job_id,
+        current,
+        total=total,
+        stage=stage,
+        log_step=0,
+        auto_log=False,
+    )
+
+
+def call_with_conn(
+    get_conn_fn: Callable[[], Any],
+    fn: Callable[..., Any],
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> Any:
+    conn = get_conn_fn()
+    try:
+        return fn(conn, *args, **kwargs)
+    finally:
+        conn.close()
+
+
 def start_admin_job_thread(target, *args, **kwargs):
     thread = threading.Thread(
         target=target,
@@ -97,18 +147,20 @@ def start_admin_job_thread(target, *args, **kwargs):
 def read_chat_username(
     get_conn_fn: Callable[[], Any], chat_id: int
 ) -> str | None:
-    conn = None
     try:
-        conn = get_conn_fn()
-        cur = conn.cursor()
-        cur.execute("SELECT chat_username FROM chats WHERE chat_id = ?", (chat_id,))
-        row = cur.fetchone()
-        if row is None:
-            return None
-        username = row["chat_username"]
+        def _load_chat_username(conn: Any, target_chat_id: int) -> str | None:
+            cur = conn.cursor()
+            cur.execute(
+                "SELECT chat_username FROM chats WHERE chat_id = ?",
+                (target_chat_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            username = row["chat_username"]
+            return str(username) if username else None
+
+        username = call_with_conn(get_conn_fn, _load_chat_username, chat_id)
         return str(username) if username else None
     except Exception:
         return None
-    finally:
-        if conn:
-            conn.close()

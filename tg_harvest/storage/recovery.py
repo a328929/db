@@ -3,24 +3,16 @@ from collections.abc import Iterable
 from contextlib import suppress
 from typing import Any
 
-from tg_harvest.domain.chat_inventory import SessionChatRecoveryRow
+from tg_harvest.domain.chat_inventory import (
+    SessionChatRecoveryRow,
+    _optional_int,
+)
+from tg_harvest.domain.chat_titles import (
+    chat_title_or_fallback as _chat_title_or_fallback,
+)
 from tg_harvest.ingest.store import upsert_chat
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.schema import _refresh_chat_message_counts
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _chat_title_or_fallback(chat_id: int, chat_title: Any) -> str:
-    title = str(chat_title or "").strip()
-    return title if title else f"Chat {chat_id}"
 
 
 def _scan_row_value(row: Any, key: str, default: Any = "") -> Any:

@@ -2,8 +2,10 @@ import sqlite3
 from contextlib import closing
 
 from flask import jsonify, render_template
+from tg_harvest.app.services import RecoveryRouteServices
 
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
+from tg_harvest.web.routes.chat_links import with_chat_links
 from tg_harvest.web.responses import (
     create_exclusive_job_or_response,
     created_job_snapshot_response,
@@ -11,21 +13,6 @@ from tg_harvest.web.responses import (
     logged_json_error,
     require_json_dict,
 )
-
-
-def _with_chat_links(rows, build_telegram_chat_link_bundle_fn):
-    items = []
-    for row in rows:
-        item = dict(row)
-        bundle = build_telegram_chat_link_bundle_fn(
-            chat_id=int(item["chat_id"]),
-            chat_username=item.get("chat_username"),
-        )
-        item["telegram_app_link"] = bundle.app_link
-        item["telegram_web_link"] = bundle.web_link
-        item["has_public_link"] = bool(item["telegram_web_link"])
-        items.append(item)
-    return items
 
 
 def _parse_restore_chat_ids(payload: dict) -> tuple[list[int] | None, object | None]:
@@ -54,22 +41,81 @@ def _parse_restore_chat_ids(payload: dict) -> tuple[list[int] | None, object | N
     return sorted(set(chat_ids)), None
 
 
+def _resolve_recovery_services(
+    *,
+    services: RecoveryRouteServices | None,
+    logger=None,
+    get_conn_fn=None,
+    cfg=None,
+    list_recovery_chat_candidates_fn=None,
+    build_recovery_overview_fn=None,
+    build_telegram_chat_link_bundle_fn=None,
+    admin_try_create_exclusive_job_fn=None,
+    admin_job_get_snapshot_fn=None,
+    admin_job_append_log_fn=None,
+    admin_job_set_status_fn=None,
+    admin_start_recovery_scan_job_thread_fn=None,
+    admin_start_recovery_restore_job_thread_fn=None,
+) -> RecoveryRouteServices:
+    if services is not None:
+        return services
+    return RecoveryRouteServices(
+        logger=logger,
+        get_conn_fn=get_conn_fn,
+        cfg=cfg,
+        list_recovery_chat_candidates_fn=list_recovery_chat_candidates_fn,
+        build_recovery_overview_fn=build_recovery_overview_fn,
+        build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
+        admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
+        admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,
+        admin_job_append_log_fn=admin_job_append_log_fn,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_start_recovery_scan_job_thread_fn=(
+            admin_start_recovery_scan_job_thread_fn
+        ),
+        admin_start_recovery_restore_job_thread_fn=(
+            admin_start_recovery_restore_job_thread_fn
+        ),
+    )
+
+
 def register_recovery_routes(
     app,
     *,
-    logger,
-    get_conn_fn,
-    cfg,
-    list_recovery_chat_candidates_fn,
-    build_recovery_overview_fn,
-    build_telegram_chat_link_bundle_fn,
-    admin_try_create_exclusive_job_fn,
-    admin_job_get_snapshot_fn,
-    admin_job_append_log_fn,
-    admin_job_set_status_fn,
-    admin_start_recovery_scan_job_thread_fn,
-    admin_start_recovery_restore_job_thread_fn,
+    services: RecoveryRouteServices | None = None,
+    logger=None,
+    get_conn_fn=None,
+    cfg=None,
+    list_recovery_chat_candidates_fn=None,
+    build_recovery_overview_fn=None,
+    build_telegram_chat_link_bundle_fn=None,
+    admin_try_create_exclusive_job_fn=None,
+    admin_job_get_snapshot_fn=None,
+    admin_job_append_log_fn=None,
+    admin_job_set_status_fn=None,
+    admin_start_recovery_scan_job_thread_fn=None,
+    admin_start_recovery_restore_job_thread_fn=None,
 ) -> None:
+    services = _resolve_recovery_services(
+        services=services,
+        logger=logger,
+        get_conn_fn=get_conn_fn,
+        cfg=cfg,
+        list_recovery_chat_candidates_fn=list_recovery_chat_candidates_fn,
+        build_recovery_overview_fn=build_recovery_overview_fn,
+        build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
+        admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
+        admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,
+        admin_job_append_log_fn=admin_job_append_log_fn,
+        admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_start_recovery_scan_job_thread_fn=(
+            admin_start_recovery_scan_job_thread_fn
+        ),
+        admin_start_recovery_restore_job_thread_fn=(
+            admin_start_recovery_restore_job_thread_fn
+        ),
+    )
+
     @app.get("/admin/recovery")
     @admin_page_login_required
     def admin_recovery_page():
@@ -79,33 +125,33 @@ def register_recovery_routes(
     @admin_login_required
     def api_admin_recovery_candidates():
         try:
-            with closing(get_conn_fn()) as conn:
-                items = list_recovery_chat_candidates_fn(conn)
-                overview = build_recovery_overview_fn(conn)
+            with closing(services.get_conn_fn()) as conn:
+                items = services.list_recovery_chat_candidates_fn(conn)
+                overview = services.build_recovery_overview_fn(conn)
             return jsonify(
                 {
                     "ok": True,
-                    "items": _with_chat_links(
+                    "items": with_chat_links(
                         items,
-                        build_telegram_chat_link_bundle_fn,
+                        services.build_telegram_chat_link_bundle_fn,
                     ),
                     "overview": overview,
                 }
             )
         except sqlite3.Error:
             return logged_json_error(
-                logger,
+                services.logger,
                 "读取群组恢复候选失败",
                 "读取群组恢复候选失败",
             )
         except Exception:
-            return logged_json_error(logger, "系统异常", "系统异常")
+            return logged_json_error(services.logger, "系统异常", "系统异常")
 
     @app.post("/api/admin/recovery/scan")
     @admin_login_required
     def api_admin_recovery_scan():
         job_id, error_response = create_exclusive_job_or_response(
-            admin_try_create_exclusive_job_fn,
+            services.admin_try_create_exclusive_job_fn,
             "recovery_scan",
             target_chat_id=None,
             target_label="Session 群组恢复扫描",
@@ -113,15 +159,15 @@ def register_recovery_routes(
         if error_response is not None:
             return error_response
 
-        admin_job_append_log_fn(job_id, "已接收 Session 群组恢复扫描请求")
-        admin_start_recovery_scan_job_thread_fn(
+        services.admin_job_append_log_fn(job_id, "已接收 Session 群组恢复扫描请求")
+        services.admin_start_recovery_scan_job_thread_fn(
             job_id,
-            cfg=cfg,
-            get_conn_fn=get_conn_fn,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-            admin_job_append_log_fn=admin_job_append_log_fn,
+            cfg=services.cfg,
+            get_conn_fn=services.get_conn_fn,
+            admin_job_set_status_fn=services.admin_job_set_status_fn,
+            admin_job_append_log_fn=services.admin_job_append_log_fn,
         )
-        return created_job_snapshot_response(job_id, admin_job_get_snapshot_fn)
+        return created_job_snapshot_response(job_id, services.admin_job_get_snapshot_fn)
 
     @app.post("/api/admin/recovery/restore")
     @admin_login_required
@@ -151,7 +197,7 @@ def register_recovery_routes(
             return json_error("confirm 参数不匹配", 400)
 
         job_id, error_response = create_exclusive_job_or_response(
-            admin_try_create_exclusive_job_fn,
+            services.admin_try_create_exclusive_job_fn,
             "recovery_restore",
             target_chat_id=None,
             target_label=target_label,
@@ -159,14 +205,14 @@ def register_recovery_routes(
         if error_response is not None:
             return error_response
 
-        admin_job_append_log_fn(job_id, "已接收群组恢复请求")
-        admin_job_append_log_fn(job_id, f"目标：{target_label}")
-        admin_start_recovery_restore_job_thread_fn(
+        services.admin_job_append_log_fn(job_id, "已接收群组恢复请求")
+        services.admin_job_append_log_fn(job_id, f"目标：{target_label}")
+        services.admin_start_recovery_restore_job_thread_fn(
             job_id,
             chat_ids=chat_ids,
             target_label=target_label,
-            get_conn_fn=get_conn_fn,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-            admin_job_append_log_fn=admin_job_append_log_fn,
+            get_conn_fn=services.get_conn_fn,
+            admin_job_set_status_fn=services.admin_job_set_status_fn,
+            admin_job_append_log_fn=services.admin_job_append_log_fn,
         )
-        return created_job_snapshot_response(job_id, admin_job_get_snapshot_fn)
+        return created_job_snapshot_response(job_id, services.admin_job_get_snapshot_fn)

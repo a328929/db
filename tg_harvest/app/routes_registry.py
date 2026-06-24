@@ -69,87 +69,15 @@ def register_all_routes(
 
     register_channel_routes(
         app,
-        logger=services.logger,
-        get_conn_fn=services.get_conn_fn,
-        cfg=services.admin.cfg,
-        list_database_channels_fn=services.list_database_channels_fn,
-        list_missing_chat_scan_results_fn=services.list_missing_chat_scan_results_fn,
-        list_absent_chat_scan_results_fn=services.list_absent_chat_scan_results_fn,
-        list_restricted_chat_scan_results_fn=(
-            services.list_restricted_chat_scan_results_fn
-        ),
-        build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
-        admin_try_create_exclusive_job_fn=services.admin.admin_try_create_exclusive_job_fn,
-        admin_job_get_snapshot_fn=services.admin.admin_job_get_snapshot_fn,
-        admin_job_append_log_fn=services.admin.admin_job_append_log_fn,
-        admin_job_set_status_fn=services.admin.admin_job_set_status_fn,
-        admin_start_missing_chats_scan_job_thread_fn=(
-            services.admin_start_missing_chats_scan_job_thread_fn
-        ),
-        admin_start_absent_chats_scan_job_thread_fn=(
-            services.admin_start_absent_chats_scan_job_thread_fn
-        ),
-        admin_start_restricted_chats_scan_job_thread_fn=(
-            services.admin_start_restricted_chats_scan_job_thread_fn
-        ),
+        services=services.channels,
     )
 
     register_recovery_routes(
         app,
-        logger=services.logger,
-        get_conn_fn=services.get_conn_fn,
-        cfg=services.admin.cfg,
-        list_recovery_chat_candidates_fn=services.list_recovery_chat_candidates_fn,
-        build_recovery_overview_fn=services.build_recovery_overview_fn,
-        build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
-        admin_try_create_exclusive_job_fn=services.admin.admin_try_create_exclusive_job_fn,
-        admin_job_get_snapshot_fn=services.admin.admin_job_get_snapshot_fn,
-        admin_job_append_log_fn=services.admin.admin_job_append_log_fn,
-        admin_job_set_status_fn=services.admin.admin_job_set_status_fn,
-        admin_start_recovery_scan_job_thread_fn=(
-            services.admin_start_recovery_scan_job_thread_fn
-        ),
-        admin_start_recovery_restore_job_thread_fn=(
-            services.admin_start_recovery_restore_job_thread_fn
-        ),
+        services=services.recovery,
     )
 
     register_clone_routes(
         app,
-        logger=services.logger,
-        get_conn_fn=services.get_conn_fn,
-        cfg=services.admin.cfg,
-        list_clone_source_chats_fn=services.list_clone_source_chats_fn,
-        build_clone_preflight_report_fn=services.build_clone_preflight_report_fn,
-        create_clone_run_fn=services.create_clone_run_fn,
-        load_clone_run_fn=services.load_clone_run_fn,
-        list_clone_runs_fn=services.list_clone_runs_fn,
-        count_clone_runs_fn=services.count_clone_runs_fn,
-        load_clone_run_detail_fn=services.load_clone_run_detail_fn,
-        list_clone_message_mappings_fn=services.list_clone_message_mappings_fn,
-        count_clone_message_mappings_fn=(
-            services.count_clone_message_mappings_fn
-        ),
-        delete_clone_run_fn=services.delete_clone_run_fn,
-        create_clone_plan_fn=services.create_clone_plan_fn,
-        load_latest_clone_plan_fn=services.load_latest_clone_plan_fn,
-        create_clone_migration_fn=services.create_clone_migration_fn,
-        load_latest_clone_migration_fn=services.load_latest_clone_migration_fn,
-        build_clone_timeline_replay_preview_fn=(
-            services.build_clone_timeline_replay_preview_fn
-        ),
-        build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
-        admin_try_create_exclusive_job_fn=services.admin.admin_try_create_exclusive_job_fn,
-        admin_job_get_snapshot_fn=services.admin.admin_job_get_snapshot_fn,
-        admin_job_append_log_fn=services.admin.admin_job_append_log_fn,
-        admin_job_set_status_fn=services.admin.admin_job_set_status_fn,
-        admin_start_clone_structure_job_thread_fn=(
-            services.admin_start_clone_structure_job_thread_fn
-        ),
-        admin_start_clone_deep_preflight_job_thread_fn=(
-            services.admin_start_clone_deep_preflight_job_thread_fn
-        ),
-        admin_start_clone_timeline_migration_job_thread_fn=(
-            services.admin_start_clone_timeline_migration_job_thread_fn
-        ),
+        services=services.clone,
     )

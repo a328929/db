@@ -6,6 +6,10 @@ from typing import Any
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
+    _optional_int,
+)
+from tg_harvest.domain.chat_titles import (
+    chat_title_or_fallback as _chat_title_or_fallback,
 )
 from tg_harvest.storage.connection import synchronized_write
 
@@ -33,20 +37,6 @@ def normalize_channel_sort(raw_sort: Any) -> str:
     if value in CHANNEL_SORT_OPTIONS:
         return value
     return CHANNEL_SORT_DEFAULT
-
-
-def _chat_title_or_fallback(chat_id: int, chat_title: Any) -> str:
-    title = str(chat_title or "").strip()
-    return title if title else f"Chat {chat_id}"
-
-
-def _optional_int(value: Any) -> int | None:
-    if value is None or value == "":
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
 
 
 def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]:

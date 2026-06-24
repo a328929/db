@@ -2,7 +2,7 @@
   'use strict';
 
   var shared = window.AdminManageShared;
-  var fetchJSON = shared.fetchJSON;
+  var sharedFetchJSON = shared.fetchJSON;
   var setDialogOpenState = shared.setDialogOpenState;
   var setElementDisabled = shared.setElementDisabled;
   var setPageInteractionState = shared.setPageInteractionState;
@@ -27,17 +27,12 @@
     deleteConfirm: ''
   };
 
-  var authState = {
-    authenticated: false,
-    logoutTimer: null
-  };
-
   document.addEventListener('DOMContentLoaded', async function () {
     var elements = getElements();
     if (!elements) return;
     initializeUI(elements);
     bindEvents(elements);
-    await checkAuth(elements);
+    await sessionController.checkAuth(elements);
   });
 
   function getElements() {
@@ -119,6 +114,10 @@
     return elements;
   }
 
+  function setLoginStatus(elements, message) {
+    shared.setLoginStatus(elements, message);
+  }
+
   function initializeUI(elements) {
     restorePersistentState(elements);
     renderRuns(elements);
@@ -129,12 +128,12 @@
 
   function bindEvents(elements) {
     elements.loginConfirmBtn.addEventListener('click', function () {
-      handleLogin(elements);
+      sessionController.handleLogin(elements);
     });
     elements.passwordInput.addEventListener('keydown', function (event) {
       if (event.key === 'Enter') {
         event.preventDefault();
-        handleLogin(elements);
+        sessionController.handleLogin(elements);
       }
     });
     elements.refreshBtn.addEventListener('click', function () {
@@ -223,75 +222,6 @@
         trapFocusWithin(elements.deleteDialog, event);
       }
     });
-  }
-
-  async function checkAuth(elements) {
-    try {
-      var data = await fetchJSON('/api/admin/auth/check');
-      if (data.authenticated) {
-        authState.authenticated = true;
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.remaining);
-        await loadRuns(elements, { resetOffset: false });
-        return;
-      }
-      openLoginDialog(elements);
-    } catch (_error) {
-      openLoginDialog(elements);
-    }
-  }
-
-  async function handleLogin(elements) {
-    var password = elements.passwordInput.value;
-    if (!password) {
-      elements.loginStatus.textContent = '请输入管理员密码。';
-      elements.passwordInput.focus();
-      return;
-    }
-    setElementDisabled(elements.loginConfirmBtn, true);
-    elements.loginStatus.textContent = '';
-    try {
-      var data = await fetchJSON('/api/admin/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ password: password })
-      });
-      if (data.ok) {
-        authState.authenticated = true;
-        elements.passwordInput.value = '';
-        closeLoginDialog(elements);
-        setupAutoLogout(elements, data.expiry_duration);
-        await loadRuns(elements, { resetOffset: false });
-      }
-    } catch (error) {
-      elements.loginStatus.textContent = '认证失败：' + error.message;
-      elements.passwordInput.focus();
-    } finally {
-      setElementDisabled(elements.loginConfirmBtn, false);
-    }
-  }
-
-  function setupAutoLogout(elements, seconds) {
-    if (authState.logoutTimer) window.clearTimeout(authState.logoutTimer);
-    if (seconds <= 0) return;
-    authState.logoutTimer = window.setTimeout(function () {
-      authState.authenticated = false;
-      elements.loginStatus.textContent = '会话已过期，请重新登录。';
-      openLoginDialog(elements);
-    }, seconds * 1000);
-  }
-
-  function openLoginDialog(elements) {
-    setDialogOpenState(elements.loginDialog, true, {
-      focusElement: elements.passwordInput
-    });
-    setPageInteractionState(elements.page, false);
-  }
-
-  function closeLoginDialog(elements) {
-    elements.loginStatus.textContent = '';
-    setDialogOpenState(elements.loginDialog, false, { skipFocusRestore: true });
-    setPageInteractionState(elements.page, true);
   }
 
   async function loadRuns(elements, options) {
@@ -977,4 +907,20 @@
       }, delayMs);
     };
   }
+
+  async function fetchJSON(url, options) {
+    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+      onUnauthorized: sessionController.handleUnauthorizedResponse
+    }));
+  }
+
+  var sessionController = shared.createAdminSessionController({
+    afterAuth: async function (elements) {
+      await loadRuns(elements, { resetOffset: false });
+    },
+    getElements: getElements,
+    getPageElement: function (elements) {
+      return elements && elements.page ? elements.page : null;
+    }
+  });
 })();

@@ -6,12 +6,20 @@ from typing import Any
 
 from telethon.tl.functions.channels import CreateChannelRequest
 
-from tg_harvest.admin_jobs.common import admin_error_message, finish_job_heartbeat
-from tg_harvest.admin_jobs.core import (
-    _admin_job_heartbeat,
-    _admin_job_update_progress,
-    job_context,
+from tg_harvest.admin_jobs.common import (
+    admin_error_message,
+    finish_job_heartbeat,
+    mark_admin_job_running,
+    start_admin_job_heartbeat,
+    update_admin_job_progress,
 )
+from tg_harvest.admin_jobs.clone_job_state import (
+    _clean_text,
+    _load_required_record,
+    _try_update_record,
+    _update_required_record,
+)
+from tg_harvest.admin_jobs.core import _admin_job_update_progress
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
@@ -149,42 +157,21 @@ def _created_chat_title(created_chat: Any, fallback_title: str) -> str:
     title = str(getattr(created_chat, "title", "") or "").strip()
     return title or fallback_title
 
-
-def _update_clone_run_required(
-    *,
-    get_conn_fn: Callable[[], Any],
-    run_id: str,
-    **kwargs: Any,
-) -> dict:
-    conn = get_conn_fn()
-    try:
-        run = update_clone_run(conn, run_id=run_id, **kwargs)
-    finally:
-        conn.close()
-    if run is None:
-        raise RuntimeError("克隆运行记录不存在，已停止结构克隆")
-    return run
-
-
 def _try_mark_clone_run_failed(
     *,
     get_conn_fn: Callable[[], Any],
     run_id: str,
     message: str,
 ) -> None:
-    with suppress(Exception):
-        conn = get_conn_fn()
-        try:
-            update_clone_run(
-                conn,
-                run_id=run_id,
-                status="error",
-                phase="error",
-                error_message=message,
-                completed_at=_admin_now_iso(),
-            )
-        finally:
-            conn.close()
+    _try_update_record(
+        get_conn_fn=get_conn_fn,
+        update_fn=update_clone_run,
+        run_id=run_id,
+        status="error",
+        phase="error",
+        error_message=message,
+        completed_at=_admin_now_iso(),
+    )
 
 
 def _admin_clone_structure_job_runner(
@@ -199,33 +186,36 @@ def _admin_clone_structure_job_runner(
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
-    job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
     client = None
     worker_id = f"{job_id}_clone_structure"
     run_id = str(clone_run_id or job_id)
     try:
-        admin_job_set_status_fn(job_id, "running")
-        _update_clone_run_required(
+        mark_admin_job_running(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+        _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_run,
+            missing_message="克隆运行记录不存在，已停止结构克隆",
             run_id=run_id,
             status="running",
             phase="loading_source",
         )
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             0,
             total=4,
             stage="running",
-            log_step=0,
-            auto_log=False,
         )
 
-        conn = get_conn_fn()
-        try:
-            source_chat = load_clone_source_chat(conn, int(source_chat_id))
-        finally:
-            conn.close()
+        source_chat = _load_required_record(
+            get_conn_fn=get_conn_fn,
+            load_fn=load_clone_source_chat,
+            missing_message="源群组不存在，无法执行结构克隆",
+            chat_id=int(source_chat_id),
+        )
 
         clone_kind = normalize_clone_target_kind(
             target_kind,
@@ -239,16 +229,16 @@ def _admin_clone_structure_job_runner(
             job_id,
             f"开始结构克隆：源={source_chat['chat_title']} ({source_chat['chat_id']})，目标标题={clone_title}，类型={clone_kind}",
         )
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             1,
             total=4,
             stage="validating",
-            log_step=0,
-            auto_log=False,
         )
-        _update_clone_run_required(
+        _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_run,
+            missing_message="克隆运行记录不存在，已停止结构克隆",
             run_id=run_id,
             status="running",
             phase="validating",
@@ -258,16 +248,16 @@ def _admin_clone_structure_job_runner(
         if not _ensure_base_session_valid(secondary_cfg, job_id, admin_job_append_log_fn):
             raise RuntimeError("第二账号会话不可用，无法创建克隆副本")
 
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             2,
             total=4,
             stage="creating",
-            log_step=0,
-            auto_log=False,
         )
-        _update_clone_run_required(
+        _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_run,
+            missing_message="克隆运行记录不存在，已停止结构克隆",
             run_id=run_id,
             status="running",
             phase="creating",
@@ -287,8 +277,10 @@ def _admin_clone_structure_job_runner(
         if created_chat is None or target_chat_id is None:
             raise RuntimeError("Telegram 创建响应缺少目标群组实体，无法写入克隆运行记录")
         target_created_at = _admin_now_iso()
-        _update_clone_run_required(
+        _update_required_record(
             get_conn_fn=get_conn_fn,
+            update_fn=update_clone_run,
+            missing_message="克隆运行记录不存在，已停止结构克隆",
             run_id=run_id,
             status="done",
             phase="done",
@@ -310,13 +302,11 @@ def _admin_clone_structure_job_runner(
             job_id,
             "第一版已停止在结构克隆阶段：未迁移历史消息、媒体、成员、评论、反应或原始时间。",
         )
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             4,
             total=4,
             stage="done",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
@@ -328,13 +318,11 @@ def _admin_clone_structure_job_runner(
             message=message,
         )
         admin_job_append_log_fn(job_id, f"结构克隆失败：{message}")
-        _admin_job_update_progress(
+        update_admin_job_progress(
             job_id,
             0,
             total=4,
             stage="error",
-            log_step=0,
-            auto_log=False,
         )
         admin_job_set_status_fn(job_id, "error")
     finally:
