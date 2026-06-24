@@ -52,7 +52,7 @@ from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     raise_if_long_flood_wait,
 )
-from tg_harvest.ingest.range_harvest import probe_history_access
+from tg_harvest.ingest.range_harvest import probe_history_access, read_latest_message_id
 from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
@@ -349,15 +349,32 @@ def _admin_update_effective_concurrency(
     active_account_count: int,
 ) -> tuple[int, int]:
     _ = cfg
-    per_account_limit = max(
-        1,
-        int(configured_concurrency) // max(1, int(active_account_count)),
-    )
+    if int(active_account_count) > 1:
+        # 双账号批量更新时限制为单账号单线程，避免同一账号并行切群造成请求突刺。
+        per_account_limit = 1
+    else:
+        per_account_limit = max(1, int(configured_concurrency))
     effective_concurrency = min(
         int(configured_concurrency),
         max(1, per_account_limit * max(1, int(active_account_count))),
     )
     return per_account_limit, effective_concurrency
+
+
+def _admin_update_account_start_delay(
+    account_next_start_at: dict[str, float],
+    account_key: str,
+    *,
+    gap_seconds: float,
+    now: float,
+) -> float:
+    safe_gap_seconds = max(0.0, float(gap_seconds))
+    if safe_gap_seconds <= 0:
+        return 0.0
+    next_allowed_at = float(account_next_start_at.get(account_key, now))
+    wait_seconds = max(0.0, next_allowed_at - float(now))
+    account_next_start_at[account_key] = max(next_allowed_at, float(now)) + safe_gap_seconds
+    return wait_seconds
 
 
 def _account_plan_by_key(account_plan: list[Any], key: str) -> Any | None:
@@ -391,6 +408,39 @@ def _admin_update_should_defer_chat(exc: Exception) -> bool:
     return "没有可用账号执行当前群组" in str(exc)
 
 
+def _load_admin_update_rows(conn: Any) -> list[Any]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                c.chat_id,
+                c.chat_title,
+                c.chat_username
+            FROM chats c
+            LEFT JOIN messages lm
+              ON lm.chat_id = c.chat_id
+             AND lm.message_id = (
+                    SELECT m.message_id
+                    FROM messages m
+                    WHERE m.chat_id = c.chat_id
+                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                    LIMIT 1
+                )
+            ORDER BY
+                CASE WHEN lm.msg_date_ts IS NULL THEN 1 ELSE 0 END ASC,
+                lm.msg_date_ts DESC,
+                c.chat_title COLLATE NOCASE ASC,
+                c.chat_id ASC
+            """
+        )
+        return cur.fetchall()
+    finally:
+        close = getattr(cur, "close", None)
+        if callable(close):
+            close()
+
+
 def _admin_update_all_chats(
     job_id, _ignored_client, get_conn_fn, admin_job_append_log_fn, cfg
 ):
@@ -399,11 +449,7 @@ def _admin_update_all_chats(
 
     conn = get_conn_fn()
     try:
-        cur = conn.cursor()
-        cur.execute(
-            "SELECT chat_id, chat_title, chat_username FROM chats ORDER BY chat_title COLLATE NOCASE ASC, chat_id ASC"
-        )
-        rows = cur.fetchall()
+        rows = _load_admin_update_rows(conn)
     finally:
         conn.close()
 
@@ -413,7 +459,8 @@ def _admin_update_all_chats(
 
     admin_job_append_log_fn(
         job_id,
-        f"数据库中共有 {len(rows)} 个群组/频道，本次将按数据库清单逐一尝试更新",
+        f"数据库中共有 {len(rows)} 个群组/频道，"
+        "本次将按数据库最后一条消息发送时间从新到旧逐一尝试更新",
     )
 
     account_plan = _admin_update_account_plan(
@@ -431,6 +478,7 @@ def _admin_update_all_chats(
         )
 
     total = len(rows)
+    probe_mode_enabled = total <= 2
     indexed_rows = list(enumerate(rows, start=1))
     account_assignments, assignment_counts = _build_admin_update_account_assignments(
         indexed_rows,
@@ -454,6 +502,12 @@ def _admin_update_all_chats(
         f"读取到 {total} 个群组，开始执行并发拉取 + 单线程写入（总并发上限：{effective_concurrency}，"
         f"单账号上限：{per_account_concurrency}，账号数：{len(account_plan)}）",
     )
+    if probe_mode_enabled:
+        admin_job_append_log_fn(
+            job_id,
+            f"当前任务仅 {total} 个群组，已启用探测模式：会先读取每个群组的最新消息 ID，"
+            "并输出“正在采集 当前/最新”进度日志",
+        )
     if len(account_plan) > 1:
         admin_job_append_log_fn(
             job_id,
@@ -488,6 +542,19 @@ def _admin_update_all_chats(
             "双账号协同策略：两个账号都会尽量参与公开群组更新；"
             "任一账号解析失败、读取失败或触发长等待时，当前群组会自动切换另一账号重试",
         )
+    try:
+        account_start_gap_seconds = max(
+            0.0,
+            float(getattr(cfg, "admin_update_min_chat_start_gap_seconds", 0.25) or 0.0),
+        )
+    except (TypeError, ValueError):
+        account_start_gap_seconds = 0.25
+    if account_start_gap_seconds > 0:
+        admin_job_append_log_fn(
+            job_id,
+            "账号级启动节流已启用："
+            f"同一账号启动下一个群组前至少间隔约 {account_start_gap_seconds:.2f}s",
+        )
     stats_lock = Lock()
     account_stats = {
         account.key: {
@@ -500,6 +567,8 @@ def _admin_update_all_chats(
     }
     account_cooldowns: dict[str, float] = {}
     account_state_lock = Lock()
+    account_start_lock = Lock()
+    account_next_start_at: dict[str, float] = {}
     no_available_accounts = False
     try:
         max_cooldown_wait_seconds = max(
@@ -524,6 +593,16 @@ def _admin_update_all_chats(
         if semaphore is not None:
             semaphore.acquire()
         try:
+            if account_start_gap_seconds > 0:
+                with account_start_lock:
+                    wait_seconds = _admin_update_account_start_delay(
+                        account_next_start_at,
+                        str(account.key),
+                        gap_seconds=account_start_gap_seconds,
+                        now=time.time(),
+                    )
+                if wait_seconds > 0:
+                    time.sleep(wait_seconds)
             local_client = _create_isolated_worker_client(account.cfg, worker_id)
             before_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
 
@@ -551,6 +630,18 @@ def _admin_update_all_chats(
                 job_id,
                 f"[{idx}/{total}] 群组连接成功：账号={account.label}，目标={current_chat_label}，名称={entity_title}",
             )
+            progress_total = None
+            progress_prefix = "正在采集"
+            if probe_mode_enabled:
+                progress_total = _probe_update_progress_total(
+                    client=local_client,
+                    entity=entity,
+                    account_label=str(account.label),
+                    cfg=account.cfg,
+                    chat_label=current_chat_label,
+                )
+                if progress_total is not None:
+                    progress_prefix = f"[{idx}/{total}] {current_chat_label} 正在采集"
 
             stream_entity_harvest_to_writer(
                 write_coordinator=write_coordinator,
@@ -564,6 +655,8 @@ def _admin_update_all_chats(
                 fallback_chat_username=current_chat_username,
                 skip_postprocess_if_unchanged=True,
                 enable_dedupe=False,
+                progress_total=progress_total,
+                progress_prefix=progress_prefix,
             )
             after_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
             return max(0, after_count - before_count)
@@ -721,10 +814,6 @@ def _admin_update_all_chats(
         )
         current_chat_label = _chat_log_label(raw_chat_id, current_chat_title)
         current_chat_username = _row_value(row, "chat_username", None)
-
-        import random
-
-        time.sleep(random.uniform(0.1, 0.5))
 
         try:
             current_chat_id = int(raw_chat_id)
@@ -948,6 +1037,7 @@ def _admin_process_single_chat_update(
     *,
     job_id: str,
     client: Any,
+    cfg: Any,
     get_conn_fn: Callable[[], Any],
     admin_job_append_log_fn: Callable[[str, str], Any],
     chat_id: int,
@@ -955,7 +1045,14 @@ def _admin_process_single_chat_update(
     chat_username: str | None = None,
     idx: int,
     total: int,
+    account_label: str = "主账号",
 ) -> None:
+    chat_label = _chat_log_label(chat_id, chat_title)
+    probe_mode_enabled = True
+    admin_job_append_log_fn(
+        job_id,
+        f"[{idx}/{total}] 准备更新群组：{chat_label}",
+    )
     entity = resolve_chat_entity(client, chat_id, chat_username)
 
     entity_title = (
@@ -982,7 +1079,19 @@ def _admin_process_single_chat_update(
             auto_log=False,
         )
         admin_job_append_log_fn(job_id, "启用边抓取边写入：抓取与数据库写入并行执行")
-        stream_entity_harvest_to_writer(
+        progress_total = None
+        progress_prefix = "正在采集"
+        if probe_mode_enabled:
+            progress_total = _probe_update_progress_total(
+                client=client,
+                entity=entity,
+                account_label=account_label,
+                cfg=cfg,
+                chat_label=chat_label,
+            )
+            if progress_total is not None:
+                progress_prefix = f"[{idx}/{total}] {chat_label} 正在采集"
+        result = stream_entity_harvest_to_writer(
             write_coordinator=write_coordinator,
             get_conn_fn=get_conn_fn,
             client=client,
@@ -994,6 +1103,15 @@ def _admin_process_single_chat_update(
             fallback_chat_username=chat_username,
             skip_postprocess_if_unchanged=True,
             enable_dedupe=False,
+            progress_total=progress_total,
+            progress_prefix=progress_prefix,
+        )
+        counters = getattr(result, "counters", None)
+        seen_count = int(getattr(counters, "seen", 0) or 0)
+        written_count = int(getattr(counters, "written", 0) or 0)
+        admin_job_append_log_fn(
+            job_id,
+            f"[{idx}/{total}] 增量更新完成：群组={chat_label}，扫描 {seen_count} 条，写入 {written_count} 条",
         )
         _admin_job_update_progress(
             job_id,
@@ -1026,6 +1144,7 @@ def _run_single_chat_update_with_account_fallback(
         _admin_process_single_chat_update(
             job_id=job_id,
             client=primary_client,
+            cfg=cfg,
             get_conn_fn=get_conn_fn,
             admin_job_append_log_fn=admin_job_append_log_fn,
             chat_id=chat_id,
@@ -1033,6 +1152,7 @@ def _run_single_chat_update_with_account_fallback(
             chat_username=chat_username,
             idx=1,
             total=1,
+            account_label="主账号",
         )
         return
     except Exception as exc:
@@ -1072,6 +1192,7 @@ def _run_single_chat_update_with_account_fallback(
             _admin_process_single_chat_update(
                 job_id=job_id,
                 client=secondary_client,
+                cfg=secondary_cfg,
                 get_conn_fn=get_conn_fn,
                 admin_job_append_log_fn=admin_job_append_log_fn,
                 chat_id=chat_id,
@@ -1079,6 +1200,11 @@ def _run_single_chat_update_with_account_fallback(
                 chat_username=chat_username,
                 idx=1,
                 total=1,
+                account_label="第二账号",
+            )
+            admin_job_append_log_fn(
+                job_id,
+                f"[1/1] 已切换第二账号完成采集：群组={_chat_log_label(chat_id, chat_title)}",
             )
         except Exception as secondary_exc:
             if isinstance(secondary_exc, AccountFloodWaitError):
@@ -1113,6 +1239,46 @@ def _admin_get_chat_message_count(get_conn_fn: Callable[[], Any], chat_id: int) 
         return int(row["cnt"] or 0) if row else 0
     finally:
         count_conn.close()
+
+
+def _probe_update_progress_total(
+    *,
+    client: Any,
+    entity: Any,
+    account_label: str,
+    cfg: Any,
+    chat_label: str,
+) -> int | None:
+    if not hasattr(client, "get_messages"):
+        return None
+    try:
+        with bind_client_event_loop(client):
+            latest_message_id = int(read_latest_message_id(client, entity))
+    except Exception as exc:
+        raise_if_long_flood_wait(
+            exc,
+            threshold_seconds=int(
+                getattr(cfg, "flood_wait_switch_threshold", 30) or 30
+            ),
+            account_label=account_label,
+            scope="admin-update-progress-probe",
+        )
+        logging.warning(
+            "%s 探测最新消息 ID 失败，继续按原模式更新：%s",
+            chat_label,
+            exc,
+        )
+        return None
+
+    if latest_message_id <= 0:
+        logging.warning(
+            "%s 探测到的最新消息 ID 无效，继续按原模式更新",
+            chat_label,
+        )
+        return None
+
+    logging.info("%s 探测到最新消息 ID=%s", chat_label, latest_message_id)
+    return latest_message_id
 
 
 def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
@@ -2126,6 +2292,11 @@ def _admin_update_job_runner(
         else:
             chat_username = read_chat_username(get_conn_fn, int(chat_id))
             local_client = _create_isolated_worker_client(cfg, worker_id)
+            admin_job_append_log_fn(
+                job_id,
+                "当前任务仅 1 个群组，已启用探测模式：会先读取该群组的最新消息 ID，"
+                "并输出“正在采集 当前/最新”进度日志",
+            )
             _run_single_chat_update_with_account_fallback(
                 job_id=job_id,
                 cfg=cfg,

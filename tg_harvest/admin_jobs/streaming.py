@@ -67,6 +67,8 @@ def stream_entity_harvest_to_writer(
     fallback_chat_username: str | None = None,
     skip_postprocess_if_unchanged: bool = False,
     enable_dedupe: bool = True,
+    progress_total: int | None = None,
+    progress_prefix: str = "正在采集",
 ) -> StreamedEntityHarvestResult:
     """Harvest one entity while delegating all writes to the shared writer thread."""
 
@@ -129,6 +131,8 @@ def stream_entity_harvest_to_writer(
                     entity,
                     chat_id,
                     write_batch_fn=_submit_harvest_batch,
+                    progress_total=progress_total,
+                    progress_prefix=progress_prefix,
                 )
         finally:
             read_conn.close()

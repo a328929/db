@@ -38,26 +38,6 @@ from tg_harvest.storage.connection import ensure_configured_db
 from tg_harvest.storage.schema import refresh_chat_message_counts
 
 
-def _read_target_message_total(
-    client: Any, entity: Any, *, first_sync: bool, scan_from_id: int
-) -> int | None:
-    try:
-        kwargs = {"limit": 0}
-        if not first_sync and scan_from_id > 0:
-            kwargs["min_id"] = int(scan_from_id)
-        result = client.get_messages(entity, **kwargs)
-        total = int(getattr(result, "total", 0) or 0)
-        return max(total, 0)
-    except Exception as exc:
-        raise_if_long_flood_wait(
-            exc,
-            threshold_seconds=CFG.flood_wait_switch_threshold,
-            scope="read-target-total",
-        )
-        logging.warning(f"读取目标总消息数失败，改用无总量进度日志: {exc}")
-        return None
-
-
 def _format_harvest_progress_message(
     current: int, total: int | None = None, *, prefix: str = "正在采集"
 ) -> str:
@@ -69,8 +49,13 @@ def _format_harvest_progress_message(
     return f"{prefix} {safe_current}"
 
 
-def _log_harvest_progress(current: int, total: int | None = None) -> None:
-    logging.info(_format_harvest_progress_message(current, total))
+def _log_harvest_progress(
+    current: int,
+    total: int | None = None,
+    *,
+    prefix: str = "正在采集",
+) -> None:
+    logging.info(_format_harvest_progress_message(current, total, prefix=prefix))
 
 
 def _build_iter_messages_kwargs(
@@ -250,6 +235,8 @@ def _harvest_messages_for_entity(
     chat_id: int,
     *,
     write_batch_fn: Callable[[list[tuple], list[tuple]], None] | None = None,
+    progress_total: int | None = None,
+    progress_prefix: str = "正在采集",
 ) -> tuple[HarvestCounters, set[int], bool]:
     from telethon.errors import FloodWaitError, RPCError
 
@@ -259,18 +246,25 @@ def _harvest_messages_for_entity(
     # 允许少量重扫尾部以处理 Telegram 乱序或删除情况
     scan_from_id = max(last_id - CFG.rescan_tail_ids, 0)
     resume_from_id = scan_from_id
+    progress_floor = max(last_id, 0)
+    normalized_progress_total = (
+        max(int(progress_total), progress_floor)
+        if isinstance(progress_total, int) and progress_total >= 0
+        else None
+    )
 
     counters = HarvestCounters()
     msg_rows, media_rows = [], []
     touched_groups = set()
-    target_total = _read_target_message_total(
-        client, entity, first_sync=first_sync, scan_from_id=scan_from_id
-    )
 
     logging.info(
         f"开始抓取 chat_id={chat_id}，{'全量' if first_sync else '增量'}同步，中止 ID <= {scan_from_id}"
     )
-    _log_harvest_progress(0, target_total)
+    _log_harvest_progress(
+        progress_floor if normalized_progress_total is not None else 0,
+        normalized_progress_total,
+        prefix=progress_prefix,
+    )
 
     max_retries = 3
     retry_count = 0
@@ -331,7 +325,16 @@ def _harvest_messages_for_entity(
                     logging.info(f"批量写入完成：已写入={counters.written}")
 
                 if counters.seen % CFG.log_every == 0:
-                    _log_harvest_progress(counters.seen, target_total)
+                    progress_current = (
+                        max(int(message.id or 0), progress_floor)
+                        if normalized_progress_total is not None
+                        else counters.seen
+                    )
+                    _log_harvest_progress(
+                        progress_current,
+                        normalized_progress_total,
+                        prefix=progress_prefix,
+                    )
                     logging.info(f"进度：扫描={counters.seen}，写入={counters.written}")
 
             harvest_completed = True
@@ -403,7 +406,13 @@ def _harvest_messages_for_entity(
         counters.written += len(msg_rows)
         resume_from_id = max(resume_from_id, _last_message_id_in_rows(msg_rows))
 
-    _log_harvest_progress(counters.seen, target_total)
+    _log_harvest_progress(
+        normalized_progress_total
+        if normalized_progress_total is not None
+        else counters.seen,
+        normalized_progress_total,
+        prefix=progress_prefix,
+    )
     elapsed = time.perf_counter() - started_at
     logging.info(
         f"消息抓取阶段完成: chat_id={chat_id} 扫描={counters.seen} 写入={counters.written} 耗时={elapsed:.2f}s"

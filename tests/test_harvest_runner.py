@@ -248,6 +248,37 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             any("为避免静默丢数已中止当前采集" in line for line in captured.output)
         )
 
+    def test_harvest_progress_logs_can_show_latest_message_id_for_small_tasks(self) -> None:
+        client = _FakeClient(
+            [_message_stream(_FakeMessage(11), _FakeMessage(12), _FakeMessage(13))]
+        )
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch("tg_harvest.ingest.runner.batch_upsert"), patch(
+            "tg_harvest.ingest.runner.CFG.log_every", 2
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
+        ), self.assertLogs(level="INFO") as captured:
+            _harvest_messages_for_entity(
+                self.conn,
+                client,
+                object(),
+                42,
+                progress_total=13,
+                progress_prefix="[1/1] test-chat 正在采集",
+            )
+
+        self.assertTrue(
+            any("[1/1] test-chat 正在采集 10/13" in line for line in captured.output)
+        )
+        self.assertTrue(
+            any("[1/1] test-chat 正在采集 12/13" in line for line in captured.output)
+        )
+        self.assertTrue(
+            any("[1/1] test-chat 正在采集 13/13" in line for line in captured.output)
+        )
+
 
 class HarvestRunnerPostprocessTests(unittest.TestCase):
     def setUp(self) -> None:

@@ -149,29 +149,148 @@
   overflow: auto;
 }
 
-.admin-log-container p {
+.admin-log-container:focus-within {
+  outline: 2px solid rgba(54, 108, 186, 0.88);
+  outline-offset: 2px;
+  box-shadow: 0 0 0 3px rgba(54, 108, 186, 0.18);
+}
+
+.admin-log-list {
+  list-style: none;
   margin: 0;
-  padding: 6px 8px;
+  padding: 0;
+}
+
+.admin-log-entry {
+  margin: 0;
+  padding: 8px 10px;
   border-radius: 8px;
   color: #2b3852;
   font-size: 0.92rem;
   line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  background: #f4f8fd;
+  border: 1px solid rgba(179, 197, 223, 0.42);
 }
 
-.admin-log-container p + p {
+.admin-log-entry + .admin-log-entry {
   margin-top: 6px;
 }
 
-.admin-log-container p:nth-child(odd) {
-  background: #f4f8fd;
+.admin-log-entry:focus-visible,
+.admin-log-placeholder:focus-visible {
+  outline: 2px solid rgba(54, 108, 186, 0.88);
+  outline-offset: 2px;
 }
 
-.admin-log-container p[data-placeholder="true"] {
+.admin-log-prefix {
+  flex: 0 0 auto;
+  min-width: 54px;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(64, 104, 170, 0.1);
+  color: #35558d;
+  font-size: 0.79rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: center;
+}
+
+.admin-log-message {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.admin-log-entry--info,
+.admin-log-entry--step {
+  background: #f4f8fd;
+  border-color: rgba(179, 197, 223, 0.42);
+}
+
+.admin-log-entry--step {
+  background: #f0f7ff;
+  border-color: rgba(133, 175, 227, 0.5);
+}
+
+.admin-log-entry--progress {
+  background: #edf5ff;
+  border-color: rgba(96, 150, 219, 0.55);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.55);
+}
+
+.admin-log-entry--progress .admin-log-prefix {
+  background: rgba(50, 112, 196, 0.16);
+  color: #214e8a;
+}
+
+.admin-log-entry--summary {
+  background: #eef6ff;
+  border-color: rgba(76, 131, 209, 0.58);
+  color: #223c62;
+  font-weight: 600;
+}
+
+.admin-log-entry--warning {
+  background: #fff7ea;
+  border-color: rgba(223, 167, 71, 0.55);
+  color: #774d12;
+}
+
+.admin-log-entry--warning .admin-log-prefix {
+  background: rgba(210, 147, 35, 0.16);
+  color: #8c5504;
+}
+
+.admin-log-entry--error {
+  background: #fff1f1;
+  border-color: rgba(220, 104, 104, 0.52);
+  color: #8f2f2f;
+}
+
+.admin-log-entry--error .admin-log-prefix {
+  background: rgba(201, 79, 79, 0.14);
+  color: #a13333;
+}
+
+.admin-log-entry--success {
+  background: #eefaf2;
+  border-color: rgba(92, 171, 116, 0.5);
+  color: #24553a;
+}
+
+.admin-log-entry--success .admin-log-prefix {
+  background: rgba(67, 154, 92, 0.14);
+  color: #24603a;
+}
+
+.admin-log-placeholder {
+  margin: 0;
   background: transparent;
   color: var(--muted);
   padding: 2px 0;
+  border: 0;
+}
+
+.admin-log-placeholder + .admin-log-entry,
+.admin-log-entry + .admin-log-placeholder {
+  margin-top: 6px;
+}
+
+@media (max-width: 640px) {
+  .admin-log-entry {
+    padding: 8px 9px;
+    gap: 7px;
+  }
+
+  .admin-log-prefix {
+    min-width: 48px;
+    padding-inline: 6px;
+    font-size: 0.76rem;
+  }
 }
 
 #admin-bottom-action-bar {

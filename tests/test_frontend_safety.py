@@ -15,12 +15,44 @@ class FrontendSafetyTests(unittest.TestCase):
         template = (ROOT / "templates" / "admin_manage.html").read_text(encoding="utf-8")
         self.assertIn("admin_manage_shared.js", template)
         self.assertIn("admin_manage.css", template)
+        self.assertIn('id="adminLogsHelp"', template)
+        self.assertIn('aria-describedby="adminLogsHelp"', template)
+        self.assertIn('id="admin-log-container"', template)
         self.assertNotIn("admin-incremental-checkbox", template)
         self.assertIn("admin-delete-empty-chats-btn", template)
         self.assertIn("/admin/channels", template)
         self.assertIn("/admin/clone", template)
         self.assertIn("/admin/clone/runs/manage", template)
         self.assertIn("/admin/recovery", template)
+
+    def test_shared_admin_log_helpers_build_focusable_list_entries(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        styles = (ROOT / "static" / "admin_manage.css").read_text(encoding="utf-8")
+        self.assertIn("document.createElement('ol')", source)
+        self.assertIn("document.createElement('li')", source)
+        self.assertIn("list.className = 'admin-log-list'", source)
+        self.assertIn("placeholder.setAttribute('tabindex', '0')", source)
+        self.assertIn("line.setAttribute('tabindex', '0')", source)
+        self.assertNotIn("buildAccessibleLogText", source)
+        self.assertNotIn("list.setAttribute('aria-live'", source)
+        self.assertNotIn("list.setAttribute('aria-relevant'", source)
+        self.assertNotIn("list.setAttribute('aria-atomic'", source)
+        self.assertIn(".admin-log-list {", styles)
+        self.assertIn(".admin-log-placeholder {", styles)
+
+    def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
+        for template_name in (
+            "admin_manage.html",
+            "admin_channels.html",
+            "admin_recovery.html",
+            "admin_clone.html",
+        ):
+            template = (ROOT / "templates" / template_name).read_text(
+                encoding="utf-8"
+            )
+            self.assertNotIn("自动播报", template, template_name)
 
     def test_admin_channels_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_channels.html").read_text(
@@ -270,6 +302,9 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("elements && elements.loginDialog", source)
         self.assertNotIn("任务创建成功但缺少 job_id", source)
         self.assertEqual(1, shared_source.count("任务创建成功但缺少 job_id"))
+        self.assertIn("line.setAttribute('role', 'listitem');", shared_source)
+        self.assertIn("placeholder.setAttribute('role', 'listitem');", shared_source)
+        self.assertIn("line.setAttribute('tabindex', '0');", shared_source)
 
     def test_admin_channels_traps_login_dialog_focus(self) -> None:
         source = (ROOT / "static" / "admin_channels.js").read_text(encoding="utf-8")

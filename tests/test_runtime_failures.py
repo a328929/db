@@ -43,7 +43,10 @@ from tg_harvest.admin_jobs.runners import (
     _admin_get_chat_message_count,
     _admin_harvest_job_runner,
     _admin_process_single_chat_update,
+    _admin_update_account_start_delay,
     _admin_update_all_chats,
+    _admin_update_effective_concurrency,
+    _load_admin_update_rows,
     _build_admin_update_account_assignments,
     _delete_chat_data,
     _delete_empty_chats_data,
@@ -61,7 +64,6 @@ from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.parse import HarvestCounters
 from tg_harvest.ingest.runner import (
     _format_harvest_progress_message,
-    _read_target_message_total,
 )
 from tg_harvest.ingest.store import (
     batch_upsert,
@@ -104,6 +106,126 @@ class _FakeClient:
 class AdminUpdateRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         _ACCOUNT_FLOOD_COOLDOWNS.clear()
+
+    def test_load_admin_update_rows_sorts_by_last_message_time_desc(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        cur = conn.cursor()
+        cur.execute(
+            """
+            CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT,
+                message_count INTEGER NOT NULL DEFAULT 0,
+                last_seen_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE messages (
+                chat_id INTEGER NOT NULL,
+                message_id INTEGER NOT NULL,
+                msg_date_text TEXT NOT NULL,
+                msg_date_ts INTEGER NOT NULL,
+                PRIMARY KEY(chat_id, message_id)
+            )
+            """
+        )
+        cur.executemany(
+            """
+            INSERT INTO chats(
+                chat_id,
+                chat_title,
+                chat_username,
+                message_count,
+                last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "Older but Many", None, 50, "2026-01-01 00:00:00"),
+                (2, "Newer but Few", None, 3, "2026-01-02 00:00:00"),
+                (3, "No Messages", None, 0, "2026-01-03 00:00:00"),
+            ],
+        )
+        cur.executemany(
+            """
+            INSERT INTO messages(
+                chat_id,
+                message_id,
+                msg_date_text,
+                msg_date_ts
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            [
+                (1, 1001, "2026-03-01 10:00:00", 1772359200),
+                (1, 1002, "2026-03-10 10:00:00", 1773136800),
+                (2, 2001, "2026-03-11 09:00:00", 1773229200),
+            ],
+        )
+        conn.commit()
+
+        try:
+            rows = _load_admin_update_rows(conn)
+        finally:
+            conn.close()
+
+        self.assertEqual(
+            [2, 1, 3],
+            [int(row["chat_id"]) for row in rows],
+        )
+
+    def test_admin_update_effective_concurrency_caps_each_account_to_one_worker(
+        self,
+    ) -> None:
+        per_account, effective = _admin_update_effective_concurrency(
+            SimpleNamespace(),
+            configured_concurrency=4,
+            active_account_count=2,
+        )
+        self.assertEqual(1, per_account)
+        self.assertEqual(2, effective)
+
+        per_account, effective = _admin_update_effective_concurrency(
+            SimpleNamespace(),
+            configured_concurrency=4,
+            active_account_count=1,
+        )
+        self.assertEqual(4, per_account)
+        self.assertEqual(4, effective)
+
+    def test_admin_update_account_start_delay_applies_gap_per_account(self) -> None:
+        next_start_at: dict[str, float] = {}
+
+        wait = _admin_update_account_start_delay(
+            next_start_at,
+            "primary",
+            gap_seconds=0.5,
+            now=100.0,
+        )
+        self.assertEqual(0.0, wait)
+        self.assertEqual(100.5, next_start_at["primary"])
+
+        wait = _admin_update_account_start_delay(
+            next_start_at,
+            "primary",
+            gap_seconds=0.5,
+            now=100.2,
+        )
+        self.assertAlmostEqual(0.3, wait, places=6)
+        self.assertEqual(101.0, next_start_at["primary"])
+
+        wait = _admin_update_account_start_delay(
+            next_start_at,
+            "secondary",
+            gap_seconds=0.5,
+            now=100.2,
+        )
+        self.assertEqual(0.0, wait)
+        self.assertEqual(100.7, next_start_at["secondary"])
 
     def test_chat_message_count_reads_chat_summary_not_messages_count(self) -> None:
         statements = []
@@ -346,8 +468,195 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual([1, 2], submitted_chat_ids)
-        self.assertTrue(any("按数据库清单逐一尝试更新" in line for line in logs))
+        self.assertTrue(
+            any("按数据库最后一条消息发送时间从新到旧逐一尝试更新" in line for line in logs)
+        )
         self.assertFalse(any("本次仅更新" in line for line in logs))
+
+    def test_all_chat_update_enables_probe_mode_only_for_two_or_fewer_chats(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+        ]
+        cfg = SimpleNamespace(admin_update_concurrency=1, session_name="sess")
+        logs = []
+        harvest_progress = []
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **kwargs):
+            harvest_progress.append(
+                (
+                    int(entity.id),
+                    kwargs.get("progress_total"),
+                    kwargs.get("progress_prefix"),
+                )
+            )
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_FakeClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._probe_update_progress_total",
+            side_effect=[5054, 6060],
+        ) as probe_mock, patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-probe-small",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(2, probe_mock.call_count)
+        self.assertEqual(
+            [
+                (1, 5054, "[1/2] one (ID=1) 正在采集"),
+                (2, 6060, "[2/2] two (ID=2) 正在采集"),
+            ],
+            harvest_progress,
+        )
+        self.assertTrue(any("已启用探测模式" in line for line in logs))
+
+    def test_all_chat_update_keeps_default_mode_when_chat_count_exceeds_two(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+            {"chat_id": 3, "chat_title": "three", "chat_username": "three_name"},
+        ]
+        cfg = SimpleNamespace(admin_update_concurrency=1, session_name="sess")
+        logs = []
+        harvest_progress = []
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def fake_harvest(_conn, _client, entity, _chat_id, **kwargs):
+            harvest_progress.append(
+                (
+                    int(entity.id),
+                    kwargs.get("progress_total"),
+                    kwargs.get("progress_prefix"),
+                )
+            )
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            return_value=_FakeClient(),
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._probe_update_progress_total",
+        ) as probe_mock, patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-probe-large",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        probe_mock.assert_not_called()
+        self.assertEqual(
+            [
+                (1, None, "正在采集"),
+                (2, None, "正在采集"),
+                (3, None, "正在采集"),
+            ],
+            harvest_progress,
+        )
+        self.assertFalse(any("已启用探测模式" in line for line in logs))
 
     def test_all_chat_update_round_robins_secondary_account(self) -> None:
         rows = [
@@ -1383,6 +1692,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             parse_failure_samples=[],
             parse_failures_by_type={},
         )
+        progress_kwargs = []
 
         class _CoordinatorStub:
             instances = []
@@ -1415,6 +1725,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 self.closed = True
 
         def fake_harvest(_conn, _client, _entity, chat_id, **kwargs):
+            progress_kwargs.append(
+                {
+                    "progress_total": kwargs.get("progress_total"),
+                    "progress_prefix": kwargs.get("progress_prefix"),
+                }
+            )
             write_batch_fn = kwargs.get("write_batch_fn")
             self.assertIsNotNone(write_batch_fn)
             write_batch_fn(
@@ -1444,6 +1760,9 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
             _CoordinatorStub,
         ), patch(
+            "tg_harvest.admin_jobs.runners._probe_update_progress_total",
+            return_value=999,
+        ), patch(
             "tg_harvest.ingest.runner._harvest_messages_for_entity",
             side_effect=fake_harvest,
         ), patch(
@@ -1452,6 +1771,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             _admin_process_single_chat_update(
                 job_id="job-1",
                 client=object(),
+                cfg=SimpleNamespace(flood_wait_switch_threshold=30),
                 get_conn_fn=lambda: _FakeConn([]),
                 admin_job_append_log_fn=_append,
                 chat_id=1,
@@ -1459,6 +1779,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 chat_username="chat_name",
                 idx=1,
                 total=1,
+                account_label="主账号",
             )
 
         self.assertEqual(1, len(_CoordinatorStub.instances))
@@ -1470,8 +1791,15 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual(None, coordinator.chat_starts[0]["chat_username"])
         self.assertTrue(coordinator.finalized[0]["skip_postprocess_if_unchanged"])
         self.assertFalse(coordinator.finalized[0]["enable_dedupe"])
+        self.assertTrue(any("准备更新群组" in line for line in append_log))
+        self.assertTrue(any("群组连接成功" in line for line in append_log))
         self.assertTrue(any("边抓取边写入" in line for line in append_log))
+        self.assertTrue(any("增量更新完成" in line for line in append_log))
         self.assertEqual(2, progress_mock.call_count)
+        self.assertEqual(
+            [{"progress_total": 999, "progress_prefix": "[1/1] chat-1 (ID=1) 正在采集"}],
+            progress_kwargs,
+        )
 
     def test_streaming_helper_finalizes_partial_batches_after_harvest_failure(self) -> None:
         class _CoordinatorStub:
@@ -2586,24 +2914,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(any("第二账号解析并在主账号确认" in line for line in logs))
 
 
-class _CountResult:
-    def __init__(self, total):
-        self.total = total
-
-
-class _CountClient:
-    def __init__(self, result=None, exc=None):
-        self._result = result
-        self._exc = exc
-        self.calls = []
-
-    def get_messages(self, entity, **kwargs):
-        self.calls.append(kwargs)
-        if self._exc is not None:
-            raise self._exc
-        return self._result
-
-
 class HarvestProgressTests(unittest.TestCase):
     def test_format_harvest_progress_message_with_total(self) -> None:
         self.assertEqual(
@@ -2616,46 +2926,6 @@ class HarvestProgressTests(unittest.TestCase):
             "正在采集 25000/25000",
             _format_harvest_progress_message(26000, 25000),
         )
-
-    def test_read_target_message_total_full_sync(self) -> None:
-        client = _CountClient(result=_CountResult(25000))
-
-        total = _read_target_message_total(
-            client,
-            object(),
-            first_sync=True,
-            scan_from_id=0,
-        )
-
-        self.assertEqual(25000, total)
-        self.assertEqual([{"limit": 0}], client.calls)
-
-    def test_read_target_message_total_incremental_uses_min_id(self) -> None:
-        client = _CountClient(result=_CountResult(123))
-
-        total = _read_target_message_total(
-            client,
-            object(),
-            first_sync=False,
-            scan_from_id=456,
-        )
-
-        self.assertEqual(123, total)
-        self.assertEqual([{"limit": 0, "min_id": 456}], client.calls)
-
-    def test_read_target_message_total_degrades_to_none_on_error(self) -> None:
-        client = _CountClient(exc=RuntimeError("boom"))
-
-        with self.assertLogs(level="WARNING") as captured:
-            total = _read_target_message_total(
-                client,
-                object(),
-                first_sync=True,
-                scan_from_id=0,
-            )
-
-        self.assertIsNone(total)
-        self.assertTrue(any("读取目标总消息数失败" in line for line in captured.output))
 
 
 class SearchableMediaCleanupTests(unittest.TestCase):

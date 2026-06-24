@@ -217,20 +217,19 @@
       <dl id="admin-clone-timeline-summary" class="clone-summary-grid clone-migration-summary" aria-label="完整时间线迁移摘要"></dl>
     </section>
 
-    <section class="panel clone-panel" aria-labelledby="cloneLogTitle">
+    <section class="panel clone-panel" aria-labelledby="cloneLogTitle" aria-describedby="cloneLogHelp">
       <div class="admin-log-head clone-log-head">
         <h2 id="cloneLogTitle" class="section-title">克隆日志</h2>
         <button id="admin-clear-clone-logs-btn" class="btn" type="button" hidden aria-label="清空克隆日志">
           清空日志
         </button>
       </div>
+      <p id="cloneLogHelp" class="sr-only">
+        日志区域可滚动。聚焦后可使用方向键浏览已生成的日志内容。
+      </p>
       <div
         id="admin-clone-log-container"
         class="admin-log-container"
-        role="log"
-        aria-live="polite"
-        aria-relevant="additions text"
-        aria-label="克隆系统日志"
       ></div>
     </section>
   </main>

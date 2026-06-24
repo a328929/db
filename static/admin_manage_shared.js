@@ -446,23 +446,49 @@
     element.hidden = hidden;
   }
 
+  function getLogList(container) {
+    if (!container) {
+      return null;
+    }
+
+    var list = container.querySelector('[data-log-list="true"]');
+    if (list) {
+      return list;
+    }
+
+    list = document.createElement('ol');
+    list.className = 'admin-log-list';
+    list.setAttribute('data-log-list', 'true');
+    list.setAttribute('role', 'list');
+    container.appendChild(list);
+    return list;
+  }
+
   function ensurePlaceholder(container) {
-    if (container.querySelector('[data-placeholder="true"]')) {
+    var list = getLogList(container);
+    if (!list || list.querySelector('[data-placeholder="true"]')) {
       return;
     }
 
-    var placeholder = document.createElement('p');
+    var placeholder = document.createElement('li');
+    placeholder.className = 'admin-log-placeholder';
+    placeholder.setAttribute('role', 'listitem');
+    placeholder.setAttribute('tabindex', '0');
     placeholder.textContent = '暂无日志';
     placeholder.setAttribute('data-placeholder', 'true');
-    container.appendChild(placeholder);
+    list.appendChild(placeholder);
   }
 
   function removePlaceholder(container) {
-    var placeholder = container.querySelector('[data-placeholder="true"]');
+    var list = getLogList(container);
+    if (!list) {
+      return;
+    }
+    var placeholder = list.querySelector('[data-placeholder="true"]');
     if (placeholder) {
       placeholder.remove();
-    } else if (container.textContent.trim() === '暂无日志') {
-      container.textContent = '';
+    } else if (list.textContent.trim() === '暂无日志') {
+      list.textContent = '';
     }
   }
 
@@ -471,7 +497,13 @@
       return;
     }
 
-    var hasLogs = Array.prototype.some.call(elements.logContainer.children, function (node) {
+    var list = getLogList(elements.logContainer);
+    if (!list) {
+      elements.clearLogsBtn.hidden = true;
+      return;
+    }
+
+    var hasLogs = Array.prototype.some.call(list.children, function (node) {
       if (!node || typeof node.getAttribute !== 'function') {
         return false;
       }
@@ -484,23 +516,142 @@
     elements.clearLogsBtn.hidden = !hasLogs;
   }
 
+  function isLogContainerPinnedToBottom(container) {
+    if (!container) {
+      return true;
+    }
+    var remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return remaining <= 24;
+  }
+
+  function logMessageKind(text) {
+    var normalized = String(text || '').trim();
+    if (!normalized) return 'info';
+    if (normalized.indexOf('[进度]') === 0) return 'progress';
+    if (/^账号执行统计：/.test(normalized)) return 'summary';
+    if (/^(全部群组增量采集|扫描完成：|删除零消息群组完成：|零消息群组删除完成：)/.test(normalized)) {
+      return 'summary';
+    }
+    if (/^\[\d+\/\d+\]/.test(normalized)) {
+      if (/(失败|错误|异常|暂缓)/.test(normalized)) return 'error';
+      if (/(冷却|等待|重试|切换|停止启动剩余群组)/.test(normalized)) return 'warning';
+      if (/(新增|连接成功|启用|已切换账号完成采集|导入目标)/.test(normalized)) return 'step';
+      return 'info';
+    }
+    if (/(失败|错误|异常|非法|不存在|无法|未授权|已中止)/.test(normalized)) return 'error';
+    if (/(冷却|FloodWait|等待约|停止启动剩余群组|已收到停止请求|已请求停止|继续监控)/.test(normalized)) {
+      return 'warning';
+    }
+    if (/(已创建|已接收|执行完成|认证成功|预检完成|恢复完成|删除完成|扫描任务已创建|恢复任务已创建)/.test(normalized)) {
+      return 'success';
+    }
+    return 'info';
+  }
+
+  function splitLogPrefix(text) {
+    var normalized = String(text || '');
+    var progressMatch = normalized.match(/^(\[进度\])\s*(.*)$/);
+    if (progressMatch) {
+      return {
+        prefix: progressMatch[1],
+        message: progressMatch[2] || '',
+        kind: 'progress'
+      };
+    }
+
+    var stepMatch = normalized.match(/^(\[\d+\/\d+\])\s*(.*)$/);
+    if (stepMatch) {
+      return {
+        prefix: stepMatch[1],
+        message: stepMatch[2] || '',
+        kind: logMessageKind(normalized)
+      };
+    }
+
+    return {
+      prefix: '',
+      message: normalized,
+      kind: logMessageKind(normalized)
+    };
+  }
+
+  function buildLogEntry(message, options) {
+    var parsed = splitLogPrefix(message);
+    var line = document.createElement('li');
+    line.className = 'admin-log-entry admin-log-entry--' + parsed.kind;
+    line.setAttribute('role', 'listitem');
+    line.setAttribute('data-log-kind', parsed.kind);
+    line.setAttribute('tabindex', '0');
+    if (options && options.liveProgress) {
+      line.setAttribute('data-log-live', 'true');
+    }
+
+    if (parsed.prefix) {
+      var prefix = document.createElement('span');
+      prefix.className = 'admin-log-prefix';
+      prefix.textContent = parsed.prefix;
+      line.appendChild(prefix);
+    }
+
+    var text = document.createElement('span');
+    text.className = 'admin-log-message';
+    text.textContent = parsed.message || String(message || '');
+    line.appendChild(text);
+    return line;
+  }
+
+  function upsertProgressEntry(container, message) {
+    var list = getLogList(container);
+    if (!list) {
+      return;
+    }
+
+    var existing = list.querySelector('[data-log-kind="progress"][data-log-live="true"]');
+    if (existing) {
+      var replacement = buildLogEntry(message, { liveProgress: true });
+      list.replaceChild(replacement, existing);
+      list.appendChild(replacement);
+      return;
+    }
+    list.appendChild(buildLogEntry(message, { liveProgress: true }));
+  }
+
   function appendLog(elements, message) {
     if (!message) {
       return;
     }
 
-    removePlaceholder(elements.logContainer);
+    var container = elements && elements.logContainer;
+    if (!container) {
+      return;
+    }
+    var list = getLogList(container);
+    if (!list) {
+      return;
+    }
+    var text = String(message);
+    var shouldStickToBottom = isLogContainerPinnedToBottom(container);
 
-    var line = document.createElement('p');
-    line.textContent = String(message);
-    elements.logContainer.appendChild(line);
+    removePlaceholder(container);
+    if (text.indexOf('[进度]') === 0) {
+      upsertProgressEntry(container, text);
+    } else {
+      list.appendChild(buildLogEntry(text));
+    }
 
-    elements.logContainer.scrollTop = elements.logContainer.scrollHeight;
+    if (shouldStickToBottom) {
+      container.scrollTop = container.scrollHeight;
+    }
     syncClearLogsButtonVisibility(elements);
   }
 
   function clearLogs(elements) {
-    elements.logContainer.textContent = '';
+    var list = getLogList(elements.logContainer);
+    if (list) {
+      list.textContent = '';
+    } else {
+      elements.logContainer.textContent = '';
+    }
     ensurePlaceholder(elements.logContainer);
     syncClearLogsButtonVisibility(elements);
   }

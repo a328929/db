@@ -58,20 +58,19 @@
       </div>
     </section>
 
-    <section class="panel admin-panel" aria-labelledby="adminLogsTitle">
+    <section class="panel admin-panel" aria-labelledby="adminLogsTitle" aria-describedby="adminLogsHelp">
       <div class="admin-log-head">
         <h2 id="adminLogsTitle" class="section-title">运行日志</h2>
         <button id="admin-clear-logs-btn" class="btn" type="button" hidden aria-label="清空日志">
           清空日志
         </button>
       </div>
+      <p id="adminLogsHelp" class="sr-only">
+        日志区域可滚动。聚焦后可使用方向键浏览已生成的日志内容。
+      </p>
       <div
         id="admin-log-container"
         class="admin-log-container"
-        role="log"
-        aria-live="polite"
-        aria-relevant="additions text"
-        aria-label="运行日志内容"
       ></div>
     </section>
 

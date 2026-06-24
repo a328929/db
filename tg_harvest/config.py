@@ -108,6 +108,10 @@ def _load_raw_config_values() -> dict:
         "admin_job_log_max_lines": _env_int("TG_ADMIN_JOB_LOG_MAX_LINES", 5000),
         # 全部群组更新时的并发数量。
         "admin_update_concurrency": _env_int("TG_ADMIN_UPDATE_CONCURRENCY", 4),
+        # 全部群组更新时，同一账号启动下一个群组前的最小间隔秒数。
+        "admin_update_min_chat_start_gap_seconds": _env_optional_float(
+            "TG_ADMIN_UPDATE_MIN_CHAT_START_GAP_SECONDS"
+        ),
         # 全部群组更新时，全部账号都处于 FloodWait 时最多等待多久。
         "admin_update_max_cooldown_wait_seconds": _env_int(
             "TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS", 45
@@ -175,6 +179,12 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["admin_update_concurrency"] = max(
         1, int(normalized["admin_update_concurrency"])
     )
+    if normalized["admin_update_min_chat_start_gap_seconds"] is None:
+        normalized["admin_update_min_chat_start_gap_seconds"] = 0.25
+    else:
+        normalized["admin_update_min_chat_start_gap_seconds"] = max(
+            0.0, float(normalized["admin_update_min_chat_start_gap_seconds"])
+        )
     normalized["admin_update_max_cooldown_wait_seconds"] = max(
         0, int(normalized["admin_update_max_cooldown_wait_seconds"])
     )
@@ -223,6 +233,9 @@ def _build_app_config(values: dict) -> "AppConfig":
         admin_job_max_count=values["admin_job_max_count"],
         admin_job_log_max_lines=values["admin_job_log_max_lines"],
         admin_update_concurrency=values["admin_update_concurrency"],
+        admin_update_min_chat_start_gap_seconds=values[
+            "admin_update_min_chat_start_gap_seconds"
+        ],
         admin_update_max_cooldown_wait_seconds=values[
             "admin_update_max_cooldown_wait_seconds"
         ],
@@ -276,6 +289,7 @@ class AppConfig:
     admin_job_max_count: int
     admin_job_log_max_lines: int
     admin_update_concurrency: int
+    admin_update_min_chat_start_gap_seconds: float
     admin_update_max_cooldown_wait_seconds: int
     ops_bot_enabled: int
     ops_bot_token: str
