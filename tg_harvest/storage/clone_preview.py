@@ -6,7 +6,14 @@ from tg_harvest.storage.clone_common import (
     _clean_text,
     _normalize_bounded_int,
     _optional_int,
+    _safe_int,
 )
+
+
+def _row_int(row: sqlite3.Row | None, key: str, default: int = 0) -> int:
+    if row is None:
+        return int(default)
+    return _safe_int(row[key], default)
 
 
 def count_clone_text_replay_candidates(conn: sqlite3.Connection, chat_id: int) -> int:
@@ -28,7 +35,7 @@ def count_clone_text_replay_candidates(conn: sqlite3.Connection, chat_id: int) -
             (int(chat_id),),
         )
         row = cur.fetchone()
-        return int(row["c"] or 0)
+        return _row_int(row, "c")
     finally:
         cur.close()
 
@@ -46,7 +53,7 @@ def count_clone_media_replay_skips(conn: sqlite3.Connection, chat_id: int) -> in
             (int(chat_id),),
         )
         row = cur.fetchone()
-        return int(row["c"] or 0)
+        return _row_int(row, "c")
     finally:
         cur.close()
 
@@ -148,8 +155,8 @@ def build_clone_text_replay_preview(
             ),
         )
         row = cur.fetchone()
-        text_total = int(row["text_total"] or 0) if row is not None else 0
-        text_completed = int(row["text_completed"] or 0) if row is not None else 0
+        text_total = _row_int(row, "text_total")
+        text_completed = _row_int(row, "text_completed")
 
         cur.execute(
             """
@@ -184,29 +191,15 @@ def build_clone_text_replay_preview(
             "text_total": text_total,
             "text_completed": text_completed,
             "text_remaining": max(0, text_total - text_completed),
-            "text_partial": int(row["text_partial"] or 0) if row is not None else 0,
-            "text_error": int(row["text_error"] or 0) if row is not None else 0,
-            "text_chunks_total": int(row["text_chunks_total"] or 0)
-            if row is not None
-            else 0,
-            "text_chunks_done": int(row["text_chunks_done"] or 0)
-            if row is not None
-            else 0,
-            "text_chunks_error": int(row["text_chunks_error"] or 0)
-            if row is not None
-            else 0,
-            "total_messages": int(skip_row["total_messages"] or 0)
-            if skip_row is not None
-            else 0,
-            "media_skipped": int(skip_row["media_skipped"] or 0)
-            if skip_row is not None
-            else 0,
-            "grouped_skipped": int(skip_row["grouped_skipped"] or 0)
-            if skip_row is not None
-            else 0,
-            "empty_text_skipped": int(skip_row["empty_text_skipped"] or 0)
-            if skip_row is not None
-            else 0,
+            "text_partial": _row_int(row, "text_partial"),
+            "text_error": _row_int(row, "text_error"),
+            "text_chunks_total": _row_int(row, "text_chunks_total"),
+            "text_chunks_done": _row_int(row, "text_chunks_done"),
+            "text_chunks_error": _row_int(row, "text_chunks_error"),
+            "total_messages": _row_int(skip_row, "total_messages"),
+            "media_skipped": _row_int(skip_row, "media_skipped"),
+            "grouped_skipped": _row_int(skip_row, "grouped_skipped"),
+            "empty_text_skipped": _row_int(skip_row, "empty_text_skipped"),
         }
     finally:
         cur.close()
@@ -279,11 +272,11 @@ def list_clone_text_replay_batch(
         )
         return [
             {
-                "chat_id": int(row["chat_id"] or 0),
-                "message_id": int(row["message_id"] or 0),
+                "chat_id": _row_int(row, "chat_id"),
+                "message_id": _row_int(row, "message_id"),
                 "msg_date_text": str(row["msg_date_text"] or ""),
-                "msg_date_ts": int(row["msg_date_ts"] or 0),
-                "sort_ts": int(row["sort_ts"] or 0),
+                "msg_date_ts": _row_int(row, "msg_date_ts"),
+                "sort_ts": _row_int(row, "sort_ts"),
                 "text": str(row["text"] or ""),
             }
             for row in cur.fetchall()
@@ -407,44 +400,20 @@ def build_clone_media_copy_preview(
             ),
         )
         row = cur.fetchone()
-        solo_total = int(row["solo_media_total"] or 0) if row is not None else 0
-        complete_group_items = (
-            int(row["complete_group_items"] or 0) if row is not None else 0
-        )
-        solo_done = int(row["solo_media_done"] or 0) if row is not None else 0
-        group_done = (
-            int(row["complete_group_items_done"] or 0) if row is not None else 0
-        )
-        media_total = int(row["media_total"] or 0) if row is not None else 0
-        grouped_items_done = int(row["grouped_items_done"] or 0) if row is not None else 0
-        media_group_candidate_total = (
-            int(row["media_group_candidate_total"] or 0) if row is not None else 0
-        )
-        media_group_candidate_items = (
-            int(row["media_group_candidate_items"] or 0) if row is not None else 0
-        )
-        incomplete_group_total = (
-            int(row["incomplete_group_total"] or 0) if row is not None else 0
-        )
-        incomplete_group_items = (
-            int(row["incomplete_group_items"] or 0) if row is not None else 0
-        )
-        suspected_incomplete_group_total = (
-            int(row["suspected_incomplete_group_total"] or 0)
-            if row is not None
-            else 0
-        )
-        suspected_incomplete_group_items = (
-            int(row["suspected_incomplete_group_items"] or 0)
-            if row is not None
-            else 0
-        )
-        missing_group_meta_total = (
-            int(row["missing_group_meta_total"] or 0) if row is not None else 0
-        )
-        missing_group_meta_items = (
-            int(row["missing_group_meta_items"] or 0) if row is not None else 0
-        )
+        solo_total = _row_int(row, "solo_media_total")
+        complete_group_items = _row_int(row, "complete_group_items")
+        solo_done = _row_int(row, "solo_media_done")
+        group_done = _row_int(row, "complete_group_items_done")
+        media_total = _row_int(row, "media_total")
+        grouped_items_done = _row_int(row, "grouped_items_done")
+        media_group_candidate_total = _row_int(row, "media_group_candidate_total")
+        media_group_candidate_items = _row_int(row, "media_group_candidate_items")
+        incomplete_group_total = _row_int(row, "incomplete_group_total")
+        incomplete_group_items = _row_int(row, "incomplete_group_items")
+        suspected_incomplete_group_total = _row_int(row, "suspected_incomplete_group_total")
+        suspected_incomplete_group_items = _row_int(row, "suspected_incomplete_group_items")
+        missing_group_meta_total = _row_int(row, "missing_group_meta_total")
+        missing_group_meta_items = _row_int(row, "missing_group_meta_items")
         executable_total = media_total
         completed = min(solo_done + grouped_items_done, executable_total)
         remaining = max(0, executable_total - completed)
@@ -471,9 +440,7 @@ def build_clone_media_copy_preview(
             "media_remaining": remaining,
             "solo_media_total": solo_total,
             "solo_media_done": solo_done,
-            "complete_group_total": int(row["complete_group_total"] or 0)
-            if row is not None
-            else 0,
+            "complete_group_total": _row_int(row, "complete_group_total"),
             "complete_group_items": complete_group_items,
             "complete_group_items_done": group_done,
             "media_group_candidate_total": media_group_candidate_total,
@@ -557,11 +524,11 @@ def list_clone_solo_media_copy_batch(
         )
         return [
             {
-                "chat_id": int(row["chat_id"] or 0),
-                "message_id": int(row["message_id"] or 0),
+                "chat_id": _row_int(row, "chat_id"),
+                "message_id": _row_int(row, "message_id"),
                 "msg_date_text": str(row["msg_date_text"] or ""),
                 "msg_date_ts": _optional_int(row["msg_date_ts"]),
-                "sort_ts": int(row["sort_ts"] or 0),
+                "sort_ts": _row_int(row, "sort_ts"),
                 "caption": str(row["caption"] or ""),
                 "media_kind": str(row["media_kind"] or ""),
                 "file_name": str(row["file_name"] or ""),
@@ -648,14 +615,14 @@ def list_clone_media_group_candidate_batch(
         )
         return [
             {
-                "chat_id": int(row["chat_id"] or 0),
-                "grouped_id": int(row["grouped_id"] or 0),
-                "sort_ts": int(row["sort_ts"] or 0),
-                "item_count": int(row["item_count"] or 0),
-                "active_items": int(row["active_items"] or 0),
-                "current_item_count": int(row["current_item_count"] or 0),
-                "first_message_id": int(row["first_message_id"] or 0),
-                "last_message_id": int(row["last_message_id"] or 0),
+                "chat_id": _row_int(row, "chat_id"),
+                "grouped_id": _row_int(row, "grouped_id"),
+                "sort_ts": _row_int(row, "sort_ts"),
+                "item_count": _row_int(row, "item_count"),
+                "active_items": _row_int(row, "active_items"),
+                "current_item_count": _row_int(row, "current_item_count"),
+                "first_message_id": _row_int(row, "first_message_id"),
+                "last_message_id": _row_int(row, "last_message_id"),
             }
             for row in cur.fetchall()
         ]
@@ -691,11 +658,11 @@ def list_clone_media_group_messages(
         )
         return [
             {
-                "chat_id": int(row["chat_id"] or 0),
-                "message_id": int(row["message_id"] or 0),
+                "chat_id": _row_int(row, "chat_id"),
+                "message_id": _row_int(row, "message_id"),
                 "msg_date_text": str(row["msg_date_text"] or ""),
                 "msg_date_ts": _optional_int(row["msg_date_ts"]),
-                "sort_ts": int(row["sort_ts"] or 0),
+                "sort_ts": _row_int(row, "sort_ts"),
                 "caption": str(row["caption"] or ""),
             }
             for row in cur.fetchall()
@@ -755,15 +722,15 @@ def build_clone_timeline_replay_preview(
             (int(source_chat_id), int(source_chat_id), int(source_chat_id)),
         )
         row = cur.fetchone()
-        timeline_items_total = int(row["c"] or 0) if row is not None else 0
+        timeline_items_total = _row_int(row, "c")
     finally:
         cur.close()
 
-    text_remaining = int(text_preview.get("text_remaining") or 0)
-    media_remaining = int(media_preview.get("media_remaining") or 0)
-    text_total = int(text_preview.get("text_total") or 0)
-    media_total = int(media_preview.get("media_total") or 0)
-    media_group_total = int(media_preview.get("media_group_candidate_total") or 0)
+    text_remaining = _safe_int(text_preview.get("text_remaining"))
+    media_remaining = _safe_int(media_preview.get("media_remaining"))
+    text_total = _safe_int(text_preview.get("text_total"))
+    media_total = _safe_int(media_preview.get("media_total"))
+    media_group_total = _safe_int(media_preview.get("media_group_candidate_total"))
     return {
         "run_id": _clean_text(run_id),
         "source_chat_id": int(source_chat_id),
@@ -772,20 +739,20 @@ def build_clone_timeline_replay_preview(
         "timeline_source_messages_total": text_total + media_total,
         "timeline_remaining": text_remaining + media_remaining,
         "text_total": text_total,
-        "text_completed": int(text_preview.get("text_completed") or 0),
+        "text_completed": _safe_int(text_preview.get("text_completed")),
         "text_remaining": text_remaining,
         "media_total": media_total,
-        "media_completed": int(media_preview.get("media_completed") or 0),
+        "media_completed": _safe_int(media_preview.get("media_completed")),
         "media_remaining": media_remaining,
         "media_group_total": media_group_total,
-        "media_group_candidate_items": int(
-            media_preview.get("media_group_candidate_items") or 0
+        "media_group_candidate_items": _safe_int(
+            media_preview.get("media_group_candidate_items")
         ),
-        "db_self_check_risk_group_total": int(
-            media_preview.get("db_self_check_risk_group_total") or 0
+        "db_self_check_risk_group_total": _safe_int(
+            media_preview.get("db_self_check_risk_group_total")
         ),
-        "db_self_check_risk_group_items": int(
-            media_preview.get("db_self_check_risk_group_items") or 0
+        "db_self_check_risk_group_items": _safe_int(
+            media_preview.get("db_self_check_risk_group_items")
         ),
         "text_preview": text_preview,
         "media_preview": media_preview,
@@ -991,15 +958,15 @@ def list_clone_timeline_replay_batch(
         return [
             {
                 "item_type": str(row["item_type"] or ""),
-                "chat_id": int(row["chat_id"] or 0),
-                "source_message_id": int(row["source_message_id"] or 0),
+                "chat_id": _row_int(row, "chat_id"),
+                "source_message_id": _row_int(row, "source_message_id"),
                 "grouped_id": _optional_int(row["grouped_id"]),
-                "sort_ts": int(row["sort_ts"] or 0),
-                "sort_message_id": int(row["sort_message_id"] or 0),
+                "sort_ts": _row_int(row, "sort_ts"),
+                "sort_message_id": _row_int(row, "sort_message_id"),
                 "msg_date_text": str(row["msg_date_text"] or ""),
                 "msg_date_ts": _optional_int(row["msg_date_ts"]),
                 "text": str(row["text"] or ""),
-                "item_count": int(row["item_count"] or 0),
+                "item_count": _row_int(row, "item_count"),
             }
             for row in cur.fetchall()
         ]

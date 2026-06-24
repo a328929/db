@@ -7,8 +7,15 @@ from tg_harvest.storage.clone_common import (
     _chat_title_or_fallback,
     _default_clone_title,
     _optional_int,
+    _safe_int,
     _percent,
 )
+
+
+def _row_int(row: sqlite3.Row | None, key: str, default: int = 0) -> int:
+    if row is None:
+        return int(default)
+    return _safe_int(row[key], default)
 
 
 def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | None:
@@ -44,7 +51,7 @@ def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | N
         row = cur.fetchone()
         if row is None:
             return None
-        normalized_chat_id = int(row["chat_id"])
+        normalized_chat_id = _row_int(row, "chat_id")
         return {
             "chat_id": normalized_chat_id,
             "chat_title": _chat_title_or_fallback(
@@ -53,7 +60,7 @@ def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | N
             ),
             "chat_username": str(row["chat_username"] or ""),
             "chat_type": str(row["chat_type"] or ""),
-            "message_count": int(row["message_count"] or 0),
+            "message_count": _row_int(row, "message_count"),
             "first_seen_at": str(row["first_seen_at"] or ""),
             "last_seen_at": str(row["last_seen_at"] or ""),
             "last_message_at": str(row["last_message_at"] or ""),
@@ -120,15 +127,15 @@ def list_clone_source_chats(
         )
         items: list[dict] = []
         for row in cur.fetchall():
-            chat_id = int(row["chat_id"])
+            chat_id = _row_int(row, "chat_id")
             items.append(
                 {
                     "chat_id": chat_id,
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "message_count": int(row["message_count"] or 0),
-                    "media_rows": int(row["media_rows"] or 0),
+                    "message_count": _row_int(row, "message_count"),
+                    "media_rows": _row_int(row, "media_rows"),
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
@@ -185,11 +192,11 @@ def _message_metrics(conn: sqlite3.Connection, chat_id: int) -> dict[str, int]:
                 "empty_text_messages": 0,
             }
         return {
-            "total_messages": int(row["total_messages"] or 0),
-            "text_messages": int(row["text_messages"] or 0),
-            "media_messages": int(row["media_messages"] or 0),
-            "grouped_messages": int(row["grouped_messages"] or 0),
-            "empty_text_messages": int(row["empty_text_messages"] or 0),
+            "total_messages": _row_int(row, "total_messages"),
+            "text_messages": _row_int(row, "text_messages"),
+            "media_messages": _row_int(row, "media_messages"),
+            "grouped_messages": _row_int(row, "grouped_messages"),
+            "empty_text_messages": _row_int(row, "empty_text_messages"),
         }
     finally:
         cur.close()
@@ -213,9 +220,9 @@ def _media_metrics(conn: sqlite3.Connection, chat_id: int) -> dict[str, int]:
         )
         row = cur.fetchone()
         return {
-            "media_metadata_rows": int(row["media_metadata_rows"] or 0),
-            "named_media_rows": int(row["named_media_rows"] or 0),
-            "fingerprinted_media_rows": int(row["fingerprinted_media_rows"] or 0),
+            "media_metadata_rows": _row_int(row, "media_metadata_rows"),
+            "named_media_rows": _row_int(row, "named_media_rows"),
+            "fingerprinted_media_rows": _row_int(row, "fingerprinted_media_rows"),
         }
     finally:
         cur.close()
@@ -261,10 +268,10 @@ def _media_group_metrics(conn: sqlite3.Connection, chat_id: int) -> dict[str, in
 
         for row in cur.fetchall():
             total_groups += 1
-            message_count = int(row["message_count"] or 0)
-            media_meta_count = int(row["media_meta_count"] or 0)
-            recorded_item_count = int(row["recorded_item_count"] or 0)
-            recorded_active_items = int(row["recorded_active_items"] or 0)
+            message_count = _row_int(row, "message_count")
+            media_meta_count = _row_int(row, "media_meta_count")
+            recorded_item_count = _row_int(row, "recorded_item_count")
+            recorded_active_items = _row_int(row, "recorded_active_items")
             is_single_item = message_count <= 1
             metadata_incomplete = media_meta_count < message_count
             recorded_larger = (

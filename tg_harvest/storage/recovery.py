@@ -7,6 +7,7 @@ from tg_harvest.domain.chat_inventory import (
     SessionChatRecoveryRow,
     _optional_int,
 )
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
 )
@@ -23,14 +24,20 @@ def _scan_row_value(row: Any, key: str, default: Any = "") -> Any:
     return default if value is None else value
 
 
+def _row_int(row: sqlite3.Row | None, key: str, default: int = 0) -> int:
+    if row is None:
+        return int(default)
+    return safe_int(row[key], default)
+
+
 def _recovery_row_params(row: Any, *, scan_job_id: str, scanned_at: str) -> tuple:
-    chat_id = int(_scan_row_value(row, "chat_id", 0) or 0)
+    chat_id = safe_int(_scan_row_value(row, "chat_id", 0))
     return (
         chat_id,
         _chat_title_or_fallback(chat_id, _scan_row_value(row, "chat_title", "")),
         str(_scan_row_value(row, "chat_username", "")).strip().lstrip("@"),
         str(_scan_row_value(row, "chat_type", "") or "SessionEntity"),
-        1 if int(_scan_row_value(row, "is_public", 0) or 0) == 1 else 0,
+        1 if safe_int(_scan_row_value(row, "is_public", 0)) == 1 else 0,
         str(_scan_row_value(row, "source_session", "")).strip(),
         _optional_int(_scan_row_value(row, "source_entity_id", None)),
         str(_scan_row_value(row, "session_entity_date", "")).strip(),
@@ -51,9 +58,9 @@ def replace_recovery_chat_scan_results(
     normalized_rows = list(rows)
     normalized_chat_ids = sorted(
         {
-            int(_scan_row_value(row, "chat_id", 0) or 0)
+            safe_int(_scan_row_value(row, "chat_id", 0))
             for row in normalized_rows
-            if int(_scan_row_value(row, "chat_id", 0) or 0) != 0
+            if safe_int(_scan_row_value(row, "chat_id", 0)) != 0
         }
     )
     cur = conn.cursor()
@@ -178,14 +185,14 @@ def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
         )
         rows = []
         for row in cur.fetchall():
-            chat_id = int(row["chat_id"])
+            chat_id = _row_int(row, "chat_id")
             rows.append(
                 {
                     "chat_id": chat_id,
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "is_public": int(row["is_public"] or 0),
+                    "is_public": _row_int(row, "is_public"),
                     "source_session": str(row["source_session"] or ""),
                     "source_entity_id": _optional_int(row["source_entity_id"]),
                     "session_entity_date": str(row["session_entity_date"] or ""),
@@ -194,8 +201,8 @@ def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
                     "recovered_job_id": str(row["recovered_job_id"] or ""),
                     "scan_job_id": str(row["scan_job_id"] or ""),
                     "scanned_at": str(row["scanned_at"] or ""),
-                    "in_database": int(row["in_database"] or 0),
-                    "message_count": int(row["message_count"] or 0),
+                    "in_database": _row_int(row, "in_database"),
+                    "message_count": _row_int(row, "message_count"),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
                     "database_last_seen_at": str(row["database_last_seen_at"] or ""),
@@ -228,10 +235,10 @@ def build_recovery_overview(conn: sqlite3.Connection) -> dict:
         )
         row = cur.fetchone()
         return {
-            "total_count": int(row["total_count"] or 0) if row else 0,
-            "pending_count": int(row["pending_count"] or 0) if row else 0,
-            "in_database_count": int(row["in_database_count"] or 0) if row else 0,
-            "recovered_count": int(row["recovered_count"] or 0) if row else 0,
+            "total_count": _row_int(row, "total_count"),
+            "pending_count": _row_int(row, "pending_count"),
+            "in_database_count": _row_int(row, "in_database_count"),
+            "recovered_count": _row_int(row, "recovered_count"),
             "last_scanned_at": str(row["last_scanned_at"] or "") if row else "",
         }
     finally:
@@ -239,13 +246,13 @@ def build_recovery_overview(conn: sqlite3.Connection) -> dict:
 
 
 def _candidate_upsert_chat_row(row: sqlite3.Row) -> tuple:
-    chat_id = int(row["chat_id"])
+    chat_id = _row_int(row, "chat_id")
     chat_username = str(row["chat_username"] or "").strip().lstrip("@")
     return (
         chat_id,
         _chat_title_or_fallback(chat_id, row["chat_title"]),
         chat_username,
-        1 if int(row["is_public"] or 0) == 1 else 0,
+        1 if _row_int(row, "is_public") == 1 else 0,
         str(row["chat_type"] or "SessionEntity"),
     )
 
@@ -261,7 +268,7 @@ def recover_chats_from_candidates(
     normalized_chat_ids = (
         None
         if chat_ids is None
-        else sorted({int(chat_id) for chat_id in chat_ids if int(chat_id) != 0})
+        else sorted({safe_int(chat_id) for chat_id in chat_ids if safe_int(chat_id) != 0})
     )
     cur = conn.cursor()
     try:
@@ -299,7 +306,7 @@ def recover_chats_from_candidates(
         if recover_rows:
             _refresh_chat_message_counts(
                 cur,
-                [int(row["chat_id"]) for row in recover_rows],
+                [_row_int(row, "chat_id") for row in recover_rows],
             )
 
         update_params: list[Any] = [str(recovered_at or ""), str(job_id or "")]

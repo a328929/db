@@ -12,3 +12,8 @@ def optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def safe_int(value: Any, default: int = 0) -> int:
+    parsed = optional_int(value)
+    return parsed if parsed is not None else int(default)

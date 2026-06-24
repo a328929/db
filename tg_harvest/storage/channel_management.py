@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from contextlib import suppress
 from typing import Any
 
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
@@ -135,7 +136,7 @@ def replace_missing_chat_scan_results(
                     str(row.chat_title or "").strip() or f"Chat {int(row.chat_id)}",
                     str(getattr(row, "chat_username", "") or "").strip().lstrip("@"),
                     str(getattr(row, "chat_type", "") or ""),
-                    1 if int(getattr(row, "is_public", 0) or 0) == 1 else 0,
+                    1 if safe_int(getattr(row, "is_public", None)) == 1 else 0,
                     str(getattr(row, "last_message_at", "") or ""),
                     _optional_int(getattr(row, "last_message_ts", None)),
                     str(scan_job_id or ""),
@@ -412,7 +413,7 @@ def replace_restricted_chat_scan_results(
                     str(row.chat_title or "").strip() or f"Chat {int(row.chat_id)}",
                     str(getattr(row, "chat_username", "") or "").strip().lstrip("@"),
                     str(getattr(row, "chat_type", "") or ""),
-                    1 if int(getattr(row, "is_public", 0) or 0) == 1 else 0,
+                    1 if safe_int(getattr(row, "is_public", None)) == 1 else 0,
                     str(getattr(row, "restriction_platforms", "") or "").strip(),
                     str(getattr(row, "restriction_reasons", "") or "").strip(),
                     str(getattr(row, "restriction_text", "") or "").strip(),

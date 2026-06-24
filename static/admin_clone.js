@@ -13,6 +13,9 @@
   var setPageInteractionState = shared.setPageInteractionState;
   var syncClearLogsButtonVisibility = shared.syncClearLogsButtonVisibility;
   var trapFocusWithin = shared.trapFocusWithin;
+  var normalizeNonnegativeInteger = shared.normalizeNonnegativeInteger;
+  var formatDateTime = shared.formatDateTime;
+  var formatNumber = shared.formatNumber;
 
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
@@ -1436,27 +1439,6 @@
       message_limit: normalizeNonnegativeInteger(elements.messageLimitInput.value, 0, 100000),
       send_delay_ms: normalizeNonnegativeInteger(elements.sendDelayInput.value, 500, 60000)
     };
-  }
-
-  function normalizeNonnegativeInteger(value, fallback, maxValue) {
-    var text = String(value || '').trim();
-    var n = text ? Number(text) : Number(fallback || 0);
-    if (!Number.isFinite(n)) return Number(fallback || 0);
-    n = Math.trunc(n);
-    if (n < 0) return 0;
-    return Math.min(n, Number(maxValue || n));
-  }
-
-  function formatDateTime(value) {
-    var text = String(value || '').trim();
-    if (!text) return '暂无';
-    return text.replace('T', ' ').replace(/\.\d+.*$/, '');
-  }
-
-  function formatNumber(value) {
-    var n = Number(value || 0);
-    if (!Number.isFinite(n)) return '0';
-    return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
   function formatLimit(value) {

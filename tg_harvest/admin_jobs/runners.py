@@ -51,6 +51,7 @@ from tg_harvest.admin_jobs.sessions import (
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
+from tg_harvest.domain.coerce import optional_int, safe_int
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     raise_if_long_flood_wait,
@@ -308,10 +309,7 @@ def _read_session_cached_chat_ids(session_name: Any) -> set[int]:
 
 
 def _row_chat_id(row: Any) -> int:
-    try:
-        return int(_row_value(row, "chat_id", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    return safe_int(_row_value(row, "chat_id", None))
 
 
 def _row_chat_identity(row: Any) -> int:
@@ -1344,11 +1342,7 @@ def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
 
 
 def _entity_identity(entity: Any) -> int:
-    try:
-        entity_id = int(getattr(entity, "id", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
-    return stored_chat_id_from_entity_id(entity_id)
+    return stored_chat_id_from_entity_id(safe_int(getattr(entity, "id", None)))
 
 
 def _find_matching_entity(candidate_entities: list[Any], target_entity: Any) -> Any | None:
@@ -1417,10 +1411,7 @@ def _secondary_harvest_targets(
 
 
 def _cfg_flood_wait_threshold(cfg: Any) -> int:
-    try:
-        return int(getattr(cfg, "flood_wait_switch_threshold", 30) or 30)
-    except (TypeError, ValueError):
-        return 30
+    return optional_int(getattr(cfg, "flood_wait_switch_threshold", None)) or 30
 
 
 def _raise_if_account_flood_wait(
@@ -1715,18 +1706,12 @@ def _try_stream_new_chat_multi_account_ranges(
         )
         return False
 
-    try:
-        min_message_id = int(getattr(cfg, "multi_account_min_message_id", 0) or 0)
-        chunk_size = int(getattr(cfg, "multi_account_range_chunk_size", 0) or 0)
-    except (TypeError, ValueError):
-        return False
+    min_message_id = safe_int(getattr(cfg, "multi_account_min_message_id", None))
+    chunk_size = safe_int(getattr(cfg, "multi_account_range_chunk_size", None))
     if min_message_id <= 0 or chunk_size <= 0:
         return False
 
-    try:
-        chat_id = int(getattr(entity, "id", 0) or 0)
-    except (TypeError, ValueError):
-        return False
+    chat_id = safe_int(getattr(entity, "id", None))
     if chat_id == 0:
         return False
 

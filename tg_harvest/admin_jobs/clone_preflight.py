@@ -34,9 +34,11 @@ from tg_harvest.domain.clone_plan import (
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
 )
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.storage.clone import load_clone_run, update_clone_plan
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
+
 
 def _access_error_state(exc: Exception) -> str:
     err = f"{type(exc).__name__}: {exc}".lower()
@@ -198,7 +200,7 @@ def _check_account_access(
             result["target_access"] = "missing"
             result["target_error"] = "目标副本尚未创建"
 
-        relay_chat_id = int(getattr(cfg, "clone_relay_chat_id", 0) or 0)
+        relay_chat_id = safe_int(getattr(cfg, "clone_relay_chat_id", None))
         if relay_chat_id:
             relay_access, relay_entity, relay_error = _resolve_access(
                 client,
@@ -278,7 +280,7 @@ def _account_can_relay_to_target(account: dict[str, Any]) -> bool:
 def _configured_relay(cfg: Any | None = None) -> dict[str, Any]:
     if cfg is None:
         return {}
-    chat_id = int(getattr(cfg, "clone_relay_chat_id", 0) or 0)
+    chat_id = safe_int(getattr(cfg, "clone_relay_chat_id", None))
     if not chat_id:
         return {}
     return {

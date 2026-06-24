@@ -1,6 +1,6 @@
 from typing import Any
 
-from tg_harvest.domain.coerce import clean_text as _clean_text
+from tg_harvest.domain.coerce import clean_text as _clean_text, safe_int
 
 CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS = 500
 CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT = 100_000
@@ -90,10 +90,7 @@ def clone_plan_media_relay(plan: dict[str, Any]) -> dict[str, Any]:
 
 def clone_plan_media_relay_chat_id(plan: dict[str, Any]) -> int:
     relay = clone_plan_media_relay(plan)
-    try:
-        return int(relay.get("chat_id") or 0)
-    except (TypeError, ValueError):
-        return 0
+    return safe_int(relay.get("chat_id"))
 
 
 def clone_plan_media_source_account(plan: dict[str, Any]) -> str:

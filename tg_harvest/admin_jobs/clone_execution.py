@@ -4,6 +4,7 @@ from tg_harvest.admin_jobs.clone import _cfg_with_session_name
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.clone_plan import CLONE_TEXT_REPLAY_CHUNK_MAX_LEN
 from tg_harvest.domain.coerce import clean_text as clean_clone_text
+from tg_harvest.domain.coerce import optional_int
 
 
 def normalize_clone_nonnegative_int(
@@ -50,13 +51,7 @@ def split_clone_text_chunks(text: str) -> list[str]:
 def clone_sent_message_id(result: Any) -> int | None:
     if isinstance(result, (list, tuple)):
         result = result[0] if result else None
-    raw_id = getattr(result, "id", None)
-    if raw_id in (None, ""):
-        return None
-    try:
-        return int(raw_id)
-    except (TypeError, ValueError):
-        return None
+    return optional_int(getattr(result, "id", None))
 
 
 def send_clone_text_chunk(client: Any, target_entity: Any, text: str) -> int | None:

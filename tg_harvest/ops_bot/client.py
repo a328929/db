@@ -7,6 +7,8 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from tg_harvest.domain.coerce import clean_text, safe_int
+
 logger = logging.getLogger(__name__)
 
 BOT_API_BASE_URL = "https://api.telegram.org"
@@ -20,18 +22,15 @@ _notify_lock = threading.Lock()
 
 
 def _enabled_int(value: object) -> int:
-    try:
-        return 1 if int(value or 0) == 1 else 0
-    except (TypeError, ValueError):
-        return 0
+    return 1 if safe_int(value) == 1 else 0
 
 
 def bot_token(cfg: Any) -> str:
-    return str(getattr(cfg, "ops_bot_token", "") or "").strip()
+    return clean_text(getattr(cfg, "ops_bot_token", ""))
 
 
 def notify_chat_id(cfg: Any) -> str:
-    return str(getattr(cfg, "ops_bot_notify_chat_id", "") or "").strip()
+    return clean_text(getattr(cfg, "ops_bot_notify_chat_id", ""))
 
 
 def is_notify_enabled(cfg: Any) -> bool:
@@ -51,7 +50,7 @@ def bot_timeout_seconds(cfg: Any) -> float:
 
 
 def mask_bot_token(token: str) -> str:
-    token = str(token or "").strip()
+    token = clean_text(token)
     if not token:
         return ""
     if len(token) <= 10:
@@ -60,7 +59,7 @@ def mask_bot_token(token: str) -> str:
 
 
 def trim_message(text: str) -> str:
-    message = str(text or "").strip()
+    message = clean_text(text)
     if len(message) <= MAX_TELEGRAM_MESSAGE_LEN:
         return message
     suffix = "\n...[truncated]"
@@ -190,4 +189,3 @@ def enqueue_message(cfg: Any, text: str, *, chat_id: str | None = None) -> bool:
         logger.warning("运维机器人通知队列已满，本条通知已丢弃")
         return False
     return True
-

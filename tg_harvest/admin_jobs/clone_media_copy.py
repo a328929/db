@@ -9,6 +9,7 @@ from tg_harvest.admin_jobs.clone_forwarding import (
 from tg_harvest.admin_jobs.common import resolve_chat_entity
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.domain.coerce import clean_text as clean_clone_media_text
+from tg_harvest.domain.coerce import optional_int
 from tg_harvest.domain.clone_plan import (
     clone_plan_media_relay,
     clone_plan_media_relay_chat_id,
@@ -20,17 +21,7 @@ def clone_sent_message_ids(result: Any) -> list[int | None]:
     if result is None:
         return []
     items = result if isinstance(result, (list, tuple)) else [result]
-    ids: list[int | None] = []
-    for item in items:
-        raw_id = getattr(item, "id", None)
-        if raw_id in (None, ""):
-            ids.append(None)
-            continue
-        try:
-            ids.append(int(raw_id))
-        except (TypeError, ValueError):
-            ids.append(None)
-    return ids
+    return [optional_int(getattr(item, "id", None)) for item in items]
 
 
 def resolve_clone_relay_chat(client: Any, plan: dict[str, Any]) -> Any:

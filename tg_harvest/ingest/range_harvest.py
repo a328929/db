@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from tg_harvest.config import CFG
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     flood_wait_seconds,
@@ -49,10 +50,7 @@ def _first_message(result: Any) -> Any | None:
 
 
 def _message_id(message: Any) -> int:
-    try:
-        return int(getattr(message, "id", 0) or 0)
-    except (TypeError, ValueError):
-        return 0
+    return safe_int(getattr(message, "id", None))
 
 
 def _is_readable_message(message: Any) -> bool:

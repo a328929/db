@@ -30,6 +30,7 @@ from tg_harvest.domain.chat_inventory import (
     entity_has_all_platform_terms_restriction,
     scan_session_chat_recovery_rows,
 )
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.storage.recovery import (
     recover_chats_from_candidates,
     replace_recovery_chat_scan_results,
@@ -39,7 +40,7 @@ RECOVERY_VALIDATION_BATCH_SIZE = 100
 
 
 def _row_chat_label(row: Any) -> str:
-    chat_id = int(getattr(row, "chat_id", 0) or 0)
+    chat_id = safe_int(getattr(row, "chat_id", None))
     title = str(getattr(row, "chat_title", "") or "").strip() or f"Chat {chat_id}"
     return f"{title} (ID={chat_id})"
 
@@ -211,14 +212,13 @@ def _batch_resolve_recovery_channel_entities(
         entities = payload if isinstance(payload, list) else []
 
     rows_by_chat_id = {
-        int(getattr(row, "chat_id", 0) or 0): row_index
+        safe_int(getattr(row, "chat_id", None)): row_index
         for row_index, row, _input_channel in batch
     }
     resolved: dict[int, Any] = {}
     for entity in entities:
-        try:
-            chat_id = int(getattr(entity, "id", 0) or 0)
-        except (TypeError, ValueError):
+        chat_id = safe_int(getattr(entity, "id", None))
+        if chat_id == 0:
             continue
         row_index = rows_by_chat_id.get(chat_id)
         if row_index is not None:

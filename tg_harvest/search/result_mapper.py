@@ -1,6 +1,7 @@
 import sqlite3
 from typing import Any
 
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.web.telegram_links import build_telegram_open_link
 
 TYPE_FALLBACK_TITLE = {
@@ -72,7 +73,7 @@ def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> dict[str, A
         "link": build_telegram_open_link(chat_id=chat_id, message_id=message_id),
         "file_size": file_size,
         "duration_sec": duration_sec,
-        "is_promo": int(_row_value(row, "is_promo", 0) or 0),
+        "is_promo": safe_int(_row_value(row, "is_promo", None)),
     }
     item.update(_build_search_display_fields(row, detail_level=detail_level))
     return item

@@ -5,6 +5,7 @@ from typing import Any
 from tg_harvest.domain.coerce import (
     clean_text as _clean_text,
     optional_int as _optional_int,
+    safe_int as _safe_int,
 )
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,

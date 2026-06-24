@@ -28,6 +28,7 @@ from tg_harvest.admin_jobs.sessions import (
     _ensure_base_session_valid,
     _start_job_heartbeat,
 )
+from tg_harvest.domain.coerce import optional_int
 from tg_harvest.storage.clone import load_clone_source_chat, update_clone_run
 
 CLONE_TARGET_TITLE_MAX_LEN = 128
@@ -133,13 +134,7 @@ def _created_chat_label(created_chat: Any) -> str:
 
 
 def _created_chat_id(created_chat: Any) -> int | None:
-    raw_id = getattr(created_chat, "id", None)
-    if raw_id in (None, ""):
-        return None
-    try:
-        return int(raw_id)
-    except (TypeError, ValueError):
-        return None
+    return optional_int(getattr(created_chat, "id", None))
 
 
 def _created_chat_access_hash(created_chat: Any) -> str:
@@ -150,12 +145,12 @@ def _created_chat_access_hash(created_chat: Any) -> str:
 
 
 def _created_chat_username(created_chat: Any) -> str:
-    return str(getattr(created_chat, "username", "") or "").strip()
+    return _clean_text(getattr(created_chat, "username", ""))
 
 
 def _created_chat_title(created_chat: Any, fallback_title: str) -> str:
-    title = str(getattr(created_chat, "title", "") or "").strip()
-    return title or fallback_title
+    return _clean_text(getattr(created_chat, "title", "")) or fallback_title
+
 
 def _try_mark_clone_run_failed(
     *,

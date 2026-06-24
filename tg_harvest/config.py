@@ -2,6 +2,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.runtime.paths import resolve_db_path, resolve_session_name
 
 # =========================
@@ -28,13 +29,7 @@ def _env_str(name: str, default: str = "") -> str:
 
 
 def _env_int(name: str, default: int) -> int:
-    v = os.getenv(name, None)
-    if v is None:
-        return int(default)
-    try:
-        return int(v.strip())
-    except Exception:
-        return int(default)
+    return safe_int(os.getenv(name, None), default)
 
 
 def _env_optional_float(name: str) -> float | None:

@@ -4,6 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from tg_harvest.domain.coerce import optional_int
 from tg_harvest.domain.dedupe import build_media_fingerprint
 from tg_harvest.domain.normalize import _safe_json
 
@@ -59,12 +60,7 @@ class MessageParser:
 
     @staticmethod
     def _coerce_int(value: Any) -> int | None:
-        if value is None:
-            return None
-        try:
-            return int(value)
-        except (TypeError, ValueError):
-            return None
+        return optional_int(value)
 
     @classmethod
     def _set_text_if_empty(cls, meta: dict[str, Any], key: str, value: Any) -> None:

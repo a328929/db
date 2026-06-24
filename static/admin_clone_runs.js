@@ -7,6 +7,8 @@
   var setElementDisabled = shared.setElementDisabled;
   var setPageInteractionState = shared.setPageInteractionState;
   var trapFocusWithin = shared.trapFocusWithin;
+  var normalizeNonnegativeInteger = shared.normalizeNonnegativeInteger;
+  var formatNumber = shared.formatNumber;
 
   var STORAGE_KEY = 'adminCloneRunsManageState';
   var MAPPING_PAGE_SIZE = 25;
@@ -816,17 +818,6 @@
     }
   }
 
-  function normalizeNonnegativeInteger(value, fallback, maxValue) {
-    var text = String(value || '').trim();
-    var number = text ? Number(text) : Number(fallback || 0);
-    if (!Number.isFinite(number)) return Number(fallback || 0);
-    number = Math.trunc(number);
-    if (number < 0) return 0;
-    var upperBound = Number(maxValue || number);
-    if (!Number.isFinite(upperBound) || upperBound <= 0) return number;
-    return Math.min(number, upperBound);
-  }
-
   function updatePageStatus(elements) {
     if (!state.total) {
       elements.pageStatus.textContent = '暂无分页信息。';
@@ -850,12 +841,6 @@
 
   function formatDoneTotal(done, total) {
     return formatNumber(done) + ' / ' + formatNumber(total);
-  }
-
-  function formatNumber(value) {
-    var number = Number(value || 0);
-    if (!Number.isFinite(number)) number = 0;
-    return number.toLocaleString('zh-CN');
   }
 
   function formatDateTime(value) {

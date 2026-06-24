@@ -13,6 +13,8 @@
   var setPageInteractionState = shared.setPageInteractionState;
   var syncClearLogsButtonVisibility = shared.syncClearLogsButtonVisibility;
   var trapFocusWithin = shared.trapFocusWithin;
+  var formatDateTime = shared.formatDateTime;
+  var formatNumber = shared.formatNumber;
 
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
@@ -155,18 +157,6 @@
         trapFocusWithin(elements.loginDialog, event);
       }
     });
-  }
-
-  function formatDateTime(value) {
-    var text = String(value || '').trim();
-    if (!text) return '暂无';
-    return text.replace('T', ' ').replace(/\.\d+.*$/, '');
-  }
-
-  function formatNumber(value) {
-    var n = Number(value || 0);
-    if (!Number.isFinite(n)) return '0';
-    return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
   function createTextElement(tagName, className, text) {

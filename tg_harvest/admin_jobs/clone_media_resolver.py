@@ -1,6 +1,7 @@
 from typing import Any
 
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
+from tg_harvest.domain.coerce import optional_int
 
 CLONE_MEDIA_GROUP_API_SCAN_RADIUS = 25
 CLONE_MEDIA_GROUP_API_SCAN_LIMIT = 100
@@ -27,23 +28,11 @@ def _as_list(value: Any) -> list[Any]:
 
 
 def _message_id(message: Any) -> int | None:
-    raw_id = getattr(message, "id", None)
-    if raw_id in (None, ""):
-        return None
-    try:
-        return int(raw_id)
-    except (TypeError, ValueError):
-        return None
+    return optional_int(getattr(message, "id", None))
 
 
 def _message_grouped_id(message: Any) -> int | None:
-    raw_grouped_id = getattr(message, "grouped_id", None)
-    if raw_grouped_id in (None, ""):
-        return None
-    try:
-        return int(raw_grouped_id)
-    except (TypeError, ValueError):
-        return None
+    return optional_int(getattr(message, "grouped_id", None))
 
 
 def _message_has_media(message: Any) -> bool:

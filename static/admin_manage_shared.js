@@ -133,6 +133,29 @@
     return '0';
   }
 
+  function normalizeNonnegativeInteger(value, fallback, maxValue) {
+    var text = String(value || '').trim();
+    var number = text ? Number(text) : Number(fallback || 0);
+    if (!Number.isFinite(number)) return Number(fallback || 0);
+    number = Math.trunc(number);
+    if (number < 0) return 0;
+    var upperBound = Number(maxValue || number);
+    if (!Number.isFinite(upperBound) || upperBound <= 0) return number;
+    return Math.min(number, upperBound);
+  }
+
+  function formatNumber(value) {
+    var number = Number(value || 0);
+    if (!Number.isFinite(number)) return '0';
+    return String(Math.trunc(number)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+  }
+
+  function formatDateTime(value) {
+    var text = String(value || '').trim();
+    if (!text) return '暂无';
+    return text.replace('T', ' ').replace(/\.\d+.*$/, '');
+  }
+
   function getSelectedOptionLabel(selectElement, value) {
     var option = Array.prototype.find.call(selectElement.options, function (opt) {
       return opt.value === value;
@@ -1094,6 +1117,8 @@
     clearLogs: clearLogs,
     ensurePlaceholder: ensurePlaceholder,
     fetchJSON: fetchJSON,
+    formatDateTime: formatDateTime,
+    formatNumber: formatNumber,
     createAdminSessionController: createAdminSessionController,
     createAdminJobPollController: createAdminJobPollController,
     getAdminCsrfToken: getAdminCsrfToken,
@@ -1110,6 +1135,7 @@
     isChatScopeValue: isChatScopeValue,
     isNoneScopeValue: isNoneScopeValue,
     normalizeChats: normalizeChats,
+    normalizeNonnegativeInteger: normalizeNonnegativeInteger,
     pickFirstNumber: pickFirstNumber,
     pickFirstText: pickFirstText,
     postJSON: postJSON,

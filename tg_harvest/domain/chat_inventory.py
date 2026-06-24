@@ -8,8 +8,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tg_harvest.domain.coerce import optional_int as _optional_int
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
+from tg_harvest.domain.coerce import optional_int as _optional_int, safe_int as _safe_int
 
 
 @dataclass(frozen=True)
@@ -74,6 +74,8 @@ def _chat_id_identity(raw_chat_id: Any) -> int:
     if original < 0 and raw.startswith("100") and len(raw) > 3:
         return int(raw[3:])
     return value
+
+
 def _is_joined_group_or_channel(dialog: Any) -> bool:
     entity = getattr(dialog, "entity", None)
     if entity is None:
@@ -122,7 +124,7 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
         return None
 
     entity = getattr(dialog, "entity", None)
-    chat_id = int(getattr(entity, "id", 0) or 0)
+    chat_id = _safe_int(getattr(entity, "id", None))
     if chat_id <= 0:
         return None
 
