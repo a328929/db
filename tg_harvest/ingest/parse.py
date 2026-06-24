@@ -4,7 +4,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from tg_harvest.domain.coerce import optional_int
+from tg_harvest.domain.coerce import clean_username, optional_int
 from tg_harvest.domain.dedupe import build_media_fingerprint
 from tg_harvest.domain.normalize import _safe_json
 
@@ -335,7 +335,7 @@ def resolve_target_entities(client: Any, target: str) -> list[Any]:
     cleaned = t.replace("https://t.me/", "").replace("http://t.me/", "").strip("/")
     is_explicit_username = t.startswith("@")
     if cleaned.startswith("@"):
-        cleaned = cleaned.lstrip("@")
+        cleaned = clean_username(cleaned)
 
     # 链接和 @username 属于显式标识符，直接按实体解析。
     if cleaned != t or is_explicit_username:

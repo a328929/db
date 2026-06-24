@@ -10,13 +10,14 @@ from tg_harvest.admin_jobs.core import (
 from tg_harvest.admin_jobs.sessions import _start_job_heartbeat
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
+from tg_harvest.domain.coerce import clean_username
 from tg_harvest.ingest.flood_wait import is_flood_wait_error
 
 
 class UsernameFallbackSkippedError(RuntimeError):
     def __init__(self, chat_id: int, chat_username: str):
         self.chat_id = int(chat_id)
-        self.chat_username = str(chat_username or "").strip().lstrip("@")
+        self.chat_username = clean_username(chat_username)
         super().__init__(
             "本地实体缓存未命中，未执行公开 username 解析"
             f": chat_id={self.chat_id}, username={self.chat_username}"

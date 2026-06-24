@@ -9,7 +9,11 @@ from pathlib import Path
 from typing import Any
 
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
-from tg_harvest.domain.coerce import optional_int as _optional_int, safe_int as _safe_int
+from tg_harvest.domain.coerce import (
+    clean_username as _clean_username,
+    optional_int as _optional_int,
+    safe_int as _safe_int,
+)
 
 
 @dataclass(frozen=True)
@@ -132,7 +136,7 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
     if not title:
         title = "未命名"
 
-    username = str(getattr(entity, "username", None) or "").strip().lstrip("@")
+    username = _clean_username(getattr(entity, "username", None))
     last_message_at, last_message_ts = _dialog_last_message_fields(dialog)
     return ChatInventoryRow(
         chat_id=chat_id,
@@ -367,9 +371,7 @@ def find_database_chats_not_joined(
                 "chat_id": chat_id,
                 "chat_title": str(_mapping_value(row, "chat_title", "")).strip()
                 or f"Chat {chat_id}",
-                "chat_username": (
-                    str(_mapping_value(row, "chat_username", "")).strip().lstrip("@")
-                ),
+                "chat_username": _clean_username(_mapping_value(row, "chat_username", "")),
                 "chat_type": str(_mapping_value(row, "chat_type", "")),
                 "message_count": int(_mapping_value(row, "message_count", 0) or 0),
                 "last_seen_at": str(_mapping_value(row, "last_seen_at", "")),
@@ -441,7 +443,7 @@ def _read_session_entity_rows(path: Path) -> list[SessionChatRecoveryRow]:
                 chat_id = stored_chat_id_from_entity_id(source_entity_id)
                 if chat_id <= 0:
                     continue
-                username = str(row["username"] or "").strip().lstrip("@")
+                username = _clean_username(row["username"])
                 title = str(row["name"] or "").strip()
                 if not title:
                     title = username or f"Chat {chat_id}"

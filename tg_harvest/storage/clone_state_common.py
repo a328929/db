@@ -1,7 +1,13 @@
 import sqlite3
 from typing import Any
 
-from tg_harvest.storage.clone_common import _clean_text, _json_value, _optional_int
+from tg_harvest.storage.clone_common import (
+    _clean_text,
+    _json_value,
+    _optional_int,
+    _safe_int,
+)
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def _append_optional_fields(
@@ -76,11 +82,7 @@ def _build_clone_message_mapping_filters(
 
 
 def _normalize_offset(value: Any) -> int:
-    try:
-        normalized_offset = int(value)
-    except (TypeError, ValueError):
-        normalized_offset = 0
-    return max(0, normalized_offset)
+    return max(0, _safe_int(value))
 
 
 def _query_one(
@@ -123,7 +125,7 @@ def _query_count(
     field_name: str = "c",
 ) -> int:
     row = _query_one(conn, sql, params, lambda item: item)
-    return int(row[field_name] or 0) if row is not None else 0
+    return _row_int(row, field_name)
 
 
 def _commit_and_reload(conn: sqlite3.Connection, *, load_fn):
@@ -167,11 +169,11 @@ def _clone_run_from_row(row: sqlite3.Row | None) -> dict | None:
     return {
         "run_id": str(row["run_id"] or ""),
         "job_id": str(row["job_id"] or ""),
-        "source_chat_id": int(row["source_chat_id"] or 0),
+        "source_chat_id": _row_int(row, "source_chat_id"),
         "source_title": str(row["source_title"] or ""),
         "source_chat_username": str(row["source_chat_username"] or ""),
         "source_chat_type": str(row["source_chat_type"] or ""),
-        "source_message_count": int(row["source_message_count"] or 0),
+        "source_message_count": _row_int(row, "source_message_count"),
         "source_last_message_at": str(row["source_last_message_at"] or ""),
         "source_last_message_ts": _optional_int(row["source_last_message_ts"]),
         "target_chat_id": _optional_int(row["target_chat_id"]),
@@ -237,20 +239,20 @@ def _clone_migration_from_row(row: sqlite3.Row | None) -> dict | None:
         "target_chat_id": _optional_int(row["target_chat_id"]),
         "target_title": str(row["target_title"] or ""),
         "target_write_account": str(row["target_write_account"] or ""),
-        "requested_limit": int(row["requested_limit"] or 0),
-        "send_delay_ms": int(row["send_delay_ms"] or 0),
-        "text_total": int(row["text_total"] or 0),
-        "text_sent": int(row["text_sent"] or 0),
-        "text_skipped": int(row["text_skipped"] or 0),
-        "text_failed": int(row["text_failed"] or 0),
-        "media_total": int(row["media_total"] or 0),
-        "media_sent": int(row["media_sent"] or 0),
-        "media_skipped": int(row["media_skipped"] or 0),
-        "media_failed": int(row["media_failed"] or 0),
-        "media_group_total": int(row["media_group_total"] or 0),
-        "media_group_sent": int(row["media_group_sent"] or 0),
-        "media_group_skipped": int(row["media_group_skipped"] or 0),
-        "media_group_failed": int(row["media_group_failed"] or 0),
+        "requested_limit": _row_int(row, "requested_limit"),
+        "send_delay_ms": _row_int(row, "send_delay_ms"),
+        "text_total": _row_int(row, "text_total"),
+        "text_sent": _row_int(row, "text_sent"),
+        "text_skipped": _row_int(row, "text_skipped"),
+        "text_failed": _row_int(row, "text_failed"),
+        "media_total": _row_int(row, "media_total"),
+        "media_sent": _row_int(row, "media_sent"),
+        "media_skipped": _row_int(row, "media_skipped"),
+        "media_failed": _row_int(row, "media_failed"),
+        "media_group_total": _row_int(row, "media_group_total"),
+        "media_group_sent": _row_int(row, "media_group_sent"),
+        "media_group_skipped": _row_int(row, "media_group_skipped"),
+        "media_group_failed": _row_int(row, "media_group_failed"),
         "plan": _json_value(row["plan_json"], default={}),
         "plan_json": str(row["plan_json"] or ""),
         "error_message": str(row["error_message"] or ""),
@@ -264,18 +266,18 @@ def _clone_message_mapping_from_row(row: sqlite3.Row | None) -> dict | None:
     if row is None:
         return None
     return {
-        "id": int(row["id"] or 0),
+        "id": _row_int(row, "id"),
         "migration_id": str(row["migration_id"] or ""),
         "run_id": str(row["run_id"] or ""),
         "plan_id": str(row["plan_id"] or ""),
-        "source_chat_id": int(row["source_chat_id"] or 0),
-        "source_message_id": int(row["source_message_id"] or 0),
+        "source_chat_id": _row_int(row, "source_chat_id"),
+        "source_message_id": _row_int(row, "source_message_id"),
         "source_msg_date_ts": _optional_int(row["source_msg_date_ts"]),
         "source_msg_date_text": str(row["source_msg_date_text"] or ""),
-        "target_chat_id": int(row["target_chat_id"] or 0),
+        "target_chat_id": _row_int(row, "target_chat_id"),
         "target_message_id": _optional_int(row["target_message_id"]),
-        "chunk_index": int(row["chunk_index"] or 0),
-        "chunk_count": int(row["chunk_count"] or 1),
+        "chunk_index": _row_int(row, "chunk_index"),
+        "chunk_count": _row_int(row, "chunk_count", 1),
         "mode": str(row["mode"] or ""),
         "status": str(row["status"] or ""),
         "error_message": str(row["error_message"] or ""),
@@ -304,18 +306,18 @@ def _clone_message_mapping_summary_from_row(row: sqlite3.Row | None) -> dict:
             "latest_updated_at": "",
         }
     return {
-        "total": int(row["total"] or 0),
-        "done": int(row["done"] or 0),
-        "error": int(row["error"] or 0),
-        "text_total": int(row["text_total"] or 0),
-        "text_done": int(row["text_done"] or 0),
-        "text_error": int(row["text_error"] or 0),
-        "media_total": int(row["media_total"] or 0),
-        "media_done": int(row["media_done"] or 0),
-        "media_error": int(row["media_error"] or 0),
-        "media_group_total": int(row["media_group_total"] or 0),
-        "media_group_done": int(row["media_group_done"] or 0),
-        "media_group_error": int(row["media_group_error"] or 0),
+        "total": _row_int(row, "total"),
+        "done": _row_int(row, "done"),
+        "error": _row_int(row, "error"),
+        "text_total": _row_int(row, "text_total"),
+        "text_done": _row_int(row, "text_done"),
+        "text_error": _row_int(row, "text_error"),
+        "media_total": _row_int(row, "media_total"),
+        "media_done": _row_int(row, "media_done"),
+        "media_error": _row_int(row, "media_error"),
+        "media_group_total": _row_int(row, "media_group_total"),
+        "media_group_done": _row_int(row, "media_group_done"),
+        "media_group_error": _row_int(row, "media_group_error"),
         "latest_sent_at": str(row["latest_sent_at"] or ""),
         "latest_updated_at": str(row["latest_updated_at"] or ""),
     }

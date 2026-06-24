@@ -4,6 +4,8 @@ import sqlite3
 import threading
 from typing import Any
 
+from tg_harvest.domain.coerce import safe_int
+
 _COUNT_CACHE_LOCK = threading.Lock()
 _COUNT_CACHE: dict[tuple[Any, ...], tuple[int, bool, int]] = {}
 _COUNT_CACHE_MAX_ENTRIES = 256
@@ -16,7 +18,7 @@ def _read_data_version(conn: sqlite3.Connection) -> int:
         row = cur.fetchone()
         if row is None:
             return 0
-        return int(row[0] if not isinstance(row, sqlite3.Row) else row[0])
+        return safe_int(row[0])
     finally:
         cur.close()
 

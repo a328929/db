@@ -6,8 +6,10 @@ from typing import Any
 import tg_harvest.search.cache as _search_cache
 import tg_harvest.search.maintenance as _search_maintenance
 import tg_harvest.storage.search_terms as _search_terms
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.search.params import SearchParams
 from tg_harvest.search.sql_builder import _build_search_query_spec, _make_type_clause
+from tg_harvest.storage.row_access import row_int as _row_int
 
 _CHAT_FACET_LIMIT = 12
 
@@ -21,7 +23,7 @@ def _execute_count_query(
     page_size: int,
 ) -> tuple[int, bool, int]:
     cur.execute(count_sql, sql_params + [count_limit])
-    counted = int(cur.fetchone()["c"] or 0)
+    counted = _row_int(cur.fetchone(), "c")
     total_is_capped = counted > max_count
     total = min(counted, max_count)
     total_pages = math.ceil(total / page_size) if total > 0 else 0
@@ -84,7 +86,7 @@ def _should_try_like_fallback(
 
 
 def _payload_has_results(payload: dict[str, Any]) -> bool:
-    total_val = int(payload.get("total") or 0)
+    total_val = safe_int(payload.get("total"))
     if total_val > 0:
         return True
     return total_val == -1 and len(payload.get("items") or []) > 0
@@ -144,7 +146,7 @@ def _fast_count_from_chat_summary(
         row = cur.fetchone()
         if row is None:
             return 0
-        return int(row["c"] or 0)
+        return _row_int(row, "c")
     finally:
         cur.close()
 
@@ -169,7 +171,7 @@ def _fast_count_by_type(
         row = cur.fetchone()
         if row is None:
             return 0
-        return int(row["c"] or 0)
+        return _row_int(row, "c")
     finally:
         cur.close()
 
@@ -301,7 +303,7 @@ def _execute_chat_facet_query(
             {
                 "chat_id": chat_id,
                 "chat_title": title,
-                "count": int(row["match_count"] or 0),
+                "count": _row_int(row, "match_count"),
             }
         )
     return facets

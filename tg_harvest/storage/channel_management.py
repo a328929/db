@@ -3,7 +3,7 @@ from collections.abc import Iterable
 from contextlib import suppress
 from typing import Any
 
-from tg_harvest.domain.coerce import safe_int
+from tg_harvest.domain.coerce import clean_username, enabled_int, safe_int
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
@@ -13,6 +13,11 @@ from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
 )
 from tg_harvest.storage.connection import synchronized_write
+from tg_harvest.storage.row_access import (
+    row_int as _row_int,
+    scan_row_int as _scan_row_int,
+    scan_row_value as _scan_row_value,
+)
 
 CHANNEL_SORT_DEFAULT = "message_count_desc"
 CHANNEL_SORT_OPTIONS = {
@@ -78,14 +83,10 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "message_count": int(row["message_count"] or 0),
+                    "message_count": _row_int(row, "message_count"),
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
-                    "last_message_ts": (
-                        int(row["last_message_ts"])
-                        if row["last_message_ts"] is not None
-                        else None
-                    ),
+                    "last_message_ts": _optional_int(row["last_message_ts"]),
                 }
             )
         return channels
@@ -134,9 +135,9 @@ def replace_missing_chat_scan_results(
                 (
                     int(row.chat_id),
                     str(row.chat_title or "").strip() or f"Chat {int(row.chat_id)}",
-                    str(getattr(row, "chat_username", "") or "").strip().lstrip("@"),
+                    clean_username(getattr(row, "chat_username", "")),
                     str(getattr(row, "chat_type", "") or ""),
-                    1 if safe_int(getattr(row, "is_public", None)) == 1 else 0,
+                    enabled_int(getattr(row, "is_public", None)),
                     str(getattr(row, "last_message_at", "") or ""),
                     _optional_int(getattr(row, "last_message_ts", None)),
                     str(scan_job_id or ""),
@@ -202,7 +203,7 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "is_public": int(row["is_public"] or 0),
+                    "is_public": _row_int(row, "is_public"),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
                     "scan_job_id": str(row["scan_job_id"] or ""),
@@ -212,14 +213,6 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
         return rows
     finally:
         cur.close()
-
-
-def _scan_row_value(row: Any, key: str, default: Any = "") -> Any:
-    if isinstance(row, dict):
-        value = row.get(key, default)
-    else:
-        value = getattr(row, key, default)
-    return default if value is None else value
 
 
 @synchronized_write
@@ -265,14 +258,14 @@ def replace_absent_chat_scan_results(
             """,
             [
                 (
-                    int(_scan_row_value(row, "chat_id", 0) or 0),
+                    _scan_row_int(row, "chat_id", 0),
                     _chat_title_or_fallback(
-                        int(_scan_row_value(row, "chat_id", 0) or 0),
+                        _scan_row_int(row, "chat_id", 0),
                         _scan_row_value(row, "chat_title", ""),
                     ),
-                    str(_scan_row_value(row, "chat_username", "")).strip().lstrip("@"),
+                    clean_username(_scan_row_value(row, "chat_username", "")),
                     str(_scan_row_value(row, "chat_type", "")),
-                    int(_scan_row_value(row, "message_count", 0) or 0),
+                    _scan_row_int(row, "message_count", 0),
                     str(_scan_row_value(row, "last_seen_at", "")),
                     str(_scan_row_value(row, "last_message_at", "")),
                     _optional_int(_scan_row_value(row, "last_message_ts", None)),
@@ -348,7 +341,7 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "message_count": int(row["message_count"] or 0),
+                    "message_count": _row_int(row, "message_count"),
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
@@ -411,9 +404,9 @@ def replace_restricted_chat_scan_results(
                 (
                     int(row.chat_id),
                     str(row.chat_title or "").strip() or f"Chat {int(row.chat_id)}",
-                    str(getattr(row, "chat_username", "") or "").strip().lstrip("@"),
+                    clean_username(getattr(row, "chat_username", "")),
                     str(getattr(row, "chat_type", "") or ""),
-                    1 if safe_int(getattr(row, "is_public", None)) == 1 else 0,
+                    enabled_int(getattr(row, "is_public", None)),
                     str(getattr(row, "restriction_platforms", "") or "").strip(),
                     str(getattr(row, "restriction_reasons", "") or "").strip(),
                     str(getattr(row, "restriction_text", "") or "").strip(),
@@ -484,7 +477,7 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "is_public": int(row["is_public"] or 0),
+                    "is_public": _row_int(row, "is_public"),
                     "restriction_platforms": str(row["restriction_platforms"] or ""),
                     "restriction_reasons": str(row["restriction_reasons"] or ""),
                     "restriction_text": str(row["restriction_text"] or ""),

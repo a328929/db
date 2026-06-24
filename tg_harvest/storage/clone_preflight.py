@@ -7,15 +7,9 @@ from tg_harvest.storage.clone_common import (
     _chat_title_or_fallback,
     _default_clone_title,
     _optional_int,
-    _safe_int,
     _percent,
 )
-
-
-def _row_int(row: sqlite3.Row | None, key: str, default: int = 0) -> int:
-    if row is None:
-        return int(default)
-    return _safe_int(row[key], default)
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | None:

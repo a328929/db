@@ -2,7 +2,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from tg_harvest.domain.coerce import safe_int
+from tg_harvest.domain.coerce import enabled_int, safe_int
 from tg_harvest.runtime.paths import resolve_db_path, resolve_session_name
 
 # =========================
@@ -134,9 +134,7 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized = dict(raw)
 
     # 统一配置收口（防止环境变量误配）
-    normalized["scan_existing_chats"] = (
-        1 if int(normalized["scan_existing_chats"]) == 1 else 0
-    )
+    normalized["scan_existing_chats"] = enabled_int(normalized["scan_existing_chats"])
 
     if normalized["dedup_mode"] not in {"PURGE_ALL", "KEEP_FIRST"}:
         normalized["dedup_mode"] = "PURGE_ALL"
@@ -150,9 +148,7 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["promo_score_threshold"] = max(
         0, int(normalized["promo_score_threshold"])
     )
-    normalized["disable_promo_filter"] = (
-        1 if int(normalized["disable_promo_filter"]) == 1 else 0
-    )
+    normalized["disable_promo_filter"] = enabled_int(normalized["disable_promo_filter"])
     normalized["log_every"] = max(1, int(normalized["log_every"]))
     if normalized["history_wait_time"] is not None:
         normalized["history_wait_time"] = max(0.0, float(normalized["history_wait_time"]))
@@ -183,19 +179,15 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["admin_update_max_cooldown_wait_seconds"] = max(
         0, int(normalized["admin_update_max_cooldown_wait_seconds"])
     )
-    normalized["ops_bot_enabled"] = (
-        1 if int(normalized["ops_bot_enabled"]) == 1 else 0
-    )
+    normalized["ops_bot_enabled"] = enabled_int(normalized["ops_bot_enabled"])
     if normalized["ops_bot_timeout_seconds"] is None:
         normalized["ops_bot_timeout_seconds"] = 3.0
     else:
         normalized["ops_bot_timeout_seconds"] = max(
             0.5, float(normalized["ops_bot_timeout_seconds"])
         )
-    normalized["force_heal_fts"] = 1 if int(normalized["force_heal_fts"]) == 1 else 0
-    normalized["skip_fts_auto_heal"] = (
-        1 if int(normalized["skip_fts_auto_heal"]) == 1 else 0
-    )
+    normalized["force_heal_fts"] = enabled_int(normalized["force_heal_fts"])
+    normalized["skip_fts_auto_heal"] = enabled_int(normalized["skip_fts_auto_heal"])
     normalized["admin_session_expiry"] = max(60, int(normalized["admin_session_expiry"]))
     return normalized
 
@@ -310,4 +302,4 @@ CFG = AppConfig.load()
 
 
 def _is_enabled(v: int) -> bool:
-    return int(v) == 1
+    return enabled_int(v) == 1

@@ -8,12 +8,7 @@ from tg_harvest.storage.clone_common import (
     _optional_int,
     _safe_int,
 )
-
-
-def _row_int(row: sqlite3.Row | None, key: str, default: int = 0) -> int:
-    if row is None:
-        return int(default)
-    return _safe_int(row[key], default)
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def count_clone_text_replay_candidates(conn: sqlite3.Connection, chat_id: int) -> int:

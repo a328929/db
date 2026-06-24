@@ -24,6 +24,7 @@ from tg_harvest.ops_bot.notify import (
     notify_admin_job_created,
     notify_admin_job_status,
 )
+from tg_harvest.storage.row_access import row_int as _row_int
 
 # 核心：使用 contextvars 确保日志与任务绑定，无视线程池复用和异步切换。
 job_context: contextvars.ContextVar[str] = contextvars.ContextVar("job_id", default="")
@@ -331,7 +332,7 @@ def _admin_job_stop_requested(job_id: str) -> bool:
                 (str(job_id),),
             )
             row = cur.fetchone()
-            return row is not None and int(row["stop_requested"] or 0) == 1
+            return _row_int(row, "stop_requested") == 1
         finally:
             cur.close()
 
@@ -399,7 +400,7 @@ def _admin_job_append_log(job_id: str, message: str) -> dict[str, Any] | None:
                 next_log_seq = _admin_fetch_last_seq(job_id) + 1
 
             log_item = {
-                "seq": int(next_log_seq),
+                "seq": next_log_seq,
                 "ts": _job_runtime._admin_now_iso(),
                 "message": str(message),
             }
@@ -500,7 +501,7 @@ def _admin_job_update_progress(
         progress_stage = str(stage) if stage is not None else str(
             row["progress_stage"] or "running"
         )
-        last_logged_current = int(row["last_logged_current"] or 0)
+        last_logged_current = _row_int(row, "last_logged_current")
         updated_at = _job_runtime._admin_now_iso()
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
@@ -630,7 +631,7 @@ def _admin_job_get_snapshot(job_id: str) -> dict[str, Any] | None:
 
     with ADMIN_JOBS_LOCK:
         cache_entry = _admin_cache_entry_locked(job_id)
-        cache_entry["next_log_seq"] = int(row["last_seq"] or 0) + 1
+        cache_entry["next_log_seq"] = _row_int(row, "last_seq") + 1
     return _admin_snapshot_from_row(row)
 
 
@@ -656,7 +657,7 @@ def _admin_job_get_logs(
             rows = cur.fetchall()
             return [
                 {
-                    "seq": int(row["seq"] or 0),
+                    "seq": _row_int(row, "seq"),
                     "ts": str(row["ts"] or ""),
                     "message": str(row["message"] or ""),
                 }

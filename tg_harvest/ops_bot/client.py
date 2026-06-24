@@ -7,7 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-from tg_harvest.domain.coerce import clean_text, safe_int
+from tg_harvest.domain.coerce import clean_text, enabled_int
 
 logger = logging.getLogger(__name__)
 
@@ -20,11 +20,6 @@ _notify_queue: queue.Queue[tuple[Any, str, str | None]] | None = None
 _notify_worker_started = False
 _notify_lock = threading.Lock()
 
-
-def _enabled_int(value: object) -> int:
-    return 1 if safe_int(value) == 1 else 0
-
-
 def bot_token(cfg: Any) -> str:
     return clean_text(getattr(cfg, "ops_bot_token", ""))
 
@@ -35,7 +30,7 @@ def notify_chat_id(cfg: Any) -> str:
 
 def is_notify_enabled(cfg: Any) -> bool:
     return (
-        _enabled_int(getattr(cfg, "ops_bot_enabled", 0)) == 1
+        enabled_int(getattr(cfg, "ops_bot_enabled", 0)) == 1
         and bool(bot_token(cfg))
         and bool(notify_chat_id(cfg))
     )

@@ -4,6 +4,7 @@ from typing import Any
 
 from tg_harvest.config import CFG
 from tg_harvest.storage.connection import connect_configured_db
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def _admin_connect() -> sqlite3.Connection:
@@ -59,8 +60,7 @@ def _admin_fetch_last_seq(job_id: str) -> int:
                 "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM admin_job_logs WHERE job_id = ?",
                 (job_id,),
             )
-            row = cur.fetchone()
-            return int(row["last_seq"] or 0) if row is not None else 0
+            return _row_int(cur.fetchone(), "last_seq")
         finally:
             cur.close()
 
@@ -76,13 +76,13 @@ def _admin_snapshot_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "created_at": str(row["created_at"] or ""),
         "updated_at": str(row["updated_at"] or ""),
         "progress": {
-            "current": int(row["progress_current"] or 0),
+            "current": _row_int(row, "progress_current"),
             "total": int(progress_total) if isinstance(progress_total, int) else None,
             "stage": str(row["progress_stage"] or "queued"),
         },
-        "stop_requested": int(row["stop_requested"] or 0) == 1,
-        "log_count": int(row["log_count"] or 0),
-        "last_seq": int(row["last_seq"] or 0),
+        "stop_requested": _row_int(row, "stop_requested") == 1,
+        "log_count": _row_int(row, "log_count"),
+        "last_seq": _row_int(row, "last_seq"),
     }
 
 
@@ -93,7 +93,7 @@ def _admin_active_job_summary_from_row(row: sqlite3.Row) -> dict[str, Any]:
         "status": str(row["status"] or "").lower(),
         "target_chat_id": row["target_chat_id"],
         "target_label": row["target_label"],
-        "stop_requested": int(row["stop_requested"] or 0) == 1,
+        "stop_requested": _row_int(row, "stop_requested") == 1,
     }
 
 

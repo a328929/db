@@ -7,6 +7,7 @@ from typing import Any
 
 from tg_harvest.config import CFG, AppConfig, _is_enabled
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
+from tg_harvest.domain.coerce import clean_username
 from tg_harvest.domain.dedupe import (
     build_message_dedupe_hash,
     dedupe_promotional_duplicates,
@@ -112,7 +113,7 @@ def _resolve_entity_by_chat_id(client: Any, chat_id: int) -> Any:
 
 
 def _resolve_same_entity_for_client(client: Any, entity: Any) -> Any:
-    username = str(getattr(entity, "username", "") or "").strip().lstrip("@")
+    username = clean_username(getattr(entity, "username", ""))
     if username:
         try:
             return client.get_entity(username)

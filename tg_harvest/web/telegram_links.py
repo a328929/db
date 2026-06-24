@@ -1,6 +1,8 @@
 from dataclasses import dataclass
 from urllib.parse import quote, urlencode
 
+from tg_harvest.domain.coerce import clean_username
+
 
 @dataclass(frozen=True)
 class TelegramLinkBundle:
@@ -17,7 +19,7 @@ class TelegramChatLinkBundle:
 
 
 def normalize_chat_username(chat_username: str | None) -> str:
-    return str(chat_username or "").strip().lstrip("@")
+    return clean_username(chat_username)
 
 
 def normalize_chat_type(chat_type: str | None) -> str:

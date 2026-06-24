@@ -57,6 +57,7 @@ def _row_value(row: sqlite3.Row, key: str, default: Any = None) -> Any:
 
 
 def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> dict[str, Any]:
+    pk = int(row["pk"])
     chat_id = int(row["chat_id"])
     message_id = int(row["message_id"])
     file_size_raw = _row_value(row, "file_size")
@@ -64,7 +65,7 @@ def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> dict[str, A
     file_size = int(file_size_raw) if file_size_raw is not None else None
     duration_sec = int(duration_sec_raw) if duration_sec_raw is not None else None
     item = {
-        "pk": int(row["pk"]),
+        "pk": pk,
         "chat_id": chat_id,
         "chat_title": _row_value(row, "chat_title", "") or "",
         "message_id": message_id,
@@ -82,7 +83,4 @@ def _map_search_row(row: sqlite3.Row, detail_level: str = "lite") -> dict[str, A
 def _map_search_items(
     rows: list[sqlite3.Row], detail_level: str = "lite"
 ) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for row in rows:
-        items.append(_map_search_row(row, detail_level=detail_level))
-    return items
+    return [_map_search_row(row, detail_level=detail_level) for row in rows]

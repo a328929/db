@@ -51,7 +51,7 @@ from tg_harvest.admin_jobs.sessions import (
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
-from tg_harvest.domain.coerce import optional_int, safe_int
+from tg_harvest.domain.coerce import clean_username, optional_int, safe_int
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     raise_if_long_flood_wait,
@@ -1471,7 +1471,7 @@ def _resolve_matching_entity_for_account(
     if matched_entity is not None:
         return matched_entity
 
-    username = str(getattr(source_entity, "username", "") or "").strip().lstrip("@")
+    username = clean_username(getattr(source_entity, "username", ""))
     if username:
         try:
             with bind_client_event_loop(client):

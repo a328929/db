@@ -1,7 +1,9 @@
 import sqlite3
 from typing import Any
 
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.domain.chat_titles import chat_sort_key, chat_title_or_fallback
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
@@ -16,20 +18,20 @@ def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             FROM chats c
             """
         )
-        chats = [
-            {
-                "chat_id": int(row["chat_id"]),
-                "chat_title": chat_title_or_fallback(
-                    int(row["chat_id"]), row["chat_title"]
-                ),
-                "message_count": int(row["message_count"] or 0),
-            }
-            for row in cur.fetchall()
-        ]
+        chats = []
+        for row in cur.fetchall():
+            chat_id = int(row["chat_id"])
+            chats.append(
+                {
+                    "chat_id": chat_id,
+                    "chat_title": chat_title_or_fallback(chat_id, row["chat_title"]),
+                    "message_count": _row_int(row, "message_count"),
+                }
+            )
         chats.sort(
             key=lambda item: chat_sort_key(
                 str(item.get("chat_title") or ""),
-                int(str(item.get("chat_id") or 0)),
+                safe_int(item.get("chat_id")),
             )
         )
         return {"ok": True, "chats": chats}
@@ -59,8 +61,8 @@ def build_admin_stats_payload(
                 """
             )
             row = cur.fetchone()
-            chat_count = int(row["chat_count"] or 0)
-            message_count = int(row["message_count"] or 0)
+            chat_count = _row_int(row, "chat_count")
+            message_count = _row_int(row, "message_count")
 
             return {
                 "ok": True,
@@ -84,14 +86,13 @@ def build_admin_stats_payload(
         if row is None:
             return {"ok": False, "error": "chat_id 不存在"}, 404
 
+        actual_chat_id = int(row["chat_id"])
         return {
             "ok": True,
             "scope": "chat",
-            "chat_id": int(row["chat_id"]),
-            "chat_title": chat_title_or_fallback(
-                int(row["chat_id"]), row["chat_title"]
-            ),
-            "message_count": int(row["message_count"] or 0),
+            "chat_id": actual_chat_id,
+            "chat_title": chat_title_or_fallback(actual_chat_id, row["chat_title"]),
+            "message_count": _row_int(row, "message_count"),
         }, 200
     finally:
         cur.close()
