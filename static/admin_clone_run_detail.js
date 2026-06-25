@@ -179,7 +179,7 @@
       return;
     }
     setBusy(elements, true);
-    elements.detailStatus.textContent = '正在读取克隆记录详情...';
+    elements.detailStatus.textContent = '正在读取已克隆群详情...';
     try {
       var payload = await fetchJSON(
         '/api/admin/clone/runs/' + encodeURIComponent(state.runId) + '/detail'
@@ -267,11 +267,11 @@
         : '缺少 run_id，请从记录列表进入详情页。';
       appendSummaryPair(elements.detailSummary, '状态', '未读取');
       appendSummaryPair(elements.detailSummary, '目标', '未读取');
-      appendSummaryPair(elements.detailSummary, '迁移计划', '未读取');
+      appendSummaryPair(elements.detailSummary, '克隆计划', '未读取');
       appendMiniPair(elements.progressSummary, '时间线剩余', '0');
       elements.nextStep.textContent = state.runId
-        ? '请返回克隆记录列表重新进入有效记录详情页。'
-        : '请回到“克隆记录列表”选择一条记录进入详情页。';
+        ? '请返回已克隆群管理重新进入有效详情页。'
+        : '请回到“已克隆群管理”选择一条记录进入详情页。';
       renderFailureList(elements.failureList, []);
       renderFailureSummary(elements, []);
       renderMappingList(elements.mappingList, []);
@@ -287,8 +287,8 @@
     appendSummaryPair(elements.detailSummary, '源群', run.source_title || run.source_chat_id);
     appendSummaryPair(elements.detailSummary, '目标', run.target_title || '未创建');
     appendSummaryPair(elements.detailSummary, '状态', getRunStatusLabel(run.status));
-    appendSummaryPair(elements.detailSummary, '迁移计划', getPlanStatusLabel(plan && plan.status));
-    appendSummaryPair(elements.detailSummary, '完整迁移', getMigrationStatusLabel(migration && migration.status));
+    appendSummaryPair(elements.detailSummary, '克隆计划', getPlanStatusLabel(plan && plan.status));
+    appendSummaryPair(elements.detailSummary, '消息克隆', getMigrationStatusLabel(migration && migration.status));
     appendSummaryPair(elements.detailSummary, '剩余时间线', formatNumber(preview && preview.timeline_remaining));
     appendSummaryPair(elements.detailSummary, '更新时间', formatDateTime(run.updated_at));
 
@@ -358,13 +358,13 @@
     var migration = payload && payload.migration ? payload.migration : null;
     var preview = payload && payload.timeline_preview ? payload.timeline_preview : null;
     if (!run || !canResumeMigration(run)) {
-      return '去迁移页查看';
+      return '去继续克隆消息';
     }
-    if (!plan) return '去迁移页生成计划';
-    if (hasPlanBlockingIssues(plan)) return '去迁移页处理阻断项';
-    if (isMigrationErrored(migration)) return '去迁移页重试迁移';
-    if (isPreviewRemaining(preview)) return '继续到迁移页处理';
-    return '去迁移页查看';
+    if (!plan) return '去生成克隆计划';
+    if (hasPlanBlockingIssues(plan)) return '去处理阻断项';
+    if (isMigrationErrored(migration)) return '去重试继续克隆';
+    if (isPreviewRemaining(preview)) return '继续克隆消息';
+    return '去继续克隆消息';
   }
 
   function buildDetailStatusText(payload) {
@@ -384,12 +384,12 @@
     var preview = payload && payload.timeline_preview ? payload.timeline_preview : null;
 
     if (!run) {
-      return '请回到“克隆记录列表”选择一条记录进入详情页。';
+      return '请回到“已克隆群管理”选择一条记录进入详情页。';
     }
 
     var runStatus = String(run.status || '').trim().toLowerCase();
     if (runStatus === 'queued' || runStatus === 'running') {
-      return '这条记录还在创建目标副本。先等待创建完成，再进入迁移历史消息页面继续操作。';
+      return '这条记录还在创建克隆群。先等待创建完成，再继续克隆消息。';
     }
     if (runStatus === 'error') {
       return '这条记录在创建阶段失败了。先看失败样本和错误信息；如果目标副本没建出来，通常需要回到“创建空副本”重新创建。';
@@ -398,16 +398,16 @@
       return '这条记录还没有可用的目标副本，暂时不能继续迁移。';
     }
     if (!plan) {
-      return '目标副本已经创建，可以去“迁移历史消息”页面先生成迁移计划。';
+      return '克隆群已经创建，可以先生成克隆计划。';
     }
     if (hasPlanBlockingIssues(plan)) {
-      return '迁移计划已经生成，但存在阻断项。先回到“迁移历史消息”页面修复计划，再继续迁移。';
+      return '克隆计划已经生成，但存在阻断项。先处理阻断项，再继续克隆消息。';
     }
     if (isMigrationErrored(migration)) {
-      return '最近一次完整迁移失败了。建议回到“迁移历史消息”页面重试，并根据需要缩小处理上限或调整发送间隔。';
+      return '最近一次继续克隆失败了。建议回到“继续克隆消息”重试。';
     }
     if (isPreviewRemaining(preview)) {
-      return '这条记录还有剩余时间线消息未迁移，可以直接回到“迁移历史消息”继续处理。';
+      return '这条记录还有剩余消息未处理，可以直接继续克隆消息。';
     }
     return '从当前摘要看，这条记录已经没有明显待处理时间线。只有在需要核对映射或清理本地数据时才继续留在本页。';
   }
@@ -422,12 +422,12 @@
 
   function updateDeleteHelp(elements, run) {
     if (!run) {
-      elements.deleteHelp.textContent = '不会删除 Telegram 上已经创建的目标副本；只会删除本地数据库中的运行记录、迁移计划、迁移统计和消息映射。';
+      elements.deleteHelp.textContent = '不会删除 Telegram 上已经创建的克隆群；只会删除本地数据库中的运行记录、计划、统计和消息映射。';
       return;
     }
     elements.deleteHelp.textContent = '当前将删除 “'
       + buildRunTitle(run)
-      + '” 的本地数据库记录。不会删除 Telegram 上已经创建的目标副本。';
+      + '” 的本地数据库记录。不会删除 Telegram 上已经创建的克隆群。';
   }
 
   function renderFailureList(container, items) {

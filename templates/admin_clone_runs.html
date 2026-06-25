@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>克隆记录列表</title>
+  <title>已克隆群管理</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -11,37 +11,23 @@
 <body>
   <main class="page" id="admin-clone-runs-page">
     <header class="page-header">
-      <p class="eyebrow">记录列表</p>
-      <h1>克隆记录列表</h1>
-      <p class="subtle">本页只负责筛选和定位克隆记录。需要排错、看消息映射或删除本地记录时，请进入单条记录详情页。</p>
-      <nav class="clone-page-nav" aria-label="克隆记录列表页面导航">
-        <span class="clone-page-nav-badge">当前位置：克隆记录列表</span>
+      <p class="eyebrow">第 3 块</p>
+      <h1>已克隆群管理</h1>
+      <p class="subtle">查看和管理已创建的克隆群。</p>
+      <nav class="clone-page-nav" aria-label="已克隆群管理页面导航">
+        <span class="clone-page-nav-badge">当前位置：已克隆群管理</span>
         <div class="clone-page-nav-links">
           <a href="/admin/clone">克隆工作台</a>
-          <a href="/admin/clone/create">去创建空副本</a>
-          <a href="/admin/clone/migrate">进入迁移历史消息</a>
+          <a href="/admin/clone/create">检查并创建克隆群组</a>
+          <a href="/admin/clone/migrate">继续克隆消息</a>
         </div>
       </nav>
     </header>
 
-    <section class="panel clone-panel clone-flow-card" aria-labelledby="cloneRunsListFlowTitle">
-      <div class="clone-panel-head">
-        <div>
-          <h2 id="cloneRunsListFlowTitle" class="section-title">本页做什么</h2>
-          <p class="clone-subline">先筛选记录，再进入单条详情页。不要在列表页上直接承担排错、映射和删除这几类任务。</p>
-        </div>
-      </div>
-      <ol class="clone-flow-list" aria-label="克隆记录列表使用流程">
-        <li><strong>1. 先筛选</strong><span>按状态、源群或目标名称找到你要处理的记录。</span></li>
-        <li><strong>2. 看概况</strong><span>在列表卡片里先判断它是未创建完成、可继续迁移，还是已经失败。</span></li>
-        <li><strong>3. 去单条详情</strong><span>只有进入详情页后，才看失败样本、消息映射和危险操作。</span></li>
-      </ol>
-    </section>
-
     <section class="panel clone-panel" aria-labelledby="cloneRunFiltersTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneRunFiltersTitle" class="section-title">筛选记录</h2>
+          <h2 id="cloneRunFiltersTitle" class="section-title">筛选已克隆群</h2>
           <p id="admin-clone-runs-manage-status" class="clone-subline" role="status" aria-live="polite">
             正在读取克隆记录...
           </p>
@@ -90,7 +76,7 @@
     <section class="panel clone-panel" aria-labelledby="cloneRunsListTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneRunsListTitle" class="section-title">记录列表</h2>
+          <h2 id="cloneRunsListTitle" class="section-title">已克隆群列表</h2>
           <p id="admin-clone-runs-page-status" class="clone-subline" aria-live="polite">暂无分页信息。</p>
         </div>
         <div class="clone-toolbar">
@@ -102,7 +88,7 @@
           </button>
         </div>
       </div>
-      <div id="admin-clone-runs-manage-list" class="clone-run-list clone-run-manage-list" aria-label="克隆记录列表"></div>
+      <div id="admin-clone-runs-manage-list" class="clone-run-list clone-run-manage-list" aria-label="已克隆群列表"></div>
     </section>
   </main>
 
@@ -115,7 +101,7 @@
     hidden
   >
     <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
-    <p class="subtle">进入克隆记录列表，请先验证管理员密码。</p>
+    <p class="subtle">进入已克隆群管理，请先验证管理员密码。</p>
     <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-password-input">登录密码</label>

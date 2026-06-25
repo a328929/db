@@ -586,8 +586,9 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
         self.assertIn("克隆工作台", body)
-        self.assertIn("/admin/clone/create", body)
-        self.assertIn("/admin/clone/migrate", body)
+        self.assertIn("检查并创建克隆群组", body)
+        self.assertIn("继续克隆消息", body)
+        self.assertIn("已克隆群管理", body)
 
     def test_clone_create_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -608,10 +609,10 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("迁移历史消息", body)
+        self.assertIn("继续克隆消息", body)
         self.assertIn('data-clone-mode="migrate"', body)
-        self.assertIn("生成迁移计划", body)
-        self.assertIn("当前位置：迁移历史消息", body)
+        self.assertIn("生成克隆计划", body)
+        self.assertIn("当前位置：继续克隆消息", body)
 
     def test_clone_runs_manage_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -620,8 +621,8 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("克隆记录列表", body)
-        self.assertIn("当前位置：克隆记录列表", body)
+        self.assertIn("已克隆群管理", body)
+        self.assertIn("当前位置：已克隆群管理", body)
 
     def test_clone_run_detail_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -630,9 +631,9 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("克隆记录详情", body)
+        self.assertIn("已克隆群详情", body)
         self.assertIn("消息映射与排错", body)
-        self.assertIn("当前位置：克隆记录详情", body)
+        self.assertIn("当前位置：已克隆群详情", body)
 
     def test_clone_chats_api_includes_telegram_links(self) -> None:
         with self._auth_config_patch():

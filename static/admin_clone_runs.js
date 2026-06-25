@@ -232,7 +232,7 @@
     if (!canResumeMigration(run)) return;
     var link = document.createElement('a');
     link.href = buildRunMigrationHref(run);
-    link.textContent = '继续到迁移页';
+    link.textContent = '继续克隆消息';
     container.appendChild(link);
   }
 
@@ -241,7 +241,7 @@
     if (!runId) return;
     var link = document.createElement('a');
     link.href = buildRunDetailHref(runId);
-    link.textContent = '查看记录详情';
+    link.textContent = '进入群详情';
     container.appendChild(link);
   }
 

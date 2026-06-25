@@ -371,8 +371,8 @@
     }
 
     if (isMigratePage(elements)) {
-      elements.planStatus.textContent = '先选择一个已创建成功的副本，再生成迁移计划。';
-      elements.timelineStatus.textContent = '尚未开始完整迁移。';
+      elements.planStatus.textContent = '先选择一个已创建成功的克隆群，再生成克隆计划。';
+      elements.timelineStatus.textContent = '尚未开始继续克隆。';
     }
 
     setBusy(elements, cloneState.busy);
@@ -630,7 +630,7 @@
       });
       var jobId = getCreatedJobId(payload);
       appendLog(elements, '空副本创建任务已创建：' + jobId);
-      elements.runsStatus.textContent = '空副本创建任务已提交，正在刷新副本记录...';
+      elements.runsStatus.textContent = '克隆群创建任务已提交，正在刷新创建记录...';
       await loadCloneRuns(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
@@ -705,8 +705,8 @@
       renderCloneRuns(elements, []);
       renderMigrationPlan(elements, null);
       renderTimelineMigration(elements, null);
-      elements.runsStatus.textContent = '读取副本记录失败：' + error.message;
-      appendLog(elements, '读取副本记录失败：' + error.message);
+      elements.runsStatus.textContent = '读取克隆群记录失败：' + error.message;
+      appendLog(elements, '读取克隆群记录失败：' + error.message);
       syncUrlRunId(elements, '');
     } finally {
       if (requestToken !== requestState.runsToken) {
@@ -723,8 +723,8 @@
         : '正在读取最近创建记录...';
     }
     return selectedSource
-      ? '正在读取当前源群组的副本记录...'
-      : '正在读取最近可迁移副本记录...';
+      ? '正在读取当前源群组的克隆群记录...'
+      : '正在读取最近可继续克隆的记录...';
   }
 
   function buildRunsStatusText(elements, selectedSource, runs) {
@@ -743,12 +743,12 @@
 
     if (selectedSource) {
       return count
-        ? '当前源群组共有 ' + total + ' 条副本记录；只有已创建成功的副本可以继续迁移。'
-        : '当前源群组暂无副本记录。';
+        ? '当前源群组共有 ' + total + ' 条克隆群记录；只有已创建成功的克隆群可以继续克隆消息。'
+        : '当前源群组暂无克隆群记录。';
     }
     return count
-      ? '最近共有 ' + total + ' 条副本记录；先选择一个已创建成功的副本继续。'
-      : '暂无副本记录。';
+      ? '最近共有 ' + total + ' 条克隆群记录；先选择一个已创建成功的克隆群继续。'
+      : '暂无克隆群记录。';
   }
 
   function renderCloneRuns(elements, runs) {
@@ -758,7 +758,7 @@
       empty.className = 'clone-run-empty';
       empty.textContent = isCreatePage(elements)
         ? '暂无创建记录'
-        : '当前筛选条件下暂无可继续迁移的副本';
+        : '当前筛选条件下暂无可继续克隆的群';
       elements.runsList.appendChild(empty);
       return;
     }
@@ -869,17 +869,17 @@
     if (isSelectableCloneRun(run)) {
       appendRunPageLink(
         container,
-        '继续到迁移页',
+        '继续克隆消息',
         '/admin/clone/migrate?run_id=' + encodeURIComponent(runId)
       );
       return;
     }
     if (normalizedStatus === 'queued' || normalizedStatus === 'running') {
-      appendRunHint(container, '空副本创建完成后，这里会出现“继续到迁移页”。');
+      appendRunHint(container, '克隆群创建完成后，这里会出现“继续克隆消息”。');
       return;
     }
     if (normalizedStatus === 'error') {
-      appendRunHint(container, '这条记录创建失败，可先查看记录详情排查原因。');
+      appendRunHint(container, '这条克隆群创建失败，可先进入群详情排查原因。');
     }
   }
 
@@ -890,11 +890,11 @@
       return;
     }
     if (normalizedStatus === 'queued' || normalizedStatus === 'running') {
-      appendRunHint(container, '副本还没创建完成，暂不能生成迁移计划。');
+      appendRunHint(container, '克隆群还没创建完成，暂不能继续克隆消息。');
       return;
     }
     if (normalizedStatus === 'error') {
-      appendRunHint(container, '这条记录创建失败，可先查看记录详情排查原因。');
+      appendRunHint(container, '这条克隆群创建失败，可先进入群详情排查原因。');
     }
   }
 
@@ -905,7 +905,7 @@
     }
     appendRunPageLink(
       container,
-      '查看记录详情',
+      '进入群详情',
       '/admin/clone/runs/detail?run_id=' + encodeURIComponent(runId)
     );
   }
@@ -933,8 +933,8 @@
     var selected = runId && runId === cloneState.selectedRunId;
     button.type = 'button';
     button.className = selected ? 'btn clone-run-select is-selected' : 'btn clone-run-select';
-    button.textContent = selected ? '当前迁移目标' : '选这个副本继续迁移';
-    button.setAttribute('aria-label', '选择 ' + buildCloneRunTitle(run) + ' 作为后续迁移目标');
+    button.textContent = selected ? '当前克隆群' : '选这个群继续克隆';
+    button.setAttribute('aria-label', '选择 ' + buildCloneRunTitle(run) + ' 作为后续继续克隆的目标群');
     button.disabled = selected || cloneState.busy || jobPollState.isPolling;
     button.addEventListener('click', function () {
       handleSelectCloneRun(elements, runId);
@@ -1006,14 +1006,14 @@
     if (!run) {
       cloneState.plan = null;
       renderMigrationPlan(elements, null);
-      elements.planStatus.textContent = '请选择已创建成功的副本。';
+      elements.planStatus.textContent = '请选择已创建成功的克隆群。';
       setBusy(elements, cloneState.busy);
       return;
     }
 
     setElementDisabled(elements.planRefreshBtn, true);
     setElementDisabled(elements.deepPreflightBtn, true);
-    elements.planStatus.textContent = '正在读取迁移计划...';
+    elements.planStatus.textContent = '正在读取克隆计划...';
     try {
       var runId = String(run.run_id || '').trim();
       var payload = await fetchJSON(
@@ -1033,8 +1033,8 @@
       }
       cloneState.plan = null;
       renderMigrationPlan(elements, null);
-      elements.planStatus.textContent = '读取迁移计划失败：' + error.message;
-      appendLog(elements, '读取迁移计划失败：' + error.message);
+      elements.planStatus.textContent = '读取克隆计划失败：' + error.message;
+      appendLog(elements, '读取克隆计划失败：' + error.message);
     } finally {
       if (requestToken !== requestState.planToken) {
         return;
@@ -1045,23 +1045,23 @@
 
   function buildPlanStatusText(plan) {
     if (!plan) {
-      return '当前副本还没有迁移计划，请先点击“生成迁移计划”。';
+      return '当前克隆群还没有克隆计划，请先点击“生成克隆计划”。';
     }
     var status = String(plan.status || '').trim().toLowerCase();
     var blockingIssues = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
     if (status === 'done' && blockingIssues.length > 0) {
-      return '迁移计划已生成，但仍有阻断项，先处理阻断项。';
+      return '克隆计划已生成，但仍有阻断项，先处理阻断项。';
     }
     if (status === 'done') {
-      return '迁移计划已生成，可以直接开始完整迁移。';
+      return '克隆计划已生成，可以直接开始继续克隆。';
     }
     if (status === 'error') {
-      return '最近一次迁移计划生成失败，请重新生成并检查日志。';
+      return '最近一次克隆计划生成失败，请重新生成并检查日志。';
     }
     if (status === 'running' || status === 'queued') {
-      return '迁移计划任务仍在执行中，请稍后刷新。';
+      return '克隆计划任务仍在执行中，请稍后刷新。';
     }
-    return '已读取最新迁移计划。';
+    return '已读取最新克隆计划。';
   }
 
   async function loadSelectedRunMigration(elements) {
@@ -1117,12 +1117,12 @@
   async function handleDeepPreflightClick(elements) {
     var run = getSelectedCloneRun();
     if (!run) {
-      elements.planStatus.textContent = '请先选择已创建成功的副本。';
+      elements.planStatus.textContent = '请先选择已创建成功的克隆群。';
       return;
     }
 
     setBusy(elements, true);
-    elements.planStatus.textContent = '正在创建迁移计划任务...';
+    elements.planStatus.textContent = '正在创建克隆计划任务...';
     try {
       var payload = await postJSON(
         '/api/admin/clone/runs/'
@@ -1133,12 +1133,12 @@
       var jobId = getCreatedJobId(payload);
       cloneState.plan = payload && payload.plan ? payload.plan : null;
       renderMigrationPlan(elements, cloneState.plan);
-      elements.planStatus.textContent = '迁移计划任务已提交，稍后会自动刷新。';
-      appendLog(elements, '迁移计划任务已创建：' + jobId);
+      elements.planStatus.textContent = '克隆计划任务已提交，稍后会自动刷新。';
+      appendLog(elements, '克隆计划任务已创建：' + jobId);
       startJobPolling(elements, jobId);
     } catch (error) {
-      appendLog(elements, '创建迁移计划任务失败：' + error.message);
-      elements.planStatus.textContent = '创建迁移计划任务失败：' + error.message;
+      appendLog(elements, '创建克隆计划任务失败：' + error.message);
+      elements.planStatus.textContent = '创建克隆计划任务失败：' + error.message;
     } finally {
       setBusy(elements, false);
     }
@@ -1147,18 +1147,18 @@
   async function handleTimelineMigrationClick(elements) {
     var run = getSelectedCloneRun();
     if (!run) {
-      elements.timelineStatus.textContent = '请先选择已创建成功的副本。';
+      elements.timelineStatus.textContent = '请先选择已创建成功的克隆群。';
       return;
     }
     if (!isTimelineMigrationAllowed()) {
       var preview = cloneState.timelinePreview || {};
       var readinessReasons = Array.isArray(preview.readiness_reasons) ? preview.readiness_reasons : [];
-      elements.timelineStatus.textContent = readinessReasons[0] || '迁移计划还未满足完整迁移条件。';
+      elements.timelineStatus.textContent = readinessReasons[0] || '克隆计划还未满足继续克隆条件。';
       return;
     }
 
     setBusy(elements, true);
-    elements.timelineStatus.textContent = '正在创建完整迁移任务...';
+    elements.timelineStatus.textContent = '正在创建继续克隆任务...';
     try {
       var payload = await postJSON(
         '/api/admin/clone/runs/'
@@ -1173,11 +1173,11 @@
         cloneState.timelinePreview = payload.timeline_preview;
       }
       renderTimelineMigration(elements, cloneState.timelineMigration);
-      appendLog(elements, '完整迁移任务已创建：' + jobId);
+      appendLog(elements, '继续克隆任务已创建：' + jobId);
       startJobPolling(elements, jobId);
     } catch (error) {
-      appendLog(elements, '创建完整迁移任务失败：' + error.message);
-      elements.timelineStatus.textContent = '创建完整迁移任务失败：' + error.message;
+      appendLog(elements, '创建继续克隆任务失败：' + error.message);
+      elements.timelineStatus.textContent = '创建继续克隆任务失败：' + error.message;
     } finally {
       setBusy(elements, false);
     }
@@ -1193,11 +1193,11 @@
     elements.planBlocking.textContent = '';
     elements.planWarnings.textContent = '';
     elements.planRunLabel.textContent = run
-      ? '当前选中副本：' + buildCloneRunTitle(run)
-      : '当前未选择副本。';
+      ? '当前选中克隆群：' + buildCloneRunTitle(run)
+      : '当前未选择克隆群。';
 
     if (!run) {
-      appendSummaryPair(elements.planSummary, '目标副本', '未选择');
+      appendSummaryPair(elements.planSummary, '克隆群', '未选择');
       appendSummaryPair(elements.planSummary, '计划状态', '未生成');
       appendSummaryPair(elements.planSummary, '源访问', '未选择');
       appendSummaryPair(elements.planSummary, '目标访问', '未选择');
@@ -1207,7 +1207,7 @@
     }
 
     if (!plan) {
-      appendSummaryPair(elements.planSummary, '目标副本', getCloneRunTargetLabel(run));
+      appendSummaryPair(elements.planSummary, '克隆群', getCloneRunTargetLabel(run));
       appendSummaryPair(elements.planSummary, '计划状态', '未生成');
       appendSummaryPair(elements.planSummary, '源访问', '未预检');
       appendSummaryPair(elements.planSummary, '目标访问', '未预检');
@@ -1216,7 +1216,7 @@
       return;
     }
 
-    appendSummaryPair(elements.planSummary, '目标副本', getCloneRunTargetLabel(run));
+    appendSummaryPair(elements.planSummary, '克隆群', getCloneRunTargetLabel(run));
     appendSummaryPair(elements.planSummary, '计划状态', getPlanStatusLabel(plan.status));
     appendSummaryPair(elements.planSummary, '源访问', getAccessStatusLabel(plan.source_access));
     appendSummaryPair(elements.planSummary, '目标访问', getAccessStatusLabel(plan.target_access));
@@ -1244,17 +1244,17 @@
     elements.timelineSummary.textContent = '';
 
     if (!run) {
-      elements.timelineStatus.textContent = '请选择已创建成功的副本。';
-      appendSummaryPair(elements.timelineSummary, '目标副本', '未选择');
+      elements.timelineStatus.textContent = '请选择已创建成功的克隆群。';
+      appendSummaryPair(elements.timelineSummary, '克隆群', '未选择');
       appendSummaryPair(elements.timelineSummary, '状态', '未选择');
       appendSummaryPair(elements.timelineSummary, '时间线总数', '0');
       appendSummaryPair(elements.timelineSummary, '剩余时间线', '0');
       return;
     }
 
-    appendSummaryPair(elements.timelineSummary, '目标副本', getCloneRunTargetLabel(run));
+    appendSummaryPair(elements.timelineSummary, '克隆群', getCloneRunTargetLabel(run));
     if (!timelineMigration) {
-      elements.timelineStatus.textContent = '尚未开始完整迁移。';
+      elements.timelineStatus.textContent = '尚未开始继续克隆。';
       appendSummaryPair(elements.timelineSummary, '状态', '未执行');
       appendTimelinePreviewSummary(elements, preview);
       return;
@@ -1301,7 +1301,7 @@
     if (error) {
       return status + '：' + error;
     }
-    return '最近一次完整迁移：' + status + ' / ' + phase + '，更新时间 ' + updatedAt + '。';
+    return '最近一次继续克隆：' + status + ' / ' + phase + '，更新时间 ' + updatedAt + '。';
   }
 
   function renderPlanList(container, items) {
@@ -1557,15 +1557,15 @@
 
   function getJobDoneMessage(snapshot) {
     var jobType = String((snapshot && snapshot.job_type) || '').trim();
-    if (jobType === 'clone_deep_preflight') return '迁移计划生成完成';
-    if (jobType === 'clone_timeline_migration') return '完整迁移执行完成';
+    if (jobType === 'clone_deep_preflight') return '克隆计划生成完成';
+    if (jobType === 'clone_timeline_migration') return '继续克隆执行完成';
     return '空副本创建完成';
   }
 
   function getJobErrorMessage(snapshot) {
     var jobType = String((snapshot && snapshot.job_type) || '').trim();
-    if (jobType === 'clone_deep_preflight') return '迁移计划生成失败，请检查日志';
-    if (jobType === 'clone_timeline_migration') return '完整迁移执行失败，请检查日志';
+    if (jobType === 'clone_deep_preflight') return '克隆计划生成失败，请检查日志';
+    if (jobType === 'clone_timeline_migration') return '继续克隆执行失败，请检查日志';
     return '空副本创建失败，请检查日志';
   }
 
@@ -1724,7 +1724,7 @@
           elements,
           isCreatePage(elements)
             ? '认证成功，已进入“创建空副本”页'
-            : '认证成功，已进入“迁移历史消息”页'
+            : '认证成功，已进入“继续克隆消息”页'
         );
       }
     },

@@ -11,55 +11,38 @@
 <body>
   <main class="page" id="admin-clone-hub-page">
     <header class="page-header">
-      <p class="eyebrow">克隆工作台</p>
+      <p class="eyebrow">克隆系统</p>
       <h1>克隆工作台</h1>
-      <p class="subtle">把“创建空副本”“迁移历史消息”“克隆记录列表/详情”拆成独立页面，按顺序操作更清楚。</p>
+      <p class="subtle">3 个入口：创建克隆群、继续克隆消息、已克隆群管理。</p>
       <p class="subtle">
         <a href="/admin/manage" class="admin-link">返回后台管理</a>
-        <a href="/admin/clone/runs/manage" class="admin-link">克隆记录列表</a>
       </p>
     </header>
 
     <section class="panel clone-panel" aria-labelledby="cloneHubTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneHubTitle" class="section-title">选择你要做的事</h2>
-          <p class="clone-subline">如果是第一次克隆某个群组，从“创建空副本”开始；如果副本已经建好，直接进入“迁移历史消息”。</p>
+          <h2 id="cloneHubTitle" class="section-title">选择操作</h2>
         </div>
       </div>
 
       <div class="clone-hub-grid" aria-label="克隆工作台入口">
         <a class="clone-hub-card" href="/admin/clone/create">
-          <span class="clone-hub-step">步骤 1-2</span>
-          <strong>创建空副本</strong>
-          <span>选择数据库中的源群组，先做本地检查，再创建一个不带历史消息的目标副本。</span>
+          <span class="clone-hub-step">第 1 块</span>
+          <strong>检查并创建克隆群组</strong>
+          <span>检查源群和账号状态，创建克隆群。</span>
         </a>
         <a class="clone-hub-card" href="/admin/clone/migrate">
-          <span class="clone-hub-step">步骤 3-5</span>
-          <strong>迁移历史消息</strong>
-          <span>选择已经创建成功的副本，生成迁移计划，再执行完整时间线迁移。</span>
+          <span class="clone-hub-step">第 2 块</span>
+          <strong>继续克隆消息</strong>
+          <span>对已创建的克隆群继续克隆消息。</span>
         </a>
         <a class="clone-hub-card" href="/admin/clone/runs/manage">
-          <span class="clone-hub-step">记录列表 / 详情</span>
-          <strong>克隆记录列表</strong>
-          <span>先筛选记录，再进入单条记录详情查看消息映射、失败样本和危险操作。</span>
+          <span class="clone-hub-step">第 3 块</span>
+          <strong>已克隆群管理</strong>
+          <span>查看和管理已经创建好的克隆群。</span>
         </a>
       </div>
-    </section>
-
-    <section class="panel clone-panel" aria-labelledby="cloneHubFlowTitle">
-      <div class="clone-panel-head">
-        <div>
-          <h2 id="cloneHubFlowTitle" class="section-title">推荐操作顺序</h2>
-        </div>
-      </div>
-      <ol class="clone-flow-list" aria-label="推荐克隆顺序">
-        <li><strong>1. 创建空副本</strong><span>检查源群与账号状态，创建目标频道或超级群。</span></li>
-        <li><strong>2. 进入迁移页</strong><span>只挑已创建成功的副本继续，避免在同一页混杂所有步骤。</span></li>
-        <li><strong>3. 生成迁移计划</strong><span>确认源群、目标副本、relay 与账号访问能力。</span></li>
-        <li><strong>4. 开始完整迁移</strong><span>按照原时间线迁移文本、媒体和相册。</span></li>
-        <li><strong>5. 去记录列表，再进详情页</strong><span>需要核对消息映射、失败样本或删除数据库记录时，再进入单条详情页。</span></li>
-      </ol>
     </section>
   </main>
 </body>
