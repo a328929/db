@@ -6,7 +6,10 @@
     '/admin/manage',
     '/admin/channels',
     '/admin/clone',
+    '/admin/clone/create',
+    '/admin/clone/migrate',
     '/admin/clone/runs/manage',
+    '/admin/clone/runs/detail',
     '/admin/recovery'
   ];
 

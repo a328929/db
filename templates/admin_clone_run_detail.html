@@ -1,0 +1,190 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>克隆记录详情</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-clone-run-detail-page">
+    <header class="page-header">
+      <p class="eyebrow">记录详情</p>
+      <h1>克隆记录详情</h1>
+      <p class="subtle">本页只处理单条克隆记录的续跑、排错、消息映射和删除本地记录。</p>
+      <nav class="clone-page-nav" aria-label="克隆记录详情页面导航">
+        <span class="clone-page-nav-badge">当前位置：克隆记录详情</span>
+        <div class="clone-page-nav-links">
+          <a href="/admin/clone/runs/manage">返回克隆记录列表</a>
+          <a href="/admin/clone/migrate" id="admin-clone-run-detail-migrate-nav-link">继续到迁移历史消息</a>
+          <a href="/admin/clone">返回克隆工作台</a>
+        </div>
+      </nav>
+    </header>
+
+    <section class="panel clone-panel clone-flow-card" aria-labelledby="cloneRunDetailFlowTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneRunDetailFlowTitle" class="section-title">本页做什么</h2>
+          <p class="clone-subline">先确认当前记录状态，再决定是回迁移页继续处理，还是在这里核对失败样本、消息映射和危险操作。</p>
+        </div>
+      </div>
+      <ol class="clone-flow-list" aria-label="克隆记录详情使用流程">
+        <li><strong>1. 看摘要</strong><span>先判断当前记录卡在创建、计划、迁移还是排错阶段。</span></li>
+        <li><strong>2. 看推荐下一步</strong><span>能回迁移页继续处理的，优先继续处理，不在这里硬排错。</span></li>
+        <li><strong>3. 再展开排错</strong><span>只有需要核对失败样本或消息映射时，再展开下面的明细。</span></li>
+        <li><strong>4. 最后才删</strong><span>删除只影响本地数据库，不会删除 Telegram 目标副本。</span></li>
+      </ol>
+    </section>
+
+    <section class="panel clone-panel" aria-labelledby="cloneRunsDetailTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneRunsDetailTitle" class="section-title">记录详情</h2>
+          <p id="admin-clone-runs-detail-status" class="clone-subline" aria-live="polite">
+            正在读取克隆记录详情...
+          </p>
+        </div>
+        <div class="clone-toolbar">
+          <button id="admin-clone-runs-detail-refresh-btn" class="btn" type="button" aria-label="刷新详情">
+            刷新详情
+          </button>
+        </div>
+      </div>
+
+      <dl id="admin-clone-runs-detail-summary" class="clone-summary-grid clone-runs-detail-summary" aria-label="克隆记录详情摘要"></dl>
+      <section class="clone-report-block clone-runs-next-step-block" aria-labelledby="cloneRunNextStepTitle">
+        <h3 id="cloneRunNextStepTitle">推荐下一步</h3>
+        <p id="admin-clone-runs-next-step" class="clone-recommendation">请选择有效记录后查看建议。</p>
+        <div id="admin-clone-runs-detail-actions" class="clone-run-actions clone-detail-actions" aria-label="当前记录可执行操作">
+          <a id="admin-clone-runs-open-source-link" href="#" rel="noopener noreferrer" hidden>打开源群</a>
+          <a id="admin-clone-runs-open-target-link" href="#" rel="noopener noreferrer" hidden>打开目标副本</a>
+          <a id="admin-clone-runs-resume-link" href="#" hidden>继续到迁移页处理</a>
+        </div>
+      </section>
+
+      <div class="clone-report-grid clone-runs-detail-grid">
+        <section class="clone-report-block" aria-labelledby="cloneRunProgressTitle">
+          <h3 id="cloneRunProgressTitle">迁移进度</h3>
+          <dl id="admin-clone-runs-progress-summary" class="clone-mini-summary"></dl>
+        </section>
+        <details id="admin-clone-runs-failure-block" class="clone-report-block clone-expand-block">
+          <summary class="clone-expand-summary">
+            <span>失败样本</span>
+            <span id="admin-clone-runs-failure-summary-text" class="clone-expand-meta">暂无失败样本</span>
+          </summary>
+          <ul id="admin-clone-runs-failure-list" class="clone-warning-list"></ul>
+        </details>
+      </div>
+
+      <details
+        id="admin-clone-runs-mapping-block"
+        class="clone-report-block clone-runs-mapping-block clone-expand-block"
+      >
+        <summary class="clone-expand-summary">
+          <span>消息映射与排错</span>
+          <span id="admin-clone-runs-mapping-summary-text" class="clone-expand-meta">请选择记录后查看消息映射。</span>
+        </summary>
+        <div class="clone-mapping-head">
+          <div>
+            <h3 id="cloneRunMappingTitle">消息映射</h3>
+            <p id="admin-clone-runs-mapping-status" class="clone-subline" aria-live="polite">
+              请选择记录后查看消息映射。
+            </p>
+          </div>
+          <div class="clone-toolbar clone-mapping-toolbar">
+            <label for="admin-clone-runs-mapping-status-filter" class="sr-only">映射状态</label>
+            <select id="admin-clone-runs-mapping-status-filter" aria-label="按映射状态筛选">
+              <option value="">全部状态</option>
+              <option value="done">完成</option>
+              <option value="error">失败</option>
+            </select>
+            <button id="admin-clone-runs-mapping-prev-btn" class="btn" type="button" aria-label="上一页消息映射">
+              上一页
+            </button>
+            <button id="admin-clone-runs-mapping-next-btn" class="btn" type="button" aria-label="下一页消息映射">
+              下一页
+            </button>
+          </div>
+        </div>
+        <div id="admin-clone-runs-mapping-list" class="clone-mapping-list" aria-label="最近消息映射列表"></div>
+      </details>
+
+      <details class="clone-report-block clone-danger-block clone-expand-block" aria-labelledby="cloneRunDangerTitle">
+        <summary class="clone-expand-summary">
+          <span id="cloneRunDangerTitle">危险操作</span>
+          <span class="clone-expand-meta">按需展开</span>
+        </summary>
+        <p class="clone-subline">只有确认这条记录不再需要时，才删除本地数据库记录。</p>
+        <p id="admin-clone-runs-delete-help" class="clone-danger-copy">
+          不会删除 Telegram 上已经创建的目标副本；只会删除本地数据库中的运行记录、迁移计划、迁移统计和消息映射。
+        </p>
+        <div class="clone-actions clone-danger-actions">
+          <button id="admin-clone-runs-delete-btn" class="btn danger" type="button" aria-label="删除数据库中的克隆记录">
+            删除这条数据库记录
+          </button>
+        </div>
+      </details>
+    </section>
+  </main>
+
+  <section
+    id="admin-clone-run-delete-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCloneRunDeleteDialogTitle"
+    hidden
+  >
+    <h2 id="adminCloneRunDeleteDialogTitle">删除数据库记录</h2>
+    <p class="subtle">只删除本地数据库里的克隆记录、迁移计划、迁移统计和消息映射，不会删除 Telegram 上已经创建的目标副本。</p>
+    <p id="admin-clone-run-delete-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-clone-run-delete-confirm-input">确认码</label>
+      <input
+        id="admin-clone-run-delete-confirm-input"
+        name="admin-clone-run-delete-confirm-input"
+        type="text"
+        autocomplete="off"
+        aria-label="删除数据库记录确认码"
+      />
+    </div>
+    <p id="admin-clone-run-delete-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
+    <div aria-label="删除数据库记录操作按钮组">
+      <button id="admin-clone-run-delete-cancel-btn" class="btn" type="button" aria-label="取消删除数据库记录">取消</button>
+      <button id="admin-clone-run-delete-confirm-btn" class="btn danger" type="button" aria-label="确认删除数据库记录">确认删除</button>
+    </div>
+  </section>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminLoginDialogTitle"
+    hidden
+  >
+    <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
+    <p class="subtle">进入克隆记录详情，请先验证管理员密码。</p>
+    <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input
+        id="admin-password-input"
+        name="admin-password-input"
+        type="password"
+        placeholder="请输入管理员密码"
+        aria-label="管理员密码"
+      />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_clone_run_detail.js') }}"></script>
+</body>
+</html>

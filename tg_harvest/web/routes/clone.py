@@ -12,15 +12,11 @@ from tg_harvest.admin_jobs.clone import (
 )
 from tg_harvest.app.services import CloneRouteServices
 from tg_harvest.domain.clone_plan import (
-    CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
-    CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
     CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS,
     CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
     CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
-    clone_plan_blocking_issues,
-    clone_plan_media_migration_account,
-    clone_plan_media_relay_ready,
-    clone_plan_target_write_account,
+    clone_plan_media_relay,
+    clone_plan_timeline_readiness,
 )
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
@@ -33,10 +29,6 @@ from tg_harvest.web.responses import (
 from tg_harvest.web.routes.chat_links import with_chat_links, with_prefixed_chat_links
 
 _ALLOWED_TARGET_KINDS = {"channel", "megagroup"}
-_ALLOWED_MEDIA_STRATEGIES = {
-    CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
-    CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
-}
 
 
 @dataclass(frozen=True)
@@ -67,40 +59,6 @@ class _CloneRouteDeps:
     admin_start_clone_structure_job_thread_fn: Any
     admin_start_clone_deep_preflight_job_thread_fn: Any
     admin_start_clone_timeline_migration_job_thread_fn: Any
-
-
-def _plan_media_relay(latest_plan: dict | None) -> dict:
-    if not isinstance(latest_plan, dict):
-        return {}
-    media_relay = latest_plan.get("media_relay")
-    if isinstance(media_relay, dict):
-        return media_relay
-    plan_payload = latest_plan.get("plan")
-    if isinstance(plan_payload, dict) and isinstance(plan_payload.get("media_relay"), dict):
-        return plan_payload["media_relay"]
-    capabilities = latest_plan.get("capabilities")
-    if isinstance(capabilities, dict) and isinstance(capabilities.get("media_relay"), dict):
-        return capabilities["media_relay"]
-    return {}
-
-
-def _plan_media_relay_ready(latest_plan: dict | None) -> bool:
-    return bool(isinstance(latest_plan, dict) and clone_plan_media_relay_ready(latest_plan))
-
-
-def _media_execution_label(latest_plan: dict | None, fallback_account: str) -> str:
-    media_relay = _plan_media_relay(latest_plan)
-    if (
-        str((latest_plan or {}).get("media_strategy") or "").strip()
-        == CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION
-        and _plan_media_relay_ready(latest_plan)
-    ):
-        return (
-            str(media_relay.get("source_account") or "").strip()
-            + "->relay->"
-            + str(media_relay.get("target_account") or "").strip()
-        )
-    return str(fallback_account or "").strip()
 
 
 def _with_clone_run_links(rows, build_telegram_chat_link_bundle_fn):
@@ -320,65 +278,33 @@ def _timeline_migration_readiness(
     timeline_preview: dict | None = None,
 ) -> dict:
     reasons: list[str] = []
-    target_write_account = (
-        clone_plan_target_write_account(latest_plan) if latest_plan is not None else ""
-    )
-    migration_account = (
-        clone_plan_media_migration_account(latest_plan)
-        if latest_plan is not None
-        else ""
-    )
-    relay_ready = _plan_media_relay_ready(latest_plan)
-    text_remaining = 0
-    media_remaining = 0
-    if isinstance(timeline_preview, dict):
-        try:
-            text_remaining = int(timeline_preview.get("text_remaining") or 0)
-            media_remaining = int(timeline_preview.get("media_remaining") or 0)
-        except (TypeError, ValueError):
-            text_remaining = 0
-            media_remaining = 0
+    shared = clone_plan_timeline_readiness(latest_plan, preview=timeline_preview)
+    target_write_account = str(shared["target_write_account"] or "")
+    migration_account = str(shared["migration_account"] or "")
+    media_execution_account = str(shared["media_execution_account"] or "")
 
     if clone_run.get("status") != "done" or not clone_run.get("target_chat_id"):
         reasons.append("目标副本尚未创建完成，不能执行完整时间线迁移")
-    if latest_plan is None:
+    if "plan_missing" in shared["reason_codes"]:
         reasons.append("请先执行在线深度预检并生成迁移计划")
-    else:
-        if latest_plan.get("status") != "done":
-            reasons.append("迁移计划尚未完成，不能执行完整时间线迁移")
-        if clone_plan_blocking_issues(latest_plan):
-            reasons.append("迁移计划存在阻断项，不能执行完整时间线迁移")
-        if latest_plan.get("target_access") != "ok":
-            reasons.append("目标副本不可访问，不能执行完整时间线迁移")
-        if text_remaining > 0:
-            if latest_plan.get("text_strategy") != "database_replay":
-                reasons.append("迁移计划不允许数据库文本重放")
-            if not target_write_account:
-                reasons.append("迁移计划缺少可写目标账号，请重新执行在线深度预检")
-        if media_remaining > 0:
-            media_strategy = str(latest_plan.get("media_strategy") or "")
-            if latest_plan.get("source_access") != "ok":
-                reasons.append("源群不可访问，不能执行媒体时间线复制")
-            if media_strategy not in _ALLOWED_MEDIA_STRATEGIES:
-                reasons.append("迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检")
-            elif (
-                media_strategy == CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION
-                and not relay_ready
-            ):
-                reasons.append("固定中转频道桥接计划未就绪，请重新执行在线深度预检")
-            elif (
-                media_strategy == CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION
-                and not migration_account
-            ):
-                reasons.append("迁移计划缺少同时访问源群与目标副本的媒体迁移账号")
+    if "plan_missing" not in shared["reason_codes"]:
+        reason_messages = {
+            "plan_not_done": "迁移计划尚未完成，不能执行完整时间线迁移",
+            "plan_blocked": "迁移计划存在阻断项，不能执行完整时间线迁移",
+            "target_inaccessible": "目标副本不可访问，不能执行完整时间线迁移",
+            "text_strategy_blocked": "迁移计划不允许数据库文本重放",
+            "missing_target_write_account": "迁移计划缺少可写目标账号，请重新执行在线深度预检",
+            "source_inaccessible": "源群不可访问，不能执行媒体时间线复制",
+            "media_strategy_blocked": "迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检",
+            "media_relay_not_ready": "固定中转频道桥接计划未就绪，请重新执行在线深度预检",
+            "missing_media_account": "迁移计划缺少同时访问源群与目标副本的媒体迁移账号",
+            "no_timeline_remaining": "没有剩余可迁移时间线消息",
+        }
+        for reason_code in shared["reason_codes"]:
+            message = reason_messages.get(str(reason_code))
+            if message and message not in reasons:
+                reasons.append(message)
 
-    if isinstance(timeline_preview, dict) and text_remaining + media_remaining <= 0:
-        reasons.append("没有剩余可迁移时间线消息")
-
-    media_execution_account = _media_execution_label(
-        latest_plan,
-        str(migration_account),
-    )
     execution_parts = []
     if target_write_account:
         execution_parts.append(f"text:{target_write_account}")
@@ -391,7 +317,7 @@ def _timeline_migration_readiness(
         "migration_account": migration_account,
         "media_execution_account": media_execution_account,
         "execution_label": "; ".join(execution_parts),
-        "media_relay": _plan_media_relay(latest_plan),
+        "media_relay": clone_plan_media_relay(latest_plan or {}),
         "plan_id": str((latest_plan or {}).get("plan_id") or ""),
         "plan_status": str((latest_plan or {}).get("status") or ""),
         "text_strategy": str((latest_plan or {}).get("text_strategy") or ""),
@@ -407,10 +333,25 @@ def _register_clone_page_routes(app) -> None:
     def admin_clone_page():
         return render_template("admin_clone.html")
 
+    @app.get("/admin/clone/create")
+    @admin_page_login_required
+    def admin_clone_create_page():
+        return render_template("admin_clone_create.html")
+
+    @app.get("/admin/clone/migrate")
+    @admin_page_login_required
+    def admin_clone_migrate_page():
+        return render_template("admin_clone_migrate.html")
+
     @app.get("/admin/clone/runs/manage")
     @admin_page_login_required
     def admin_clone_runs_manage_page():
         return render_template("admin_clone_runs.html")
+
+    @app.get("/admin/clone/runs/detail")
+    @admin_page_login_required
+    def admin_clone_run_detail_page():
+        return render_template("admin_clone_run_detail.html")
 
 
 def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:

@@ -8,9 +8,7 @@
   var sharedFetchJSON = shared.fetchJSON;
   var sharedPostJSON = shared.postJSON;
   var getCreatedJobId = shared.getCreatedJobId;
-  var setDialogOpenState = shared.setDialogOpenState;
   var setElementDisabled = shared.setElementDisabled;
-  var setPageInteractionState = shared.setPageInteractionState;
   var syncClearLogsButtonVisibility = shared.syncClearLogsButtonVisibility;
   var trapFocusWithin = shared.trapFocusWithin;
   var normalizeNonnegativeInteger = shared.normalizeNonnegativeInteger;
@@ -20,7 +18,8 @@
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
   var JOB_POLL_RETRY_BASE_MS = 3000;
-  var STORAGE_KEY = 'adminCloneConsoleState';
+  var CLONE_MODE_CREATE = 'create';
+  var CLONE_MODE_MIGRATE = 'migrate';
 
   var cloneState = {
     items: [],
@@ -45,9 +44,17 @@
     lastProgressKey: ''
   };
 
+  var requestState = {
+    runsToken: 0,
+    planToken: 0,
+    migrationToken: 0
+  };
+
   document.addEventListener('DOMContentLoaded', async function () {
     var elements = getElements();
-    if (!elements) return;
+    if (!elements) {
+      return;
+    }
 
     initializeUI(elements);
     bindEvents(elements);
@@ -56,6 +63,7 @@
 
   function getElements() {
     var elements = {
+      page: document.getElementById('admin-clone-page'),
       sourceStatus: document.getElementById('admin-clone-source-status'),
       sortSelect: document.getElementById('admin-clone-sort-select'),
       refreshBtn: document.getElementById('admin-clone-refresh-btn'),
@@ -76,17 +84,17 @@
       runsRefreshBtn: document.getElementById('admin-clone-runs-refresh-btn'),
       runsList: document.getElementById('admin-clone-runs-list'),
       planStatus: document.getElementById('admin-clone-plan-status'),
-	      planRefreshBtn: document.getElementById('admin-clone-plan-refresh-btn'),
-	      deepPreflightBtn: document.getElementById('admin-clone-deep-preflight-btn'),
-	      timelineMigrationBtn: document.getElementById('admin-clone-timeline-migration-btn'),
+      planRefreshBtn: document.getElementById('admin-clone-plan-refresh-btn'),
+      deepPreflightBtn: document.getElementById('admin-clone-deep-preflight-btn'),
+      timelineMigrationBtn: document.getElementById('admin-clone-timeline-migration-btn'),
       planRunLabel: document.getElementById('admin-clone-plan-run-label'),
       planSummary: document.getElementById('admin-clone-plan-summary'),
       planBlocking: document.getElementById('admin-clone-plan-blocking'),
       planWarnings: document.getElementById('admin-clone-plan-warnings'),
-	      messageLimitInput: document.getElementById('admin-clone-message-limit-input'),
-	      sendDelayInput: document.getElementById('admin-clone-send-delay-input'),
-	      timelineStatus: document.getElementById('admin-clone-timeline-status'),
-	      timelineSummary: document.getElementById('admin-clone-timeline-summary'),
+      messageLimitInput: document.getElementById('admin-clone-message-limit-input'),
+      sendDelayInput: document.getElementById('admin-clone-send-delay-input'),
+      timelineStatus: document.getElementById('admin-clone-timeline-status'),
+      timelineSummary: document.getElementById('admin-clone-timeline-summary'),
       logContainer: document.getElementById('admin-clone-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-clone-logs-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
@@ -95,13 +103,31 @@
       loginConfirmBtn: document.getElementById('admin-login-confirm-btn')
     };
 
-    var requiredKeys = [
+    if (!elements.page) {
+      console.warn('[admin_clone] Missing required element: page');
+      return null;
+    }
+
+    elements.cloneMode = getPageMode(elements);
+    var commonRequiredKeys = [
+      'page',
       'sourceStatus',
       'sortSelect',
       'refreshBtn',
       'sourceSelect',
-      'preflightBtn',
       'sourceSummary',
+      'runsStatus',
+      'runsRefreshBtn',
+      'runsList',
+      'logContainer',
+      'clearLogsBtn',
+      'loginDialog',
+      'loginStatus',
+      'passwordInput',
+      'loginConfirmBtn'
+    ];
+    var createRequiredKeys = [
+      'preflightBtn',
       'preflightStatus',
       'metricsList',
       'capabilities',
@@ -111,30 +137,33 @@
       'targetKindSelect',
       'confirmInput',
       'confirmHint',
-      'startBtn',
-      'runsStatus',
-      'runsRefreshBtn',
-      'runsList',
+      'startBtn'
+    ];
+    var migrateRequiredKeys = [
       'planStatus',
-	      'planRefreshBtn',
-	      'deepPreflightBtn',
-	      'timelineMigrationBtn',
+      'planRefreshBtn',
+      'deepPreflightBtn',
+      'timelineMigrationBtn',
       'planRunLabel',
       'planSummary',
       'planBlocking',
       'planWarnings',
-	      'messageLimitInput',
-	      'sendDelayInput',
-	      'timelineStatus',
-	      'timelineSummary',
-      'logContainer',
-      'clearLogsBtn',
-      'loginDialog',
-      'loginStatus',
-      'passwordInput',
-      'loginConfirmBtn'
+      'messageLimitInput',
+      'sendDelayInput',
+      'timelineStatus',
+      'timelineSummary'
     ];
-    var missing = requiredKeys.filter(function (key) { return !elements[key]; });
+    var requiredKeys = commonRequiredKeys.slice();
+
+    if (isCreatePage(elements)) {
+      requiredKeys = requiredKeys.concat(createRequiredKeys);
+    } else if (isMigratePage(elements)) {
+      requiredKeys = requiredKeys.concat(migrateRequiredKeys);
+    }
+
+    var missing = requiredKeys.filter(function (key) {
+      return !elements[key];
+    });
     if (missing.length > 0) {
       console.warn('[admin_clone] Missing required elements:', missing.join(', '));
       return null;
@@ -142,19 +171,36 @@
     return elements;
   }
 
+  function getPageMode(elements) {
+    var page = elements && elements.page ? elements.page : null;
+    var rawMode = page && typeof page.getAttribute === 'function'
+      ? page.getAttribute('data-clone-mode')
+      : '';
+    var normalized = String(rawMode || '').trim().toLowerCase();
+    return normalized === CLONE_MODE_MIGRATE ? CLONE_MODE_MIGRATE : CLONE_MODE_CREATE;
+  }
+
+  function isCreatePage(elements) {
+    return getPageMode(elements) === CLONE_MODE_CREATE;
+  }
+
+  function isMigratePage(elements) {
+    return getPageMode(elements) === CLONE_MODE_MIGRATE;
+  }
+
   function setLoginStatus(elements, message) {
     shared.setLoginStatus(elements, message);
   }
 
   function initializeUI(elements) {
-    restoreConsoleState(elements);
+    initializeConsoleState(elements);
     ensurePlaceholder(elements.logContainer);
     syncClearLogsButtonVisibility(elements);
     renderSourceSummary(elements, null);
     renderReport(elements, null);
-	    renderCloneRuns(elements, []);
-	    renderMigrationPlan(elements, null);
-	      renderTimelineMigration(elements, null);
+    renderCloneRuns(elements, []);
+    renderMigrationPlan(elements, null);
+    renderTimelineMigration(elements, null);
     setBusy(elements, false);
   }
 
@@ -163,13 +209,14 @@
       sessionController.handleLogin(elements);
     });
     elements.passwordInput.addEventListener('keydown', function (event) {
-      if (event.key === 'Enter') {
-        event.preventDefault();
-        sessionController.handleLogin(elements);
+      if (event.key !== 'Enter') {
+        return;
       }
+      event.preventDefault();
+      sessionController.handleLogin(elements);
     });
+
     elements.sortSelect.addEventListener('change', function () {
-      persistConsoleState(elements);
       loadSourceChats(elements);
     });
     elements.refreshBtn.addEventListener('click', function () {
@@ -177,45 +224,48 @@
     });
     elements.sourceSelect.addEventListener('change', function () {
       handleSourceChange(elements, { resetRunSelection: true });
-      persistConsoleState(elements);
       loadCloneRuns(elements);
-    });
-    elements.preflightBtn.addEventListener('click', function () {
-      handlePreflightClick(elements);
-    });
-    elements.confirmInput.addEventListener('input', function () {
-      updateStartButtonState(elements);
-    });
-    elements.targetTitleInput.addEventListener('input', function () {
-      updateStartButtonState(elements);
-    });
-    elements.startBtn.addEventListener('click', function () {
-      handleStartCloneClick(elements);
     });
     elements.runsRefreshBtn.addEventListener('click', function () {
       loadCloneRuns(elements);
-    });
-    elements.planRefreshBtn.addEventListener('click', function () {
-      loadSelectedRunPlan(elements);
-    });
-	    elements.deepPreflightBtn.addEventListener('click', function () {
-	      handleDeepPreflightClick(elements);
-	    });
-    elements.timelineMigrationBtn.addEventListener('click', function () {
-      handleTimelineMigrationClick(elements);
-    });
-    elements.messageLimitInput.addEventListener('input', function () {
-      persistConsoleState(elements);
-    });
-    elements.sendDelayInput.addEventListener('input', function () {
-      persistConsoleState(elements);
     });
     elements.clearLogsBtn.addEventListener('click', function () {
       clearLogs(elements);
     });
 
+    if (isCreatePage(elements)) {
+      elements.preflightBtn.addEventListener('click', function () {
+        handlePreflightClick(elements);
+      });
+      elements.confirmInput.addEventListener('input', function () {
+        updateStartButtonState(elements);
+      });
+      elements.targetTitleInput.addEventListener('input', function () {
+        updateStartButtonState(elements);
+      });
+      elements.startBtn.addEventListener('click', function () {
+        handleStartCloneClick(elements);
+      });
+    }
+
+    if (isMigratePage(elements)) {
+      elements.planRefreshBtn.addEventListener('click', function () {
+        loadSelectedRunPlan(elements);
+      });
+      elements.deepPreflightBtn.addEventListener('click', function () {
+        handleDeepPreflightClick(elements);
+      });
+      elements.timelineMigrationBtn.addEventListener('click', function () {
+        handleTimelineMigrationClick(elements);
+      });
+      elements.messageLimitInput.addEventListener('input', function () {
+      });
+      elements.sendDelayInput.addEventListener('input', function () {
+      });
+    }
+
     document.addEventListener('keydown', function (event) {
-      if (!elements || !elements.loginDialog || elements.loginDialog.hidden) {
+      if (!elements.loginDialog || elements.loginDialog.hidden) {
         return;
       }
       if (event.key === 'Tab') {
@@ -227,7 +277,9 @@
   async function loadSourceChats(elements) {
     var previousValue = String(elements.sourceSelect.value || cloneState.sourceChatId || '');
     setBusy(elements, true);
-    elements.sourceStatus.textContent = '正在读取数据库群组...';
+    elements.sourceStatus.textContent = isCreatePage(elements)
+      ? '正在读取可克隆源群组...'
+      : '正在读取源群组筛选项...';
     try {
       var payload = await fetchJSON(
         '/api/admin/clone/chats?sort='
@@ -235,7 +287,7 @@
       );
       cloneState.items = Array.isArray(payload.items) ? payload.items : [];
       renderSourceOptions(elements, previousValue);
-      elements.sourceStatus.textContent = '共 ' + formatNumber(cloneState.items.length) + ' 个可选源群组。';
+      elements.sourceStatus.textContent = buildSourceStatusText(elements, cloneState.items.length);
       handleSourceChange(elements);
       await loadCloneRuns(elements);
     } catch (error) {
@@ -248,19 +300,29 @@
     }
   }
 
+  function buildSourceStatusText(elements, count) {
+    var total = formatNumber(count || 0);
+    if (isCreatePage(elements)) {
+      return '共 ' + total + ' 个可选源群组。';
+    }
+    return '共 ' + total + ' 个源群组，可用于筛选副本记录。';
+  }
+
   function renderSourceOptions(elements, preferredValue) {
     elements.sourceSelect.textContent = '';
 
     var placeholder = document.createElement('option');
     placeholder.value = '';
     placeholder.textContent = cloneState.items.length
-      ? '全部源群组 / 最近副本'
+      ? getSourcePlaceholderText(elements)
       : '暂无可选群组';
     elements.sourceSelect.appendChild(placeholder);
 
     cloneState.items.forEach(function (item) {
       var chatId = item && item.chat_id;
-      if (chatId === undefined || chatId === null) return;
+      if (chatId === undefined || chatId === null) {
+        return;
+      }
       var option = document.createElement('option');
       option.value = String(chatId);
       option.textContent = buildChatOptionText(item);
@@ -274,14 +336,21 @@
     elements.sourceSelect.value = '';
   }
 
+  function getSourcePlaceholderText(elements) {
+    if (isCreatePage(elements)) {
+      return '请选择要克隆的源群组';
+    }
+    return '全部源群组 / 最近副本';
+  }
+
   function handleSourceChange(elements, options) {
     var opts = options || {};
     var selected = getSelectedSourceChat(elements);
     cloneState.report = null;
     cloneState.sourceChatId = selected ? String(selected.chat_id || '') : '';
-    if (opts.resetRunSelection) {
+    if (opts.resetRunSelection || isCreatePage(elements)) {
       cloneState.selectedRunId = '';
-      syncUrlRunId('');
+      syncUrlRunId(elements, '');
     }
     cloneState.plan = null;
     cloneState.migration = null;
@@ -291,13 +360,22 @@
     renderReport(elements, null);
     renderMigrationPlan(elements, null);
     renderTimelineMigration(elements, null);
-    if (selected) {
-      elements.targetKindSelect.value = inferTargetKindFromSource(selected.chat_type);
-      elements.preflightStatus.textContent = '已选择源群组，请执行预检。';
-    } else {
-      elements.preflightStatus.textContent = '请选择源群组后执行预检。';
+
+    if (isCreatePage(elements)) {
+      if (selected) {
+        elements.targetKindSelect.value = inferTargetKindFromSource(selected.chat_type);
+        elements.preflightStatus.textContent = '已选择源群组，可以开始检查。';
+      } else {
+        elements.preflightStatus.textContent = '请选择源群组后开始检查。';
+      }
     }
-    setBusy(elements, false);
+
+    if (isMigratePage(elements)) {
+      elements.planStatus.textContent = '先选择一个已创建成功的副本，再生成迁移计划。';
+      elements.timelineStatus.textContent = '尚未开始完整迁移。';
+    }
+
+    setBusy(elements, cloneState.busy);
   }
 
   function getSelectedSourceChat(elements) {
@@ -306,7 +384,9 @@
 
   function findSourceChat(chatId) {
     var normalized = String(chatId || '').trim();
-    if (!normalized) return null;
+    if (!normalized) {
+      return null;
+    }
     for (var i = 0; i < cloneState.items.length; i += 1) {
       if (String(cloneState.items[i].chat_id) === normalized) {
         return cloneState.items[i];
@@ -330,9 +410,16 @@
   }
 
   function renderSourceSummary(elements, item) {
+    if (!elements.sourceSummary) {
+      return;
+    }
     elements.sourceSummary.textContent = '';
     if (!item) {
-      appendSummaryPair(elements.sourceSummary, '当前源', '未选择');
+      appendSummaryPair(
+        elements.sourceSummary,
+        '当前源',
+        isCreatePage(elements) ? '未选择' : '全部源群组'
+      );
       appendSummaryPair(elements.sourceSummary, '消息数', '0');
       appendSummaryPair(elements.sourceSummary, '媒体元信息', '0');
       appendSummaryPair(elements.sourceSummary, '最后消息', '暂无');
@@ -342,7 +429,11 @@
     appendSummaryPair(elements.sourceSummary, '当前源', item.chat_title || item.chat_id);
     appendSummaryPair(elements.sourceSummary, '消息数', formatNumber(item.message_count));
     appendSummaryPair(elements.sourceSummary, '媒体元信息', formatNumber(item.media_rows));
-    appendSummaryPair(elements.sourceSummary, '最后消息', formatDateTime(item.last_message_at || item.last_seen_at));
+    appendSummaryPair(
+      elements.sourceSummary,
+      '最后消息',
+      formatDateTime(item.last_message_at || item.last_seen_at)
+    );
   }
 
   function appendSummaryPair(container, label, value) {
@@ -366,32 +457,36 @@
     setBusy(elements, true);
     cloneState.report = null;
     renderReport(elements, null);
-    elements.preflightStatus.textContent = '正在执行本地数据库和配置预检...';
+    elements.preflightStatus.textContent = '正在执行检查：读取数据库摘要并验证账号配置...';
     try {
       var payload = await postJSON('/api/admin/clone/preflight', {
         chat_id: Number(selected.chat_id)
       });
       cloneState.report = payload && payload.report ? payload.report : null;
       if (!cloneState.report) {
-        throw new Error('预检响应缺少 report');
+        throw new Error('检查响应缺少 report');
       }
       renderReport(elements, cloneState.report);
-      appendLog(elements, '预检完成：' + getReportSourceLabel(cloneState.report));
+      appendLog(elements, '检查完成：' + getReportSourceLabel(cloneState.report));
     } catch (error) {
-      elements.preflightStatus.textContent = '预检失败：' + error.message;
-      appendLog(elements, '预检失败：' + error.message);
+      elements.preflightStatus.textContent = '检查失败：' + error.message;
+      appendLog(elements, '检查失败：' + error.message);
     } finally {
       setBusy(elements, false);
     }
   }
 
   function renderReport(elements, report) {
+    if (!elements.metricsList) {
+      return;
+    }
+
     elements.metricsList.textContent = '';
     elements.capabilities.textContent = '';
     elements.warnings.textContent = '';
     elements.recommendation.textContent = '';
     elements.confirmInput.value = '';
-    elements.confirmHint.textContent = '预检通过后会生成确认码。';
+    elements.confirmHint.textContent = '完成检查后会自动填入操作确认码。';
     elements.targetTitleInput.value = '';
 
     if (!report) {
@@ -405,7 +500,7 @@
     elements.targetTitleInput.value = String(target.default_title || '');
     elements.targetKindSelect.value = inferTargetKindFromSource(source.chat_type);
     elements.confirmInput.value = String(report.confirm || '');
-    elements.confirmHint.textContent = '确认码已生成，第二次点击“确认克隆”将创建结构副本。';
+    elements.confirmHint.textContent = '确认码已填入，核对标题后即可创建空副本。';
 
     renderMetricCards(elements.metricsList, metrics);
     renderCapabilities(elements.capabilities, report.capabilities || []);
@@ -414,8 +509,8 @@
 
     var account = report.account || {};
     elements.preflightStatus.textContent = account.secondary_session_distinct
-      ? '预检完成：结构克隆可执行。'
-      : '预检完成：第二账号未就绪，暂不能启动克隆。';
+      ? '检查完成：当前配置允许创建空副本。'
+      : '检查完成：第二账号未就绪，暂不能创建空副本。';
     updateStartButtonState(elements);
   }
 
@@ -485,7 +580,9 @@
 
   function renderRecommendation(container, recommendation) {
     var summary = String((recommendation && recommendation.summary) || '').trim();
-    if (!summary) return;
+    if (!summary) {
+      return;
+    }
     var level = String((recommendation && recommendation.level) || '').trim();
     var mode = String((recommendation && recommendation.mode) || '').trim();
     var prefix = level ? '评估 ' + level : '评估';
@@ -508,11 +605,11 @@
 
   async function handleStartCloneClick(elements) {
     if (!cloneState.report) {
-      elements.preflightStatus.textContent = '请先执行预检。';
+      elements.preflightStatus.textContent = '请先完成检查。';
       return;
     }
     if (!isStartAllowed(elements)) {
-      elements.preflightStatus.textContent = '确认码或第二账号状态不满足启动条件。';
+      elements.preflightStatus.textContent = '确认码不匹配，或第二账号暂时不能创建空副本。';
       return;
     }
 
@@ -532,11 +629,12 @@
         confirm: elements.confirmInput.value
       });
       var jobId = getCreatedJobId(payload);
-      appendLog(elements, '结构克隆任务已创建：' + jobId);
+      appendLog(elements, '空副本创建任务已创建：' + jobId);
+      elements.runsStatus.textContent = '空副本创建任务已提交，正在刷新副本记录...';
       await loadCloneRuns(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
-      appendLog(elements, '创建结构克隆任务失败：' + error.message);
+      appendLog(elements, '创建空副本任务失败：' + error.message);
       elements.preflightStatus.textContent = '创建任务失败：' + error.message;
     } finally {
       setBusy(elements, false);
@@ -547,13 +645,15 @@
     try {
       var payload = await fetchJSON('/api/admin/jobs/active');
       var job = payload && payload.job ? payload.job : null;
-      if (!job) return;
+      if (!job) {
+        return;
+      }
       var jobType = String(job.job_type || '').trim();
       var status = String(job.status || '').trim();
       if (!isCloneJobType(jobType) || ['queued', 'running'].indexOf(status) === -1) {
         return;
       }
-      appendLog(elements, '检测到未完成的克隆系统任务，恢复日志轮询：' + String(job.job_id));
+      appendLog(elements, '检测到未完成的克隆任务，恢复日志轮询：' + String(job.job_id));
       startJobPolling(elements, String(job.job_id));
     } catch (error) {
       appendLog(elements, '检查活跃克隆任务失败：' + error.message);
@@ -561,11 +661,11 @@
   }
 
   async function loadCloneRuns(elements) {
+    var requestToken = requestState.runsToken + 1;
+    requestState.runsToken = requestToken;
     var selected = getSelectedSourceChat(elements);
     setElementDisabled(elements.runsRefreshBtn, true);
-    elements.runsStatus.textContent = selected
-      ? '正在读取当前源群组的克隆记录...'
-      : '正在读取最近克隆记录...';
+    elements.runsStatus.textContent = buildRunsLoadingText(elements, selected);
     try {
       var url = selected
         ? '/api/admin/clone/runs?source_chat_id='
@@ -573,35 +673,82 @@
           + '&limit=20'
         : '/api/admin/clone/runs?limit=20';
       var payload = await fetchJSON(url);
+      if (requestToken !== requestState.runsToken) {
+        return;
+      }
       cloneState.runs = Array.isArray(payload.items) ? payload.items : [];
-      syncSelectedRunFromRuns();
+      if (isMigratePage(elements)) {
+        syncSelectedRunFromRuns();
+      } else {
+        cloneState.selectedRunId = '';
+      }
+      syncUrlRunId(elements, cloneState.selectedRunId);
       renderCloneRuns(elements, cloneState.runs);
-      elements.runsStatus.textContent = selected
-        ? cloneState.runs.length
-          ? '当前源群组共有 ' + formatNumber(cloneState.runs.length) + ' 条克隆记录。'
-          : '当前源群组暂无克隆记录。'
-        : cloneState.runs.length
-          ? '最近共有 ' + formatNumber(cloneState.runs.length) + ' 条克隆记录。'
-          : '暂无克隆记录。';
-      persistConsoleState(elements);
-      await loadSelectedRunPlan(elements);
-      await loadSelectedRunMigration(elements);
-	    } catch (error) {
-	      cloneState.runs = [];
-	      cloneState.selectedRunId = '';
-	      cloneState.plan = null;
-	      cloneState.migration = null;
-	      cloneState.timelineMigration = null;
+      elements.runsStatus.textContent = buildRunsStatusText(elements, selected, cloneState.runs);
+      if (isMigratePage(elements)) {
+        await loadSelectedRunPlan(elements);
+        if (requestToken !== requestState.runsToken) {
+          return;
+        }
+        await loadSelectedRunMigration(elements);
+      }
+    } catch (error) {
+      if (requestToken !== requestState.runsToken) {
+        return;
+      }
+      cloneState.runs = [];
+      cloneState.selectedRunId = '';
+      cloneState.plan = null;
+      cloneState.migration = null;
+      cloneState.timelineMigration = null;
       cloneState.timelinePreview = null;
       renderCloneRuns(elements, []);
       renderMigrationPlan(elements, null);
       renderTimelineMigration(elements, null);
-      elements.runsStatus.textContent = '读取克隆记录失败：' + error.message;
-      appendLog(elements, '读取克隆记录失败：' + error.message);
-      persistConsoleState(elements);
+      elements.runsStatus.textContent = '读取副本记录失败：' + error.message;
+      appendLog(elements, '读取副本记录失败：' + error.message);
+      syncUrlRunId(elements, '');
     } finally {
+      if (requestToken !== requestState.runsToken) {
+        return;
+      }
       setElementDisabled(elements.runsRefreshBtn, cloneState.busy || jobPollState.isPolling);
     }
+  }
+
+  function buildRunsLoadingText(elements, selectedSource) {
+    if (isCreatePage(elements)) {
+      return selectedSource
+        ? '正在读取当前源群组的创建记录...'
+        : '正在读取最近创建记录...';
+    }
+    return selectedSource
+      ? '正在读取当前源群组的副本记录...'
+      : '正在读取最近可迁移副本记录...';
+  }
+
+  function buildRunsStatusText(elements, selectedSource, runs) {
+    var count = Array.isArray(runs) ? runs.length : 0;
+    var total = formatNumber(count);
+    if (isCreatePage(elements)) {
+      if (selectedSource) {
+        return count
+          ? '当前源群组已有 ' + total + ' 条创建记录。创建完成后可直接继续到迁移页，或查看记录详情。'
+          : '当前源群组还没有创建记录。';
+      }
+      return count
+        ? '最近共有 ' + total + ' 条创建记录。创建成功后也会在这里出现。'
+        : '暂无创建记录。';
+    }
+
+    if (selectedSource) {
+      return count
+        ? '当前源群组共有 ' + total + ' 条副本记录；只有已创建成功的副本可以继续迁移。'
+        : '当前源群组暂无副本记录。';
+    }
+    return count
+      ? '最近共有 ' + total + ' 条副本记录；先选择一个已创建成功的副本继续。'
+      : '暂无副本记录。';
   }
 
   function renderCloneRuns(elements, runs) {
@@ -609,7 +756,9 @@
     if (!Array.isArray(runs) || runs.length <= 0) {
       var empty = document.createElement('p');
       empty.className = 'clone-run-empty';
-      empty.textContent = '暂无克隆运行记录';
+      empty.textContent = isCreatePage(elements)
+        ? '暂无创建记录'
+        : '当前筛选条件下暂无可继续迁移的副本';
       elements.runsList.appendChild(empty);
       return;
     }
@@ -621,6 +770,8 @@
 
   function createCloneRunCard(elements, run) {
     var normalizedStatus = String((run && run.status) || '').trim().toLowerCase();
+    var runId = String((run && run.run_id) || '').trim();
+    var selected = isMigratePage(elements) && runId && runId === cloneState.selectedRunId;
     var card = document.createElement('article');
     var head = document.createElement('div');
     var title = document.createElement('h3');
@@ -629,6 +780,9 @@
     var actions = document.createElement('div');
 
     card.className = 'clone-run-card is-' + (normalizedStatus || 'unknown');
+    if (selected) {
+      card.className += ' is-selected';
+    }
     head.className = 'clone-run-head';
     title.className = 'clone-run-title';
     status.className = 'clone-run-status is-' + (normalizedStatus || 'unknown');
@@ -642,16 +796,19 @@
     card.appendChild(head);
 
     appendRunPill(meta, '源群组', (run && run.source_title) || '未知源');
-    appendRunPill(meta, '目标类型', getTargetKindLabel((run && run.target_kind) || ''));
-    appendRunPill(meta, '目标 ID', run && run.target_chat_id ? String(run.target_chat_id) : '未创建');
+    appendRunPill(meta, '目标副本', getCloneRunTargetLabel(run));
     appendRunPill(meta, '阶段', getRunPhaseLabel((run && run.phase) || ''));
-    appendRunPill(meta, '创建时间', formatDateTime((run && run.created_at) || ''));
-    appendRunPill(meta, '完成时间', formatDateTime((run && run.completed_at) || ''));
+    appendRunPill(meta, '最近更新时间', formatDateTime((run && run.updated_at) || ''));
     card.appendChild(meta);
 
     appendRunLink(actions, '打开源群', run && run.source_telegram_app_link);
     appendRunLink(actions, '打开目标', run && run.target_telegram_app_link);
-    appendRunSelectButton(elements, actions, run);
+    appendRunDetailPageLink(actions, run);
+    if (isCreatePage(elements)) {
+      appendCreatePageRunAction(actions, run);
+    } else {
+      appendMigratePageRunAction(elements, actions, run);
+    }
     if (actions.childNodes.length > 0) {
       card.appendChild(actions);
     }
@@ -663,6 +820,17 @@
       card.appendChild(error);
     }
     return card;
+  }
+
+  function getCloneRunTargetLabel(run) {
+    var targetTitle = String((run && run.target_title) || '').trim();
+    if (targetTitle) {
+      return targetTitle;
+    }
+    if (run && run.target_chat_id) {
+      return String(run.target_chat_id);
+    }
+    return '未创建';
   }
 
   function buildCloneRunTitle(run) {
@@ -685,7 +853,9 @@
 
   function appendRunLink(container, label, href) {
     var normalizedHref = String(href || '').trim();
-    if (!normalizedHref) return;
+    if (!normalizedHref) {
+      return;
+    }
     var link = document.createElement('a');
     link.href = normalizedHref;
     link.textContent = String(label || '');
@@ -693,15 +863,78 @@
     container.appendChild(link);
   }
 
+  function appendCreatePageRunAction(container, run) {
+    var runId = String((run && run.run_id) || '').trim();
+    var normalizedStatus = String((run && run.status) || '').trim().toLowerCase();
+    if (isSelectableCloneRun(run)) {
+      appendRunPageLink(
+        container,
+        '继续到迁移页',
+        '/admin/clone/migrate?run_id=' + encodeURIComponent(runId)
+      );
+      return;
+    }
+    if (normalizedStatus === 'queued' || normalizedStatus === 'running') {
+      appendRunHint(container, '空副本创建完成后，这里会出现“继续到迁移页”。');
+      return;
+    }
+    if (normalizedStatus === 'error') {
+      appendRunHint(container, '这条记录创建失败，可先查看记录详情排查原因。');
+    }
+  }
+
+  function appendMigratePageRunAction(elements, container, run) {
+    var normalizedStatus = String((run && run.status) || '').trim().toLowerCase();
+    if (isSelectableCloneRun(run)) {
+      appendRunSelectButton(elements, container, run);
+      return;
+    }
+    if (normalizedStatus === 'queued' || normalizedStatus === 'running') {
+      appendRunHint(container, '副本还没创建完成，暂不能生成迁移计划。');
+      return;
+    }
+    if (normalizedStatus === 'error') {
+      appendRunHint(container, '这条记录创建失败，可先查看记录详情排查原因。');
+    }
+  }
+
+  function appendRunDetailPageLink(container, run) {
+    var runId = String((run && run.run_id) || '').trim();
+    if (!runId) {
+      return;
+    }
+    appendRunPageLink(
+      container,
+      '查看记录详情',
+      '/admin/clone/runs/detail?run_id=' + encodeURIComponent(runId)
+    );
+  }
+
+  function appendRunPageLink(container, label, href) {
+    var link = document.createElement('a');
+    link.href = String(href || '');
+    link.textContent = String(label || '');
+    container.appendChild(link);
+  }
+
+  function appendRunHint(container, message) {
+    var hint = document.createElement('span');
+    hint.className = 'clone-run-note';
+    hint.textContent = String(message || '');
+    container.appendChild(hint);
+  }
+
   function appendRunSelectButton(elements, container, run) {
-    if (!isSelectableCloneRun(run)) return;
+    if (!isSelectableCloneRun(run)) {
+      return;
+    }
     var button = document.createElement('button');
     var runId = String((run && run.run_id) || '').trim();
     var selected = runId && runId === cloneState.selectedRunId;
     button.type = 'button';
     button.className = selected ? 'btn clone-run-select is-selected' : 'btn clone-run-select';
-    button.textContent = selected ? '已选择' : '选择副本';
-    button.setAttribute('aria-label', '选择 ' + buildCloneRunTitle(run) + ' 作为深度预检目标');
+    button.textContent = selected ? '当前迁移目标' : '选这个副本继续迁移';
+    button.setAttribute('aria-label', '选择 ' + buildCloneRunTitle(run) + ' 作为后续迁移目标');
     button.disabled = selected || cloneState.busy || jobPollState.isPolling;
     button.addEventListener('click', function () {
       handleSelectCloneRun(elements, runId);
@@ -716,10 +949,7 @@
   }
 
   function syncSelectedRunFromRuns() {
-    if (
-      cloneState.selectedRunId
-      && isSelectableCloneRun(findCloneRun(cloneState.selectedRunId))
-    ) {
+    if (cloneState.selectedRunId && isSelectableCloneRun(findCloneRun(cloneState.selectedRunId))) {
       return;
     }
     cloneState.selectedRunId = '';
@@ -733,7 +963,9 @@
 
   function findCloneRun(runId) {
     var normalized = String(runId || '').trim();
-    if (!normalized) return null;
+    if (!normalized) {
+      return null;
+    }
     for (var i = 0; i < cloneState.runs.length; i += 1) {
       if (String(cloneState.runs[i].run_id) === normalized) {
         return cloneState.runs[i];
@@ -747,21 +979,29 @@
   }
 
   async function handleSelectCloneRun(elements, runId) {
+    if (!isMigratePage(elements)) {
+      return;
+    }
     cloneState.selectedRunId = String(runId || '').trim();
     cloneState.plan = null;
     cloneState.migration = null;
     cloneState.timelineMigration = null;
     cloneState.timelinePreview = null;
-    persistConsoleState(elements);
-    syncUrlRunId(cloneState.selectedRunId);
+    syncUrlRunId(elements, cloneState.selectedRunId);
     renderCloneRuns(elements, cloneState.runs);
     renderMigrationPlan(elements, null);
     renderTimelineMigration(elements, null);
+    setBusy(elements, cloneState.busy);
     await loadSelectedRunPlan(elements);
     await loadSelectedRunMigration(elements);
   }
 
   async function loadSelectedRunPlan(elements) {
+    if (!isMigratePage(elements)) {
+      return;
+    }
+    var requestToken = requestState.planToken + 1;
+    requestState.planToken = requestToken;
     var run = getSelectedCloneRun();
     if (!run) {
       cloneState.plan = null;
@@ -775,62 +1015,106 @@
     setElementDisabled(elements.deepPreflightBtn, true);
     elements.planStatus.textContent = '正在读取迁移计划...';
     try {
+      var runId = String(run.run_id || '').trim();
       var payload = await fetchJSON(
         '/api/admin/clone/runs/'
-          + encodeURIComponent(String(run.run_id))
+          + encodeURIComponent(runId)
           + '/plan'
       );
+      if (requestToken !== requestState.planToken || runId !== cloneState.selectedRunId) {
+        return;
+      }
       cloneState.plan = payload && payload.plan ? payload.plan : null;
       renderMigrationPlan(elements, cloneState.plan);
-      elements.planStatus.textContent = cloneState.plan
-        ? '已读取最新迁移计划。'
-        : '当前副本还没有在线深度预检计划。';
+      elements.planStatus.textContent = buildPlanStatusText(cloneState.plan);
     } catch (error) {
+      if (requestToken !== requestState.planToken) {
+        return;
+      }
       cloneState.plan = null;
       renderMigrationPlan(elements, null);
       elements.planStatus.textContent = '读取迁移计划失败：' + error.message;
       appendLog(elements, '读取迁移计划失败：' + error.message);
     } finally {
+      if (requestToken !== requestState.planToken) {
+        return;
+      }
       setBusy(elements, cloneState.busy);
     }
   }
 
+  function buildPlanStatusText(plan) {
+    if (!plan) {
+      return '当前副本还没有迁移计划，请先点击“生成迁移计划”。';
+    }
+    var status = String(plan.status || '').trim().toLowerCase();
+    var blockingIssues = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
+    if (status === 'done' && blockingIssues.length > 0) {
+      return '迁移计划已生成，但仍有阻断项，先处理阻断项。';
+    }
+    if (status === 'done') {
+      return '迁移计划已生成，可以直接开始完整迁移。';
+    }
+    if (status === 'error') {
+      return '最近一次迁移计划生成失败，请重新生成并检查日志。';
+    }
+    if (status === 'running' || status === 'queued') {
+      return '迁移计划任务仍在执行中，请稍后刷新。';
+    }
+    return '已读取最新迁移计划。';
+  }
+
   async function loadSelectedRunMigration(elements) {
-	    var run = getSelectedCloneRun();
-	    if (!run) {
-	      cloneState.migration = null;
-	      cloneState.timelineMigration = null;
-	      cloneState.timelinePreview = null;
-	      renderTimelineMigration(elements, null);
+    if (!isMigratePage(elements)) {
+      return;
+    }
+    var requestToken = requestState.migrationToken + 1;
+    requestState.migrationToken = requestToken;
+    var run = getSelectedCloneRun();
+    if (!run) {
+      cloneState.migration = null;
+      cloneState.timelineMigration = null;
+      cloneState.timelinePreview = null;
+      renderTimelineMigration(elements, null);
       return;
     }
 
     try {
+      var runId = String(run.run_id || '').trim();
       var payload = await fetchJSON(
         '/api/admin/clone/runs/'
-          + encodeURIComponent(String(run.run_id))
+          + encodeURIComponent(runId)
           + '/migration'
       );
-	      cloneState.migration = payload && payload.migration ? payload.migration : null;
-	      cloneState.timelineMigration = payload && payload.timeline_migration
-	        ? payload.timeline_migration
-	        : null;
-	      cloneState.timelinePreview = payload && payload.timeline_preview
-	        ? payload.timeline_preview
-	        : null;
-	      renderTimelineMigration(elements, cloneState.timelineMigration);
+      if (requestToken !== requestState.migrationToken || runId !== cloneState.selectedRunId) {
+        return;
+      }
+      cloneState.migration = payload && payload.migration ? payload.migration : null;
+      cloneState.timelineMigration = payload && payload.timeline_migration
+        ? payload.timeline_migration
+        : null;
+      cloneState.timelinePreview = payload && payload.timeline_preview
+        ? payload.timeline_preview
+        : null;
+      renderTimelineMigration(elements, cloneState.timelineMigration);
     } catch (error) {
-	      cloneState.migration = null;
-	      cloneState.timelineMigration = null;
-	      cloneState.timelinePreview = null;
-	      renderTimelineMigration(elements, null);
-      appendLog(elements, '读取克隆迁移记录失败：' + error.message);
+      if (requestToken !== requestState.migrationToken) {
+        return;
+      }
+      cloneState.migration = null;
+      cloneState.timelineMigration = null;
+      cloneState.timelinePreview = null;
+      renderTimelineMigration(elements, null);
+      appendLog(elements, '读取迁移记录失败：' + error.message);
     } finally {
+      if (requestToken !== requestState.migrationToken) {
+        return;
+      }
       setBusy(elements, cloneState.busy);
     }
   }
 
-	  async function handleDeepPreflightClick(elements) {
+  async function handleDeepPreflightClick(elements) {
     var run = getSelectedCloneRun();
     if (!run) {
       elements.planStatus.textContent = '请先选择已创建成功的副本。';
@@ -838,6 +1122,7 @@
     }
 
     setBusy(elements, true);
+    elements.planStatus.textContent = '正在创建迁移计划任务...';
     try {
       var payload = await postJSON(
         '/api/admin/clone/runs/'
@@ -848,147 +1133,176 @@
       var jobId = getCreatedJobId(payload);
       cloneState.plan = payload && payload.plan ? payload.plan : null;
       renderMigrationPlan(elements, cloneState.plan);
-      appendLog(elements, '深度预检任务已创建：' + jobId);
+      elements.planStatus.textContent = '迁移计划任务已提交，稍后会自动刷新。';
+      appendLog(elements, '迁移计划任务已创建：' + jobId);
       startJobPolling(elements, jobId);
     } catch (error) {
-      appendLog(elements, '创建深度预检任务失败：' + error.message);
-      elements.planStatus.textContent = '创建深度预检任务失败：' + error.message;
-	    } finally {
-	      setBusy(elements, false);
-	    }
-	  }
+      appendLog(elements, '创建迁移计划任务失败：' + error.message);
+      elements.planStatus.textContent = '创建迁移计划任务失败：' + error.message;
+    } finally {
+      setBusy(elements, false);
+    }
+  }
 
-	  async function handleTimelineMigrationClick(elements) {
-	    var run = getSelectedCloneRun();
-	    if (!run) {
-	      elements.timelineStatus.textContent = '请先选择已创建成功的副本。';
-	      return;
-	    }
-	    if (!isTimelineMigrationAllowed()) {
-	      elements.timelineStatus.textContent = '最新迁移计划未满足完整时间线迁移条件。';
-	      return;
-	    }
+  async function handleTimelineMigrationClick(elements) {
+    var run = getSelectedCloneRun();
+    if (!run) {
+      elements.timelineStatus.textContent = '请先选择已创建成功的副本。';
+      return;
+    }
+    if (!isTimelineMigrationAllowed()) {
+      var preview = cloneState.timelinePreview || {};
+      var readinessReasons = Array.isArray(preview.readiness_reasons) ? preview.readiness_reasons : [];
+      elements.timelineStatus.textContent = readinessReasons[0] || '迁移计划还未满足完整迁移条件。';
+      return;
+    }
 
-	    setBusy(elements, true);
-	    try {
-	      var payload = await postJSON(
-	        '/api/admin/clone/runs/'
-	          + encodeURIComponent(String(run.run_id))
-	          + '/migrate-timeline',
-	        buildTimelineMigrationOptions(elements)
-	      );
-	      var jobId = getCreatedJobId(payload);
-	      cloneState.migration = payload && payload.migration ? payload.migration : null;
-	      cloneState.timelineMigration = cloneState.migration;
-	      if (payload && payload.timeline_preview) cloneState.timelinePreview = payload.timeline_preview;
-	      renderTimelineMigration(elements, cloneState.timelineMigration);
-	      appendLog(elements, '完整时间线迁移任务已创建：' + jobId);
-	      startJobPolling(elements, jobId);
-	    } catch (error) {
-	      appendLog(elements, '创建完整时间线迁移任务失败：' + error.message);
-	      elements.timelineStatus.textContent = '创建完整时间线迁移任务失败：' + error.message;
-	    } finally {
-	      setBusy(elements, false);
-	    }
-	  }
+    setBusy(elements, true);
+    elements.timelineStatus.textContent = '正在创建完整迁移任务...';
+    try {
+      var payload = await postJSON(
+        '/api/admin/clone/runs/'
+          + encodeURIComponent(String(run.run_id))
+          + '/migrate-timeline',
+        buildTimelineMigrationOptions(elements)
+      );
+      var jobId = getCreatedJobId(payload);
+      cloneState.migration = payload && payload.migration ? payload.migration : null;
+      cloneState.timelineMigration = cloneState.migration;
+      if (payload && payload.timeline_preview) {
+        cloneState.timelinePreview = payload.timeline_preview;
+      }
+      renderTimelineMigration(elements, cloneState.timelineMigration);
+      appendLog(elements, '完整迁移任务已创建：' + jobId);
+      startJobPolling(elements, jobId);
+    } catch (error) {
+      appendLog(elements, '创建完整迁移任务失败：' + error.message);
+      elements.timelineStatus.textContent = '创建完整迁移任务失败：' + error.message;
+    } finally {
+      setBusy(elements, false);
+    }
+  }
 
-	  function renderMigrationPlan(elements, plan) {
+  function renderMigrationPlan(elements, plan) {
+    if (!elements.planSummary) {
+      return;
+    }
+
     var run = getSelectedCloneRun();
     elements.planSummary.textContent = '';
     elements.planBlocking.textContent = '';
     elements.planWarnings.textContent = '';
     elements.planRunLabel.textContent = run
-      ? '当前副本：' + buildCloneRunTitle(run)
+      ? '当前选中副本：' + buildCloneRunTitle(run)
       : '当前未选择副本。';
 
     if (!run) {
+      appendSummaryPair(elements.planSummary, '目标副本', '未选择');
+      appendSummaryPair(elements.planSummary, '计划状态', '未生成');
       appendSummaryPair(elements.planSummary, '源访问', '未选择');
       appendSummaryPair(elements.planSummary, '目标访问', '未选择');
-      appendSummaryPair(elements.planSummary, '文本策略', '未选择');
-      appendSummaryPair(elements.planSummary, '媒体策略', '未选择');
       renderPlanList(elements.planBlocking, []);
       renderPlanList(elements.planWarnings, []);
       return;
     }
 
     if (!plan) {
+      appendSummaryPair(elements.planSummary, '目标副本', getCloneRunTargetLabel(run));
+      appendSummaryPair(elements.planSummary, '计划状态', '未生成');
       appendSummaryPair(elements.planSummary, '源访问', '未预检');
       appendSummaryPair(elements.planSummary, '目标访问', '未预检');
-      appendSummaryPair(elements.planSummary, '文本策略', '未生成');
-      appendSummaryPair(elements.planSummary, '媒体策略', '未生成');
       renderPlanList(elements.planBlocking, []);
       renderPlanList(elements.planWarnings, []);
       return;
     }
 
+    appendSummaryPair(elements.planSummary, '目标副本', getCloneRunTargetLabel(run));
     appendSummaryPair(elements.planSummary, '计划状态', getPlanStatusLabel(plan.status));
     appendSummaryPair(elements.planSummary, '源访问', getAccessStatusLabel(plan.source_access));
     appendSummaryPair(elements.planSummary, '目标访问', getAccessStatusLabel(plan.target_access));
-    appendSummaryPair(elements.planSummary, '迁移账号', getMigrationAccountLabel(getPlanTargetWriteAccount(plan)));
-    appendSummaryPair(elements.planSummary, '文本策略', getTextStrategyLabel(plan.text_strategy));
-    appendSummaryPair(elements.planSummary, '媒体策略', getMediaStrategyLabel(plan.media_strategy));
-    appendSummaryPair(elements.planSummary, '媒体组策略', getMediaGroupStrategyLabel(plan.media_group_strategy));
-    appendSummaryPair(elements.planSummary, '头像策略', getAvatarStrategyLabel(plan.avatar_strategy));
+    appendSummaryPair(
+      elements.planSummary,
+      '目标写入账号',
+      getMigrationAccountLabel(getPlanTargetWriteAccount(plan))
+    );
+    appendSummaryPair(elements.planSummary, '文本迁移', getTextStrategyLabel(plan.text_strategy));
+    appendSummaryPair(elements.planSummary, '媒体迁移', getMediaStrategyLabel(plan.media_strategy));
     renderPlanList(elements.planBlocking, plan.blocking_issues || []);
-	    renderPlanList(elements.planWarnings, plan.warnings || []);
-	  }
+    renderPlanList(elements.planWarnings, plan.warnings || []);
+  }
 
-	  function renderTimelineMigration(elements, migration) {
-	    elements.timelineSummary.textContent = '';
-	    var preview = cloneState.timelinePreview || null;
-	    var timelineMigration = migration && String(migration.mode || '') === 'timeline_replay'
-	      ? migration
-	      : null;
-	    if (!getSelectedCloneRun()) {
-	      elements.timelineStatus.textContent = '请选择已创建成功的副本。';
-	      appendSummaryPair(elements.timelineSummary, '状态', '未选择');
-	      appendSummaryPair(elements.timelineSummary, '时间线总数', '0');
-	      appendSummaryPair(elements.timelineSummary, '剩余时间线', '0');
-	      return;
-	    }
-	    if (!timelineMigration) {
-	      elements.timelineStatus.textContent = '尚未执行完整时间线迁移。';
-	      appendSummaryPair(elements.timelineSummary, '状态', '未执行');
-	      appendTimelinePreviewSummary(elements, preview);
-	      return;
-	    }
-	    elements.timelineStatus.textContent = buildTimelineMigrationStatusText(timelineMigration);
-	    appendSummaryPair(elements.timelineSummary, '状态', getMigrationStatusLabel(timelineMigration.status));
-	    appendSummaryPair(elements.timelineSummary, '阶段', getMigrationPhaseLabel(timelineMigration.phase));
-	    appendSummaryPair(elements.timelineSummary, '文本总数', formatNumber(timelineMigration.text_total));
-	    appendSummaryPair(elements.timelineSummary, '文本已发送', formatNumber(timelineMigration.text_sent));
-	    appendSummaryPair(elements.timelineSummary, '媒体总数', formatNumber(timelineMigration.media_total));
-	    appendSummaryPair(elements.timelineSummary, '媒体已复制', formatNumber(timelineMigration.media_sent));
-	    appendSummaryPair(elements.timelineSummary, '媒体组已复制', formatNumber(timelineMigration.media_group_sent));
-	    appendSummaryPair(elements.timelineSummary, '执行账号', String(timelineMigration.target_write_account || ''));
-	    appendSummaryPair(elements.timelineSummary, '本次上限', formatLimit(timelineMigration.requested_limit));
-	    appendSummaryPair(elements.timelineSummary, '发送间隔', formatNumber(timelineMigration.send_delay_ms) + 'ms');
-	    appendTimelinePreviewSummary(elements, preview);
-	  }
+  function renderTimelineMigration(elements, migration) {
+    if (!elements.timelineSummary) {
+      return;
+    }
 
-	  function appendTimelinePreviewSummary(elements, preview) {
-	    var data = preview && typeof preview === 'object' ? preview : {};
-	    var readinessReasons = Array.isArray(data.readiness_reasons) ? data.readiness_reasons : [];
-	    appendSummaryPair(
-	      elements.timelineSummary,
-	      '执行评估',
-	      data.can_migrate_timeline ? '可执行' : readinessReasons[0] || '未完成评估'
-	    );
-	    appendSummaryPair(elements.timelineSummary, '时间线总数', formatNumber(data.timeline_items_total));
-	    appendSummaryPair(elements.timelineSummary, '剩余时间线', formatNumber(data.timeline_remaining));
-	    appendSummaryPair(elements.timelineSummary, '文本剩余', formatNumber(data.text_remaining));
-	    appendSummaryPair(elements.timelineSummary, '媒体剩余', formatNumber(data.media_remaining));
-	    appendSummaryPair(elements.timelineSummary, '媒体组总数', formatGroupPair(data.media_group_total, data.media_group_candidate_items));
-	    appendSummaryPair(elements.timelineSummary, '数据库风险组', formatGroupPair(data.db_self_check_risk_group_total, data.db_self_check_risk_group_items));
-	  }
+    var run = getSelectedCloneRun();
+    var preview = cloneState.timelinePreview || null;
+    var timelineMigration = migration && String(migration.mode || '') === 'timeline_replay'
+      ? migration
+      : null;
+    elements.timelineSummary.textContent = '';
 
-	  function buildTimelineMigrationStatusText(migration) {
-	    var status = getMigrationStatusLabel((migration && migration.status) || '');
-	    var updatedAt = formatDateTime((migration && migration.updated_at) || '');
-	    var error = String((migration && migration.error_message) || '').trim();
-	    if (error) return status + '：' + error;
-	    return '最新完整时间线迁移状态：' + status + '，更新时间 ' + updatedAt + '。';
-	  }
+    if (!run) {
+      elements.timelineStatus.textContent = '请选择已创建成功的副本。';
+      appendSummaryPair(elements.timelineSummary, '目标副本', '未选择');
+      appendSummaryPair(elements.timelineSummary, '状态', '未选择');
+      appendSummaryPair(elements.timelineSummary, '时间线总数', '0');
+      appendSummaryPair(elements.timelineSummary, '剩余时间线', '0');
+      return;
+    }
+
+    appendSummaryPair(elements.timelineSummary, '目标副本', getCloneRunTargetLabel(run));
+    if (!timelineMigration) {
+      elements.timelineStatus.textContent = '尚未开始完整迁移。';
+      appendSummaryPair(elements.timelineSummary, '状态', '未执行');
+      appendTimelinePreviewSummary(elements, preview);
+      return;
+    }
+
+    elements.timelineStatus.textContent = buildTimelineMigrationStatusText(timelineMigration);
+    appendSummaryPair(elements.timelineSummary, '状态', getMigrationStatusLabel(timelineMigration.status));
+    appendSummaryPair(elements.timelineSummary, '阶段', getMigrationPhaseLabel(timelineMigration.phase));
+    appendSummaryPair(elements.timelineSummary, '文本已发送', formatNumber(timelineMigration.text_sent));
+    appendSummaryPair(elements.timelineSummary, '媒体已复制', formatNumber(timelineMigration.media_sent));
+    appendSummaryPair(
+      elements.timelineSummary,
+      '执行账号',
+      String(timelineMigration.target_write_account || '')
+    );
+    appendSummaryPair(elements.timelineSummary, '本次上限', formatLimit(timelineMigration.requested_limit));
+    appendSummaryPair(
+      elements.timelineSummary,
+      '发送间隔',
+      formatNumber(timelineMigration.send_delay_ms) + 'ms'
+    );
+    appendTimelinePreviewSummary(elements, preview);
+  }
+
+  function appendTimelinePreviewSummary(elements, preview) {
+    var data = preview && typeof preview === 'object' ? preview : {};
+    var readinessReasons = Array.isArray(data.readiness_reasons) ? data.readiness_reasons : [];
+    appendSummaryPair(
+      elements.timelineSummary,
+      '执行评估',
+      data.can_migrate_timeline ? '可执行' : readinessReasons[0] || '未完成评估'
+    );
+    appendSummaryPair(elements.timelineSummary, '时间线总数', formatNumber(data.timeline_items_total));
+    appendSummaryPair(elements.timelineSummary, '剩余时间线', formatNumber(data.timeline_remaining));
+    appendSummaryPair(elements.timelineSummary, '文本剩余', formatNumber(data.text_remaining));
+    appendSummaryPair(elements.timelineSummary, '媒体剩余', formatNumber(data.media_remaining));
+  }
+
+  function buildTimelineMigrationStatusText(migration) {
+    var status = getMigrationStatusLabel((migration && migration.status) || '');
+    var phase = getMigrationPhaseLabel((migration && migration.phase) || '');
+    var updatedAt = formatDateTime((migration && migration.updated_at) || '');
+    var error = String((migration && migration.error_message) || '').trim();
+    if (error) {
+      return status + '：' + error;
+    }
+    return '最近一次完整迁移：' + status + ' / ' + phase + '，更新时间 ' + updatedAt + '。';
+  }
 
   function renderPlanList(container, items) {
     container.textContent = '';
@@ -1007,8 +1321,8 @@
 
   function getRunStatusLabel(status) {
     if (status === 'queued') return '排队中';
-    if (status === 'running') return '执行中';
-    if (status === 'done') return '已创建';
+    if (status === 'running') return '创建中';
+    if (status === 'done') return '副本已创建';
     if (status === 'error') return '失败';
     return status || '未知';
   }
@@ -1019,7 +1333,7 @@
     if (normalized === 'loading_source') return '读取源群';
     if (normalized === 'validating') return '校验账号';
     if (normalized === 'creating') return '创建结构';
-    if (normalized === 'done') return '结构完成';
+    if (normalized === 'done') return '结构创建完成';
     if (normalized === 'error') return '失败';
     return normalized || '未知';
   }
@@ -1034,7 +1348,7 @@
   function getPlanStatusLabel(status) {
     var normalized = String(status || '').trim();
     if (normalized === 'queued') return '排队中';
-    if (normalized === 'running') return '预检中';
+    if (normalized === 'running') return '生成中';
     if (normalized === 'done') return '已生成';
     if (normalized === 'error') return '失败';
     return normalized || '未知';
@@ -1063,7 +1377,7 @@
     var normalized = String(status || '').trim();
     if (normalized === 'queued') return '排队中';
     if (normalized === 'running') return '迁移中';
-    if (normalized === 'done') return '完成';
+    if (normalized === 'done') return '已完成';
     if (normalized === 'error') return '失败';
     return normalized || '未知';
   }
@@ -1071,10 +1385,10 @@
   function getMigrationPhaseLabel(phase) {
     var normalized = String(phase || '').trim();
     if (normalized === 'queued') return '等待迁移';
-	    if (normalized === 'validating') return '校验计划';
-	    if (normalized === 'connecting') return '连接账号';
-	    if (normalized === 'replaying_timeline') return '重放完整时间线';
-	    if (normalized === 'sending_text') return '发送文本';
+    if (normalized === 'validating') return '校验计划';
+    if (normalized === 'connecting') return '连接账号';
+    if (normalized === 'replaying_timeline') return '重放完整时间线';
+    if (normalized === 'sending_text') return '发送文本';
     if (normalized === 'done') return '完成';
     if (normalized === 'limited_done') return '达到本次上限';
     if (normalized === 'stopped') return '已停止';
@@ -1098,26 +1412,11 @@
     return normalized || '未生成';
   }
 
-  function getMediaGroupStrategyLabel(strategy) {
-    var normalized = String(strategy || '').trim();
-    if (normalized === 'strict_skip_incomplete') return '残缺组严格跳过';
-    if (normalized === 'relay_api_rebuild') return '中转桥接重建相册';
-    if (normalized === 'blocked_by_source_access') return '源群不可访问';
-    if (normalized === 'blocked') return '阻断';
-    return normalized || '未生成';
-  }
-
-  function getAvatarStrategyLabel(strategy) {
-    var normalized = String(strategy || '').trim();
-    if (normalized === 'copy_if_accessible') return '可访问时复制';
-    if (normalized === 'skip_not_implemented') return '暂未执行';
-    if (normalized === 'skip') return '跳过';
-    return normalized || '未生成';
-  }
-
   function startJobPolling(elements, jobId) {
     var normalizedJobId = String(jobId || '').trim();
-    if (!normalizedJobId) return;
+    if (!normalizedJobId) {
+      return;
+    }
     stopJobPolling(undefined, elements);
     jobPollState.pollToken += 1;
     jobPollState.jobId = normalizedJobId;
@@ -1148,14 +1447,18 @@
   }
 
   function scheduleJobPollingWithDelay(elements, jobId, pollToken, delayMs) {
-    if (!isPollContextActive(jobId, pollToken)) return;
+    if (!isPollContextActive(jobId, pollToken)) {
+      return;
+    }
     jobPollState.timerId = window.setTimeout(function () {
       pollJobProgress(elements);
     }, Math.max(250, Number(delayMs) || JOB_POLL_INTERVAL_MS));
   }
 
   async function pollJobProgress(elements) {
-    if (!jobPollState.isPolling || !jobPollState.jobId) return;
+    if (!jobPollState.isPolling || !jobPollState.jobId) {
+      return;
+    }
 
     var jobId = jobPollState.jobId;
     var pollToken = jobPollState.pollToken;
@@ -1166,11 +1469,15 @@
           + '/logs?after_seq='
           + encodeURIComponent(String(jobPollState.lastSeq || 0))
       );
-      if (!isPollContextActive(jobId, pollToken)) return;
+      if (!isPollContextActive(jobId, pollToken)) {
+        return;
+      }
 
       var logs = logsPayload && Array.isArray(logsPayload.logs) ? logsPayload.logs : [];
       logs.forEach(function (line) {
-        if (!line || typeof line.message !== 'string') return;
+        if (!line || typeof line.message !== 'string') {
+          return;
+        }
         appendLog(elements, line.message);
         if (typeof line.seq === 'number' && Number.isFinite(line.seq)) {
           jobPollState.lastSeq = Math.max(jobPollState.lastSeq, line.seq);
@@ -1178,7 +1485,9 @@
       });
 
       var snapshotPayload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
-      if (!isPollContextActive(jobId, pollToken)) return;
+      if (!isPollContextActive(jobId, pollToken)) {
+        return;
+      }
 
       var snapshot = snapshotPayload && snapshotPayload.job ? snapshotPayload.job : null;
       var status = snapshot && typeof snapshot.status === 'string' ? snapshot.status.trim() : '';
@@ -1192,27 +1501,27 @@
       var progressState = shared.buildSnapshotProgressMessage(snapshot);
       if (progressState.key && progressState.key !== jobPollState.lastProgressKey) {
         jobPollState.lastProgressKey = progressState.key;
-        if (progressState.message) appendLog(elements, progressState.message);
+        if (progressState.message) {
+          appendLog(elements, progressState.message);
+        }
       }
 
       if (status === 'done') {
         appendLog(elements, getJobDoneMessage(snapshot));
         stopJobPolling(pollToken, elements);
         await loadCloneRuns(elements);
-        await loadSelectedRunPlan(elements);
-        await loadSelectedRunMigration(elements);
         return;
       }
       if (status === 'error') {
         appendLog(elements, getJobErrorMessage(snapshot));
         stopJobPolling(pollToken, elements);
         await loadCloneRuns(elements);
-        await loadSelectedRunPlan(elements);
-        await loadSelectedRunMigration(elements);
         return;
       }
     } catch (error) {
-      if (!isPollContextActive(jobId, pollToken)) return;
+      if (!isPollContextActive(jobId, pollToken)) {
+        return;
+      }
       jobPollState.retryCount += 1;
       if (jobPollState.retryCount > JOB_POLL_RETRY_MAX_COUNT) {
         appendLog(elements, '任务日志轮询失败次数过多，已停止轮询：' + error.message);
@@ -1239,67 +1548,38 @@
     scheduleJobPollingWithDelay(elements, jobId, pollToken, JOB_POLL_INTERVAL_MS);
   }
 
-	  function isCloneJobType(jobType) {
-	    var normalized = String(jobType || '').trim();
-	    return normalized === 'clone_structure'
-	      || normalized === 'clone_deep_preflight'
-	      || normalized === 'clone_timeline_migration';
+  function isCloneJobType(jobType) {
+    var normalized = String(jobType || '').trim();
+    return normalized === 'clone_structure'
+      || normalized === 'clone_deep_preflight'
+      || normalized === 'clone_timeline_migration';
   }
 
-	  function getJobDoneMessage(snapshot) {
-	    var jobType = String((snapshot && snapshot.job_type) || '').trim();
-	    if (jobType === 'clone_deep_preflight') return '深度预检任务执行完成';
-	    if (jobType === 'clone_timeline_migration') return '完整时间线迁移任务执行完成';
-    return '结构克隆任务执行完成';
+  function getJobDoneMessage(snapshot) {
+    var jobType = String((snapshot && snapshot.job_type) || '').trim();
+    if (jobType === 'clone_deep_preflight') return '迁移计划生成完成';
+    if (jobType === 'clone_timeline_migration') return '完整迁移执行完成';
+    return '空副本创建完成';
   }
 
   function getJobErrorMessage(snapshot) {
     var jobType = String((snapshot && snapshot.job_type) || '').trim();
-    if (jobType === 'clone_deep_preflight') return '深度预检任务执行失败，请检查日志';
-    if (jobType === 'clone_timeline_migration') return '完整时间线迁移任务执行失败，请检查日志';
-    return '结构克隆任务执行失败，请检查日志';
+    if (jobType === 'clone_deep_preflight') return '迁移计划生成失败，请检查日志';
+    if (jobType === 'clone_timeline_migration') return '完整迁移执行失败，请检查日志';
+    return '空副本创建失败，请检查日志';
   }
 
-  function restoreConsoleState(elements) {
-    var stored = readStoredConsoleState();
-    cloneState.sourceChatId = String(stored.sourceChatId || '').trim();
-    cloneState.selectedRunId = getRunIdFromLocation()
-      || String(stored.selectedRunId || '').trim();
-    elements.sortSelect.value = String(stored.sort || elements.sortSelect.value || '');
-    elements.messageLimitInput.value = String(stored.messageLimit || '');
-    if (stored.sendDelay !== undefined && stored.sendDelay !== null) {
-      elements.sendDelayInput.value = String(stored.sendDelay);
-    }
-    syncUrlRunId(cloneState.selectedRunId);
-  }
+  function initializeConsoleState(elements) {
+    cloneState.sourceChatId = '';
+    cloneState.selectedRunId = isMigratePage(elements) ? getRunIdFromLocation() : '';
+    elements.sortSelect.value = isCreatePage(elements) ? 'message_count_desc' : 'updated_desc';
 
-  function persistConsoleState(elements) {
-    if (!elements) return;
-    try {
-      window.localStorage.setItem(
-        STORAGE_KEY,
-        JSON.stringify({
-          sourceChatId: String(elements.sourceSelect.value || cloneState.sourceChatId || ''),
-          selectedRunId: String(cloneState.selectedRunId || ''),
-          sort: String(elements.sortSelect.value || ''),
-          messageLimit: String(elements.messageLimitInput.value || ''),
-          sendDelay: String(elements.sendDelayInput.value || '')
-        })
-      );
-    } catch (_error) {
-      return;
+    if (isMigratePage(elements)) {
+      elements.messageLimitInput.value = '';
+      elements.sendDelayInput.value = '500';
     }
-  }
 
-  function readStoredConsoleState() {
-    try {
-      var raw = window.localStorage.getItem(STORAGE_KEY);
-      if (!raw) return {};
-      var parsed = JSON.parse(raw);
-      return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch (_error) {
-      return {};
-    }
+    syncUrlRunId(elements, cloneState.selectedRunId);
   }
 
   function getRunIdFromLocation() {
@@ -1311,11 +1591,11 @@
     }
   }
 
-  function syncUrlRunId(runId) {
+  function syncUrlRunId(elements, runId) {
     try {
       var url = new URL(window.location.href);
       var normalized = String(runId || '').trim();
-      if (normalized) {
+      if (isMigratePage(elements) && normalized) {
         url.searchParams.set('run_id', normalized);
       } else {
         url.searchParams.delete('run_id');
@@ -1329,30 +1609,43 @@
   function setBusy(elements, isBusy) {
     cloneState.busy = !!isBusy;
     var disabled = cloneState.busy || jobPollState.isPolling;
+    var selectedSource = getSelectedSourceChat(elements);
+    var selectedRun = getSelectedCloneRun();
+
     setElementDisabled(elements.sortSelect, disabled);
     setElementDisabled(elements.refreshBtn, disabled);
     setElementDisabled(elements.sourceSelect, disabled);
-    setElementDisabled(elements.preflightBtn, disabled || !getSelectedSourceChat(elements));
-	    setElementDisabled(elements.runsRefreshBtn, disabled);
-	    setElementDisabled(elements.planRefreshBtn, disabled || !getSelectedCloneRun(elements));
-	    setElementDisabled(elements.deepPreflightBtn, disabled || !getSelectedCloneRun(elements));
-	    setElementDisabled(elements.timelineMigrationBtn, disabled || !isTimelineMigrationAllowed());
-    setElementDisabled(elements.messageLimitInput, disabled || !getSelectedCloneRun(elements));
-    setElementDisabled(elements.sendDelayInput, disabled || !getSelectedCloneRun(elements));
-    setElementDisabled(elements.targetTitleInput, disabled || !cloneState.report);
-    setElementDisabled(elements.targetKindSelect, disabled || !cloneState.report);
-    setElementDisabled(elements.confirmInput, disabled || !cloneState.report);
+    setElementDisabled(elements.runsRefreshBtn, disabled);
+
+    if (isCreatePage(elements)) {
+      setElementDisabled(elements.preflightBtn, disabled || !selectedSource);
+      setElementDisabled(elements.targetTitleInput, disabled || !cloneState.report);
+      setElementDisabled(elements.targetKindSelect, disabled || !cloneState.report);
+      setElementDisabled(elements.confirmInput, disabled || !cloneState.report);
+      updateStartButtonState(elements);
+    }
+
+    if (isMigratePage(elements)) {
+      setElementDisabled(elements.planRefreshBtn, disabled || !selectedRun);
+      setElementDisabled(elements.deepPreflightBtn, disabled || !selectedRun);
+      setElementDisabled(elements.timelineMigrationBtn, disabled || !isTimelineMigrationAllowed());
+      setElementDisabled(elements.messageLimitInput, disabled || !selectedRun);
+      setElementDisabled(elements.sendDelayInput, disabled || !selectedRun);
+    }
+
     if (elements.logContainer && typeof elements.logContainer.setAttribute === 'function') {
       elements.logContainer.setAttribute('aria-busy', disabled ? 'true' : 'false');
     }
-    updateStartButtonState(elements);
   }
 
   function updateStartButtonState(elements) {
+    if (!elements.startBtn) {
+      return;
+    }
     setElementDisabled(elements.startBtn, !isStartAllowed(elements));
   }
 
-	  function isStartAllowed(elements) {
+  function isStartAllowed(elements) {
     if (cloneState.busy || jobPollState.isPolling) return false;
     if (!cloneState.report) return false;
     var account = cloneState.report.account || {};
@@ -1360,29 +1653,17 @@
     var expectedConfirm = String(cloneState.report.confirm || '').trim();
     var suppliedConfirm = String(elements.confirmInput.value || '').trim();
     if (!expectedConfirm || expectedConfirm !== suppliedConfirm) return false;
-	    return String(elements.targetTitleInput.value || '').trim().length > 0;
-	  }
+    return String(elements.targetTitleInput.value || '').trim().length > 0;
+  }
 
-	  function isTimelineMigrationAllowed() {
-	    if (cloneState.busy || jobPollState.isPolling) return false;
-	    if (!getSelectedCloneRun()) return false;
-	    var plan = cloneState.plan || {};
-	    if (String(plan.status || '').trim() !== 'done') return false;
-	    if (String(plan.target_access || '').trim() !== 'ok') return false;
-	    var blocking = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
-	    if (blocking.length > 0) return false;
-	    if (cloneState.timelinePreview) {
-	      if (cloneState.timelinePreview.can_migrate_timeline === false) return false;
-	      if (Number(cloneState.timelinePreview.timeline_remaining || 0) <= 0) return false;
-	      return true;
-	    }
-	    var canText = String(plan.text_strategy || '').trim() === 'database_replay'
-	      && !!getPlanTargetWriteAccount(plan);
-      var canMedia = String(plan.source_access || '').trim() === 'ok'
-	      && isAllowedMediaStrategy(plan.media_strategy)
-	      && !!getPlanMediaMigrationAccount(plan);
-	    return canText || canMedia;
-	  }
+  function isTimelineMigrationAllowed() {
+    if (cloneState.busy || jobPollState.isPolling) return false;
+    if (!getSelectedCloneRun()) return false;
+    var preview = cloneState.timelinePreview;
+    if (!preview || typeof preview !== 'object') return false;
+    if (preview.can_migrate_timeline !== true) return false;
+    return Number(preview.timeline_remaining || 0) > 0;
+  }
 
   function getPlanTargetWriteAccount(plan) {
     var source = plan || {};
@@ -1403,37 +1684,6 @@
     return '';
   }
 
-  function getPlanMediaMigrationAccount(plan) {
-    var source = plan || {};
-    var payload = source.plan && typeof source.plan === 'object' ? source.plan : {};
-    var relay = source.media_relay && typeof source.media_relay === 'object'
-      ? source.media_relay
-      : payload.media_relay && typeof payload.media_relay === 'object'
-        ? payload.media_relay
-        : {};
-    if (String(source.media_strategy || '').trim() === 'relay_copy_without_attribution'
-      && relay.enabled
-      && relay.source_account
-      && relay.target_account) {
-      return String(relay.source_account).trim() + '->relay->' + String(relay.target_account).trim();
-    }
-    var candidates = [
-      source.migration_account,
-      payload.migration_account
-    ];
-    for (var i = 0; i < candidates.length; i += 1) {
-      var normalized = String(candidates[i] || '').trim().toLowerCase();
-      if (normalized === 'primary' || normalized === 'secondary') return normalized;
-    }
-    return '';
-  }
-
-  function isAllowedMediaStrategy(strategy) {
-    var normalized = String(strategy || '').trim();
-    return normalized === 'source_copy_without_attribution'
-      || normalized === 'relay_copy_without_attribution';
-  }
-
   function buildTimelineMigrationOptions(elements) {
     return {
       message_limit: normalizeNonnegativeInteger(elements.messageLimitInput.value, 0, 100000),
@@ -1445,10 +1695,6 @@
     var n = Number(value || 0);
     if (!Number.isFinite(n) || n <= 0) return '全部';
     return formatNumber(n);
-  }
-
-  function formatGroupPair(groups, items) {
-    return formatNumber(groups) + ' 组 / ' + formatNumber(items) + ' 条';
   }
 
   function formatPercent(value) {
@@ -1474,7 +1720,12 @@
       await loadSourceChats(elements);
       await resumeActiveJobPolling(elements);
       if (context.reason === 'login') {
-        appendLog(elements, '认证成功，已进入克隆系统');
+        appendLog(
+          elements,
+          isCreatePage(elements)
+            ? '认证成功，已进入“创建空副本”页'
+            : '认证成功，已进入“迁移历史消息”页'
+        );
       }
     },
     getElements: getElements,

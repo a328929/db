@@ -554,13 +554,64 @@ class CloneRoutesTests(unittest.TestCase):
             response.location,
         )
 
-    def test_clone_page_renders_when_authenticated(self) -> None:
+    def test_clone_run_detail_page_redirects_to_login_when_unauthenticated(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/clone/runs/detail?run_id=run-existing")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual(
+            "/admin/login?next=%2Fadmin%2Fclone%2Fruns%2Fdetail%3Frun_id%3Drun-existing",
+            response.location,
+        )
+
+    def test_clone_create_page_redirects_to_login_when_unauthenticated(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/clone/create")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/login?next=%2Fadmin%2Fclone%2Fcreate", response.location)
+
+    def test_clone_migrate_page_redirects_to_login_when_unauthenticated(self) -> None:
+        with self._auth_config_patch():
+            response = self.client.get("/admin/clone/migrate")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/login?next=%2Fadmin%2Fclone%2Fmigrate", response.location)
+
+    def test_clone_hub_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/clone")
 
         self.assertEqual(200, response.status_code)
-        self.assertIn("克隆系统", response.get_data(as_text=True))
+        body = response.get_data(as_text=True)
+        self.assertIn("克隆工作台", body)
+        self.assertIn("/admin/clone/create", body)
+        self.assertIn("/admin/clone/migrate", body)
+
+    def test_clone_create_page_renders_when_authenticated(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/clone/create")
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_data(as_text=True)
+        self.assertIn("创建空副本", body)
+        self.assertIn('data-clone-mode="create"', body)
+        self.assertIn("最近创建记录", body)
+        self.assertIn("当前位置：创建空副本", body)
+
+    def test_clone_migrate_page_renders_when_authenticated(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/clone/migrate")
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_data(as_text=True)
+        self.assertIn("迁移历史消息", body)
+        self.assertIn('data-clone-mode="migrate"', body)
+        self.assertIn("生成迁移计划", body)
+        self.assertIn("当前位置：迁移历史消息", body)
 
     def test_clone_runs_manage_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -568,7 +619,20 @@ class CloneRoutesTests(unittest.TestCase):
             response = self.client.get("/admin/clone/runs/manage")
 
         self.assertEqual(200, response.status_code)
-        self.assertIn("克隆记录管理", response.get_data(as_text=True))
+        body = response.get_data(as_text=True)
+        self.assertIn("克隆记录列表", body)
+        self.assertIn("当前位置：克隆记录列表", body)
+
+    def test_clone_run_detail_page_renders_when_authenticated(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/clone/runs/detail?run_id=run-existing")
+
+        self.assertEqual(200, response.status_code)
+        body = response.get_data(as_text=True)
+        self.assertIn("克隆记录详情", body)
+        self.assertIn("消息映射与排错", body)
+        self.assertIn("当前位置：克隆记录详情", body)
 
     def test_clone_chats_api_includes_telegram_links(self) -> None:
         with self._auth_config_patch():

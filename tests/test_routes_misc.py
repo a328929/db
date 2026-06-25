@@ -245,8 +245,20 @@ class AuthRoutesValidationTests(unittest.TestCase):
             auth_module.normalize_admin_next_path("/admin/clone"),
         )
         self.assertEqual(
+            "/admin/clone/create",
+            auth_module.normalize_admin_next_path("/admin/clone/create"),
+        )
+        self.assertEqual(
+            "/admin/clone/migrate",
+            auth_module.normalize_admin_next_path("/admin/clone/migrate"),
+        )
+        self.assertEqual(
             "/admin/clone/runs/manage",
             auth_module.normalize_admin_next_path("/admin/clone/runs/manage"),
+        )
+        self.assertEqual(
+            "/admin/clone/runs/detail?run_id=run-existing",
+            auth_module.normalize_admin_next_path("/admin/clone/runs/detail?run_id=run-existing"),
         )
         self.assertEqual(
             "/admin/manage",
@@ -312,6 +324,30 @@ class AdminPageRoutesTests(unittest.TestCase):
 
         self.assertEqual(302, response.status_code)
         self.assertEqual("/admin/clone/runs/manage", response.location)
+
+    def test_authenticated_login_page_redirects_to_clone_run_detail_page(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/login?next=/admin/clone/runs/detail?run_id=run-existing")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/clone/runs/detail?run_id=run-existing", response.location)
+
+    def test_authenticated_login_page_redirects_to_clone_create_page(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/login?next=/admin/clone/create")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/clone/create", response.location)
+
+    def test_authenticated_login_page_redirects_to_clone_migrate_page(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/login?next=/admin/clone/migrate")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/clone/migrate", response.location)
 
     def test_authenticated_admin_manage_page_renders(self) -> None:
         with self._auth_config_patch():

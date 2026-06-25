@@ -14,14 +14,7 @@ from tg_harvest.admin_jobs.clone_timeline_types import (
 from tg_harvest.admin_jobs.common import call_with_conn
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.domain.clone_plan import (
-    CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
-    CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
-    clone_plan_blocking_issues,
-    clone_plan_media_execution_label,
-    clone_plan_media_relay_ready,
-    clone_plan_media_source_account,
-    clone_plan_media_target_account,
-    clone_plan_target_write_account,
+    clone_plan_timeline_readiness,
     clone_plan_uses_media_relay,
 )
 from tg_harvest.storage.clone import (
@@ -119,50 +112,33 @@ def validate_plan_for_timeline(
     plan: dict[str, Any],
     preview: dict[str, Any],
 ) -> dict[str, str]:
-    if plan.get("status") != "done":
+    readiness = clone_plan_timeline_readiness(plan, preview=preview)
+    if "plan_not_done" in readiness["reason_codes"]:
         raise RuntimeError("最新迁移计划尚未完成，请先执行在线深度预检")
-    if clone_plan_blocking_issues(plan):
+    if "plan_blocked" in readiness["reason_codes"]:
         raise RuntimeError("最新迁移计划存在阻断项，不能执行完整时间线迁移")
-    if plan.get("target_access") != "ok":
+    if "target_inaccessible" in readiness["reason_codes"]:
         raise RuntimeError("目标副本不可访问，不能执行完整时间线迁移")
-
-    text_remaining = int(preview.get("text_remaining") or 0)
-    media_remaining = int(preview.get("media_remaining") or 0)
-    if text_remaining <= 0 and media_remaining <= 0:
+    if "no_timeline_remaining" in readiness["reason_codes"]:
         raise RuntimeError("没有剩余可迁移时间线消息")
-
-    text_account = ""
-    if text_remaining > 0:
-        if plan.get("text_strategy") != "database_replay":
-            raise RuntimeError("最新迁移计划不允许数据库文本重放")
-        text_account = clone_plan_target_write_account(plan)
-        if not text_account:
-            raise RuntimeError("最新迁移计划缺少可写目标账号")
-
-    media_execution_account = ""
-    media_source_account = ""
-    media_target_account = ""
-    if media_remaining > 0:
-        if plan.get("source_access") != "ok":
-            raise RuntimeError("源群不可访问，不能执行媒体时间线复制")
-        if plan.get("media_strategy") not in {
-            CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
-            CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
-        }:
+    if "text_strategy_blocked" in readiness["reason_codes"]:
+        raise RuntimeError("最新迁移计划不允许数据库文本重放")
+    if "missing_target_write_account" in readiness["reason_codes"]:
+        raise RuntimeError("最新迁移计划缺少可写目标账号")
+    if "source_inaccessible" in readiness["reason_codes"]:
+        raise RuntimeError("源群不可访问，不能执行媒体时间线复制")
+    if "media_strategy_blocked" in readiness["reason_codes"]:
             raise RuntimeError("最新迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检")
-        if clone_plan_uses_media_relay(plan) and not clone_plan_media_relay_ready(plan):
-            raise RuntimeError("固定中转频道桥接计划未就绪，请重新执行在线深度预检")
-        media_execution_account = clone_plan_media_execution_label(plan)
-        media_source_account = clone_plan_media_source_account(plan)
-        media_target_account = clone_plan_media_target_account(plan)
-        if not media_execution_account or not media_source_account or not media_target_account:
-            raise RuntimeError("最新迁移计划缺少媒体迁移账号")
+    if "media_relay_not_ready" in readiness["reason_codes"]:
+        raise RuntimeError("固定中转频道桥接计划未就绪，请重新执行在线深度预检")
+    if "missing_media_account" in readiness["reason_codes"]:
+        raise RuntimeError("最新迁移计划缺少媒体迁移账号")
 
     return {
-        "text_account": text_account,
-        "media_execution_account": media_execution_account,
-        "media_source_account": media_source_account,
-        "media_target_account": media_target_account,
+        "text_account": str(readiness["text_account"] or ""),
+        "media_execution_account": str(readiness["media_execution_account"] or ""),
+        "media_source_account": str(readiness["media_source_account"] or ""),
+        "media_target_account": str(readiness["media_target_account"] or ""),
     }
 
 

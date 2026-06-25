@@ -20,7 +20,10 @@ ALLOWED_ADMIN_PAGE_PATHS = frozenset(
         "/admin/manage",
         "/admin/channels",
         "/admin/clone",
+        "/admin/clone/create",
+        "/admin/clone/migrate",
         "/admin/clone/runs/manage",
+        "/admin/clone/runs/detail",
         "/admin/recovery",
     }
 )
@@ -105,7 +108,10 @@ def admin_page_login_required(f):
     @functools.wraps(f)
     def decorated_function(*args, **kwargs):
         if not is_authenticated():
-            return admin_login_redirect_response(request.path)
+            raw_next_path = request.full_path or request.path
+            if raw_next_path.endswith("?"):
+                raw_next_path = raw_next_path[:-1]
+            return admin_login_redirect_response(raw_next_path)
         return f(*args, **kwargs)
 
     return decorated_function

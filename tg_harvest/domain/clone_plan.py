@@ -23,6 +23,16 @@ VALID_CLONE_MEDIA_STRATEGIES = frozenset(
 )
 
 
+def _preview_nonnegative_int(preview: dict[str, Any] | None, key: str) -> int:
+    if not isinstance(preview, dict):
+        return 0
+    try:
+        value = int(preview.get(key) or 0)
+    except (TypeError, ValueError):
+        return 0
+    return value if value > 0 else 0
+
+
 def clone_plan_payload(plan: dict[str, Any]) -> dict[str, Any]:
     payload = plan.get("plan")
     return payload if isinstance(payload, dict) else {}
@@ -134,3 +144,86 @@ def clone_plan_media_execution_label(plan: dict[str, Any]) -> str:
             return f"{source_account}->relay->{target_account}"
         return ""
     return clone_plan_media_migration_account(plan)
+
+
+def clone_plan_timeline_readiness(
+    plan: dict[str, Any] | None,
+    *,
+    preview: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    has_preview = isinstance(preview, dict)
+    text_remaining = _preview_nonnegative_int(preview, "text_remaining")
+    media_remaining = _preview_nonnegative_int(preview, "media_remaining")
+    timeline_remaining = _preview_nonnegative_int(preview, "timeline_remaining")
+    if has_preview and timeline_remaining <= 0:
+        timeline_remaining = text_remaining + media_remaining
+
+    if not isinstance(plan, dict):
+        return {
+            "can_migrate_timeline": False,
+            "reason_codes": ["plan_missing"],
+            "text_remaining": text_remaining,
+            "media_remaining": media_remaining,
+            "timeline_remaining": timeline_remaining,
+            "target_write_account": "",
+            "migration_account": "",
+            "media_execution_account": "",
+            "media_source_account": "",
+            "media_target_account": "",
+            "media_relay_ready": False,
+            "text_account": "",
+        }
+
+    target_write_account = clone_plan_target_write_account(plan)
+    migration_account = clone_plan_media_migration_account(plan)
+    media_execution_account = clone_plan_media_execution_label(plan)
+    media_source_account = clone_plan_media_source_account(plan)
+    media_target_account = clone_plan_media_target_account(plan)
+    media_relay_ready = clone_plan_media_relay_ready(plan)
+
+    reasons: list[str] = []
+    if plan.get("status") != "done":
+        reasons.append("plan_not_done")
+    if clone_plan_blocking_issues(plan):
+        reasons.append("plan_blocked")
+    if plan.get("target_access") != "ok":
+        reasons.append("target_inaccessible")
+
+    if has_preview and text_remaining <= 0 and media_remaining <= 0:
+        reasons.append("no_timeline_remaining")
+
+    if text_remaining > 0:
+        if plan.get("text_strategy") != "database_replay":
+            reasons.append("text_strategy_blocked")
+        if not target_write_account:
+            reasons.append("missing_target_write_account")
+
+    if media_remaining > 0:
+        if plan.get("source_access") != "ok":
+            reasons.append("source_inaccessible")
+        media_strategy = _clean_text(plan.get("media_strategy"))
+        if media_strategy not in VALID_CLONE_MEDIA_STRATEGIES:
+            reasons.append("media_strategy_blocked")
+        elif clone_plan_uses_media_relay(plan) and not media_relay_ready:
+            reasons.append("media_relay_not_ready")
+        elif (
+            not media_execution_account
+            or not media_source_account
+            or not media_target_account
+        ):
+            reasons.append("missing_media_account")
+
+    return {
+        "can_migrate_timeline": not reasons,
+        "reason_codes": reasons,
+        "text_remaining": text_remaining,
+        "media_remaining": media_remaining,
+        "timeline_remaining": timeline_remaining,
+        "target_write_account": target_write_account,
+        "migration_account": migration_account,
+        "media_execution_account": media_execution_account,
+        "media_source_account": media_source_account,
+        "media_target_account": media_target_account,
+        "media_relay_ready": media_relay_ready,
+        "text_account": target_write_account if text_remaining > 0 else "",
+    }
