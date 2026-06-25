@@ -1,19 +1,18 @@
 from collections.abc import Callable
 from typing import Any
 
-from tg_harvest.admin_jobs.common import call_with_conn
 from tg_harvest.admin_jobs.clone_job_state import (
-    _clean_text,
     _load_required_record,
     _try_update_record,
     _update_required_record,
 )
 from tg_harvest.admin_jobs.clone_media_copy import clone_sent_message_ids
-from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.clone_timeline_types import (
     TimelineExecutionState,
     TimelineFinalStatus,
 )
+from tg_harvest.admin_jobs.common import call_with_conn
+from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.domain.clone_plan import (
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,

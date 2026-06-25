@@ -4,13 +4,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from flask import jsonify, render_template, request
-from tg_harvest.app.services import CloneRouteServices
 
 from tg_harvest.admin_jobs.clone import (
     CLONE_TARGET_TITLE_MAX_LEN,
     normalize_clone_target_kind,
     normalize_clone_target_title,
 )
+from tg_harvest.app.services import CloneRouteServices
 from tg_harvest.domain.clone_plan import (
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
@@ -23,7 +23,6 @@ from tg_harvest.domain.clone_plan import (
     clone_plan_target_write_account,
 )
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
-from tg_harvest.web.routes.chat_links import with_chat_links, with_prefixed_chat_links
 from tg_harvest.web.responses import (
     create_exclusive_job_or_response,
     created_job_snapshot_response,
@@ -31,6 +30,7 @@ from tg_harvest.web.responses import (
     logged_json_error,
     require_json_dict,
 )
+from tg_harvest.web.routes.chat_links import with_chat_links, with_prefixed_chat_links
 
 _ALLOWED_TARGET_KINDS = {"channel", "megagroup"}
 _ALLOWED_MEDIA_STRATEGIES = {

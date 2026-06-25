@@ -1,7 +1,12 @@
 import sqlite3
 from typing import Any
 
-from tg_harvest.storage.clone_common import _clean_text, _json_text, _now_iso, _optional_int
+from tg_harvest.storage.clone_common import (
+    _clean_text,
+    _json_text,
+    _now_iso,
+    _optional_int,
+)
 from tg_harvest.storage.clone_state_common import (
     _append_optional_fields,
     _clone_migration_from_row,

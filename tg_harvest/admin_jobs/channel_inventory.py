@@ -19,7 +19,6 @@ from tg_harvest.admin_jobs.sessions import (
     _create_isolated_worker_client,
     _disconnect_worker_client,
     _ensure_base_session_valid,
-    _start_job_heartbeat,
 )
 from tg_harvest.domain.chat_inventory import (
     find_database_chats_not_joined,

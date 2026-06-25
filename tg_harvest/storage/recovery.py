@@ -7,15 +7,19 @@ from tg_harvest.domain.chat_inventory import (
     SessionChatRecoveryRow,
     _optional_int,
 )
-from tg_harvest.domain.coerce import clean_username, enabled_int, safe_int
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
 )
+from tg_harvest.domain.coerce import clean_username, enabled_int, safe_int
 from tg_harvest.ingest.store import upsert_chat
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.row_access import (
     row_int as _row_int,
+)
+from tg_harvest.storage.row_access import (
     scan_row_int as _scan_row_int,
+)
+from tg_harvest.storage.row_access import (
     scan_row_value as _scan_row_value,
 )
 from tg_harvest.storage.schema import _refresh_chat_message_counts

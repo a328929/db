@@ -1,4 +1,5 @@
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
@@ -299,6 +300,10 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("shared.getSelectedOptionLabel", source)
         self.assertIn("shared.setDialogOpenState", source)
         self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn(
+            "onUnauthorized: sessionController.handleUnauthorizedResponse", source
+        )
+        self.assertNotIn("onUnauthorized: handleUnauthorizedResponse", source)
         self.assertIn("elements && elements.loginDialog", source)
         self.assertNotIn("任务创建成功但缺少 job_id", source)
         self.assertEqual(1, shared_source.count("任务创建成功但缺少 job_id"))
@@ -452,6 +457,30 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("pageElement.removeAttribute('aria-hidden');", source)
         self.assertIn("pageElement.removeAttribute('inert');", source)
         self.assertIn("pageElement.inert = false;", source)
+
+    def test_admin_page_scripts_consistently_route_unauthorized_callbacks(self) -> None:
+        for script_name in (
+            "admin_channels.js",
+            "admin_clone.js",
+            "admin_clone_runs.js",
+            "admin_manage.js",
+            "admin_recovery.js",
+        ):
+            source = (ROOT / "static" / script_name).read_text(encoding="utf-8")
+            matches = re.findall(
+                r"onUnauthorized:\s*([A-Za-z0-9_.]+)", source
+            )
+            self.assertTrue(matches, script_name)
+            self.assertEqual(
+                {"sessionController.handleUnauthorizedResponse"},
+                set(matches),
+                script_name,
+            )
+            self.assertNotIn(
+                "onUnauthorized: handleUnauthorizedResponse",
+                source,
+                script_name,
+            )
 
 
 if __name__ == "__main__":

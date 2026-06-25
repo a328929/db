@@ -39,6 +39,8 @@ from tg_harvest.storage.clone import load_clone_run, update_clone_plan
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
 
+_COMPAT_PATCH_EXPORTS = (_admin_job_update_progress, _start_job_heartbeat)
+
 
 def _access_error_state(exc: Exception) -> str:
     err = f"{type(exc).__name__}: {exc}".lower()

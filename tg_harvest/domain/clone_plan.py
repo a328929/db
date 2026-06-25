@@ -1,6 +1,7 @@
 from typing import Any
 
-from tg_harvest.domain.coerce import clean_text as _clean_text, safe_int
+from tg_harvest.domain.coerce import clean_text as _clean_text
+from tg_harvest.domain.coerce import safe_int
 
 CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS = 500
 CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT = 100_000

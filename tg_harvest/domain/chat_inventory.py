@@ -11,7 +11,11 @@ from typing import Any
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
 from tg_harvest.domain.coerce import (
     clean_username as _clean_username,
+)
+from tg_harvest.domain.coerce import (
     optional_int as _optional_int,
+)
+from tg_harvest.domain.coerce import (
     safe_int as _safe_int,
 )
 

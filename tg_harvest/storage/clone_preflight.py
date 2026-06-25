@@ -2,7 +2,6 @@ import sqlite3
 from typing import Any
 
 from tg_harvest.domain.chat_titles import chat_sort_key
-
 from tg_harvest.storage.clone_common import (
     _chat_title_or_fallback,
     _default_clone_title,

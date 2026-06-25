@@ -3,7 +3,6 @@ from collections.abc import Iterable
 from contextlib import suppress
 from typing import Any
 
-from tg_harvest.domain.coerce import clean_username, enabled_int, safe_int
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
@@ -12,10 +11,15 @@ from tg_harvest.domain.chat_inventory import (
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
 )
+from tg_harvest.domain.coerce import clean_username, enabled_int
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.row_access import (
     row_int as _row_int,
+)
+from tg_harvest.storage.row_access import (
     scan_row_int as _scan_row_int,
+)
+from tg_harvest.storage.row_access import (
     scan_row_value as _scan_row_value,
 )
 

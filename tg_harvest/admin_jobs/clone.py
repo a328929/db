@@ -6,18 +6,18 @@ from typing import Any
 
 from telethon.tl.functions.channels import CreateChannelRequest
 
+from tg_harvest.admin_jobs.clone_job_state import (
+    _clean_text,
+    _load_required_record,
+    _try_update_record,
+    _update_required_record,
+)
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     finish_job_heartbeat,
     mark_admin_job_running,
     start_admin_job_heartbeat,
     update_admin_job_progress,
-)
-from tg_harvest.admin_jobs.clone_job_state import (
-    _clean_text,
-    _load_required_record,
-    _try_update_record,
-    _update_required_record,
 )
 from tg_harvest.admin_jobs.core import _admin_job_update_progress
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
@@ -33,6 +33,8 @@ from tg_harvest.storage.clone import load_clone_source_chat, update_clone_run
 
 CLONE_TARGET_TITLE_MAX_LEN = 128
 CLONE_TARGET_ABOUT_MAX_LEN = 255
+
+_COMPAT_PATCH_EXPORTS = (_admin_job_update_progress, _start_job_heartbeat)
 
 
 def normalize_clone_target_kind(raw_kind: Any, *, source_chat_type: Any = "") -> str:

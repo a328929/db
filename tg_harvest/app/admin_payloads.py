@@ -1,8 +1,8 @@
 import sqlite3
 from typing import Any
 
-from tg_harvest.domain.coerce import safe_int
 from tg_harvest.domain.chat_titles import chat_sort_key, chat_title_or_fallback
+from tg_harvest.domain.coerce import safe_int
 from tg_harvest.storage.row_access import row_int as _row_int
 
 

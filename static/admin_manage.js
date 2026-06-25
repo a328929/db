@@ -386,7 +386,7 @@
 
   async function postJSON(url, payload) {
     return sharedPostJSON(url, payload, {
-      onUnauthorized: handleUnauthorizedResponse
+      onUnauthorized: sessionController.handleUnauthorizedResponse
     });
   }
 

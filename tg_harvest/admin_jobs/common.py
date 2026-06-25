@@ -7,8 +7,7 @@ from tg_harvest.admin_jobs.core import (
     _admin_job_update_progress,
     job_context,
 )
-from tg_harvest.admin_jobs.sessions import _start_job_heartbeat
-from tg_harvest.admin_jobs.sessions import bind_client_event_loop
+from tg_harvest.admin_jobs.sessions import _start_job_heartbeat, bind_client_event_loop
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
 from tg_harvest.domain.coerce import clean_username
 from tg_harvest.ingest.flood_wait import is_flood_wait_error
