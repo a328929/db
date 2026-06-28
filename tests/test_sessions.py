@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tg_harvest.admin_jobs.sessions import (
+    _copy_session_storage,
     _cleanup_isolated_worker_session,
     _configure_telethon_session_sqlite,
 )
@@ -45,6 +46,21 @@ def _read_entities(path: Path) -> dict[int, tuple]:
 
 
 class WorkerSessionCleanupTests(unittest.TestCase):
+    def test_copy_session_storage_replaces_stale_worker_files(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_name = root / "primary_session"
+            worker_name = root / "primary_session_worker_listener"
+            base_path = root / "primary_session.session"
+            worker_path = root / "primary_session_worker_listener.session"
+
+            base_path.write_text("fresh-base", encoding="utf-8")
+            worker_path.write_text("stale-worker", encoding="utf-8")
+
+            _copy_session_storage(str(base_name), str(worker_name))
+
+            self.assertEqual("fresh-base", worker_path.read_text(encoding="utf-8"))
+
     def test_cleanup_merges_worker_entities_back_into_base_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)

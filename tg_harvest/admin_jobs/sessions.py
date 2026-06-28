@@ -65,6 +65,11 @@ def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> N
     base_lock = _session_file_lock(base_session_name)
     with base_lock:
         for ext in _SESSION_FILE_EXTENSIONS:
+            dst = f"{worker_session_name}{ext}"
+            if os.path.exists(dst):
+                with suppress(Exception):
+                    os.remove(dst)
+        for ext in _SESSION_FILE_EXTENSIONS:
             src = f"{base_session_name}{ext}"
             dst = f"{worker_session_name}{ext}"
             if os.path.exists(src):

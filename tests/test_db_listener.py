@@ -2,6 +2,7 @@ import queue
 import sqlite3
 import tempfile
 import unittest
+from inspect import iscoroutinefunction
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -157,6 +158,26 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         self.assertEqual(123456, queued.chat_id)
         self.assertEqual("db chat", queued.chat_title)
         self.assertEqual("db_name", queued.chat_username)
+
+    def test_register_client_event_handlers_uses_async_callbacks(self) -> None:
+        runtime = DatabaseChatListenerRuntime(
+            cfg=SimpleNamespace(),
+            get_conn_fn=lambda: None,
+        )
+
+        class _Client:
+            def __init__(self) -> None:
+                self.handlers = []
+
+            def add_event_handler(self, callback, event_builder) -> None:
+                self.handlers.append((callback, event_builder))
+
+        client = _Client()
+
+        runtime._register_client_event_handlers(client, account_key="primary")
+
+        self.assertEqual(3, len(client.handlers))
+        self.assertTrue(all(iscoroutinefunction(callback) for callback, _ in client.handlers))
 
     def test_public_probe_candidate_rows_exclude_only_joined_public_chats(self) -> None:
         cfg = SimpleNamespace(

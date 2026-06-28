@@ -518,17 +518,17 @@ class DatabaseChatListenerRuntime:
                 last_joined_snapshot_refresh_at = now
 
     def _register_client_event_handlers(self, client: Any, *, account_key: str) -> None:
-        def _on_new_message(event: Any) -> None:
+        async def _on_new_message(event: Any) -> None:
             self._handle_message_event(event, reason="new_message", account_key=account_key)
 
-        def _on_message_edited(event: Any) -> None:
+        async def _on_message_edited(event: Any) -> None:
             self._handle_message_event(
                 event,
                 reason="message_edited",
                 account_key=account_key,
             )
 
-        def _on_message_deleted(event: Any) -> None:
+        async def _on_message_deleted(event: Any) -> None:
             self._handle_message_event(
                 event,
                 reason="message_deleted",
