@@ -13,6 +13,7 @@ from tg_harvest.domain.clone_plan import (
 )
 from tg_harvest.domain.coerce import clean_text as clean_clone_media_text
 from tg_harvest.domain.coerce import optional_int
+from tg_harvest.ingest.flood_wait import AccountFloodWaitError, raise_if_long_flood_wait
 from tg_harvest.storage.clone import record_clone_message_mapping
 
 
@@ -32,7 +33,7 @@ def resolve_clone_relay_chat(client: Any, plan: dict[str, Any]) -> Any:
         client,
         relay_chat_id,
         clean_clone_media_text(relay.get("username")),
-        allow_username_fallback=True,
+        allow_username_fallback=False,
     )
 
 
@@ -63,7 +64,14 @@ def copy_clone_media_via_relay_without_source(
     message_ids: int | list[int],
     source_entity: Any,
     as_album: bool | None = None,
+    log_step: Any | None = None,
+    target_attempts: list[dict[str, Any]] | None = None,
+    flood_wait_threshold_seconds: int = 30,
 ) -> Any:
+    if callable(log_step):
+        log_step(
+            "媒体桥接第一跳：源群 -> 中转群"
+        )
     relay_result = clone_forward_without_source_attribution(
         source_client,
         relay_entity_for_source,
@@ -105,14 +113,60 @@ def copy_clone_media_via_relay_without_source(
         relay_copy_messages = int(relay_message_ids[0])
         relay_copy_as_album = None
 
+    attempts = target_attempts or [
+        {
+            "client": target_client,
+            "relay_entity": relay_entity_for_target,
+            "target_entity": target_entity,
+            "account": "",
+        }
+    ]
+
     try:
-        return clone_forward_without_source_attribution(
-            target_client,
-            target_entity,
-            relay_copy_messages,
-            from_peer=relay_entity_for_target,
-            as_album=relay_copy_as_album,
-        )
+        for index, attempt in enumerate(attempts):
+            attempt_client = attempt.get("client")
+            attempt_relay_entity = attempt.get("relay_entity")
+            attempt_target_entity = attempt.get("target_entity")
+            attempt_account = clean_clone_media_text(attempt.get("account"))
+            if callable(log_step):
+                if index == 0:
+                    log_step("媒体桥接第二跳：中转群 -> 克隆群")
+                elif attempt_account:
+                    log_step(f"第二跳切换账号：改由 {attempt_account} 接管中转群 -> 克隆群")
+                else:
+                    log_step("第二跳切换账号：改由备用账号接管中转群 -> 克隆群")
+            try:
+                return clone_forward_without_source_attribution(
+                    attempt_client,
+                    attempt_target_entity,
+                    relay_copy_messages,
+                    from_peer=attempt_relay_entity,
+                    as_album=relay_copy_as_album,
+                )
+            except Exception as exc:
+                try:
+                    raise_if_long_flood_wait(
+                        exc,
+                        threshold_seconds=int(flood_wait_threshold_seconds or 30),
+                        account_label=attempt_account,
+                        scope="clone-relay-target-hop",
+                    )
+                except AccountFloodWaitError as flood_exc:
+                    if callable(log_step):
+                        wait_text = f"{flood_exc.seconds}s"
+                        if index + 1 < len(attempts):
+                            log_step(
+                                f"第二跳触发频控：{attempt_account or '当前账号'} 需等待 {wait_text}，准备切换下一账号"
+                            )
+                        else:
+                            log_step(
+                                f"第二跳触发频控：{attempt_account or '当前账号'} 需等待 {wait_text}"
+                            )
+                    if index + 1 < len(attempts):
+                        continue
+                    raise
+                raise
+        raise RuntimeError("中转群到克隆群的桥接发送未成功完成")
     finally:
         with suppress(Exception):
             clone_delete_copied_relay_messages(
@@ -120,6 +174,8 @@ def copy_clone_media_via_relay_without_source(
                 relay_entity_for_source,
                 relay_message_ids,
             )
+            if callable(log_step):
+                log_step("已清理本次中转临时消息")
 
 
 def clone_source_message_for_api_id(

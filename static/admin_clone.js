@@ -1222,11 +1222,12 @@
     appendSummaryPair(elements.planSummary, '目标访问', getAccessStatusLabel(plan.target_access));
     appendSummaryPair(
       elements.planSummary,
-      '目标写入账号',
+      '文本发送账号',
       getMigrationAccountLabel(getPlanTargetWriteAccount(plan))
     );
-    appendSummaryPair(elements.planSummary, '文本迁移', getTextStrategyLabel(plan.text_strategy));
-    appendSummaryPair(elements.planSummary, '媒体迁移', getMediaStrategyLabel(plan.media_strategy));
+    appendSummaryPair(elements.planSummary, '文本方式', getTextStrategyLabel(plan.text_strategy));
+    appendSummaryPair(elements.planSummary, '媒体方式', getMediaStrategyLabel(plan.media_strategy));
+    appendSummaryPair(elements.planSummary, '执行路径', describePlanExecutionPath(plan));
     renderPlanList(elements.planBlocking, plan.blocking_issues || []);
     renderPlanList(elements.planWarnings, plan.warnings || []);
   }
@@ -1267,8 +1268,8 @@
     appendSummaryPair(elements.timelineSummary, '媒体已复制', formatNumber(timelineMigration.media_sent));
     appendSummaryPair(
       elements.timelineSummary,
-      '执行账号',
-      String(timelineMigration.target_write_account || '')
+      '执行方式',
+      describeTimelineExecutionLabel(timelineMigration.target_write_account)
     );
     appendSummaryPair(elements.timelineSummary, '本次上限', formatLimit(timelineMigration.requested_limit));
     appendSummaryPair(
@@ -1373,6 +1374,70 @@
     return normalized || '未确定';
   }
 
+  function describePlanExecutionPath(plan) {
+    var source = plan || {};
+    var capabilities = source.capabilities && typeof source.capabilities === 'object'
+      ? source.capabilities
+      : {};
+    var payload = source.plan && typeof source.plan === 'object' ? source.plan : {};
+    var relay = capabilities.media_relay && typeof capabilities.media_relay === 'object'
+      ? capabilities.media_relay
+      : (payload.media_relay && typeof payload.media_relay === 'object' ? payload.media_relay : {});
+    var mediaStrategy = String(source.media_strategy || '').trim();
+    var textAccount = getPlanTargetWriteAccount(plan);
+    if (mediaStrategy === 'relay_copy_without_attribution') {
+      return '文本由'
+        + getMigrationAccountLabel(textAccount)
+        + '发送；媒体经中转群桥接：'
+        + getMigrationAccountLabel(relay.source_account)
+        + ' -> 中转群 -> '
+        + getMigrationAccountLabel(relay.target_account);
+    }
+    if (mediaStrategy === 'source_copy_without_attribution') {
+      return '文本和媒体都由'
+        + getMigrationAccountLabel(textAccount)
+        + '直接发送到克隆群';
+    }
+    return '等待生成可执行路径';
+  }
+
+  function describeTimelineExecutionLabel(label) {
+    var text = String(label || '').trim();
+    if (!text) return '未确定';
+
+    var textAccount = '';
+    var mediaPath = '';
+    text.split(';').forEach(function (part) {
+      var normalized = String(part || '').trim();
+      if (!normalized) return;
+      if (normalized.indexOf('text:') === 0) {
+        textAccount = normalized.slice(5).trim();
+        return;
+      }
+      if (normalized.indexOf('media:') === 0) {
+        mediaPath = normalized.slice(6).trim();
+      }
+    });
+
+    var parts = [];
+    if (textAccount) {
+      parts.push('文本由' + getMigrationAccountLabel(textAccount) + '发送');
+    }
+    if (mediaPath.indexOf('->relay->') > 0) {
+      var relayParts = mediaPath.split('->relay->');
+      parts.push(
+        '媒体经中转群桥接：'
+          + getMigrationAccountLabel(relayParts[0])
+          + ' -> 中转群 -> '
+          + getMigrationAccountLabel(relayParts[1])
+      );
+    } else if (mediaPath) {
+      parts.push('媒体由' + getMigrationAccountLabel(mediaPath) + '直接复制');
+    }
+
+    return parts.length ? parts.join('；') : text;
+  }
+
   function getMigrationStatusLabel(status) {
     var normalized = String(status || '').trim();
     if (normalized === 'queued') return '排队中';
@@ -1398,15 +1463,15 @@
 
   function getTextStrategyLabel(strategy) {
     var normalized = String(strategy || '').trim();
-    if (normalized === 'database_replay') return '数据库重放';
+    if (normalized === 'database_replay') return '按数据库顺序发送';
     if (normalized === 'blocked') return '阻断';
     return normalized || '未生成';
   }
 
   function getMediaStrategyLabel(strategy) {
     var normalized = String(strategy || '').trim();
-    if (normalized === 'source_copy_without_attribution') return '隐藏来源复制转发';
-    if (normalized === 'relay_copy_without_attribution') return '固定中转频道桥接';
+    if (normalized === 'source_copy_without_attribution') return '源群直接复制';
+    if (normalized === 'relay_copy_without_attribution') return '通过中转群桥接';
     if (normalized === 'impossible_without_local_vault') return '缺本地媒体保险库';
     if (normalized === 'blocked') return '阻断';
     return normalized || '未生成';

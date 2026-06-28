@@ -63,6 +63,9 @@ class RecoveryRouteServices:
     admin_job_get_snapshot_fn: Any
     admin_job_append_log_fn: Any
     admin_job_set_status_fn: Any
+    admin_start_harvest_job_thread_fn: Any
+    admin_make_job_log_handler_fn: Any
+    admin_harvest_target_max_len: int
     admin_start_recovery_scan_job_thread_fn: Any
     admin_start_recovery_restore_job_thread_fn: Any
 

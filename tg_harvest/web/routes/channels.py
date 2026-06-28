@@ -6,8 +6,7 @@ from flask import jsonify, render_template
 from tg_harvest.app.services import ChannelRouteServices
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
-    create_exclusive_job_or_response,
-    created_job_snapshot_response,
+    create_started_exclusive_job_response,
     logged_json_error,
 )
 from tg_harvest.web.routes.chat_links import with_chat_links
@@ -186,24 +185,22 @@ def register_channel_routes(
         received_log,
         start_thread_fn,
     ):
-        job_id, error_response = create_exclusive_job_or_response(
+        return create_started_exclusive_job_response(
             services.admin_try_create_exclusive_job_fn,
-            job_type,
+            services.admin_job_get_snapshot_fn,
+            job_type=job_type,
             target_chat_id=None,
             target_label=target_label,
+            append_log_fn=services.admin_job_append_log_fn,
+            initial_logs=[received_log],
+            start_job_fn=lambda job_id: start_thread_fn(
+                job_id,
+                cfg=services.cfg,
+                get_conn_fn=services.get_conn_fn,
+                admin_job_set_status_fn=services.admin_job_set_status_fn,
+                admin_job_append_log_fn=services.admin_job_append_log_fn,
+            ),
         )
-        if error_response is not None:
-            return error_response
-
-        services.admin_job_append_log_fn(job_id, received_log)
-        start_thread_fn(
-            job_id,
-            cfg=services.cfg,
-            get_conn_fn=services.get_conn_fn,
-            admin_job_set_status_fn=services.admin_job_set_status_fn,
-            admin_job_append_log_fn=services.admin_job_append_log_fn,
-        )
-        return created_job_snapshot_response(job_id, services.admin_job_get_snapshot_fn)
 
     @app.post("/api/admin/channels/missing/scan")
     @admin_login_required

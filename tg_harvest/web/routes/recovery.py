@@ -6,8 +6,7 @@ from flask import jsonify, render_template
 from tg_harvest.app.services import RecoveryRouteServices
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
-    create_exclusive_job_or_response,
-    created_job_snapshot_response,
+    create_started_exclusive_job_response,
     json_error,
     logged_json_error,
     require_json_dict,
@@ -41,6 +40,23 @@ def _parse_restore_chat_ids(payload: dict) -> tuple[list[int] | None, object | N
     return sorted(set(chat_ids)), None
 
 
+def _parse_recovery_harvest_target(
+    payload: dict,
+    *,
+    max_len: int,
+) -> tuple[str | None, object | None]:
+    raw_target = payload.get("target", "")
+    if not isinstance(raw_target, str):
+        return None, json_error("target 参数必须为字符串", 400)
+
+    target = raw_target.strip()
+    if not target:
+        return None, json_error("target 不能为空", 400)
+    if len(target) > max_len:
+        return None, json_error(f"target 长度不能超过 {max_len}", 400)
+    return target, None
+
+
 def _resolve_recovery_services(
     *,
     services: RecoveryRouteServices | None,
@@ -54,6 +70,9 @@ def _resolve_recovery_services(
     admin_job_get_snapshot_fn=None,
     admin_job_append_log_fn=None,
     admin_job_set_status_fn=None,
+    admin_start_harvest_job_thread_fn=None,
+    admin_make_job_log_handler_fn=None,
+    admin_harvest_target_max_len=None,
     admin_start_recovery_scan_job_thread_fn=None,
     admin_start_recovery_restore_job_thread_fn=None,
 ) -> RecoveryRouteServices:
@@ -70,6 +89,9 @@ def _resolve_recovery_services(
         admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,
         admin_job_append_log_fn=admin_job_append_log_fn,
         admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_start_harvest_job_thread_fn=admin_start_harvest_job_thread_fn,
+        admin_make_job_log_handler_fn=admin_make_job_log_handler_fn,
+        admin_harvest_target_max_len=int(admin_harvest_target_max_len or 300),
         admin_start_recovery_scan_job_thread_fn=(
             admin_start_recovery_scan_job_thread_fn
         ),
@@ -93,6 +115,9 @@ def register_recovery_routes(
     admin_job_get_snapshot_fn=None,
     admin_job_append_log_fn=None,
     admin_job_set_status_fn=None,
+    admin_start_harvest_job_thread_fn=None,
+    admin_make_job_log_handler_fn=None,
+    admin_harvest_target_max_len=None,
     admin_start_recovery_scan_job_thread_fn=None,
     admin_start_recovery_restore_job_thread_fn=None,
 ) -> None:
@@ -108,6 +133,9 @@ def register_recovery_routes(
         admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,
         admin_job_append_log_fn=admin_job_append_log_fn,
         admin_job_set_status_fn=admin_job_set_status_fn,
+        admin_start_harvest_job_thread_fn=admin_start_harvest_job_thread_fn,
+        admin_make_job_log_handler_fn=admin_make_job_log_handler_fn,
+        admin_harvest_target_max_len=admin_harvest_target_max_len,
         admin_start_recovery_scan_job_thread_fn=(
             admin_start_recovery_scan_job_thread_fn
         ),
@@ -150,24 +178,58 @@ def register_recovery_routes(
     @app.post("/api/admin/recovery/scan")
     @admin_login_required
     def api_admin_recovery_scan():
-        job_id, error_response = create_exclusive_job_or_response(
+        return create_started_exclusive_job_response(
             services.admin_try_create_exclusive_job_fn,
-            "recovery_scan",
+            services.admin_job_get_snapshot_fn,
+            job_type="recovery_scan",
             target_chat_id=None,
             target_label="Session 群组恢复扫描",
+            append_log_fn=services.admin_job_append_log_fn,
+            initial_logs=["已接收 Session 群组恢复扫描请求"],
+            start_job_fn=lambda job_id: services.admin_start_recovery_scan_job_thread_fn(
+                job_id,
+                cfg=services.cfg,
+                get_conn_fn=services.get_conn_fn,
+                admin_job_set_status_fn=services.admin_job_set_status_fn,
+                admin_job_append_log_fn=services.admin_job_append_log_fn,
+            ),
+        )
+
+    @app.post("/api/admin/recovery/add")
+    @admin_login_required
+    def api_admin_recovery_add():
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        target, error_response = _parse_recovery_harvest_target(
+            data,
+            max_len=services.admin_harvest_target_max_len,
         )
         if error_response is not None:
             return error_response
 
-        services.admin_job_append_log_fn(job_id, "已接收 Session 群组恢复扫描请求")
-        services.admin_start_recovery_scan_job_thread_fn(
-            job_id,
-            cfg=services.cfg,
-            get_conn_fn=services.get_conn_fn,
-            admin_job_set_status_fn=services.admin_job_set_status_fn,
-            admin_job_append_log_fn=services.admin_job_append_log_fn,
+        return create_started_exclusive_job_response(
+            services.admin_try_create_exclusive_job_fn,
+            services.admin_job_get_snapshot_fn,
+            job_type="harvest",
+            target_chat_id=None,
+            target_label=target,
+            append_log_fn=services.admin_job_append_log_fn,
+            initial_logs=[
+                "已接收恢复候选添加入库请求",
+                f"抓取目标：{target}",
+            ],
+            start_job_fn=lambda job_id: services.admin_start_harvest_job_thread_fn(
+                job_id,
+                target,
+                cfg=services.cfg,
+                get_conn_fn=services.get_conn_fn,
+                admin_make_job_log_handler_fn=services.admin_make_job_log_handler_fn,
+                admin_job_set_status_fn=services.admin_job_set_status_fn,
+                admin_job_append_log_fn=services.admin_job_append_log_fn,
+            ),
         )
-        return created_job_snapshot_response(job_id, services.admin_job_get_snapshot_fn)
 
     @app.post("/api/admin/recovery/restore")
     @admin_login_required
@@ -196,23 +258,23 @@ def register_recovery_routes(
         if str(data.get("confirm") or "").strip() != expected_confirm:
             return json_error("confirm 参数不匹配", 400)
 
-        job_id, error_response = create_exclusive_job_or_response(
+        return create_started_exclusive_job_response(
             services.admin_try_create_exclusive_job_fn,
-            "recovery_restore",
+            services.admin_job_get_snapshot_fn,
+            job_type="recovery_restore",
             target_chat_id=None,
             target_label=target_label,
+            append_log_fn=services.admin_job_append_log_fn,
+            initial_logs=[
+                "已接收群组恢复请求",
+                f"目标：{target_label}",
+            ],
+            start_job_fn=lambda job_id: services.admin_start_recovery_restore_job_thread_fn(
+                job_id,
+                chat_ids=chat_ids,
+                target_label=target_label,
+                get_conn_fn=services.get_conn_fn,
+                admin_job_set_status_fn=services.admin_job_set_status_fn,
+                admin_job_append_log_fn=services.admin_job_append_log_fn,
+            ),
         )
-        if error_response is not None:
-            return error_response
-
-        services.admin_job_append_log_fn(job_id, "已接收群组恢复请求")
-        services.admin_job_append_log_fn(job_id, f"目标：{target_label}")
-        services.admin_start_recovery_restore_job_thread_fn(
-            job_id,
-            chat_ids=chat_ids,
-            target_label=target_label,
-            get_conn_fn=services.get_conn_fn,
-            admin_job_set_status_fn=services.admin_job_set_status_fn,
-            admin_job_append_log_fn=services.admin_job_append_log_fn,
-        )
-        return created_job_snapshot_response(job_id, services.admin_job_get_snapshot_fn)

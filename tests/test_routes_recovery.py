@@ -27,6 +27,7 @@ class _Bundle:
 
 class RecoveryRoutesTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.started_harvests = []
         self.started_scans = []
         self.started_restores = []
         self.logs = []
@@ -87,6 +88,11 @@ class RecoveryRoutesTests(unittest.TestCase):
                 (job_id, str(message))
             ),
             admin_job_set_status_fn=lambda *_args, **_kwargs: True,
+            admin_start_harvest_job_thread_fn=(
+                lambda *args, **kwargs: self.started_harvests.append((args, kwargs))
+            ),
+            admin_make_job_log_handler_fn=lambda _job_id: None,
+            admin_harvest_target_max_len=128,
             admin_start_recovery_scan_job_thread_fn=(
                 lambda *args, **kwargs: self.started_scans.append((args, kwargs))
             ),
@@ -156,6 +162,28 @@ class RecoveryRoutesTests(unittest.TestCase):
         self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
         self.assertEqual(1, len(self.started_scans))
         self.assertIn(("job-1", "已接收 Session 群组恢复扫描请求"), self.logs)
+
+    def test_recovery_add_starts_harvest_job_with_recovery_specific_route(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/recovery/add",
+                json={"target": "  @recoverable  "},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+        self.assertEqual(1, len(self.started_harvests))
+        args, _kwargs = self.started_harvests[0]
+        self.assertEqual(("job-1", "@recoverable"), args[:2])
+        self.assertEqual(
+            [
+                ("job-1", "已接收恢复候选添加入库请求"),
+                ("job-1", "抓取目标：@recoverable"),
+            ],
+            self.logs[:2],
+        )
 
     def test_recovery_restore_selected_requires_confirmation(self) -> None:
         with self._auth_config_patch():

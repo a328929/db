@@ -41,6 +41,7 @@ from tg_harvest.admin_jobs.clone_timeline_store import (
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     finish_job_heartbeat,
+    is_entity_lookup_miss_error,
     resolve_chat_entity,
     start_admin_job_thread,
 )
@@ -62,6 +63,41 @@ from tg_harvest.domain.clone_plan import (
     CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
     CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
 )
+
+
+def _execution_entity_lookup_error_message(*, role: str, account: str) -> str:
+    role_label = str(role or "").strip() or "会话"
+    account_label = str(account or "").strip() or "当前账号"
+    return (
+        f"{role_label}实体缓存未命中，{account_label} 不能在执行阶段回退公开 username 解析。"
+        "请先重新执行在线深度预检，必要时先用对应账号手动打开一次源群/目标群/中转频道后再重试。"
+    )
+
+
+def _resolve_entity_for_execution(
+    client: Any,
+    *,
+    chat_id: int,
+    chat_username: str,
+    account: str,
+    role: str,
+) -> Any:
+    try:
+        return resolve_chat_entity(
+            client,
+            int(chat_id),
+            chat_username,
+            allow_username_fallback=False,
+        )
+    except Exception as exc:
+        if is_entity_lookup_miss_error(exc):
+            raise RuntimeError(
+                _execution_entity_lookup_error_message(
+                    role=role,
+                    account=account,
+                )
+            ) from exc
+        raise
 
 
 def _sleep_after_send(send_delay_ms: int) -> None:
@@ -86,12 +122,28 @@ def _log_timeline_start(
         state.job_id,
         "时间线策略：按原群 msg_date_ts/message_id 顺序混合发送文本、媒体和相册",
     )
+    text_account = _clean_text(state.accounts.get("text_account"))
+    if text_account:
+        admin_job_append_log_fn(
+            state.job_id,
+            f"文本发送：{text_account} -> 克隆群",
+        )
     if state.using_relay:
+        admin_job_append_log_fn(
+            state.job_id,
+            "媒体复制：源群 -> 中转群 -> 克隆群",
+        )
         admin_job_append_log_fn(
             state.job_id,
             "媒体复制策略：固定中转频道桥接；两跳均 drop_author=True，不显示原群或中转频道跳转",
         )
     else:
+        media_account = _clean_text(state.accounts.get("media_source_account"))
+        if media_account:
+            admin_job_append_log_fn(
+                state.job_id,
+                f"媒体复制：{media_account} -> 克隆群",
+            )
         admin_job_append_log_fn(
             state.job_id,
             "媒体复制策略：drop_author=True，不显示原群来源，不带原群跳转",
@@ -174,6 +226,58 @@ def _cleanup_runner_clients(clients: dict[str, Any], worker_ids: dict[str, str],
             continue
         with suppress(Exception):
             _cleanup_isolated_worker_session(account_cfg, worker_id)
+
+
+def _normalized_distinct_accounts(*accounts: str) -> list[str]:
+    result: list[str] = []
+    seen: set[str] = set()
+    for account in accounts:
+        normalized = _clean_text(account).lower()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _plan_account_records(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(plan, dict):
+        return []
+    capabilities = plan.get("capabilities")
+    if not isinstance(capabilities, dict):
+        return []
+    accounts = capabilities.get("accounts")
+    if not isinstance(accounts, list):
+        return []
+    return [item for item in accounts if isinstance(item, dict)]
+
+
+def _plan_account_allows_relay_target_hop(
+    plan: dict[str, Any] | None,
+    account: str,
+) -> bool:
+    normalized_account = _clean_text(account).lower()
+    if not normalized_account:
+        return False
+
+    account_records = _plan_account_records(plan)
+    if not account_records:
+        return True
+
+    for item in account_records:
+        if _clean_text(item.get("account")).lower() != normalized_account:
+            continue
+        target_access = _clean_text(item.get("target_access")).lower()
+        relay_access = _clean_text(item.get("relay_access")).lower()
+        target_send_permission = _clean_text(item.get("target_send_permission")).lower()
+        relay_send_permission = _clean_text(item.get("relay_send_permission")).lower()
+        return (
+            target_access == "ok"
+            and relay_access == "ok"
+            and target_send_permission != "blocked"
+            and relay_send_permission != "blocked"
+        )
+    return False
 
 
 def _admin_clone_timeline_migration_job_runner(
@@ -277,11 +381,12 @@ def _admin_clone_timeline_migration_job_runner(
         def target_entity_for(account: str) -> Any:
             normalized = _clean_text(account).lower()
             if normalized not in target_entities:
-                target_entities[normalized] = resolve_chat_entity(
+                target_entities[normalized] = _resolve_entity_for_execution(
                     account_client(normalized),
-                    target_chat_id,
-                    _clean_text(run.get("target_username")),
-                    allow_username_fallback=True,
+                    chat_id=target_chat_id,
+                    chat_username=_clean_text(run.get("target_username")),
+                    account=normalized,
+                    role="目标群",
                 )
             return target_entities[normalized]
 
@@ -294,11 +399,12 @@ def _admin_clone_timeline_migration_job_runner(
         source_client = account_client(media_source_account) if media_source_account else None
         target_client = account_client(media_target_account) if media_target_account else None
         source_entity = (
-            resolve_chat_entity(
+            _resolve_entity_for_execution(
                 source_client,
-                source_chat_id,
-                _clean_text(run.get("source_chat_username")),
-                allow_username_fallback=True,
+                chat_id=source_chat_id,
+                chat_username=_clean_text(run.get("source_chat_username")),
+                account=media_source_account,
+                role="源群",
             )
             if source_client is not None
             else None
@@ -316,6 +422,29 @@ def _admin_clone_timeline_migration_job_runner(
             if state.using_relay and target_client is not None
             else None
         )
+        relay_target_attempts: list[dict[str, Any]] = []
+        if state.using_relay:
+            for relay_target_account in _normalized_distinct_accounts(
+                media_target_account,
+                text_account,
+                media_source_account,
+            ):
+                if not _plan_account_allows_relay_target_hop(plan, relay_target_account):
+                    continue
+                try:
+                    relay_target_attempts.append(
+                        {
+                            "client": account_client(relay_target_account),
+                            "relay_entity": resolve_clone_relay_chat(
+                                account_client(relay_target_account),
+                                plan,
+                            ),
+                            "target_entity": target_entity_for(relay_target_account),
+                            "account": relay_target_account,
+                        }
+                    )
+                except Exception:
+                    continue
 
         def copy_media_to_target(message_ids: int | list[int], *, as_album: bool | None = None) -> Any:
             if source_client is None or source_entity is None or media_target_entity is None:
@@ -336,6 +465,11 @@ def _admin_clone_timeline_migration_job_runner(
                     message_ids=message_ids,
                     source_entity=source_entity,
                     as_album=as_album,
+                    log_step=lambda message: admin_job_append_log_fn(job_id, message),
+                    target_attempts=relay_target_attempts,
+                    flood_wait_threshold_seconds=int(
+                        getattr(cfg, "flood_wait_switch_threshold", 30) or 30
+                    ),
                 )
             return copy_clone_media_direct_without_source(
                 client=source_client,

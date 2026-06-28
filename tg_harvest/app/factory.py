@@ -300,6 +300,20 @@ def _shared_admin_job_route_kwargs(admin_services: AdminRouteServices) -> dict[s
     }
 
 
+def _shared_admin_harvest_route_kwargs(
+    admin_services: AdminRouteServices,
+) -> dict[str, object]:
+    return {
+        "admin_start_harvest_job_thread_fn": (
+            admin_services.admin_start_harvest_job_thread_fn
+        ),
+        "admin_make_job_log_handler_fn": (
+            admin_services.admin_make_job_log_handler_fn
+        ),
+        "admin_harvest_target_max_len": admin_services.admin_harvest_target_max_len,
+    }
+
+
 def _build_route_services() -> RouteRegistryServices:
     admin_services = _build_admin_route_services()
     clone_services = CloneRouteServices(
@@ -353,6 +367,7 @@ def _build_route_services() -> RouteRegistryServices:
         build_recovery_overview_fn=build_recovery_overview,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         **_shared_admin_job_route_kwargs(admin_services),
+        **_shared_admin_harvest_route_kwargs(admin_services),
         admin_start_recovery_scan_job_thread_fn=_admin_start_recovery_scan_job_thread,
         admin_start_recovery_restore_job_thread_fn=(
             _admin_start_recovery_restore_job_thread

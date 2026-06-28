@@ -633,7 +633,7 @@
     }
 
     try {
-      var data = await postJSON('/api/admin/jobs/harvest', {
+      var data = await postJSON('/api/admin/recovery/add', {
         target: target
       });
       var jobId = getCreatedJobId(data);

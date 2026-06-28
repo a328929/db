@@ -297,6 +297,11 @@
     appendMiniPair(elements.progressSummary, '剩余时间线', formatNumber(preview && preview.timeline_remaining));
     appendMiniPair(elements.progressSummary, '文本已发', formatDoneTotal(migration && migration.text_sent, migration && migration.text_total));
     appendMiniPair(elements.progressSummary, '媒体已复制', formatDoneTotal(migration && migration.media_sent, migration && migration.media_total));
+    appendMiniPair(
+      elements.progressSummary,
+      '执行方式',
+      describeTimelineExecutionLabel(migration && migration.target_write_account)
+    );
     appendMiniPair(elements.progressSummary, '映射失败', formatNumber(summary && summary.error));
 
     elements.detailStatus.textContent = buildDetailStatusText(payload);
@@ -407,7 +412,7 @@
       return '最近一次继续克隆失败了。建议回到“继续克隆消息”重试。';
     }
     if (isPreviewRemaining(preview)) {
-      return '这条记录还有剩余消息未处理，可以直接继续克隆消息。';
+      return '这条记录还有剩余消息未处理，可以继续克隆。文本会按数据库顺序发送；媒体会按当前计划直接复制或通过中转群桥接。';
     }
     return '从当前摘要看，这条记录已经没有明显待处理时间线。只有在需要核对映射或清理本地数据时才继续留在本页。';
   }
@@ -684,6 +689,51 @@
     if (normalized === 'done') return '完成';
     if (normalized === 'error') return '失败';
     return normalized || '未执行';
+  }
+
+  function getMigrationAccountLabel(account) {
+    var normalized = String(account || '').trim().toLowerCase();
+    if (normalized === 'primary') return '主账号';
+    if (normalized === 'secondary') return '第二账号';
+    if (normalized === 'unavailable') return '不可用';
+    return normalized || '未确定';
+  }
+
+  function describeTimelineExecutionLabel(label) {
+    var text = String(label || '').trim();
+    if (!text) return '未确定';
+
+    var textAccount = '';
+    var mediaPath = '';
+    text.split(';').forEach(function (part) {
+      var normalized = String(part || '').trim();
+      if (!normalized) return;
+      if (normalized.indexOf('text:') === 0) {
+        textAccount = normalized.slice(5).trim();
+        return;
+      }
+      if (normalized.indexOf('media:') === 0) {
+        mediaPath = normalized.slice(6).trim();
+      }
+    });
+
+    var parts = [];
+    if (textAccount) {
+      parts.push('文本由' + getMigrationAccountLabel(textAccount) + '发送');
+    }
+    if (mediaPath.indexOf('->relay->') > 0) {
+      var relayParts = mediaPath.split('->relay->');
+      parts.push(
+        '媒体经中转群桥接：'
+          + getMigrationAccountLabel(relayParts[0])
+          + ' -> 中转群 -> '
+          + getMigrationAccountLabel(relayParts[1])
+      );
+    } else if (mediaPath) {
+      parts.push('媒体由' + getMigrationAccountLabel(mediaPath) + '直接复制');
+    }
+
+    return parts.length ? parts.join('；') : text;
   }
 
   function getMigrationPhaseLabel(phase) {

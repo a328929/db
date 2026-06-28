@@ -41,11 +41,17 @@ from tg_harvest.admin_jobs.range_streaming import (
 from tg_harvest.admin_jobs.runners import (
     _ACCOUNT_FLOOD_COOLDOWNS,
     _admin_get_chat_message_count,
+    _admin_update_effective_start_gap_seconds,
     _admin_harvest_job_runner,
+    _admin_update_primary_soft_cap,
     _admin_process_single_chat_update,
+    _admin_update_secondary_public_resolve_reserve,
+    _admin_update_secondary_target_count,
     _admin_update_account_start_delay,
     _admin_update_all_chats,
     _admin_update_effective_concurrency,
+    _admin_update_start_gap_seconds,
+    _auto_secondary_public_resolve_limit,
     _build_admin_update_account_assignments,
     _delete_chat_data,
     _delete_empty_chats_data,
@@ -666,6 +672,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ]
         cfg = SimpleNamespace(
             admin_update_concurrency=1,
+            admin_update_secondary_public_resolve_limit=1,
             session_name="main_sess",
             secondary_session_name="secondary_sess",
             api_id=1,
@@ -774,6 +781,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ]
         cfg = SimpleNamespace(
             admin_update_concurrency=1,
+            admin_update_secondary_public_resolve_limit=1,
             session_name="main_sess",
             secondary_session_name="secondary_sess",
             api_id=1,
@@ -880,6 +888,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ]
         cfg = SimpleNamespace(
             admin_update_concurrency=1,
+            admin_update_secondary_public_resolve_limit=1,
             session_name="main_sess",
             secondary_session_name="secondary_sess",
             api_id=1,
@@ -1099,6 +1108,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             list(enumerate(rows, start=1)),
             [primary, secondary],
             secondary_cached_chat_ids={1},
+            secondary_public_resolve_limit=1,
         )
 
         secondary_indexes = {
@@ -1108,7 +1118,132 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual(2, len(secondary_indexes))
         self.assertEqual(1, counts["secondary_cached"])
         self.assertEqual(1, counts["secondary_public"])
+        self.assertEqual(1, counts["secondary_public_eligible"])
         self.assertEqual(3, counts["secondary_public_candidates"])
+        self.assertEqual(2, counts["secondary_public_skipped"])
+
+    def test_all_chat_update_assignment_can_disable_secondary_public_warmup(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "public-a", "chat_username": "public_a"},
+            {"chat_id": 2, "chat_title": "public-b", "chat_username": "public_b"},
+        ]
+        primary = SimpleNamespace(key="primary", label="主账号")
+        secondary = SimpleNamespace(key="secondary", label="第二账号")
+
+        assignments, counts = _build_admin_update_account_assignments(
+            list(enumerate(rows, start=1)),
+            [primary, secondary],
+            secondary_cached_chat_ids=set(),
+            secondary_public_resolve_limit=0,
+        )
+
+        self.assertTrue(all(account.key == "primary" for account in assignments.values()))
+        self.assertEqual(0, counts["secondary"])
+        self.assertEqual(0, counts["secondary_public"])
+        self.assertEqual(0, counts["secondary_public_eligible"])
+        self.assertEqual(2, counts["secondary_public_candidates"])
+        self.assertEqual(2, counts["secondary_public_skipped"])
+
+    def test_auto_secondary_public_resolve_limit_scales_with_large_queue(self) -> None:
+        self.assertEqual(
+            0,
+            _auto_secondary_public_resolve_limit(
+                secondary_cached_row_count=0,
+                total_rows=0,
+            ),
+        )
+        self.assertEqual(
+            30,
+            _auto_secondary_public_resolve_limit(
+                secondary_cached_row_count=0,
+                total_rows=60,
+            ),
+        )
+        self.assertEqual(
+            156,
+            _auto_secondary_public_resolve_limit(
+                secondary_cached_row_count=0,
+                total_rows=320,
+            ),
+        )
+        self.assertEqual(
+            171,
+            _auto_secondary_public_resolve_limit(
+                secondary_cached_row_count=25,
+                total_rows=400,
+            ),
+        )
+        self.assertEqual(
+            155,
+            _auto_secondary_public_resolve_limit(
+                secondary_cached_row_count=120,
+                total_rows=480,
+            ),
+        )
+
+    def test_admin_update_secondary_target_count_limits_primary_share_on_large_queue(
+        self,
+    ) -> None:
+        self.assertEqual(30, _admin_update_primary_soft_cap(60))
+        self.assertEqual(186, _admin_update_primary_soft_cap(320))
+        self.assertEqual(0, _admin_update_secondary_public_resolve_reserve(60))
+        self.assertEqual(22, _admin_update_secondary_public_resolve_reserve(320))
+        self.assertEqual(
+            134,
+            _admin_update_secondary_target_count(
+                total_rows=320,
+                secondary_eligible=320,
+                secondary_cached_eligible=0,
+            ),
+        )
+        self.assertEqual(
+            168,
+            _admin_update_secondary_target_count(
+                total_rows=400,
+                secondary_eligible=400,
+                secondary_cached_eligible=25,
+            ),
+        )
+        self.assertEqual(
+            116,
+            _admin_update_secondary_target_count(
+                total_rows=240,
+                secondary_eligible=134,
+                secondary_cached_eligible=80,
+            ),
+        )
+
+    def test_all_chat_update_large_dual_queue_shifts_more_load_to_secondary(self) -> None:
+        rows = [
+            {
+                "chat_id": idx,
+                "chat_title": f"chat-{idx}",
+                "chat_username": f"chat_{idx}",
+            }
+            for idx in range(1, 321)
+        ]
+        primary = SimpleNamespace(key="primary", label="主账号")
+        secondary = SimpleNamespace(key="secondary", label="第二账号")
+
+        assignments, counts = _build_admin_update_account_assignments(
+            list(enumerate(rows, start=1)),
+            [primary, secondary],
+            secondary_cached_chat_ids=set(),
+            secondary_public_resolve_limit=None,
+        )
+
+        secondary_indexes = {
+            idx for idx, account in assignments.items() if account.key == "secondary"
+        }
+        self.assertEqual(134, len(secondary_indexes))
+        self.assertEqual(186, counts["primary"])
+        self.assertEqual(134, counts["secondary"])
+        self.assertEqual(186, counts["primary_soft_cap"])
+        self.assertEqual(134, counts["secondary_target"])
+        self.assertEqual(134, counts["secondary_public"])
+        self.assertEqual(164, counts["secondary_public_skipped"])
 
     def test_all_chat_update_allows_secondary_public_username_resolve(self) -> None:
         rows = [
@@ -1117,6 +1252,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ]
         cfg = SimpleNamespace(
             admin_update_concurrency=1,
+            admin_update_secondary_public_resolve_limit=2,
             session_name="main_sess",
             secondary_session_name="secondary_sess",
             api_id=1,
@@ -1211,6 +1347,113 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual(["two_name"], secondary_username_calls)
         self.assertEqual([("main_sess", 1), ("secondary_sess", 2)], harvest_calls)
         self.assertTrue(any("双账号协同策略" in line for line in logs))
+
+    def test_all_chat_update_auto_warms_secondary_public_username_budget(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        secondary_username_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, key):
+                if self.label == "secondary_sess" and isinstance(key, str):
+                    secondary_username_calls.append(key)
+                    return SimpleNamespace(id=2, title=f"{self.label}-{key}")
+                if self.label == "secondary_sess" and not isinstance(key, str):
+                    raise ValueError("could not find the input entity")
+                return SimpleNamespace(id=int(key), title=f"{self.label}-{key}")
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-secondary-defaults-to-cache-only",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(["two_name"], secondary_username_calls)
+        self.assertEqual([("main_sess", 1), ("secondary_sess", 2)], harvest_calls)
+        self.assertTrue(
+            any("公开 username 候选" in line for line in logs),
+            logs,
+        )
 
     def test_all_chat_update_switches_to_secondary_when_primary_flood_waits(self) -> None:
         rows = [
@@ -1321,6 +1564,122 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(any("主账号 进入长等待冷却" in line for line in logs))
         self.assertTrue(any("已切换账号完成采集" in line for line in logs))
 
+    def test_all_chat_update_keeps_secondary_username_budget_for_primary_takeover(
+        self,
+    ) -> None:
+        rows = [
+            {"chat_id": idx, "chat_title": f"chat-{idx}", "chat_username": f"name_{idx}"}
+            for idx in range(1, 91)
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        secondary_username_calls = []
+        primary_attempts = {"count": 0}
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, key):
+                if self.label == "secondary_sess" and isinstance(key, str):
+                    secondary_username_calls.append(key)
+                    chat_num = int(str(key).split("_")[-1])
+                    return SimpleNamespace(id=chat_num, title=f"{self.label}-{key}")
+                if self.label == "secondary_sess" and not isinstance(key, str):
+                    raise ValueError("could not find the input entity")
+                return SimpleNamespace(id=int(key), title=f"{self.label}-{key}")
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            if client.label == "main_sess":
+                primary_attempts["count"] += 1
+                if primary_attempts["count"] == 1:
+                    raise AccountFloodWaitError(
+                        seconds=70,
+                        threshold_seconds=30,
+                        account_label="primary",
+                        scope="test",
+                    )
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            return_value=None,
+        ):
+            ok = _admin_update_all_chats(
+                "job-primary-takeover-budget",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertGreaterEqual(len(secondary_username_calls), 30)
+        self.assertTrue(any(label == "secondary_sess" and chat_id > 45 for label, chat_id in harvest_calls))
+        self.assertTrue(any("主账号 进入长等待冷却" in line for line in logs))
+        self.assertTrue(any("已切换账号完成采集" in line for line in logs))
+
     def test_all_chat_update_reuses_account_after_short_cooldown(self) -> None:
         rows = [
             {"chat_id": 1, "chat_title": "one", "chat_username": None},
@@ -1419,6 +1778,81 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual([1, 2, 3], harvest_calls)
         self.assertTrue(any("等待约 2s 后继续启动剩余群组" in line for line in logs))
         self.assertTrue(any("成功 2 个，失败 0 个，暂缓 1 个" in line for line in logs))
+
+    def test_admin_update_start_gap_seconds_uses_safer_dual_account_default(
+        self,
+    ) -> None:
+        self.assertEqual(
+            0.25,
+            _admin_update_start_gap_seconds(
+                SimpleNamespace(admin_update_min_chat_start_gap_seconds=None),
+                active_account_count=1,
+            ),
+        )
+        self.assertEqual(
+            1.25,
+            _admin_update_start_gap_seconds(
+                SimpleNamespace(admin_update_min_chat_start_gap_seconds=None),
+                active_account_count=2,
+            ),
+        )
+        self.assertEqual(
+            0.5,
+            _admin_update_start_gap_seconds(
+                SimpleNamespace(admin_update_min_chat_start_gap_seconds=0.5),
+                active_account_count=2,
+            ),
+        )
+
+    def test_admin_update_effective_start_gap_seconds_progressively_slows_down(
+        self,
+    ) -> None:
+        self.assertEqual(
+            1.0,
+            _admin_update_effective_start_gap_seconds(
+                base_gap_seconds=1.0,
+                started_chat_count=10,
+                active_account_count=2,
+                account_key="primary",
+            ),
+        )
+        self.assertEqual(
+            2.0,
+            _admin_update_effective_start_gap_seconds(
+                base_gap_seconds=1.0,
+                started_chat_count=250,
+                active_account_count=2,
+                account_key="primary",
+            ),
+        )
+        self.assertEqual(
+            3.0,
+            _admin_update_effective_start_gap_seconds(
+                base_gap_seconds=1.0,
+                started_chat_count=5,
+                active_account_count=2,
+                account_key="secondary",
+                warmup_username_resolve=True,
+            ),
+        )
+        self.assertEqual(
+            4.0,
+            _admin_update_effective_start_gap_seconds(
+                base_gap_seconds=1.25,
+                started_chat_count=370,
+                active_account_count=2,
+                account_key="primary",
+            ),
+        )
+        self.assertEqual(
+            2.5,
+            _admin_update_effective_start_gap_seconds(
+                base_gap_seconds=0.25,
+                started_chat_count=650,
+                active_account_count=1,
+                account_key="primary",
+            ),
+        )
 
     def test_all_chat_update_stops_submitting_when_all_accounts_long_cooldown(
         self,

@@ -256,7 +256,7 @@ def _admin_update_account_plan(
 
     admin_job_append_log_fn(
         job_id,
-        "第二账号已加入批量更新调度；公开可访问群组将尽量分配给两个账号并发拉取",
+        "第二账号已加入批量更新调度；优先处理本地已缓存实体的群组，必要时再参与切换重试",
     )
     return accounts
 
@@ -336,11 +336,85 @@ def _select_evenly(indexed_rows: list[tuple[int, Any]], target_count: int) -> se
     return selected
 
 
+def _admin_update_primary_soft_cap(total_rows: int) -> int:
+    safe_total_rows = max(0, int(total_rows))
+    if safe_total_rows <= 0:
+        return 0
+    if safe_total_rows >= 640:
+        primary_ratio = 0.54
+    elif safe_total_rows >= 480:
+        primary_ratio = 0.56
+    elif safe_total_rows >= 320:
+        primary_ratio = 0.58
+    elif safe_total_rows >= 200:
+        primary_ratio = 0.60
+    elif safe_total_rows >= 120:
+        primary_ratio = 0.62
+    else:
+        primary_ratio = 0.50
+    return max(1, math.ceil(safe_total_rows * primary_ratio))
+
+
+def _admin_update_secondary_target_count(
+    *,
+    total_rows: int,
+    secondary_eligible: int,
+    secondary_cached_eligible: int,
+) -> int:
+    safe_total_rows = max(0, int(total_rows))
+    safe_secondary_eligible = max(0, int(secondary_eligible))
+    safe_secondary_cached = max(0, int(secondary_cached_eligible))
+    if safe_total_rows <= 0 or safe_secondary_eligible <= 0:
+        return 0
+
+    primary_soft_cap = _admin_update_primary_soft_cap(safe_total_rows)
+    secondary_target = max(0, safe_total_rows - primary_soft_cap)
+    if safe_secondary_cached >= max(24, safe_total_rows // 4):
+        secondary_target += min(
+            safe_secondary_cached // 4,
+            max(1, safe_total_rows // 10),
+    )
+    return min(safe_secondary_eligible, secondary_target)
+
+
+def _admin_update_secondary_public_resolve_reserve(total_rows: int) -> int:
+    safe_total_rows = max(0, int(total_rows))
+    if safe_total_rows < 80:
+        return 0
+    return min(48, max(8, safe_total_rows // 14))
+
+
+def _auto_secondary_public_resolve_limit(
+    *,
+    secondary_cached_row_count: int,
+    total_rows: int,
+) -> int:
+    safe_total_rows = max(0, int(total_rows))
+    safe_cached_rows = max(0, int(secondary_cached_row_count))
+    if safe_total_rows <= 0:
+        return 0
+    desired_secondary_target = _admin_update_secondary_target_count(
+        total_rows=safe_total_rows,
+        secondary_eligible=safe_total_rows,
+        secondary_cached_eligible=min(safe_total_rows, safe_cached_rows),
+    )
+    base_limit = max(
+        0,
+        desired_secondary_target - min(desired_secondary_target, safe_cached_rows),
+    )
+    # 额外保留一部分 username 解析预算，供主账号中途长等待后由第二账号接管。
+    return min(
+        safe_total_rows,
+        base_limit + _admin_update_secondary_public_resolve_reserve(safe_total_rows),
+    )
+
+
 def _build_admin_update_account_assignments(
     indexed_rows: list[tuple[int, Any]],
     account_plan: list[Any],
     *,
     secondary_cached_chat_ids: set[int] | None = None,
+    secondary_public_resolve_limit: int | None = None,
 ) -> tuple[dict[int, Any], dict[str, int]]:
     primary_account = account_plan[0]
     assignments: dict[int, Any] = {}
@@ -352,12 +426,17 @@ def _build_admin_update_account_assignments(
         "secondary_cached": 0,
         "secondary_cached_eligible": 0,
         "secondary_public": 0,
+        "secondary_public_eligible": 0,
         "secondary_public_candidates": 0,
+        "secondary_public_skipped": 0,
+        "primary_soft_cap": 0,
+        "secondary_target": 0,
     }
     if len(account_plan) < 2:
         for idx, _row in indexed_rows:
             assignments[idx] = primary_account
             counts["primary"] += 1
+        counts["primary_soft_cap"] = counts["primary"]
         return assignments, counts
 
     secondary_account = next(
@@ -380,23 +459,49 @@ def _build_admin_update_account_assignments(
 
     counts["secondary_cached_eligible"] = len(cached_rows)
     counts["secondary_public_candidates"] = len(username_rows)
-    counts["secondary_eligible"] = len(cached_rows) + len(username_rows)
+    if secondary_public_resolve_limit is None:
+        public_resolve_limit = _auto_secondary_public_resolve_limit(
+            secondary_cached_row_count=len(cached_rows),
+            total_rows=total,
+        )
+    else:
+        public_resolve_limit = max(0, int(secondary_public_resolve_limit or 0))
+    if public_resolve_limit <= 0:
+        limited_username_rows: list[tuple[int, Any]] = []
+    elif len(username_rows) <= public_resolve_limit:
+        limited_username_rows = list(username_rows)
+    else:
+        selected_public_indexes = _select_evenly(username_rows, public_resolve_limit)
+        limited_username_rows = [
+            (idx, row) for idx, row in username_rows if idx in selected_public_indexes
+        ]
+    counts["secondary_public_eligible"] = len(limited_username_rows)
+    counts["secondary_public_skipped"] = max(
+        0, len(username_rows) - len(limited_username_rows)
+    )
+    counts["secondary_eligible"] = len(cached_rows) + len(limited_username_rows)
 
     if counts["secondary_eligible"] <= 0:
         for idx, _row in indexed_rows:
             assignments[idx] = primary_account
             counts["primary"] += 1
+        counts["primary_soft_cap"] = counts["primary"]
         return assignments, counts
 
-    primary_target = (total + len(account_plan) - 1) // len(account_plan)
-    secondary_target = min(counts["secondary_eligible"], max(0, total - primary_target))
+    secondary_target = _admin_update_secondary_target_count(
+        total_rows=total,
+        secondary_eligible=counts["secondary_eligible"],
+        secondary_cached_eligible=len(cached_rows),
+    )
+    counts["secondary_target"] = secondary_target
+    counts["primary_soft_cap"] = max(0, total - secondary_target)
     if len(cached_rows) >= secondary_target:
         selected_cached = _select_evenly(cached_rows, secondary_target)
         selected_username: set[int] = set()
     else:
         selected_cached = {idx for idx, _row in cached_rows}
         selected_username = _select_evenly(
-            username_rows, secondary_target - len(selected_cached)
+            limited_username_rows, secondary_target - len(selected_cached)
         )
     secondary_indexes = selected_cached | selected_username
     counts["secondary_cached"] = len(selected_cached)
@@ -430,6 +535,65 @@ def _admin_update_effective_concurrency(
         max(1, per_account_limit * max(1, int(active_account_count))),
     )
     return per_account_limit, effective_concurrency
+
+
+def _admin_update_start_gap_seconds(
+    cfg: Any,
+    *,
+    active_account_count: int,
+) -> float:
+    configured_value = getattr(cfg, "admin_update_min_chat_start_gap_seconds", None)
+    if configured_value is None:
+        return 1.25 if int(active_account_count) > 1 else 0.25
+    try:
+        return max(0.0, float(configured_value))
+    except (TypeError, ValueError):
+        return 1.25 if int(active_account_count) > 1 else 0.25
+
+
+def _admin_update_effective_start_gap_seconds(
+    *,
+    base_gap_seconds: float,
+    started_chat_count: int,
+    active_account_count: int,
+    account_key: str,
+    warmup_username_resolve: bool = False,
+) -> float:
+    gap_seconds = max(0.0, float(base_gap_seconds))
+    safe_started_chat_count = max(1, int(started_chat_count))
+    if int(active_account_count) > 1:
+        if safe_started_chat_count >= 120:
+            gap_seconds = max(gap_seconds, 1.5)
+        if safe_started_chat_count >= 240:
+            gap_seconds = max(gap_seconds, 2.0)
+        if safe_started_chat_count >= 360:
+            gap_seconds = max(gap_seconds, 3.0)
+        if safe_started_chat_count >= 480:
+            gap_seconds = max(gap_seconds, 4.0)
+        if account_key == "primary" and safe_started_chat_count >= 360:
+            gap_seconds = max(gap_seconds, 4.0)
+    else:
+        if safe_started_chat_count >= 180:
+            gap_seconds = max(gap_seconds, 0.5)
+        if safe_started_chat_count >= 320:
+            gap_seconds = max(gap_seconds, 1.0)
+        if safe_started_chat_count >= 480:
+            gap_seconds = max(gap_seconds, 1.5)
+        if safe_started_chat_count >= 640:
+            gap_seconds = max(gap_seconds, 2.5)
+    if account_key == "secondary" and warmup_username_resolve:
+        gap_seconds = max(gap_seconds, 3.0)
+    return gap_seconds
+
+
+def _admin_update_secondary_public_resolve_limit(cfg: Any) -> int | None:
+    value = getattr(cfg, "admin_update_secondary_public_resolve_limit", None)
+    if value is None:
+        return None
+    value = optional_int(value)
+    if value is None:
+        return None
+    return max(0, int(value))
 
 
 def _admin_update_account_start_delay(
@@ -547,10 +711,15 @@ def _admin_update_all_chats(
     total = len(rows)
     probe_mode_enabled = total <= 2
     indexed_rows = list(enumerate(rows, start=1))
+    secondary_public_resolve_limit_cfg = _admin_update_secondary_public_resolve_limit(cfg)
     account_assignments, assignment_counts = _build_admin_update_account_assignments(
         indexed_rows,
         account_plan,
         secondary_cached_chat_ids=secondary_cached_chat_ids,
+        secondary_public_resolve_limit=secondary_public_resolve_limit_cfg,
+    )
+    secondary_public_resolve_limit = int(
+        assignment_counts.get("secondary_public_eligible", 0) or 0
     )
     success_count, failed_count, deferred_count, total_added_messages = 0, 0, 0, 0
     failed_chats = []
@@ -582,11 +751,21 @@ def _admin_update_all_chats(
             f"主账号 {assignment_counts['primary']} 个，"
             f"第二账号 {assignment_counts['secondary']} 个；"
             f"第二账号本地缓存可直接解析 {assignment_counts['secondary_cached_eligible']} 个，"
-            f"本次安排缓存命中 {assignment_counts['secondary_cached']} 个、"
-            f"公开 username 解析 {assignment_counts['secondary_public']} 个；"
+            f"本次安排缓存命中 {assignment_counts['secondary_cached']} 个；"
+            f"公开 username 候选 {assignment_counts['secondary_public_candidates']} 个，"
+            f"本次纳入主动解析 {assignment_counts['secondary_public_eligible']} 个，"
+            f"实际分配 {assignment_counts['secondary_public']} 个；"
             f"{assignment_counts['primary_only']} 个缺少公开用户名且第二账号无缓存，"
             "优先交给主账号；执行中任一账号失败会自动切换另一账号重试",
         )
+        if assignment_counts["secondary_public_skipped"] > 0:
+            admin_job_append_log_fn(
+                job_id,
+                "为降低第二账号批量 ResolveUsername 触发 FloodWait 的概率，"
+                f"本次有 {assignment_counts['secondary_public_skipped']} 个仅公开 username 可解析的群组"
+                "继续优先交给主账号；"
+                "如需放宽可设置 TG_ADMIN_UPDATE_SECONDARY_PUBLIC_RESOLVE_LIMIT",
+            )
     _silent_progress(
         job_id,
         0,
@@ -605,16 +784,13 @@ def _admin_update_all_chats(
     if len(account_plan) > 1:
         admin_job_append_log_fn(
             job_id,
-            "双账号协同策略：两个账号都会尽量参与公开群组更新；"
+            "双账号协同策略：第二账号优先处理已缓存实体的群组；"
             "任一账号解析失败、读取失败或触发长等待时，当前群组会自动切换另一账号重试",
         )
-    try:
-        account_start_gap_seconds = max(
-            0.0,
-            float(getattr(cfg, "admin_update_min_chat_start_gap_seconds", 0.25) or 0.0),
-        )
-    except (TypeError, ValueError):
-        account_start_gap_seconds = 0.25
+    account_start_gap_seconds = _admin_update_start_gap_seconds(
+        cfg,
+        active_account_count=len(account_plan),
+    )
     if account_start_gap_seconds > 0:
         admin_job_append_log_fn(
             job_id,
@@ -635,6 +811,15 @@ def _admin_update_all_chats(
     account_state_lock = Lock()
     account_start_lock = Lock()
     account_next_start_at: dict[str, float] = {}
+    account_started_counts: dict[str, int] = {}
+    account_logged_gap_levels: dict[str, float] = {}
+    secondary_username_resolve_lock = Lock()
+    secondary_username_resolve_used = 0
+    secondary_cached_identity_set = {
+        int(chat_id) for chat_id in (secondary_cached_chat_ids or set())
+    }
+    secondary_username_budget_exhausted_logged = False
+    secondary_username_takeover_logged = False
     no_available_accounts = False
     try:
         max_cooldown_wait_seconds = max(
@@ -653,31 +838,112 @@ def _admin_update_all_chats(
         current_chat_label: str,
         current_chat_username: str | None,
     ) -> int:
+        nonlocal secondary_username_resolve_used
+        nonlocal secondary_username_budget_exhausted_logged
         local_client = None
         worker_id = f"{job_id}_{account.key}_{idx}"
         semaphore = account_semaphores.get(account.key)
         if semaphore is not None:
             semaphore.acquire()
         try:
+            account_key = str(getattr(account, "key", ""))
+            current_chat_identity = stored_chat_id_from_entity_id(current_chat_id)
+            secondary_needs_username_warmup = (
+                account_key == "secondary"
+                and current_chat_identity not in secondary_cached_identity_set
+                and bool(str(current_chat_username or "").strip())
+            )
             if account_start_gap_seconds > 0:
                 with account_start_lock:
+                    started_chat_count = int(account_started_counts.get(account_key, 0)) + 1
+                    effective_gap_seconds = _admin_update_effective_start_gap_seconds(
+                        base_gap_seconds=account_start_gap_seconds,
+                        started_chat_count=started_chat_count,
+                        active_account_count=len(account_plan),
+                        account_key=account_key,
+                        warmup_username_resolve=secondary_needs_username_warmup,
+                    )
                     wait_seconds = _admin_update_account_start_delay(
                         account_next_start_at,
-                        str(account.key),
-                        gap_seconds=account_start_gap_seconds,
+                        account_key,
+                        gap_seconds=effective_gap_seconds,
                         now=time.time(),
                     )
+                    account_started_counts[account_key] = started_chat_count
+                    previous_logged_gap = float(
+                        account_logged_gap_levels.get(
+                            account_key, account_start_gap_seconds
+                        )
+                    )
+                    if effective_gap_seconds > previous_logged_gap + 1e-9:
+                        account_logged_gap_levels[account_key] = effective_gap_seconds
+                        admin_job_append_log_fn(
+                            job_id,
+                            f"{account.label} 已启动约 {started_chat_count} 个群组，"
+                            f"为降低长等待风险，后续最小启动间隔提高到约 {effective_gap_seconds:.2f}s",
+                        )
                 if wait_seconds > 0:
                     time.sleep(wait_seconds)
             local_client = _create_isolated_worker_client(account.cfg, worker_id)
             before_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
 
             try:
+                resolve_kwargs: dict[str, Any] = {
+                    "allow_username_fallback": True,
+                }
+                if account_key == "secondary":
+                    def _secondary_username_fallback_gate() -> bool:
+                        nonlocal secondary_username_resolve_used
+                        nonlocal secondary_username_budget_exhausted_logged
+                        nonlocal secondary_username_takeover_logged
+                        if current_chat_identity in secondary_cached_identity_set:
+                            return True
+                        if secondary_public_resolve_limit <= 0:
+                            return False
+                        with secondary_username_resolve_lock:
+                            if (
+                                secondary_username_resolve_used
+                                >= secondary_public_resolve_limit
+                            ):
+                                primary_account = _account_plan_by_key(
+                                    account_plan, "primary"
+                                )
+                                primary_in_cooldown = (
+                                    primary_account is not None
+                                    and (
+                                        primary_account.key in _active_account_cooldown_keys()
+                                        or _account_cooldown_remaining(primary_account) > 0
+                                    )
+                                )
+                                if primary_in_cooldown:
+                                    secondary_username_resolve_used += 1
+                                    if not secondary_username_takeover_logged:
+                                        secondary_username_takeover_logged = True
+                                        admin_job_append_log_fn(
+                                            job_id,
+                                            "主账号处于长等待冷却中，"
+                                            "第二账号将临时放宽公开 username 解析预算，继续接管剩余公开群组",
+                                        )
+                                    return True
+                                if not secondary_username_budget_exhausted_logged:
+                                    secondary_username_budget_exhausted_logged = True
+                                    admin_job_append_log_fn(
+                                        job_id,
+                                        "第二账号公开 username 解析预算已用尽，"
+                                        "其余未缓存群组继续优先交给主账号",
+                                    )
+                                return False
+                            secondary_username_resolve_used += 1
+                            return True
+
+                    resolve_kwargs["username_fallback_gate"] = (
+                        _secondary_username_fallback_gate
+                    )
                 entity = resolve_chat_entity(
                     local_client,
                     current_chat_id,
                     current_chat_username,
-                    allow_username_fallback=True,
+                    **resolve_kwargs,
                 )
             except Exception as exc:
                 _raise_if_account_flood_wait(
@@ -724,6 +990,8 @@ def _admin_update_all_chats(
                 progress_total=progress_total,
                 progress_prefix=progress_prefix,
             )
+            if account_key == "secondary":
+                secondary_cached_identity_set.add(current_chat_identity)
             after_count = _admin_get_chat_message_count(get_conn_fn, current_chat_id)
             return max(0, after_count - before_count)
         finally:

@@ -29,6 +29,7 @@ class CloneRoutesTests(unittest.TestCase):
     def setUp(self) -> None:
         self.started_jobs = []
         self.logs = []
+        self.status_updates = []
         self.created_jobs = []
         self.created_clone_runs = []
         self.created_clone_plans = []
@@ -38,6 +39,9 @@ class CloneRoutesTests(unittest.TestCase):
         self.started_deep_preflight_jobs = []
         self.started_timeline_migration_jobs = []
         self.clone_timeline_preview_override = None
+        self.clone_run_create_error = None
+        self.clone_plan_create_error = None
+        self.clone_migration_create_error = None
         self.clone_runs = [
             {
                 "run_id": "run-existing",
@@ -121,7 +125,12 @@ class CloneRoutesTests(unittest.TestCase):
             admin_job_append_log_fn=lambda job_id, message: self.logs.append(
                 (job_id, str(message))
             ),
-            admin_job_set_status_fn=lambda *_args, **_kwargs: True,
+            admin_job_set_status_fn=(
+                lambda job_id, status: self.status_updates.append(
+                    (str(job_id), str(status))
+                )
+                or True
+            ),
             admin_start_clone_structure_job_thread_fn=(
                 lambda *args, **kwargs: self.started_jobs.append((args, kwargs))
             ),
@@ -180,6 +189,8 @@ class CloneRoutesTests(unittest.TestCase):
         }
 
     def _create_clone_run(self, _conn, **kwargs):
+        if self.clone_run_create_error is not None:
+            raise self.clone_run_create_error
         self.created_clone_runs.append(kwargs)
         return {
             "run_id": kwargs["run_id"],
@@ -349,6 +360,8 @@ class CloneRoutesTests(unittest.TestCase):
         return deleted
 
     def _create_clone_plan(self, _conn, **kwargs):
+        if self.clone_plan_create_error is not None:
+            raise self.clone_plan_create_error
         plan = {
             "plan_id": kwargs["plan_id"],
             "run_id": kwargs["run_id"],
@@ -453,6 +466,8 @@ class CloneRoutesTests(unittest.TestCase):
         return plan
 
     def _create_clone_migration(self, _conn, **kwargs):
+        if self.clone_migration_create_error is not None:
+            raise self.clone_migration_create_error
         migration = {
             "migration_id": kwargs["migration_id"],
             "run_id": kwargs["run_id"],
@@ -896,6 +911,25 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("job-clone-1", kwargs["plan_id"])
         self.assertIn(("job-clone-1", "已接收克隆深度预检请求"), self.logs)
 
+    def test_clone_deep_preflight_marks_job_error_when_plan_creation_fails(self) -> None:
+        self.clone_plan_create_error = RuntimeError("plan boom")
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/deep-preflight",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("plan boom", response.get_json()["error"])
+        self.assertEqual([], self.started_deep_preflight_jobs)
+        self.assertIn(("job-clone-1", "error"), self.status_updates)
+        self.assertIn(
+            ("job-clone-1", "克隆迁移计划创建失败，任务未启动"),
+            self.logs,
+        )
+
     def test_clone_timeline_migration_creates_migration_and_starts_job(self) -> None:
         self._create_done_plan()
         with self._auth_config_patch():
@@ -934,6 +968,28 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("job-clone-1", kwargs["migration_id"])
         self.assertEqual(20, kwargs["message_limit"])
         self.assertEqual(1000, kwargs["send_delay_ms"])
+
+    def test_clone_timeline_migration_marks_job_error_when_record_creation_fails(
+        self,
+    ) -> None:
+        self._create_done_plan()
+        self.clone_migration_create_error = RuntimeError("migration boom")
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/migrate-timeline",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("migration boom", response.get_json()["error"])
+        self.assertEqual([], self.started_timeline_migration_jobs)
+        self.assertIn(("job-clone-1", "error"), self.status_updates)
+        self.assertIn(
+            ("job-clone-1", "完整时间线迁移记录创建失败，任务未启动"),
+            self.logs,
+        )
 
     def test_clone_timeline_migration_allows_ready_relay_plan(self) -> None:
         self._create_relay_done_plan()
@@ -1143,6 +1199,30 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("Source Backup", kwargs["target_title"])
         self.assertEqual("megagroup", kwargs["target_kind"])
         self.assertIn(("job-clone-1", "已接收结构克隆请求"), self.logs)
+
+    def test_clone_job_marks_job_error_when_run_creation_fails(self) -> None:
+        self.clone_run_create_error = RuntimeError("run boom")
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/jobs",
+                json={
+                    "chat_id": 100,
+                    "target_title": "Source Backup",
+                    "target_kind": "megagroup",
+                    "confirm": "CLONE:STRUCTURE:100",
+                },
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("run boom", response.get_json()["error"])
+        self.assertEqual([], self.started_jobs)
+        self.assertIn(("job-clone-1", "error"), self.status_updates)
+        self.assertIn(
+            ("job-clone-1", "克隆运行记录创建失败，任务未启动"),
+            self.logs,
+        )
 
     def test_clone_job_rejects_invalid_target_kind(self) -> None:
         with self._auth_config_patch():

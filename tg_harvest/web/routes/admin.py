@@ -7,8 +7,7 @@ from flask import jsonify, request
 from tg_harvest.app.services import AdminRouteServices
 from tg_harvest.web.auth import admin_login_required
 from tg_harvest.web.responses import (
-    create_exclusive_job_or_response,
-    created_job_snapshot_response,
+    create_started_exclusive_job_response,
     json_error,
     require_json_dict,
 )
@@ -72,25 +71,26 @@ class AdminRoutesHandler:
     def _require_json_dict(self):
         return require_json_dict()
 
-    def _created_job_snapshot_response(self, job_id: str, **extra):
-        return created_job_snapshot_response(
-            job_id,
-            self.admin_job_get_snapshot_fn,
-            **extra,
-        )
-
-    def _create_exclusive_job_or_response(
+    def _create_started_exclusive_job_response(
         self,
-        job_type: str,
         *,
+        job_type: str,
         target_chat_id: int | None = None,
         target_label: str | None = None,
+        initial_logs: tuple[str, ...] | list[str] = (),
+        start_job_fn,
+        response_extra: dict[str, Any] | None = None,
     ):
-        return create_exclusive_job_or_response(
+        return create_started_exclusive_job_response(
             self.admin_try_create_exclusive_job_fn,
-            job_type,
+            self.admin_job_get_snapshot_fn,
+            job_type=job_type,
             target_chat_id=target_chat_id,
             target_label=target_label,
+            append_log_fn=self.admin_job_append_log_fn,
+            initial_logs=initial_logs,
+            start_job_fn=start_job_fn,
+            response_extra=response_extra,
         )
 
     def _load_chat_brief_or_response(self, chat_id: int):
@@ -143,18 +143,34 @@ class AdminRoutesHandler:
             return self._json_error("confirm 参数不匹配", 400)
         return None
 
-    def _append_scope_target_logs(
+    def _resolve_harvest_target_or_response(self, data: dict):
+        raw_target = data.get("target", "")
+        if not isinstance(raw_target, str):
+            return None, self._json_error("target 参数必须为字符串", 400)
+
+        target = raw_target.strip()
+        if not target:
+            return None, self._json_error("target 不能为空", 400)
+        if len(target) > self.admin_harvest_target_max_len:
+            return None, self._json_error(
+                f"target 长度不能超过 {self.admin_harvest_target_max_len}",
+                400,
+            )
+        return target, None
+
+    def _build_scope_target_logs(
         self,
-        job_id: str,
         *,
         scope: str,
         chat_id: int | None,
         target_label: str,
-    ) -> None:
+    ) -> list[str]:
         scope_label = {"all": "全部数据", "chat": "当前群组"}.get(scope, scope)
         chat_suffix = "" if chat_id is None else f" ({chat_id})"
-        self.admin_job_append_log_fn(job_id, f"作用范围：{scope_label}")
-        self.admin_job_append_log_fn(job_id, f"目标：{target_label}{chat_suffix}")
+        return [
+            f"作用范围：{scope_label}",
+            f"目标：{target_label}{chat_suffix}",
+        ]
 
     @admin_login_required
     def api_admin_chats(self):
@@ -246,38 +262,25 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        raw_target = data.get("target", "")
-        if not isinstance(raw_target, str):
-            return self._json_error("target 参数必须为字符串", 400)
-
-        target = raw_target.strip()
-        if not target:
-            return self._json_error("target 不能为空", 400)
-        if len(target) > self.admin_harvest_target_max_len:
-            return self._json_error(
-                f"target 长度不能超过 {self.admin_harvest_target_max_len}",
-                400,
-            )
-
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "harvest",
-            target_chat_id=None,
-            target_label=target,
-        )
+        target, error_response = self._resolve_harvest_target_or_response(data)
         if error_response is not None:
             return error_response
 
-        self.admin_job_append_log_fn(job_id, f"已接收抓取目标：{target}")
-        self.admin_start_harvest_job_thread_fn(
-            job_id,
-            target,
-            cfg=self.cfg,
-            get_conn_fn=self.get_conn_fn,
-            admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
+        return self._create_started_exclusive_job_response(
+            job_type="harvest",
+            target_chat_id=None,
+            target_label=target,
+            initial_logs=[f"已接收抓取目标：{target}"],
+            start_job_fn=lambda job_id: self.admin_start_harvest_job_thread_fn(
+                job_id,
+                target,
+                cfg=self.cfg,
+                get_conn_fn=self.get_conn_fn,
+                admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
         )
-        return self._created_job_snapshot_response(job_id)
 
     @admin_login_required
     def api_admin_job_create_update(self):
@@ -291,27 +294,25 @@ class AdminRoutesHandler:
         )
 
         if is_all_scope:
-            job_id, error_response = self._create_exclusive_job_or_response(
-                "update",
+            return self._create_started_exclusive_job_response(
+                job_type="update",
                 target_chat_id=None,
                 target_label="全部群聊",
+                initial_logs=[
+                    "已接收增量更新请求",
+                    "目标范围：全部群聊",
+                ],
+                start_job_fn=lambda job_id: self.admin_start_update_job_thread_fn(
+                    job_id,
+                    "all",
+                    "全部群聊",
+                    cfg=self.cfg,
+                    get_conn_fn=self.get_conn_fn,
+                    admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
+                    admin_job_set_status_fn=self.admin_job_set_status_fn,
+                    admin_job_append_log_fn=self.admin_job_append_log_fn,
+                ),
             )
-            if error_response is not None:
-                return error_response
-
-            self.admin_job_append_log_fn(job_id, "已接收增量更新请求")
-            self.admin_job_append_log_fn(job_id, "目标范围：全部群聊")
-            self.admin_start_update_job_thread_fn(
-                job_id,
-                "all",
-                "全部群聊",
-                cfg=self.cfg,
-                get_conn_fn=self.get_conn_fn,
-                admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
-                admin_job_set_status_fn=self.admin_job_set_status_fn,
-                admin_job_append_log_fn=self.admin_job_append_log_fn,
-            )
-            return self._created_job_snapshot_response(job_id)
 
         chat_id, chat_title, error_response = self._resolve_chat_target_or_response(
             raw_chat_id
@@ -319,27 +320,25 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "update",
+        return self._create_started_exclusive_job_response(
+            job_type="update",
             target_chat_id=chat_id,
             target_label=chat_title,
+            initial_logs=[
+                "已接收增量更新请求",
+                f"目标群组：{chat_title} ({chat_id})",
+            ],
+            start_job_fn=lambda job_id: self.admin_start_update_job_thread_fn(
+                job_id,
+                chat_id,
+                chat_title,
+                cfg=self.cfg,
+                get_conn_fn=self.get_conn_fn,
+                admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
         )
-        if error_response is not None:
-            return error_response
-
-        self.admin_job_append_log_fn(job_id, "已接收增量更新请求")
-        self.admin_job_append_log_fn(job_id, f"目标群组：{chat_title} ({chat_id})")
-        self.admin_start_update_job_thread_fn(
-            job_id,
-            chat_id,
-            chat_title,
-            cfg=self.cfg,
-            get_conn_fn=self.get_conn_fn,
-            admin_make_job_log_handler_fn=self.admin_make_job_log_handler_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
-        )
-        return self._created_job_snapshot_response(job_id)
 
     @admin_login_required
     def api_admin_job_create_delete(self):
@@ -357,25 +356,23 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "delete",
+        return self._create_started_exclusive_job_response(
+            job_type="delete",
             target_chat_id=chat_id,
             target_label=chat_title,
+            initial_logs=[
+                "已接收删除请求",
+                f"目标群组：{chat_title} ({chat_id})",
+            ],
+            start_job_fn=lambda job_id: self.admin_start_delete_job_thread_fn(
+                job_id,
+                chat_id,
+                chat_title,
+                get_conn_fn=self.get_conn_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
         )
-        if error_response is not None:
-            return error_response
-
-        self.admin_job_append_log_fn(job_id, "已接收删除请求")
-        self.admin_job_append_log_fn(job_id, f"目标群组：{chat_title} ({chat_id})")
-        self.admin_start_delete_job_thread_fn(
-            job_id,
-            chat_id,
-            chat_title,
-            get_conn_fn=self.get_conn_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
-        )
-        return self._created_job_snapshot_response(job_id)
 
     @admin_login_required
     def api_admin_job_create_delete_empty_chats(self):
@@ -387,22 +384,18 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "delete_empty_chats",
+        return self._create_started_exclusive_job_response(
+            job_type="delete_empty_chats",
             target_chat_id=None,
             target_label="零消息群组",
+            initial_logs=["已接收零消息群组删除请求"],
+            start_job_fn=lambda job_id: self.admin_start_delete_empty_chats_job_thread_fn(
+                job_id,
+                get_conn_fn=self.get_conn_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
         )
-        if error_response is not None:
-            return error_response
-
-        self.admin_job_append_log_fn(job_id, "已接收零消息群组删除请求")
-        self.admin_start_delete_empty_chats_job_thread_fn(
-            job_id,
-            get_conn_fn=self.get_conn_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
-        )
-        return self._created_job_snapshot_response(job_id)
 
     @admin_login_required
     def api_admin_job_create_cleanup(self):
@@ -436,39 +429,37 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "cleanup",
+        initial_logs = ["已接收垃圾清理请求"]
+        initial_logs.extend(
+            self._build_scope_target_logs(
+                scope=scope,
+                chat_id=chat_id,
+                target_label=target_label,
+            )
+        )
+        initial_logs.append(f"关键字：{keyword}")
+        return self._create_started_exclusive_job_response(
+            job_type="cleanup",
             target_chat_id=chat_id,
             target_label=target_label,
-        )
-        if error_response is not None:
-            return error_response
-
-        self.admin_job_append_log_fn(job_id, "已接收垃圾清理请求")
-        self._append_scope_target_logs(
-            job_id,
-            scope=scope,
-            chat_id=chat_id,
-            target_label=target_label,
-        )
-        self.admin_job_append_log_fn(job_id, f"关键字：{keyword}")
-        self.admin_start_cleanup_job_thread_fn(
-            job_id=job_id,
-            keyword=keyword,
-            scope=scope,
-            chat_id=chat_id,
-            target_label=target_label,
-            get_conn_fn=self.get_conn_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
-        )
-        return self._created_job_snapshot_response(
-            job_id,
-            request={
-                "scope": scope,
-                "chat_id": chat_id,
-                "target_label": target_label,
-                "keyword": keyword,
+            initial_logs=initial_logs,
+            start_job_fn=lambda job_id: self.admin_start_cleanup_job_thread_fn(
+                job_id=job_id,
+                keyword=keyword,
+                scope=scope,
+                chat_id=chat_id,
+                target_label=target_label,
+                get_conn_fn=self.get_conn_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
+            response_extra={
+                "request": {
+                    "scope": scope,
+                    "chat_id": chat_id,
+                    "target_label": target_label,
+                    "keyword": keyword,
+                }
             },
         )
 
@@ -491,36 +482,34 @@ class AdminRoutesHandler:
         if error_response is not None:
             return error_response
 
-        job_id, error_response = self._create_exclusive_job_or_response(
-            "cleanup_empty",
+        initial_logs = ["已接收不可搜索数据清理请求"]
+        initial_logs.extend(
+            self._build_scope_target_logs(
+                scope=scope,
+                chat_id=chat_id,
+                target_label=target_label,
+            )
+        )
+        return self._create_started_exclusive_job_response(
+            job_type="cleanup_empty",
             target_chat_id=chat_id,
             target_label=target_label,
-        )
-        if error_response is not None:
-            return error_response
-
-        self.admin_job_append_log_fn(job_id, "已接收不可搜索数据清理请求")
-        self._append_scope_target_logs(
-            job_id,
-            scope=scope,
-            chat_id=chat_id,
-            target_label=target_label,
-        )
-        self.admin_start_cleanup_empty_job_thread_fn(
-            job_id=job_id,
-            scope=scope,
-            chat_id=chat_id,
-            target_label=target_label,
-            get_conn_fn=self.get_conn_fn,
-            admin_job_set_status_fn=self.admin_job_set_status_fn,
-            admin_job_append_log_fn=self.admin_job_append_log_fn,
-        )
-        return self._created_job_snapshot_response(
-            job_id,
-            request={
-                "scope": scope,
-                "chat_id": chat_id,
-                "target_label": target_label,
+            initial_logs=initial_logs,
+            start_job_fn=lambda job_id: self.admin_start_cleanup_empty_job_thread_fn(
+                job_id=job_id,
+                scope=scope,
+                chat_id=chat_id,
+                target_label=target_label,
+                get_conn_fn=self.get_conn_fn,
+                admin_job_set_status_fn=self.admin_job_set_status_fn,
+                admin_job_append_log_fn=self.admin_job_append_log_fn,
+            ),
+            response_extra={
+                "request": {
+                    "scope": scope,
+                    "chat_id": chat_id,
+                    "target_label": target_label,
+                }
             },
         )
 

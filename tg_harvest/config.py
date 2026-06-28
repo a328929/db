@@ -32,6 +32,19 @@ def _env_int(name: str, default: int) -> int:
     return safe_int(os.getenv(name, None), default)
 
 
+def _env_optional_int(name: str) -> int | None:
+    v = os.getenv(name, None)
+    if v is None:
+        return None
+    text = v.strip().lower()
+    if not text or text in {"auto", "none", "default"}:
+        return None
+    try:
+        return int(text)
+    except Exception:
+        return None
+
+
 def _env_optional_float(name: str) -> float | None:
     v = os.getenv(name, None)
     if v is None:
@@ -104,8 +117,14 @@ def _load_raw_config_values() -> dict:
         # 全部群组更新时的并发数量。
         "admin_update_concurrency": _env_int("TG_ADMIN_UPDATE_CONCURRENCY", 4),
         # 全部群组更新时，同一账号启动下一个群组前的最小间隔秒数。
+        # 未配置时会按账号数自动取更保守的默认值。
         "admin_update_min_chat_start_gap_seconds": _env_optional_float(
             "TG_ADMIN_UPDATE_MIN_CHAT_START_GAP_SECONDS"
+        ),
+        # 全部群组更新时，允许第二账号主动按公开 username 解析的群组数量上限。
+        # 0 表示彻底关闭主动预热；空值表示按缓存覆盖率自动渐进预热。
+        "admin_update_secondary_public_resolve_limit": _env_optional_int(
+            "TG_ADMIN_UPDATE_SECONDARY_PUBLIC_RESOLVE_LIMIT"
         ),
         # 全部群组更新时，全部账号都处于 FloodWait 时最多等待多久。
         "admin_update_max_cooldown_wait_seconds": _env_int(
@@ -170,11 +189,13 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["admin_update_concurrency"] = max(
         1, int(normalized["admin_update_concurrency"])
     )
-    if normalized["admin_update_min_chat_start_gap_seconds"] is None:
-        normalized["admin_update_min_chat_start_gap_seconds"] = 0.25
-    else:
+    if normalized["admin_update_min_chat_start_gap_seconds"] is not None:
         normalized["admin_update_min_chat_start_gap_seconds"] = max(
             0.0, float(normalized["admin_update_min_chat_start_gap_seconds"])
+        )
+    if normalized["admin_update_secondary_public_resolve_limit"] is not None:
+        normalized["admin_update_secondary_public_resolve_limit"] = max(
+            0, int(normalized["admin_update_secondary_public_resolve_limit"])
         )
     normalized["admin_update_max_cooldown_wait_seconds"] = max(
         0, int(normalized["admin_update_max_cooldown_wait_seconds"])
@@ -222,6 +243,9 @@ def _build_app_config(values: dict) -> "AppConfig":
         admin_update_concurrency=values["admin_update_concurrency"],
         admin_update_min_chat_start_gap_seconds=values[
             "admin_update_min_chat_start_gap_seconds"
+        ],
+        admin_update_secondary_public_resolve_limit=values[
+            "admin_update_secondary_public_resolve_limit"
         ],
         admin_update_max_cooldown_wait_seconds=values[
             "admin_update_max_cooldown_wait_seconds"
@@ -276,7 +300,8 @@ class AppConfig:
     admin_job_max_count: int
     admin_job_log_max_lines: int
     admin_update_concurrency: int
-    admin_update_min_chat_start_gap_seconds: float
+    admin_update_min_chat_start_gap_seconds: float | None
+    admin_update_secondary_public_resolve_limit: int | None
     admin_update_max_cooldown_wait_seconds: int
     ops_bot_enabled: int
     ops_bot_token: str

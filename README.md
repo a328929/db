@@ -41,7 +41,8 @@ bash start_web.sh
 - `TG_MULTI_ACCOUNT_RANGE_CHUNK_SIZE`: 双账号区间拉取的 message_id 范围跨度，默认 `1000`
 - `TG_FLOOD_WAIT_SWITCH_THRESHOLD`: Telegram FloodWait 超过该秒数时不再等待，改由后台任务尝试切换另一个账号，默认 `30`
 - `TG_ADMIN_UPDATE_CONCURRENCY`: 后台数据库管理页“批量更新所有群组”的总并发上限，默认 `4`；单账号模式会按该值并发，双账号模式默认收敛为“每个账号同一时刻只跑 1 个群组”，并在单个群组更新失败时自动切换另一账号重试
-- `TG_ADMIN_UPDATE_MIN_CHAT_START_GAP_SECONDS`: 后台“批量更新所有群组”时，同一账号启动下一个群组前的最小间隔秒数，默认 `0.25`；短任务很多、双账号容易一起触发 FloodWait 时可调到 `0.5` 或 `1.0`
+- `TG_ADMIN_UPDATE_MIN_CHAT_START_GAP_SECONDS`: 后台“批量更新所有群组”时，同一账号启动下一个群组前的最小间隔秒数；默认按账号数自动取值，单账号约 `0.25` 秒、双账号约 `1.0` 秒；如需更激进或更保守可显式设置
+- `TG_ADMIN_UPDATE_SECONDARY_PUBLIC_RESOLVE_LIMIT`: 后台“批量更新所有群组”时，允许第二账号主动按公开 username 解析的群组数量上限；留空时会按第二账号当前缓存覆盖率自动给一个小的每日预热预算（冷启动默认约 `12`），设为 `0` 可彻底关闭主动预热
 - `TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS`: 批量更新所有群组时，全部账号都处于 FloodWait 后最多短等秒数，默认 `45`；超过该值会提前收尾并保留未启动群组供下次继续，避免把剩余群组批量记为失败
 - `TG_OPS_BOT_ENABLED`: 运维机器人通知开关，默认 `0`；开启后会把后台任务创建、终态和重要长等待日志发到 Telegram
 - `TG_OPS_BOT_TOKEN`: 运维机器人 token，只从环境变量读取

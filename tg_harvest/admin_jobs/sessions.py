@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 import shutil
 import sqlite3
@@ -13,6 +14,9 @@ from telethon.sync import TelegramClient
 from tg_harvest.ingest.flood_wait import flood_sleep_threshold_kwargs
 
 JOB_HEARTBEAT_INTERVAL_SEC = 30.0
+_SESSION_FILE_EXTENSIONS = (".session", ".session-journal", ".session-wal", ".session-shm")
+_SESSION_FILE_LOCKS: dict[str, threading.Lock] = {}
+_SESSION_FILE_LOCKS_GUARD = threading.Lock()
 
 
 def _current_event_loop_or_none() -> asyncio.AbstractEventLoop | None:
@@ -38,6 +42,109 @@ def _client_event_loop(client: Any) -> asyncio.AbstractEventLoop | None:
     if _is_open_asyncio_loop(loop):
         return loop
     return None
+
+
+def _session_sqlite_path(session_name: Any) -> Path:
+    path = Path(str(session_name or ""))
+    if path.suffix != ".session":
+        path = Path(str(path) + ".session")
+    return path
+
+
+def _session_file_lock(session_name: Any) -> threading.Lock:
+    key = str(_session_sqlite_path(session_name).resolve())
+    with _SESSION_FILE_LOCKS_GUARD:
+        lock = _SESSION_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _SESSION_FILE_LOCKS[key] = lock
+        return lock
+
+
+def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> None:
+    base_lock = _session_file_lock(base_session_name)
+    with base_lock:
+        for ext in _SESSION_FILE_EXTENSIONS:
+            src = f"{base_session_name}{ext}"
+            dst = f"{worker_session_name}{ext}"
+            if os.path.exists(src):
+                with suppress(Exception):
+                    shutil.copy2(src, dst)
+
+
+def _merge_worker_session_entities_into_base_session(
+    base_session_name: Any,
+    worker_session_name: Any,
+) -> int:
+    base_path = _session_sqlite_path(base_session_name)
+    worker_path = _session_sqlite_path(worker_session_name)
+    if not base_path.exists() or not worker_path.exists():
+        return 0
+
+    lock = _session_file_lock(base_session_name)
+    with lock:
+        conn = None
+        try:
+            conn = sqlite3.connect(str(base_path), timeout=30)
+            conn.execute("PRAGMA busy_timeout=30000")
+            conn.execute("ATTACH DATABASE ? AS worker_db", (str(worker_path),))
+            before_changes = conn.total_changes
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO entities(id, hash, username, phone, name, date)
+                SELECT
+                    w.id,
+                    w.hash,
+                    w.username,
+                    w.phone,
+                    w.name,
+                    w.date
+                FROM worker_db.entities w
+                LEFT JOIN entities b
+                  ON b.id = w.id
+                WHERE b.id IS NULL
+                   OR COALESCE(w.date, 0) > COALESCE(b.date, 0)
+                   OR (
+                        COALESCE(b.username, '') = ''
+                        AND COALESCE(w.username, '') <> ''
+                    )
+                   OR (
+                        COALESCE(b.phone, 0) = 0
+                        AND COALESCE(w.phone, 0) <> 0
+                    )
+                   OR (
+                        COALESCE(b.name, '') = ''
+                        AND COALESCE(w.name, '') <> ''
+                    )
+                   OR (
+                        COALESCE(w.date, 0) = COALESCE(b.date, 0)
+                        AND (
+                            COALESCE(w.username, '') <> COALESCE(b.username, '')
+                            OR COALESCE(w.phone, 0) <> COALESCE(b.phone, 0)
+                            OR COALESCE(w.name, '') <> COALESCE(b.name, '')
+                        )
+                    )
+                """
+            )
+            conn.commit()
+            return max(0, int(conn.total_changes - before_changes))
+        except Exception:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.rollback()
+            logging.exception(
+                "合并 Telegram worker session 实体缓存失败: base=%s worker=%s",
+                base_path,
+                worker_path,
+            )
+            return 0
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.execute("DETACH DATABASE worker_db")
+                with suppress(Exception):
+                    conn.close()
 
 
 @contextmanager
@@ -100,12 +207,7 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
     worker_session_name = f"{base_session_name}_worker_{worker_id}"
     Path(worker_session_name).parent.mkdir(parents=True, exist_ok=True)
 
-    for ext in [".session", ".session-journal", ".session-wal", ".session-shm"]:
-        src = f"{base_session_name}{ext}"
-        dst = f"{worker_session_name}{ext}"
-        if os.path.exists(src):
-            with suppress(Exception):
-                shutil.copy2(src, dst)
+    _copy_session_storage(base_session_name, worker_session_name)
 
     previous_loop = _current_event_loop_or_none()
     loop = asyncio.new_event_loop()
@@ -158,7 +260,11 @@ def _disconnect_worker_client(client: Any) -> None:
 
 def _cleanup_isolated_worker_session(cfg: Any, worker_id: str):
     worker_session_name = f"{cfg.session_name}_worker_{worker_id}"
-    for ext in [".session", ".session-journal", ".session-wal", ".session-shm"]:
+    _merge_worker_session_entities_into_base_session(
+        cfg.session_name,
+        worker_session_name,
+    )
+    for ext in _SESSION_FILE_EXTENSIONS:
         try:
             path = f"{worker_session_name}{ext}"
             if os.path.exists(path):

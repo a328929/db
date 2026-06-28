@@ -21,9 +21,17 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.app = Flask(__name__)
         self.logs = []
         self.started_jobs = []
+        self.started_harvests = []
+        self.started_updates = []
 
         def append_log(job_id, message):
             self.logs.append((job_id, str(message)))
+
+        def start_harvest(*args, **kwargs):
+            self.started_harvests.append({"args": args, **kwargs})
+
+        def start_update(*args, **kwargs):
+            self.started_updates.append({"args": args, **kwargs})
 
         def start_cleanup_empty(**kwargs):
             self.started_jobs.append(kwargs)
@@ -57,8 +65,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             admin_create_chat_job_if_absent_fn=lambda *_args, **_kwargs: (None, None),
             admin_job_create_fn=lambda *_args, **_kwargs: {"job_id": "job-1"},
             admin_job_append_log_fn=append_log,
-            admin_start_harvest_job_thread_fn=lambda *_args, **_kwargs: None,
-            admin_start_update_job_thread_fn=lambda *_args, **_kwargs: None,
+            admin_start_harvest_job_thread_fn=start_harvest,
+            admin_start_update_job_thread_fn=start_update,
             admin_start_delete_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_delete_empty_chats_job_thread_fn=start_delete_empty_chats,
             admin_start_cleanup_job_thread_fn=lambda *_args, **_kwargs: None,
@@ -69,6 +77,69 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             admin_cleanup_keyword_max_len=64,
         )
         self.handler = AdminRoutesHandler(services=self.services)
+
+    def test_harvest_success_starts_job_with_normalized_target(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/harvest",
+            method="POST",
+            json={"target": "  @example_group  "},
+        ):
+            response = self.handler.api_admin_job_create_harvest.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [("job-1", "已接收抓取目标：@example_group")],
+            self.logs,
+        )
+        self.assertEqual(1, len(self.started_harvests))
+        self.assertEqual(("job-1", "@example_group"), self.started_harvests[0]["args"])
+
+    def test_update_all_success_starts_job_with_all_scope(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/update",
+            method="POST",
+            json={"chat_id": "all"},
+        ):
+            response = self.handler.api_admin_job_create_update.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [
+                ("job-1", "已接收增量更新请求"),
+                ("job-1", "目标范围：全部群聊"),
+            ],
+            self.logs,
+        )
+        self.assertEqual(1, len(self.started_updates))
+        self.assertEqual(("job-1", "all", "全部群聊"), self.started_updates[0]["args"])
+
+    def test_update_single_chat_success_starts_job_with_resolved_target(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/update",
+            method="POST",
+            json={"chat_id": 42},
+        ):
+            response = self.handler.api_admin_job_create_update.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            [
+                ("job-1", "已接收增量更新请求"),
+                ("job-1", "目标群组：chat-42 (42)"),
+            ],
+            self.logs,
+        )
+        self.assertEqual(1, len(self.started_updates))
+        self.assertEqual(("job-1", 42, "chat-42"), self.started_updates[0]["args"])
 
     def test_cleanup_empty_requires_json_body(self) -> None:
         with self.app.test_request_context("/api/admin/jobs/cleanup-empty", method="POST"):

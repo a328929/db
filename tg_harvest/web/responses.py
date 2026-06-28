@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
 from flask import jsonify, request
@@ -73,3 +73,35 @@ def created_job_snapshot_response(
     payload = {"ok": True, "job": snapshot}
     payload.update(extra)
     return jsonify(payload)
+
+
+def create_started_exclusive_job_response(
+    create_job_fn: Callable[..., tuple[dict[str, Any] | None, dict[str, Any] | None]],
+    get_snapshot_fn: Callable[[str], dict[str, Any] | None],
+    *,
+    job_type: str,
+    target_chat_id: int | None = None,
+    target_label: str | None = None,
+    append_log_fn: Callable[[str, str], None],
+    initial_logs: Iterable[str] = (),
+    start_job_fn: Callable[[str], Any],
+    response_extra: dict[str, Any] | None = None,
+):
+    job_id, error_response = create_exclusive_job_or_response(
+        create_job_fn,
+        job_type,
+        target_chat_id=target_chat_id,
+        target_label=target_label,
+    )
+    if error_response is not None:
+        return error_response
+
+    for message in initial_logs:
+        append_log_fn(job_id, str(message))
+
+    start_job_fn(job_id)
+    return created_job_snapshot_response(
+        job_id,
+        get_snapshot_fn,
+        **(response_extra or {}),
+    )
