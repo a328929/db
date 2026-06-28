@@ -18,6 +18,7 @@ DEFAULT_ADMIN_PAGE_PATH = "/admin/manage"
 ALLOWED_ADMIN_PAGE_PATHS = frozenset(
     {
         "/admin/manage",
+        "/admin/sync",
         "/admin/channels",
         "/admin/clone",
         "/admin/clone/create",

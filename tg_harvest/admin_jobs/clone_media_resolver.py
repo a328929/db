@@ -2,6 +2,7 @@ from typing import Any
 
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.coerce import optional_int
+from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 
 CLONE_MEDIA_GROUP_API_SCAN_RADIUS = 25
 CLONE_MEDIA_GROUP_API_SCAN_LIMIT = 100
@@ -162,13 +163,36 @@ def _dedupe_sorted_messages(messages: list[Any]) -> list[Any]:
     return [by_id[message_id] for message_id in sorted(by_id)]
 
 
-def _get_messages_by_ids(client: Any, entity: Any, message_ids: list[int]) -> list[Any]:
+def _call_get_messages(
+    client: Any,
+    entity: Any,
+    *,
+    scope: str,
+    **kwargs: Any,
+) -> list[Any]:
+    def _load_messages() -> Any:
+        with bind_client_event_loop(client):
+            return client.get_messages(entity, **kwargs)
+
+    return _as_list(call_with_bounded_retry(_load_messages, scope=scope))
+
+
+def _get_messages_by_ids(
+    client: Any,
+    entity: Any,
+    message_ids: list[int],
+    *,
+    scope: str = "clone-media-by-ids",
+) -> list[Any]:
     normalized_ids = [int(message_id) for message_id in message_ids if message_id]
     if not normalized_ids:
         return []
-    with bind_client_event_loop(client):
-        result = client.get_messages(entity, ids=normalized_ids)
-    return _as_list(result)
+    return _call_get_messages(
+        client,
+        entity,
+        ids=normalized_ids,
+        scope=scope,
+    )
 
 
 def _get_messages_window(
@@ -178,6 +202,7 @@ def _get_messages_window(
     min_message_id: int,
     max_message_id: int,
     scan_radius: int,
+    scope: str = "clone-media-window",
 ) -> list[Any]:
     min_id = max(0, int(min_message_id) - int(scan_radius) - 1)
     max_id = int(max_message_id) + int(scan_radius) + 1
@@ -185,9 +210,14 @@ def _get_messages_window(
         CLONE_MEDIA_GROUP_API_SCAN_LIMIT,
         max(1, max_id - min_id + 1),
     )
-    with bind_client_event_loop(client):
-        result = client.get_messages(entity, min_id=min_id, max_id=max_id, limit=limit)
-    return _as_list(result)
+    return _call_get_messages(
+        client,
+        entity,
+        min_id=min_id,
+        max_id=max_id,
+        limit=limit,
+        scope=scope,
+    )
 
 
 def _get_messages_between_ids(
@@ -197,15 +227,16 @@ def _get_messages_between_ids(
     min_id: int,
     max_id: int,
     limit: int,
+    scope: str = "clone-media-between-ids",
 ) -> list[Any]:
-    with bind_client_event_loop(client):
-        result = client.get_messages(
-            entity,
-            min_id=max(0, int(min_id)),
-            max_id=max(0, int(max_id)),
-            limit=max(1, int(limit)),
-        )
-    return _as_list(result)
+    return _call_get_messages(
+        client,
+        entity,
+        min_id=max(0, int(min_id)),
+        max_id=max(0, int(max_id)),
+        limit=max(1, int(limit)),
+        scope=scope,
+    )
 
 
 def _media_group_messages(
@@ -258,6 +289,7 @@ def _expand_media_group_direction(
             min_id=min_id,
             max_id=max_id,
             limit=batch_size,
+            scope="clone-media-group-expand",
         )
         group_batch = _media_group_messages(batch_messages, grouped_id)
         new_messages = [
@@ -336,7 +368,12 @@ def clone_api_resolve_media_message(
     source_message_id: int,
 ) -> dict[str, Any]:
     """Resolve a single source media message through Telegram before copying."""
-    messages = _get_messages_by_ids(client, source_entity, [int(source_message_id)])
+    messages = _get_messages_by_ids(
+        client,
+        source_entity,
+        [int(source_message_id)],
+        scope="clone-media-single-message",
+    )
     for message in messages:
         message_id = _message_id(message)
         if message_id == int(source_message_id) and _message_has_media(message):
@@ -375,7 +412,12 @@ def clone_api_resolve_media_group(
 
     anchor_messages = [
         message
-        for message in _get_messages_by_ids(client, source_entity, anchors)
+        for message in _get_messages_by_ids(
+            client,
+            source_entity,
+            anchors,
+            scope="clone-media-group-anchors",
+        )
         if _message_has_media(message)
     ]
     if not anchor_messages:
@@ -426,6 +468,7 @@ def clone_api_resolve_media_group(
         min_message_id=min(anchors),
         max_message_id=max(anchors),
         scan_radius=scan_radius,
+        scope="clone-media-group-window",
     )
     candidates = _dedupe_sorted_messages([*anchor_messages, *window_messages])
     initial_group_messages = _media_group_messages(candidates, api_grouped_id)

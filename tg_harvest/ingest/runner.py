@@ -16,9 +16,15 @@ from tg_harvest.domain.normalize import _safe_json
 from tg_harvest.domain.promo import build_single_promo_features
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
+    bounded_retry_count,
+    exponential_backoff_seconds,
+    format_retry_context,
     flood_sleep_threshold_kwargs,
     flood_wait_seconds,
+    is_transient_telegram_error,
+    maybe_refresh_entity_cursor,
     raise_if_long_flood_wait,
+    short_retry_sleep_seconds,
 )
 from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
 from tg_harvest.ingest.parse import (
@@ -267,7 +273,7 @@ def _harvest_messages_for_entity(
         prefix=progress_prefix,
     )
 
-    max_retries = 3
+    max_retries = bounded_retry_count(3)
     retry_count = 0
     harvest_completed = False
 
@@ -349,14 +355,27 @@ def _harvest_messages_for_entity(
                 scope=f"chat:{chat_id}",
             )
             wait_seconds = flood_wait_seconds(e)
-            logging.warning(f"触发 FloodWait: 等待 {wait_seconds}s")
             retry_count += 1
             if retry_count >= max_retries:
                 raise RuntimeError(
                     f"采集触发 FloodWait 且重试耗尽 (chat_id={chat_id}, wait={wait_seconds}s)"
                 ) from e
-            time.sleep(wait_seconds)
-        except (RPCError, ConnectionError) as e:
+            sleep_seconds = exponential_backoff_seconds(
+                retry_count,
+                required_wait_seconds=wait_seconds,
+            )
+            logging.warning(
+                "触发 FloodWait，准备重试: chat_id=%s %s raw_wait=%ss",
+                chat_id,
+                format_retry_context(
+                    retry_index=retry_count,
+                    max_retries=max_retries,
+                    wait_seconds=sleep_seconds,
+                ),
+                wait_seconds,
+            )
+            time.sleep(sleep_seconds)
+        except (RPCError, ConnectionError, OSError, TimeoutError) as e:
             msg_rows, media_rows = [], []
             # P0 级修复：专门处理 MsgidDecreaseRetryError 等位点冲突错误
             # 这种错误如果不做状态重置，单纯的重试是无效的
@@ -365,19 +384,26 @@ def _harvest_messages_for_entity(
                 logging.error(
                     f"检测到 Telegram 内部位点冲突 ({err_msg})，正在尝试重置位点..."
                 )
-                with suppress(Exception):
-                    # 通过拉取最新一条消息，强迫 Telethon 内部更新位点 (pts)
-                    client.get_messages(entity, limit=1)
+                maybe_refresh_entity_cursor(client, entity)
                 retry_count += 1
                 if retry_count >= max_retries:
                     raise RuntimeError(
                         f"检测到 Telegram 位点冲突且重试耗尽 (chat_id={chat_id}): {e}"
                     ) from e
-                time.sleep(2)
+                sleep_seconds = short_retry_sleep_seconds(retry_count)
+                logging.warning(
+                    "位点冲突刷新后准备重试: chat_id=%s %s",
+                    chat_id,
+                    format_retry_context(
+                        retry_index=retry_count,
+                        max_retries=max_retries,
+                        wait_seconds=sleep_seconds,
+                    ),
+                )
+                time.sleep(sleep_seconds)
                 continue
 
             retry_count += 1
-            wait_time = retry_count * 5
             if retry_count >= max_retries:
                 logging.error(
                     f"网络或 RPC 错误 (尝试 {retry_count}/{max_retries}): {e}。已达到重试上限。"
@@ -385,10 +411,21 @@ def _harvest_messages_for_entity(
                 raise RuntimeError(
                     f"网络或 RPC 错误重试耗尽，采集中断 (chat_id={chat_id}): {e}"
                 ) from e
+            if is_transient_telegram_error(e) or isinstance(e, RPCError):
+                sleep_seconds = short_retry_sleep_seconds(retry_count)
+            else:
+                sleep_seconds = short_retry_sleep_seconds(retry_count)
             logging.warning(
-                f"网络或 RPC 错误 (尝试 {retry_count}/{max_retries}): {e}。等待 {wait_time}s 重试..."
+                "网络或 RPC 错误，准备重试: chat_id=%s %s error=%s",
+                chat_id,
+                format_retry_context(
+                    retry_index=retry_count,
+                    max_retries=max_retries,
+                    wait_seconds=sleep_seconds,
+                ),
+                e,
             )
-            time.sleep(wait_time)
+            time.sleep(sleep_seconds)
         except Exception as e:
             msg_rows, media_rows = [], []
             logging.error(f"采集发生未预期错误: {e}")

@@ -72,6 +72,18 @@ def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> N
                     shutil.copy2(src, dst)
 
 
+def _configure_telethon_session_sqlite(client: Any) -> None:
+    try:
+        session = getattr(client, "session", None)
+        conn = getattr(session, "_conn", None)
+        if conn is None:
+            return
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA busy_timeout=30000")
+    except Exception:
+        logging.debug("Telethon session SQLite 并发保护配置失败", exc_info=True)
+
+
 def _merge_worker_session_entities_into_base_session(
     base_session_name: Any,
     worker_session_name: Any,
@@ -175,6 +187,7 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
             receive_updates=False,
             **flood_sleep_threshold_kwargs(cfg),
         )
+        _configure_telethon_session_sqlite(client)
         client.connect()
         if not client.is_user_authorized():
             append_log_fn(
@@ -203,6 +216,19 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
 
 
 def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
+    return _create_isolated_worker_client_with_options(
+        cfg,
+        worker_id,
+        receive_updates=False,
+    )
+
+
+def _create_isolated_worker_client_with_options(
+    cfg: Any,
+    worker_id: str,
+    *,
+    receive_updates: bool,
+) -> TelegramClient:
     base_session_name = str(cfg.session_name)
     worker_session_name = f"{base_session_name}_worker_{worker_id}"
     Path(worker_session_name).parent.mkdir(parents=True, exist_ok=True)
@@ -222,11 +248,12 @@ def _create_isolated_worker_client(cfg: Any, worker_id: str) -> TelegramClient:
             request_retries=5,
             connection_retries=5,
             timeout=15,
-            receive_updates=False,
+            receive_updates=bool(receive_updates),
             **flood_sleep_threshold_kwargs(cfg),
         )
         client._tg_harvest_loop = loop
         client._tg_harvest_previous_loop = previous_loop
+        _configure_telethon_session_sqlite(client)
         client.connect()
         return client
     except Exception:

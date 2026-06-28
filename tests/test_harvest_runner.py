@@ -7,7 +7,12 @@ from unittest.mock import patch
 from telethon.errors import FloodWaitError
 
 import tg_harvest.ingest.runner as harvest_runner_module
-from tg_harvest.ingest.flood_wait import AccountFloodWaitError
+from tg_harvest.ingest.flood_wait import (
+    AccountFloodWaitError,
+    exponential_backoff_seconds,
+    format_retry_context,
+    short_retry_sleep_seconds,
+)
 from tg_harvest.ingest.runner import (
     _build_iter_messages_kwargs,
     _harvest_messages_for_entity,
@@ -110,6 +115,30 @@ class HarvestRunnerIterMessagesKwargsTests(unittest.TestCase):
         )
 
 
+class FloodWaitHelpersTests(unittest.TestCase):
+    def test_exponential_backoff_respects_required_wait_floor(self) -> None:
+        with patch("tg_harvest.ingest.flood_wait.random.uniform", return_value=0.75):
+            self.assertEqual(
+                10.75,
+                exponential_backoff_seconds(1, required_wait_seconds=10),
+            )
+            self.assertEqual(
+                4.75,
+                exponential_backoff_seconds(2, required_wait_seconds=0),
+            )
+
+    def test_short_retry_sleep_seconds_uses_compact_jitter_window(self) -> None:
+        with patch("tg_harvest.ingest.flood_wait.random.uniform", return_value=0.4):
+            self.assertEqual(2.4, short_retry_sleep_seconds(1))
+            self.assertEqual(4.4, short_retry_sleep_seconds(2))
+
+    def test_format_retry_context_is_stable(self) -> None:
+        self.assertEqual(
+            "retry=2/3 wait=4.25s",
+            format_retry_context(retry_index=2, max_retries=3, wait_seconds=4.25),
+        )
+
+
 class HarvestRunnerReliabilityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
@@ -205,6 +234,33 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
         sleep_mock.assert_not_called()
         batch_upsert_mock.assert_not_called()
 
+    def test_short_flood_wait_uses_bounded_backoff_sleep(self) -> None:
+        client = _FakeClient(
+            [FloodWaitError(request=None, capture=3), _message_stream(_FakeMessage(11))]
+        )
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch("tg_harvest.ingest.runner.batch_upsert"), patch(
+            "tg_harvest.ingest.runner.CFG.log_every", 1000
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.flood_wait_switch_threshold", 30
+        ), patch(
+            "tg_harvest.ingest.runner.exponential_backoff_seconds", return_value=3.75
+        ) as backoff_mock, patch(
+            "tg_harvest.ingest.runner.time.sleep"
+        ) as sleep_mock:
+            counters, _touched_groups, first_sync = _harvest_messages_for_entity(
+                self.conn, client, object(), 42
+            )
+
+        self.assertFalse(first_sync)
+        self.assertEqual(1, counters.written)
+        backoff_mock.assert_called_once_with(1, required_wait_seconds=3)
+        sleep_mock.assert_called_once_with(3.75)
+
     def test_harvest_messages_can_delegate_writes_to_external_writer(self) -> None:
         client = _FakeClient([_message_stream(_FakeMessage(11), _FakeMessage(12))])
         delegated_batches = []
@@ -278,6 +334,31 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
         self.assertTrue(
             any("[1/1] test-chat 正在采集 13/13" in line for line in captured.output)
         )
+
+    def test_msgid_conflict_refresh_uses_shared_retry_helper(self) -> None:
+        client = _FakeClient([ConnectionError("MsgidDecreaseRetryError"), _message_stream(_FakeMessage(11))])
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch("tg_harvest.ingest.runner.batch_upsert"), patch(
+            "tg_harvest.ingest.runner.CFG.log_every", 1000
+        ), patch(
+            "tg_harvest.ingest.runner.CFG.history_wait_time", None
+        ), patch(
+            "tg_harvest.ingest.runner.maybe_refresh_entity_cursor", return_value=True
+        ) as refresh_mock, patch(
+            "tg_harvest.ingest.runner.short_retry_sleep_seconds", return_value=2.25
+        ) as retry_sleep_mock, patch(
+            "tg_harvest.ingest.runner.time.sleep"
+        ) as sleep_mock:
+            counters, _touched_groups, _first_sync = _harvest_messages_for_entity(
+                self.conn, client, object(), 42
+            )
+
+        self.assertEqual(1, counters.written)
+        refresh_mock.assert_called_once()
+        retry_sleep_mock.assert_called_once_with(1)
+        sleep_mock.assert_called_once_with(2.25)
 
 
 class HarvestRunnerPostprocessTests(unittest.TestCase):

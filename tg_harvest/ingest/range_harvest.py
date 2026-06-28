@@ -8,9 +8,15 @@ from tg_harvest.config import CFG
 from tg_harvest.domain.coerce import safe_int
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
+    bounded_retry_count,
+    call_with_bounded_retry,
+    exponential_backoff_seconds,
+    format_retry_context,
     flood_wait_seconds,
     is_flood_wait_error,
+    is_transient_telegram_error,
     raise_if_long_flood_wait,
+    short_retry_sleep_seconds,
 )
 from tg_harvest.ingest.parse import HarvestCounters, MessageParseError, MessageParser
 from tg_harvest.ingest.runner import _last_message_id_in_rows, _prepare_db_rows
@@ -65,7 +71,15 @@ def _iter_messages_kwargs(**kwargs: Any) -> dict[str, Any]:
 
 
 def read_latest_message_id(client: Any, entity: Any) -> int:
-    message = _first_message(client.get_messages(entity, limit=1))
+    message = _first_message(
+        call_with_bounded_retry(
+            client.get_messages,
+            entity,
+            limit=1,
+            flood_wait_threshold_seconds=CFG.flood_wait_switch_threshold,
+            scope="history-latest-id",
+        )
+    )
     return _message_id(message)
 
 
@@ -77,7 +91,16 @@ def probe_history_access(
     account_label: str = "",
 ) -> HistoryAccessProbeResult:
     try:
-        latest_message = _first_message(client.get_messages(entity, limit=1))
+        latest_message = _first_message(
+            call_with_bounded_retry(
+                client.get_messages,
+                entity,
+                limit=1,
+                flood_wait_threshold_seconds=CFG.flood_wait_switch_threshold,
+                account_label=account_label,
+                scope="history-latest-probe",
+            )
+        )
     except Exception as exc:
         raise_if_long_flood_wait(
             exc,
@@ -97,13 +120,20 @@ def probe_history_access(
     history_probe_depth = max(1, int(min_history_message_id) // 2)
     probe_offset_id = max(2, latest_id - history_probe_depth)
     try:
-        older_message = None
-        for message in client.iter_messages(
-            entity,
-            **_iter_messages_kwargs(limit=1, offset_id=probe_offset_id),
-        ):
-            older_message = message
-            break
+        def _load_older_message() -> Any | None:
+            for message in client.iter_messages(
+                entity,
+                **_iter_messages_kwargs(limit=1, offset_id=probe_offset_id),
+            ):
+                return message
+            return None
+
+        older_message = call_with_bounded_retry(
+            _load_older_message,
+            flood_wait_threshold_seconds=CFG.flood_wait_switch_threshold,
+            account_label=account_label,
+            scope="history-range-probe",
+        )
     except Exception as exc:
         raise_if_long_flood_wait(
             exc,
@@ -193,8 +223,9 @@ def harvest_message_id_range(
     end_id = int(message_range.end_id)
     next_offset_id = end_id + 1
     retry_count = 0
+    safe_max_retries = bounded_retry_count(max_retries)
 
-    while retry_count < max(1, int(max_retries)):
+    while retry_count < safe_max_retries:
         msg_rows: list[tuple] = []
         media_rows: list[tuple] = []
         last_processed_id = next_offset_id
@@ -245,20 +276,23 @@ def harvest_message_id_range(
             if "消息解析失败" in str(exc) or "消息解析为空" in str(exc):
                 raise
             retry_count += 1
-            if retry_count >= max(1, int(max_retries)):
+            if retry_count >= safe_max_retries:
                 raise RuntimeError(
                     f"区间采集失败且重试耗尽: account={account_label or '-'} "
                     f"chat_id={chat_id} range={start_id}-{end_id}: {exc}"
                 ) from exc
-            wait_seconds = retry_count * 5
+            wait_seconds = short_retry_sleep_seconds(retry_count)
             logging.warning(
-                "区间采集失败，准备重试: account=%s chat_id=%s range=%s-%s retry=%s wait=%ss error=%s",
+                "区间采集失败，准备重试: account=%s chat_id=%s range=%s-%s %s error=%s",
                 account_label or "-",
                 chat_id,
                 start_id,
                 end_id,
-                retry_count,
-                wait_seconds,
+                format_retry_context(
+                    retry_index=retry_count,
+                    max_retries=safe_max_retries,
+                    wait_seconds=wait_seconds,
+                ),
                 exc,
             )
             time.sleep(wait_seconds)
@@ -266,7 +300,7 @@ def harvest_message_id_range(
             if isinstance(exc, AccountFloodWaitError):
                 raise
             retry_count += 1
-            if retry_count >= max(1, int(max_retries)):
+            if retry_count >= safe_max_retries:
                 raise RuntimeError(
                     f"区间采集失败且重试耗尽: account={account_label or '-'} "
                     f"chat_id={chat_id} range={start_id}-{end_id}: {exc}"
@@ -278,17 +312,25 @@ def harvest_message_id_range(
                     account_label=account_label,
                     scope=f"range:{chat_id}:{start_id}-{end_id}",
                 )
-                wait_seconds = flood_wait_seconds(exc)
+                wait_seconds = exponential_backoff_seconds(
+                    retry_count,
+                    required_wait_seconds=flood_wait_seconds(exc),
+                )
+            elif is_transient_telegram_error(exc):
+                wait_seconds = short_retry_sleep_seconds(retry_count)
             else:
-                wait_seconds = retry_count * 5
+                wait_seconds = short_retry_sleep_seconds(retry_count)
             logging.warning(
-                "区间采集异常，准备重试: account=%s chat_id=%s range=%s-%s retry=%s wait=%ss error=%s",
+                "区间采集异常，准备重试: account=%s chat_id=%s range=%s-%s %s error=%s",
                 account_label or "-",
                 chat_id,
                 start_id,
                 end_id,
-                retry_count,
-                wait_seconds,
+                format_retry_context(
+                    retry_index=retry_count,
+                    max_retries=safe_max_retries,
+                    wait_seconds=wait_seconds,
+                ),
                 exc,
             )
             time.sleep(wait_seconds)

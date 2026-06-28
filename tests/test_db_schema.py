@@ -198,6 +198,21 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 self.assertIn(expected_index, plan_text)
                 self.assertNotIn("USE TEMP B-TREE", plan_text)
 
+    def test_sync_stats_time_window_query_uses_created_at_index(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT COUNT(*)
+            FROM messages
+            WHERE created_at >= '2026-06-28 00:00:00'
+            """
+        )
+        plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+
+        self.assertIn("idx_messages_created_at", plan_text)
+
     def test_dedupe_group_hash_queries_use_promo_hash_indexes(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()

@@ -28,6 +28,12 @@ class AdminRoutesHandler:
         self.parse_admin_chat_id_fn = services.parse_admin_chat_id_fn
         self.build_admin_chats_payload_fn = services.build_admin_chats_payload_fn
         self.build_admin_stats_payload_fn = services.build_admin_stats_payload_fn
+        self.build_admin_sync_stats_payload_fn = (
+            services.build_admin_sync_stats_payload_fn
+        )
+        self.build_admin_sync_live_messages_payload_fn = (
+            services.build_admin_sync_live_messages_payload_fn
+        )
         self.admin_get_chat_brief_fn = services.admin_get_chat_brief_fn
         self.admin_job_get_snapshot_fn = services.admin_job_get_snapshot_fn
         self.admin_job_get_logs_fn = services.admin_job_get_logs_fn
@@ -199,6 +205,43 @@ class AdminRoutesHandler:
         except sqlite3.Error:
             self.logger.exception("读取后台统计失败")
             return self._json_error("读取后台统计失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_sync_stats(self):
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = self.build_admin_sync_stats_payload_fn(conn)
+            return jsonify(payload)
+        except sqlite3.Error:
+            self.logger.exception("读取消息同步统计失败")
+            return self._json_error("读取消息同步统计失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_sync_live_messages(self):
+        raw_limit = str(request.args.get("limit", "") or "").strip()
+        try:
+            limit = int(raw_limit) if raw_limit else 50
+        except (TypeError, ValueError):
+            return self._json_error("limit 参数非法", 400)
+        if limit <= 0:
+            return self._json_error("limit 参数非法", 400)
+
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = self.build_admin_sync_live_messages_payload_fn(
+                    conn,
+                    limit=limit,
+                )
+            return jsonify(payload)
+        except sqlite3.Error:
+            self.logger.exception("读取实时同步消息失败")
+            return self._json_error("读取实时同步消息失败", 500)
         except Exception:
             self.logger.exception("系统异常")
             return self._json_error("系统异常", 500)
@@ -519,6 +562,8 @@ def register_admin_routes(app, *, services: AdminRouteServices) -> None:
 
     app.get("/api/admin/chats")(handler.api_admin_chats)
     app.get("/api/admin/stats")(handler.api_admin_stats)
+    app.get("/api/admin/sync/stats")(handler.api_admin_sync_stats)
+    app.get("/api/admin/sync/messages")(handler.api_admin_sync_live_messages)
     app.get("/api/admin/jobs/active")(handler.api_admin_active_job)
     app.get("/api/admin/jobs/<job_id>")(handler.api_admin_job_snapshot)
     app.get("/api/admin/jobs/<job_id>/logs")(handler.api_admin_job_logs)

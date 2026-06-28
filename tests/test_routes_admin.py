@@ -46,6 +46,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             parse_admin_chat_id_fn=lambda value: value,
             build_admin_chats_payload_fn=lambda _conn: {"ok": True, "items": []},
             build_admin_stats_payload_fn=lambda _conn, _chat_id: ({"ok": True}, 200),
+            build_admin_sync_stats_payload_fn=lambda _conn: {"ok": True, "windows": []},
+            build_admin_sync_live_messages_payload_fn=lambda _conn, **_kwargs: {"ok": True, "items": []},
             admin_get_chat_brief_fn=lambda _conn, chat_id: {
                 "chat_id": chat_id,
                 "chat_title": f"chat-{chat_id}",
@@ -270,6 +272,40 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual("job-active", payload["job"]["job_id"])
+
+    def test_sync_stats_reads_payload_from_service(self) -> None:
+        self.handler.build_admin_sync_stats_payload_fn = lambda _conn: {
+            "ok": True,
+            "default_window_key": "live",
+            "windows": [{"window_key": "10m", "message_count": 3}],
+        }
+
+        with self.app.test_request_context("/api/admin/sync/stats", method="GET"):
+            response = self.handler.api_admin_sync_stats.__wrapped__(self.handler)
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("10m", payload["windows"][0]["window_key"])
+        self.assertEqual(3, payload["windows"][0]["message_count"])
+
+    def test_sync_live_messages_reads_payload_from_service(self) -> None:
+        self.handler.build_admin_sync_live_messages_payload_fn = lambda _conn, **_kwargs: {
+            "ok": True,
+            "items": [{"chat_id": 1, "message_id": 101}],
+        }
+
+        with self.app.test_request_context(
+            "/api/admin/sync/messages?limit=20",
+            method="GET",
+        ):
+            response = self.handler.api_admin_sync_live_messages.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, payload["items"][0]["chat_id"])
+        self.assertEqual(101, payload["items"][0]["message_id"])
 
     def test_job_stop_marks_active_job_and_logs_request(self) -> None:
         stop_calls = []

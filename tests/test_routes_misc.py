@@ -241,6 +241,10 @@ class AuthRoutesValidationTests(unittest.TestCase):
             auth_module.normalize_admin_next_path("/admin/recovery"),
         )
         self.assertEqual(
+            "/admin/sync",
+            auth_module.normalize_admin_next_path("/admin/sync"),
+        )
+        self.assertEqual(
             "/admin/clone",
             auth_module.normalize_admin_next_path("/admin/clone"),
         )
@@ -356,6 +360,14 @@ class AdminPageRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         self.assertIn("后台数据库管理", response.get_data(as_text=True))
+
+    def test_authenticated_admin_sync_page_renders(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/sync")
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn("消息同步统计", response.get_data(as_text=True))
 
 
 class SearchRoutesValidationTests(unittest.TestCase):
@@ -487,11 +499,14 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
             return app
 
         with patch.object(app_factory, "_ensure_db") as ensure_db_mock, patch.object(
+            app_factory, "ensure_database_chat_listener_runtime"
+        ) as listener_mock, patch.object(
             app_factory, "create_app", side_effect=capture_create_app
         ), patch("flask.Flask.run", return_value=None) as run_mock:
             app_factory.run_web_server(host="127.0.0.1", port=9999, debug=False)
 
         ensure_db_mock.assert_called_once_with()
+        listener_mock.assert_not_called()
         run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=False)
         self.assertEqual(1, len(created_apps))
         self.assertTrue(created_apps[0].extensions["tg_db_ready"])

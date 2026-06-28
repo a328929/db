@@ -1,7 +1,9 @@
 import sqlite3
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
+import tg_harvest.admin_jobs.common as admin_common
 from tg_harvest.admin_jobs.common import resolve_chat_entity
 from tg_harvest.ingest.runner import collect_target_entities
 
@@ -88,6 +90,27 @@ class CollectTargetEntitiesTests(unittest.TestCase):
 
         self.assertIs(entity, resolved)
         self.assertIn("public_name", client.calls)
+
+    def test_resolve_chat_entity_uses_retry_scope_for_username_fallback(self) -> None:
+        entity = SimpleNamespace(id=777, title="by-username")
+        client = _LookupMissClient({"public_name": entity})
+
+        with patch(
+            "tg_harvest.admin_jobs.common.call_with_bounded_retry",
+            wraps=admin_common.call_with_bounded_retry,
+        ) as retry_mock:
+            resolved = resolve_chat_entity(
+                client,
+                -100123,
+                chat_username="public_name",
+                retry_scope="test-resolve",
+            )
+
+        self.assertIs(entity, resolved)
+        scopes = [call.kwargs.get("scope") for call in retry_mock.call_args_list]
+        self.assertIn("test-resolve:chat-id", scopes)
+        self.assertIn("test-resolve:candidate-id", scopes)
+        self.assertIn("test-resolve:username", scopes)
 
 
 if __name__ == "__main__":

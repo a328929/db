@@ -46,6 +46,7 @@ from tg_harvest.admin_jobs.runners import (
     _admin_update_primary_soft_cap,
     _admin_process_single_chat_update,
     _admin_update_secondary_public_resolve_reserve,
+    _admin_update_secondary_username_gap_seconds,
     _admin_update_secondary_target_count,
     _admin_update_account_start_delay,
     _admin_update_all_chats,
@@ -1680,6 +1681,135 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(any("主账号 进入长等待冷却" in line for line in logs))
         self.assertTrue(any("已切换账号完成采集" in line for line in logs))
 
+    def test_all_chat_update_secondary_username_resolution_has_extra_gap(self) -> None:
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one_name"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two_name"},
+            {"chat_id": 3, "chat_title": "three", "chat_username": "three_name"},
+            {"chat_id": 4, "chat_title": "four", "chat_username": "four_name"},
+        ]
+        cfg = SimpleNamespace(
+            admin_update_concurrency=1,
+            admin_update_min_chat_start_gap_seconds=0.0,
+            admin_update_secondary_username_gap_seconds=4.5,
+            admin_update_secondary_public_resolve_limit=2,
+            session_name="main_sess",
+            secondary_session_name="secondary_sess",
+            api_id=1,
+            api_hash="hash",
+        )
+        logs = []
+        harvest_calls = []
+        secondary_username_calls = []
+        sleep_calls = []
+
+        class _AccountClient:
+            def __init__(self, label):
+                self.label = label
+
+            def get_entity(self, key):
+                if self.label == "secondary_sess":
+                    if isinstance(key, str):
+                        secondary_username_calls.append(key)
+                        return SimpleNamespace(
+                            id=2 if key == "two_name" else 4,
+                            title=f"{self.label}-{key}",
+                        )
+                    raise ValueError("could not find the input entity")
+                return SimpleNamespace(id=int(key), title=f"{self.label}-{key}")
+
+            def disconnect(self):
+                return None
+
+        class _CoordinatorStub:
+            def __init__(self, **_kwargs):
+                return None
+
+            def register_chat(self, _chat_id):
+                return None
+
+            def submit_chat_start(self, **_kwargs):
+                return None
+
+            def submit_batch(self, **_kwargs):
+                return None
+
+            def submit_finalize(self, **_kwargs):
+                return None
+
+            def wait_for_chat(self, _chat_id):
+                return None
+
+            def close(self):
+                return None
+
+        def create_client(account_cfg, _worker_id):
+            return _AccountClient(account_cfg.session_name)
+
+        def fake_harvest(_conn, client, entity, _chat_id, **_kwargs):
+            harvest_calls.append((client.label, int(entity.id)))
+            counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+            return counters, set(), False
+
+        def fake_sleep(seconds):
+            sleep_calls.append(float(seconds))
+
+        with patch(
+            "tg_harvest.admin_jobs.runners._ensure_base_session_valid",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._create_isolated_worker_client",
+            side_effect=create_client,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._cleanup_isolated_worker_session",
+            return_value=None,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_get_chat_message_count",
+            return_value=0,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+            return_value=True,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_stop_requested",
+            return_value=False,
+        ), patch(
+            "tg_harvest.admin_jobs.runners.time.sleep",
+            side_effect=fake_sleep,
+        ):
+            ok = _admin_update_all_chats(
+                "job-secondary-username-gap",
+                None,
+                lambda: _FakeConn(rows),
+                lambda _job_id, message: logs.append(str(message)),
+                cfg,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(["two_name", "four_name"], secondary_username_calls)
+        self.assertEqual(
+            [
+                ("main_sess", 1),
+                ("secondary_sess", 2),
+                ("main_sess", 3),
+                ("secondary_sess", 4),
+            ],
+            harvest_calls,
+        )
+        self.assertTrue(
+            any(abs(seconds - 4.5) < 0.05 for seconds in sleep_calls),
+            sleep_calls,
+        )
+        self.assertTrue(
+            any("第二账号公开 username 解析独立节流已启用" in line for line in logs),
+            logs,
+        )
+
     def test_all_chat_update_reuses_account_after_short_cooldown(self) -> None:
         rows = [
             {"chat_id": 1, "chat_title": "one", "chat_username": None},
@@ -1801,6 +1931,19 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             _admin_update_start_gap_seconds(
                 SimpleNamespace(admin_update_min_chat_start_gap_seconds=0.5),
                 active_account_count=2,
+            ),
+        )
+
+    def test_admin_update_secondary_username_gap_seconds_defaults_to_auto(self) -> None:
+        self.assertIsNone(
+            _admin_update_secondary_username_gap_seconds(
+                SimpleNamespace(admin_update_secondary_username_gap_seconds=None)
+            )
+        )
+        self.assertEqual(
+            4.5,
+            _admin_update_secondary_username_gap_seconds(
+                SimpleNamespace(admin_update_secondary_username_gap_seconds=4.5)
             ),
         )
 
@@ -2234,6 +2377,109 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             [{"progress_total": 999, "progress_prefix": "[1/1] chat-1 (ID=1) 正在采集"}],
             progress_kwargs,
         )
+
+    def test_process_single_chat_update_can_skip_progress_probe(self) -> None:
+        append_log = []
+        progress_kwargs = []
+        counters = SimpleNamespace(seen=1, written=1, parse_failures=0)
+
+        def _append(_job_id, message):
+            append_log.append(str(message))
+
+        class _CoordinatorStub:
+            instances = []
+
+            def __init__(self, **_kwargs):
+                self.registered = []
+                self.chat_starts = []
+                self.batches = []
+                self.finalized = []
+                self.waited = []
+                self.closed = False
+                self.__class__.instances.append(self)
+
+            def register_chat(self, chat_id):
+                self.registered.append(chat_id)
+
+            def submit_chat_start(self, **kwargs):
+                self.chat_starts.append(kwargs)
+
+            def submit_batch(self, **kwargs):
+                self.batches.append(kwargs)
+
+            def submit_finalize(self, **kwargs):
+                self.finalized.append(kwargs)
+
+            def wait_for_chat(self, chat_id):
+                self.waited.append(chat_id)
+
+            def close(self):
+                self.closed = True
+
+        def fake_harvest(_conn, _client, _entity, chat_id, **kwargs):
+            progress_kwargs.append(
+                {
+                    "progress_total": kwargs.get("progress_total"),
+                    "progress_prefix": kwargs.get("progress_prefix"),
+                }
+            )
+            write_batch_fn = kwargs.get("write_batch_fn")
+            self.assertIsNotNone(write_batch_fn)
+            write_batch_fn(
+                [
+                    (
+                        chat_id,
+                        101,
+                        "",
+                        0,
+                        0,
+                        "",
+                        "",
+                        "",
+                        "",
+                        "TEXT",
+                        9001,
+                    )
+                ],
+                [],
+            )
+            return counters, {9001}, False
+
+        with patch(
+            "tg_harvest.admin_jobs.runners.resolve_chat_entity",
+            return_value=SimpleNamespace(id=999, title="chat-1", username=None),
+        ), patch(
+            "tg_harvest.admin_jobs.runners.ChatUpdateWriteCoordinator",
+            _CoordinatorStub,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._probe_update_progress_total",
+        ) as probe_mock, patch(
+            "tg_harvest.ingest.runner._harvest_messages_for_entity",
+            side_effect=fake_harvest,
+        ), patch(
+            "tg_harvest.admin_jobs.runners._admin_job_update_progress",
+        ):
+            _admin_process_single_chat_update(
+                job_id="job-1",
+                client=object(),
+                cfg=SimpleNamespace(flood_wait_switch_threshold=30),
+                get_conn_fn=lambda: _FakeConn([]),
+                admin_job_append_log_fn=_append,
+                chat_id=1,
+                chat_title="chat-1",
+                chat_username="chat_name",
+                idx=1,
+                total=1,
+                account_label="主账号",
+                enable_progress_probe=False,
+            )
+
+        probe_mock.assert_not_called()
+        self.assertEqual(
+            [{"progress_total": None, "progress_prefix": "正在采集"}],
+            progress_kwargs,
+        )
+        self.assertTrue(any("增量更新完成" in line for line in append_log))
 
     def test_streaming_helper_finalizes_partial_batches_after_harvest_failure(self) -> None:
         class _CoordinatorStub:

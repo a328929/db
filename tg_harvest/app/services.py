@@ -78,6 +78,8 @@ class AdminRouteServices:
     parse_admin_chat_id_fn: Any
     build_admin_chats_payload_fn: Any
     build_admin_stats_payload_fn: Any
+    build_admin_sync_stats_payload_fn: Any
+    build_admin_sync_live_messages_payload_fn: Any
     admin_get_chat_brief_fn: Any
     admin_job_get_snapshot_fn: Any
     admin_job_get_logs_fn: Any

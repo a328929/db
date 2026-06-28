@@ -23,3 +23,8 @@ def register_page_routes(app, *, page_size: int) -> None:
     @admin_page_login_required
     def admin_manage_page():
         return render_template("admin_manage.html")
+
+    @app.get("/admin/sync")
+    @admin_page_login_required
+    def admin_sync_page():
+        return render_template("admin_sync.html")

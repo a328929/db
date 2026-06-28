@@ -49,6 +49,8 @@ from tg_harvest.admin_jobs.runtime import configure_admin_job_runtime
 from tg_harvest.app.admin_payloads import (
     build_admin_chats_payload,
     build_admin_stats_payload,
+    build_admin_sync_live_messages_payload,
+    build_admin_sync_stats_payload,
     get_admin_chat_brief,
     parse_admin_chat_id,
 )
@@ -63,6 +65,7 @@ from tg_harvest.app.services import (
 from tg_harvest.config import CFG
 from tg_harvest.domain.meta_payload import _build_meta_payload
 from tg_harvest.ingest.parse import setup_logging
+from tg_harvest.runtime.db_listener import ensure_database_chat_listener_runtime
 from tg_harvest.search.maintenance import (
     configure_message_search_maintenance,
     schedule_message_search_maintenance,
@@ -124,6 +127,7 @@ _DB_FREE_ENDPOINTS = frozenset(
         "index",
         "admin_login_page",
         "admin_manage_page",
+        "admin_sync_page",
         "admin_channels_page",
         "admin_clone_page",
         "admin_clone_runs_manage_page",
@@ -226,6 +230,7 @@ def _ensure_db() -> None:
         )
     configure_message_search_maintenance(get_conn)
     schedule_message_search_maintenance()
+    ensure_database_chat_listener_runtime(cfg=CFG, get_conn_fn=get_conn)
 
 
 def _ensure_runtime_db(app: Flask) -> None:
@@ -256,6 +261,8 @@ def _build_admin_route_services() -> AdminRouteServices:
         parse_admin_chat_id_fn=parse_admin_chat_id,
         build_admin_chats_payload_fn=build_admin_chats_payload,
         build_admin_stats_payload_fn=build_admin_stats_payload,
+        build_admin_sync_stats_payload_fn=build_admin_sync_stats_payload,
+        build_admin_sync_live_messages_payload_fn=build_admin_sync_live_messages_payload,
         admin_get_chat_brief_fn=get_admin_chat_brief,
         admin_job_get_snapshot_fn=_admin_job_get_snapshot,
         admin_job_get_logs_fn=_admin_job_get_logs,

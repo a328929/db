@@ -1,0 +1,116 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>消息同步统计</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_sync.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-sync-page">
+    <header class="page-header">
+      <p class="eyebrow">Sync Console</p>
+      <h1>消息同步统计</h1>
+      <p class="subtle">查看不同时间窗口内的消息入库情况</p>
+      <p class="subtle"><a href="/admin/manage" class="admin-link">返回后台管理</a></p>
+    </header>
+
+    <section class="panel sync-panel" aria-labelledby="syncOverviewTitle">
+      <div class="sync-panel-head">
+        <div>
+          <h2 id="syncOverviewTitle" class="section-title">同步概览</h2>
+          <p id="admin-sync-status" class="sync-subline" role="status" aria-live="polite">正在读取消息同步统计...</p>
+        </div>
+        <div class="sync-toolbar">
+          <button id="admin-sync-refresh-btn" class="btn" type="button" aria-label="刷新消息同步统计">
+            刷新
+          </button>
+        </div>
+      </div>
+
+      <ul class="admin-stats sync-stats" aria-label="消息同步统计摘要">
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">当前窗口</span>
+          <strong id="admin-sync-window-label" class="admin-stat-value" aria-live="polite">暂无</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">窗口消息数</span>
+          <strong id="admin-sync-window-messages" class="admin-stat-value" aria-live="polite">0</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">覆盖群组数</span>
+          <strong id="admin-sync-window-chats" class="admin-stat-value" aria-live="polite">0</strong>
+        </li>
+        <li class="admin-stat-card">
+          <span class="admin-stat-label">最近入库时间</span>
+          <strong id="admin-sync-latest-created-at" class="admin-stat-value" aria-live="polite">暂无</strong>
+        </li>
+      </ul>
+
+      <p id="admin-sync-metric-note" class="sync-note" aria-live="polite"></p>
+    </section>
+
+    <section class="panel sync-panel" aria-labelledby="syncWindowsTitle">
+      <div class="sync-panel-head">
+        <div>
+          <h2 id="syncWindowsTitle" class="section-title">时间窗口</h2>
+          <p class="sync-subline">默认“时时”会展示最近入库消息流；切换其他窗口查看聚合统计。</p>
+        </div>
+        <div class="sync-toolbar">
+          <label for="admin-sync-window-select" class="sr-only">选择时间窗口</label>
+          <select id="admin-sync-window-select" aria-label="选择消息同步统计时间窗口"></select>
+        </div>
+      </div>
+
+      <div id="admin-sync-window-grid" class="sync-window-grid" aria-label="消息同步窗口卡片列表"></div>
+    </section>
+
+    <section
+      id="admin-sync-live-section"
+      class="panel sync-panel"
+      aria-labelledby="syncLiveTitle"
+      hidden
+    >
+      <div class="sync-panel-head">
+        <div>
+          <h2 id="syncLiveTitle" class="section-title">时时同步消息</h2>
+          <p id="admin-sync-live-status" class="sync-subline" role="status" aria-live="polite">正在读取最近入库消息...</p>
+        </div>
+      </div>
+
+      <div id="admin-sync-live-list" class="sync-live-list" aria-label="最近入库消息列表"></div>
+    </section>
+  </main>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminLoginDialogTitle"
+    hidden
+  >
+    <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
+    <p class="subtle">进入消息同步统计页面，请先验证管理员密码。</p>
+    <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input
+        id="admin-password-input"
+        name="admin-password-input"
+        type="password"
+        placeholder="请输入管理员密码"
+        aria-label="管理员密码"
+      />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_sync.js') }}"></script>
+</body>
+</html>

@@ -3,8 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
-from tg_harvest.admin_jobs.sessions import _cleanup_isolated_worker_session
+from tg_harvest.admin_jobs.sessions import (
+    _cleanup_isolated_worker_session,
+    _configure_telethon_session_sqlite,
+)
 
 
 def _create_session_entities(path: Path, rows: list[tuple]) -> None:
@@ -103,6 +107,34 @@ class WorkerSessionCleanupTests(unittest.TestCase):
             self.assertEqual("stable_name", entities[1][2])
             self.assertEqual("base-newer", entities[1][4])
             self.assertEqual(300, entities[1][5])
+
+    def test_configure_telethon_session_sqlite_enables_wal_and_busy_timeout(self) -> None:
+        statements = []
+
+        class _Conn:
+            def execute(self, sql):
+                statements.append(str(sql))
+
+        client = SimpleNamespace(session=SimpleNamespace(_conn=_Conn()))
+
+        _configure_telethon_session_sqlite(client)
+
+        self.assertEqual(
+            ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=30000"],
+            statements,
+        )
+
+    def test_configure_telethon_session_sqlite_swallows_sqlite_failures(self) -> None:
+        class _Conn:
+            def execute(self, _sql):
+                raise sqlite3.OperationalError("locked")
+
+        client = SimpleNamespace(session=SimpleNamespace(_conn=_Conn()))
+
+        with patch("tg_harvest.admin_jobs.sessions.logging.debug") as debug_mock:
+            _configure_telethon_session_sqlite(client)
+
+        self.assertTrue(debug_mock.called)
 
 
 if __name__ == "__main__":

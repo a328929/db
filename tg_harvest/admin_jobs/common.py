@@ -10,7 +10,10 @@ from tg_harvest.admin_jobs.core import (
 from tg_harvest.admin_jobs.sessions import _start_job_heartbeat, bind_client_event_loop
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
 from tg_harvest.domain.coerce import clean_username
-from tg_harvest.ingest.flood_wait import is_flood_wait_error
+from tg_harvest.ingest.flood_wait import (
+    call_with_bounded_retry,
+    is_flood_wait_error,
+)
 
 
 class UsernameFallbackSkippedError(RuntimeError):
@@ -54,10 +57,19 @@ def resolve_chat_entity(
     *,
     allow_username_fallback: bool = True,
     username_fallback_gate: Callable[[], bool] | None = None,
+    username_fallback_before_lookup: Callable[[], None] | None = None,
+    retry_scope: str = "resolve-chat-entity",
 ) -> Any:
+    def _get_entity(value: Any, *, scope_suffix: str) -> Any:
+        return call_with_bounded_retry(
+            client.get_entity,
+            value,
+            scope=f"{retry_scope}:{scope_suffix}",
+        )
+
     with bind_client_event_loop(client):
         try:
-            return client.get_entity(chat_id)
+            return _get_entity(chat_id, scope_suffix="chat-id")
         except Exception as exc:
             if is_flood_wait_error(exc):
                 raise
@@ -69,7 +81,7 @@ def resolve_chat_entity(
                 if fallback_id == int(chat_id):
                     continue
                 try:
-                    return client.get_entity(fallback_id)
+                    return _get_entity(fallback_id, scope_suffix="candidate-id")
                 except Exception as fallback_exc:
                     if is_flood_wait_error(fallback_exc):
                         raise
@@ -78,7 +90,9 @@ def resolve_chat_entity(
             if chat_username and allow_username_fallback:
                 if username_fallback_gate is not None and not username_fallback_gate():
                     raise UsernameFallbackSkippedError(chat_id, chat_username) from exc
-                return client.get_entity(chat_username)
+                if username_fallback_before_lookup is not None:
+                    username_fallback_before_lookup()
+                return _get_entity(chat_username, scope_suffix="username")
             if chat_username and not allow_username_fallback:
                 raise UsernameFallbackSkippedError(chat_id, chat_username) from exc
             raise exc

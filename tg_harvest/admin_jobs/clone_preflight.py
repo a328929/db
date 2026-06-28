@@ -35,6 +35,7 @@ from tg_harvest.domain.clone_plan import (
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
 )
 from tg_harvest.domain.coerce import safe_int
+from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 from tg_harvest.storage.clone import load_clone_run, update_clone_plan
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
@@ -115,7 +116,19 @@ def _resolve_access(
 def _read_latest_source_message(client: Any, entity: Any) -> tuple[dict[str, Any], str]:
     try:
         with bind_client_event_loop(client):
-            return _message_summary(_first_message(client.get_messages(entity, limit=1))), ""
+            return (
+                _message_summary(
+                    _first_message(
+                        call_with_bounded_retry(
+                            client.get_messages,
+                            entity,
+                            limit=1,
+                            scope="clone-preflight-latest-source",
+                        )
+                    )
+                ),
+                "",
+            )
     except Exception as exc:
         return {}, admin_error_message(exc)
 

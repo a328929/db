@@ -346,6 +346,47 @@ def test_clone_deep_preflight_job_persists_online_plan(tmp_path):
     assert any("深度预检完成" in message for message in logs)
 
 
+def test_clone_deep_preflight_reads_latest_source_via_bounded_retry(tmp_path):
+    db_path = tmp_path / "clone-deep-retry.db"
+    _create_job_db(db_path)
+    _create_deep_plan(db_path, with_target=True)
+
+    with (
+        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
+        patch(
+            "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
+            side_effect=[
+                _DeepPreflightClient(source_ok=True, target_ok=True),
+                _DeepPreflightClient(source_ok=False, target_ok=True),
+            ],
+        ),
+        patch("tg_harvest.admin_jobs.clone_preflight._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_preflight._cleanup_isolated_worker_session"),
+        patch(
+            "tg_harvest.admin_jobs.clone_preflight.call_with_bounded_retry"
+        ) as retry_mock,
+    ):
+        retry_mock.side_effect = lambda fn, *args, **kwargs: fn(*args, **kwargs)
+        _admin_clone_deep_preflight_job_runner(
+            "job-deep",
+            run_id="job-clone",
+            plan_id="job-deep",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda *_args: True,
+            admin_job_append_log_fn=lambda *_args: None,
+        )
+
+    assert retry_mock.called
+    assert any(
+        call.kwargs.get("scope") == "clone-preflight-latest-source"
+        for call in retry_mock.call_args_list
+    )
+
+
 def test_clone_deep_preflight_job_blocks_when_target_missing(tmp_path):
     db_path = tmp_path / "clone-deep-missing-target.db"
     _create_job_db(db_path)

@@ -117,6 +117,12 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_messages_date_global "
         "ON messages(msg_date_ts DESC, message_id DESC, pk DESC)"
     )
+    _ensure_index(
+        cur,
+        "idx_messages_created_at",
+        "CREATE INDEX idx_messages_created_at "
+        "ON messages(created_at DESC, chat_id, message_id)"
+    )
 
     if table_has_column(cur, "messages", SEARCH_TEXT_PRESENT_COLUMN):
         _ensure_index(

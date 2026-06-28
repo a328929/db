@@ -121,6 +121,11 @@ def _load_raw_config_values() -> dict:
         "admin_update_min_chat_start_gap_seconds": _env_optional_float(
             "TG_ADMIN_UPDATE_MIN_CHAT_START_GAP_SECONDS"
         ),
+        # 全部群组更新时，第二账号执行公开 username 解析前的最小额外间隔秒数。
+        # 空值表示自动采用比普通群组启动更保守的节流。
+        "admin_update_secondary_username_gap_seconds": _env_optional_float(
+            "TG_ADMIN_UPDATE_SECONDARY_USERNAME_GAP_SECONDS"
+        ),
         # 全部群组更新时，允许第二账号主动按公开 username 解析的群组数量上限。
         # 0 表示彻底关闭主动预热；空值表示按缓存覆盖率自动渐进预热。
         "admin_update_secondary_public_resolve_limit": _env_optional_int(
@@ -129,6 +134,26 @@ def _load_raw_config_values() -> dict:
         # 全部群组更新时，全部账号都处于 FloodWait 时最多等待多久。
         "admin_update_max_cooldown_wait_seconds": _env_int(
             "TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS", 45
+        ),
+        # 数据库内群组事件监听。仅监听已入库群组，不自动纳入新加入群。
+        "db_listener_enabled": _env_int("TG_DB_LISTENER_ENABLED", 1),
+        # 数据库内群组缓存刷新周期，单位秒。
+        "db_listener_refresh_seconds": _env_int("TG_DB_LISTENER_REFRESH_SECONDS", 120),
+        # 是否启用公开群的低频定向探测。
+        "db_listener_public_probe_enabled": _env_int(
+            "TG_DB_LISTENER_PUBLIC_PROBE_ENABLED", 1
+        ),
+        # 公开群低频定向探测的轮询周期，单位秒。
+        "db_listener_public_probe_interval_seconds": _env_int(
+            "TG_DB_LISTENER_PUBLIC_PROBE_INTERVAL_SECONDS", 180
+        ),
+        # 每轮公开群低频定向探测最多处理的群组数。
+        "db_listener_public_probe_batch_size": _env_int(
+            "TG_DB_LISTENER_PUBLIC_PROBE_BATCH_SIZE", 4
+        ),
+        # 同一公开群两次定向探测之间的最小间隔，单位秒。
+        "db_listener_public_probe_chat_cooldown_seconds": _env_int(
+            "TG_DB_LISTENER_PUBLIC_PROBE_CHAT_COOLDOWN_SECONDS", 3600
         ),
         # 可选运维机器人；默认关闭，只用于任务通知，不参与历史消息采集。
         "ops_bot_enabled": _env_int("TG_OPS_BOT_ENABLED", 0),
@@ -193,12 +218,32 @@ def _normalize_config_values(raw: dict) -> dict:
         normalized["admin_update_min_chat_start_gap_seconds"] = max(
             0.0, float(normalized["admin_update_min_chat_start_gap_seconds"])
         )
+    if normalized["admin_update_secondary_username_gap_seconds"] is not None:
+        normalized["admin_update_secondary_username_gap_seconds"] = max(
+            0.0, float(normalized["admin_update_secondary_username_gap_seconds"])
+        )
     if normalized["admin_update_secondary_public_resolve_limit"] is not None:
         normalized["admin_update_secondary_public_resolve_limit"] = max(
             0, int(normalized["admin_update_secondary_public_resolve_limit"])
         )
     normalized["admin_update_max_cooldown_wait_seconds"] = max(
         0, int(normalized["admin_update_max_cooldown_wait_seconds"])
+    )
+    normalized["db_listener_enabled"] = enabled_int(normalized["db_listener_enabled"])
+    normalized["db_listener_refresh_seconds"] = max(
+        30, int(normalized["db_listener_refresh_seconds"])
+    )
+    normalized["db_listener_public_probe_enabled"] = enabled_int(
+        normalized["db_listener_public_probe_enabled"]
+    )
+    normalized["db_listener_public_probe_interval_seconds"] = max(
+        60, int(normalized["db_listener_public_probe_interval_seconds"])
+    )
+    normalized["db_listener_public_probe_batch_size"] = max(
+        1, int(normalized["db_listener_public_probe_batch_size"])
+    )
+    normalized["db_listener_public_probe_chat_cooldown_seconds"] = max(
+        300, int(normalized["db_listener_public_probe_chat_cooldown_seconds"])
     )
     normalized["ops_bot_enabled"] = enabled_int(normalized["ops_bot_enabled"])
     if normalized["ops_bot_timeout_seconds"] is None:
@@ -244,11 +289,26 @@ def _build_app_config(values: dict) -> "AppConfig":
         admin_update_min_chat_start_gap_seconds=values[
             "admin_update_min_chat_start_gap_seconds"
         ],
+        admin_update_secondary_username_gap_seconds=values[
+            "admin_update_secondary_username_gap_seconds"
+        ],
         admin_update_secondary_public_resolve_limit=values[
             "admin_update_secondary_public_resolve_limit"
         ],
         admin_update_max_cooldown_wait_seconds=values[
             "admin_update_max_cooldown_wait_seconds"
+        ],
+        db_listener_enabled=values["db_listener_enabled"],
+        db_listener_refresh_seconds=values["db_listener_refresh_seconds"],
+        db_listener_public_probe_enabled=values["db_listener_public_probe_enabled"],
+        db_listener_public_probe_interval_seconds=values[
+            "db_listener_public_probe_interval_seconds"
+        ],
+        db_listener_public_probe_batch_size=values[
+            "db_listener_public_probe_batch_size"
+        ],
+        db_listener_public_probe_chat_cooldown_seconds=values[
+            "db_listener_public_probe_chat_cooldown_seconds"
         ],
         ops_bot_enabled=values["ops_bot_enabled"],
         ops_bot_token=values["ops_bot_token"],
@@ -301,8 +361,15 @@ class AppConfig:
     admin_job_log_max_lines: int
     admin_update_concurrency: int
     admin_update_min_chat_start_gap_seconds: float | None
+    admin_update_secondary_username_gap_seconds: float | None
     admin_update_secondary_public_resolve_limit: int | None
     admin_update_max_cooldown_wait_seconds: int
+    db_listener_enabled: int
+    db_listener_refresh_seconds: int
+    db_listener_public_probe_enabled: int
+    db_listener_public_probe_interval_seconds: int
+    db_listener_public_probe_batch_size: int
+    db_listener_public_probe_chat_cooldown_seconds: int
     ops_bot_enabled: int
     ops_bot_token: str
     ops_bot_notify_chat_id: str

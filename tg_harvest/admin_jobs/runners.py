@@ -551,6 +551,20 @@ def _admin_update_start_gap_seconds(
         return 1.25 if int(active_account_count) > 1 else 0.25
 
 
+def _admin_update_secondary_username_gap_seconds(cfg: Any) -> float | None:
+    configured_value = getattr(
+        cfg,
+        "admin_update_secondary_username_gap_seconds",
+        None,
+    )
+    if configured_value is None:
+        return None
+    try:
+        return max(0.0, float(configured_value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _admin_update_effective_start_gap_seconds(
     *,
     base_gap_seconds: float,
@@ -814,12 +828,15 @@ def _admin_update_all_chats(
     account_started_counts: dict[str, int] = {}
     account_logged_gap_levels: dict[str, float] = {}
     secondary_username_resolve_lock = Lock()
+    secondary_username_next_allowed_at = 0.0
     secondary_username_resolve_used = 0
     secondary_cached_identity_set = {
         int(chat_id) for chat_id in (secondary_cached_chat_ids or set())
     }
     secondary_username_budget_exhausted_logged = False
     secondary_username_takeover_logged = False
+    secondary_username_gap_logged = False
+    secondary_username_gap_seconds = _admin_update_secondary_username_gap_seconds(cfg)
     no_available_accounts = False
     try:
         max_cooldown_wait_seconds = max(
@@ -840,6 +857,8 @@ def _admin_update_all_chats(
     ) -> int:
         nonlocal secondary_username_resolve_used
         nonlocal secondary_username_budget_exhausted_logged
+        nonlocal secondary_username_next_allowed_at
+        nonlocal secondary_username_gap_logged
         local_client = None
         worker_id = f"{job_id}_{account.key}_{idx}"
         semaphore = account_semaphores.get(account.key)
@@ -890,8 +909,49 @@ def _admin_update_all_chats(
             try:
                 resolve_kwargs: dict[str, Any] = {
                     "allow_username_fallback": True,
+                    "retry_scope": "admin-update-resolve-entity",
                 }
                 if account_key == "secondary":
+
+                    def _wait_for_secondary_username_resolve_slot() -> None:
+                        if current_chat_identity in secondary_cached_identity_set:
+                            return
+                        effective_gap_seconds = secondary_username_gap_seconds
+                        if effective_gap_seconds is None:
+                            effective_gap_seconds = max(
+                                3.0,
+                                account_start_gap_seconds,
+                            )
+                        effective_gap_seconds = max(
+                            float(effective_gap_seconds),
+                            account_start_gap_seconds,
+                        )
+                        if effective_gap_seconds <= 0:
+                            return
+                        nonlocal secondary_username_next_allowed_at
+                        nonlocal secondary_username_gap_logged
+                        with secondary_username_resolve_lock:
+                            now = time.time()
+                            wait_seconds = max(
+                                0.0,
+                                float(secondary_username_next_allowed_at) - now,
+                            )
+                            secondary_username_next_allowed_at = max(
+                                float(secondary_username_next_allowed_at),
+                                now,
+                            ) + effective_gap_seconds
+                            should_log = not secondary_username_gap_logged
+                            if should_log:
+                                secondary_username_gap_logged = True
+                        if should_log:
+                            admin_job_append_log_fn(
+                                job_id,
+                                "第二账号公开 username 解析独立节流已启用："
+                                f"两次公开解析之间至少间隔约 {effective_gap_seconds:.2f}s",
+                            )
+                        if wait_seconds > 0:
+                            time.sleep(wait_seconds)
+
                     def _secondary_username_fallback_gate() -> bool:
                         nonlocal secondary_username_resolve_used
                         nonlocal secondary_username_budget_exhausted_logged
@@ -936,8 +996,14 @@ def _admin_update_all_chats(
                             secondary_username_resolve_used += 1
                             return True
 
+                    def _secondary_username_fallback_before_lookup() -> None:
+                        _wait_for_secondary_username_resolve_slot()
+
                     resolve_kwargs["username_fallback_gate"] = (
                         _secondary_username_fallback_gate
+                    )
+                    resolve_kwargs["username_fallback_before_lookup"] = (
+                        _secondary_username_fallback_before_lookup
                     )
                 entity = resolve_chat_entity(
                     local_client,
@@ -1371,9 +1437,9 @@ def _admin_process_single_chat_update(
     idx: int,
     total: int,
     account_label: str = "主账号",
+    enable_progress_probe: bool = True,
 ) -> None:
     chat_label = _chat_log_label(chat_id, chat_title)
-    probe_mode_enabled = True
     admin_job_append_log_fn(
         job_id,
         f"[{idx}/{total}] 准备更新群组：{chat_label}",
@@ -1404,7 +1470,7 @@ def _admin_process_single_chat_update(
         admin_job_append_log_fn(job_id, "启用边抓取边写入：抓取与数据库写入并行执行")
         progress_total = None
         progress_prefix = "正在采集"
-        if probe_mode_enabled:
+        if enable_progress_probe:
             progress_total = _probe_update_progress_total(
                 client=client,
                 entity=entity,
