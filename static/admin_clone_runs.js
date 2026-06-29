@@ -3,6 +3,7 @@
 
   var shared = window.AdminManageShared;
   var sharedFetchJSON = shared.fetchJSON;
+  var formatDateTime = shared.formatDateTime;
   var setElementDisabled = shared.setElementDisabled;
   var trapFocusWithin = shared.trapFocusWithin;
   var normalizeNonnegativeInteger = shared.normalizeNonnegativeInteger;
@@ -312,12 +313,6 @@
     var sourceTitle = String((run && run.source_title) || '未知源').trim();
     var targetTitle = String((run && run.target_title) || '').trim();
     return targetTitle ? sourceTitle + ' -> ' + targetTitle : sourceTitle;
-  }
-
-  function formatDateTime(value) {
-    var text = String(value || '').trim();
-    if (!text) return '暂无';
-    return text.replace('T', ' ').replace('+00:00', '');
   }
 
   function getRunStatusLabel(status) {

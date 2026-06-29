@@ -12,6 +12,45 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("display_helpers.js", index_template)
         self.assertIn("display_helpers.js", context_template)
 
+    def test_shared_display_time_formatter_uses_shanghai_timezone(self) -> None:
+        source = (ROOT / "static" / "display_helpers.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Asia/Shanghai", source)
+        self.assertIn("formatToParts", source)
+        self.assertIn("parseUtcDateTime", source)
+        self.assertIn("formatShanghaiDateTime", source)
+        self.assertIn("formatDateTime", source)
+
+    def test_shared_display_time_formatter_renders_beijing_time(self) -> None:
+        script = """
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync('static/display_helpers.js', 'utf8');
+        const sandbox = {
+          window: {},
+          document: {},
+          console,
+          Intl
+        };
+        sandbox.window = sandbox;
+        vm.runInNewContext(source, sandbox);
+        const value = sandbox.TgHarvestDisplay.formatDateTime('2026-06-29 04:11:19');
+        if (value !== '2026-06-29 12:11:19') {
+          throw new Error(value);
+        }
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_admin_template_loads_shared_admin_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_manage.html").read_text(encoding="utf-8")
         self.assertIn("admin_manage_shared.js", template)
@@ -44,6 +83,56 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("list.setAttribute('aria-atomic'", source)
         self.assertIn(".admin-log-list {", styles)
         self.assertIn(".admin-log-placeholder {", styles)
+
+    def test_shared_admin_time_formatter_uses_shanghai_timezone(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Asia/Shanghai", source)
+        self.assertIn("formatToParts", source)
+        self.assertIn("parseUtcDateTime", source)
+        self.assertIn("formatShanghaiDateTime", source)
+        self.assertNotIn("replace('+00:00', '')", source)
+
+    def test_shared_admin_time_formatter_renders_beijing_time(self) -> None:
+        script = """
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync('static/admin_manage_shared.js', 'utf8');
+        const sandbox = {
+          window: {},
+          document: {},
+          console,
+          Intl,
+          URLSearchParams,
+          setTimeout,
+          clearTimeout
+        };
+        sandbox.window = sandbox;
+        vm.runInNewContext(source, sandbox);
+        const value = sandbox.AdminManageShared.formatDateTime('2026-06-29 04:11:19');
+        if (value !== '2026-06-29 12:11:19') {
+          throw new Error(value);
+        }
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_search_and_sync_time_labels_use_shared_formatters(self) -> None:
+        app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        sync_source = (ROOT / "static" / "admin_sync.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("display.formatDateTime(item.msg_date_text)", app_source)
+        self.assertIn("formatDateTime(item.msg_date_text)", sync_source)
 
     def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
         for template_name in (
@@ -150,7 +239,7 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertEqual(1, source.count("message_limit:"))
         self.assertIn("send_delay_ms:", source)
         self.assertIn("source_copy_without_attribution", source)
-        self.assertIn("隐藏来源复制转发", source)
+        self.assertIn("通过中转群桥接", source)
         self.assertNotIn("/resolve-media", source)
         self.assertNotIn("/migrate-media", source)
         self.assertNotIn("/migrate-text", source)

@@ -260,7 +260,7 @@
 
   function _buildResultMetaText(item, effectiveSort) {
     const parts = [];
-    parts.push(item.msg_date_text || "");
+    parts.push(display.formatDateTime(item.msg_date_text));
     if (item.chat_title) parts.push(item.chat_title);
     parts.push(display.typeToLabel(item.msg_type));
 

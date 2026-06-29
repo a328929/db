@@ -337,7 +337,7 @@
       item.msg_type || 'TEXT'
     ];
     if (item.msg_date_text) {
-      metaParts.push('消息时间 ' + item.msg_date_text);
+      metaParts.push('消息时间 ' + formatDateTime(item.msg_date_text));
     }
     chatWrap.appendChild(
       createTextElement('div', 'sync-live-chat-meta', metaParts.join(' · '))

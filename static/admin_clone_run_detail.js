@@ -658,12 +658,6 @@
     return formatNumber(done) + ' / ' + formatNumber(total);
   }
 
-  function formatDateTime(value) {
-    var text = String(value || '').trim();
-    if (!text) return '暂无';
-    return text.replace('T', ' ').replace('+00:00', '');
-  }
-
   function getRunStatusLabel(status) {
     var normalized = String(status || '').trim().toLowerCase();
     if (normalized === 'queued') return '排队中';

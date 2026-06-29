@@ -150,10 +150,67 @@
     return String(Math.trunc(number)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   }
 
-  function formatDateTime(value) {
+  var SHANGHAI_DATE_TIME_FORMATTER = new Intl.DateTimeFormat('zh-CN', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false
+  });
+
+  function parseUtcDateTime(value) {
     var text = String(value || '').trim();
-    if (!text) return '暂无';
-    return text.replace('T', ' ').replace(/\.\d+.*$/, '');
+    if (!text) {
+      return null;
+    }
+
+    var normalized = text.replace('T', ' ').replace(/\s+UTC$/i, '');
+    var hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
+    var candidate = normalized.replace(' ', 'T');
+    if (hasTimezone) {
+      candidate = candidate.replace(/(\.\d+)(?=Z|[+-]\d{2}:?\d{2}$)/i, '');
+    } else {
+      candidate = candidate.replace(/\.\d+$/, '');
+      candidate += 'Z';
+    }
+
+    var parsed = new Date(candidate);
+    if (Number.isNaN(parsed.getTime())) {
+      return null;
+    }
+    return parsed;
+  }
+
+  function formatShanghaiDateTime(date) {
+    var parts = SHANGHAI_DATE_TIME_FORMATTER.formatToParts(date);
+    var values = {};
+    parts.forEach(function (part) {
+      values[part.type] = part.value;
+    });
+    if (
+      !values.year
+      || !values.month
+      || !values.day
+      || !values.hour
+      || !values.minute
+      || !values.second
+    ) {
+      return SHANGHAI_DATE_TIME_FORMATTER.format(date).replace(/\//g, '-');
+    }
+    return values.year + '-' + values.month + '-' + values.day + ' '
+      + values.hour + ':' + values.minute + ':' + values.second;
+  }
+
+  function formatDateTime(value) {
+    var parsed = parseUtcDateTime(value);
+    if (!parsed) {
+      var fallback = String(value || '').trim();
+      return fallback || '暂无';
+    }
+    return formatShanghaiDateTime(parsed);
   }
 
   function getSelectedOptionLabel(selectElement, value) {
