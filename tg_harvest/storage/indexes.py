@@ -123,6 +123,12 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_messages_created_at "
         "ON messages(created_at DESC, chat_id DESC, message_id DESC, pk DESC)"
     )
+    _ensure_index(
+        cur,
+        "idx_messages_chat_created_at",
+        "CREATE INDEX idx_messages_chat_created_at "
+        "ON messages(chat_id, created_at DESC, pk DESC)"
+    )
 
     if table_has_column(cur, "messages", SEARCH_TEXT_PRESENT_COLUMN):
         _ensure_index(
@@ -153,6 +159,12 @@ def _create_chat_indexes(cur: sqlite3.Cursor):
         "idx_chats_last_seen",
         "CREATE INDEX idx_chats_last_seen "
         "ON chats(last_seen_at DESC, chat_id ASC)"
+    )
+    _ensure_index(
+        cur,
+        "idx_chats_last_message_created_at",
+        "CREATE INDEX idx_chats_last_message_created_at "
+        "ON chats(last_message_created_at DESC, chat_id ASC)"
     )
     _ensure_index(
         cur,

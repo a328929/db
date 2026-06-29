@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 
 from tg_harvest.domain.normalize import make_hash
 from tg_harvest.storage.connection import synchronized_write
+from tg_harvest.storage.schema import _refresh_chat_message_counts
 
 
 def build_media_fingerprint(
@@ -507,6 +508,7 @@ def dedupe_promotional_duplicates(
             )
 
         affected_group_ids = _record_actions_and_delete_targets(cur, batch_id)
+        _refresh_chat_message_counts(cur, [chat_id])
         _finish_dedupe_run(
             cur,
             batch_id,

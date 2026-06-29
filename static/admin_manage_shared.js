@@ -1114,16 +1114,40 @@
   async function fetchJSON(url, options) {
     var requestOptions = options || {};
     var onUnauthorized = requestOptions.onUnauthorized;
+    var timeoutMs = Number(requestOptions.timeoutMs || 0);
+    var timeoutId = null;
+    var didTimeout = false;
+    var controller = null;
+    var fetchOptions = {
+      method: requestOptions.method || 'GET',
+      headers: buildFetchHeaders(url, requestOptions),
+      body: requestOptions.body
+    };
+
+    if (timeoutMs > 0 && typeof AbortController === 'function') {
+      controller = new AbortController();
+      fetchOptions.signal = controller.signal;
+      timeoutId = window.setTimeout(function () {
+        didTimeout = true;
+        controller.abort();
+      }, timeoutMs);
+    }
 
     var response;
     try {
-      response = await fetch(url, {
-        method: requestOptions.method || 'GET',
-        headers: buildFetchHeaders(url, requestOptions),
-        body: requestOptions.body
-      });
-    } catch (_networkError) {
+      response = await fetch(url, fetchOptions);
+    } catch (networkError) {
+      if (
+        didTimeout
+        || (networkError && String(networkError.name || '') === 'AbortError')
+      ) {
+        throw new Error('请求超时，请稍后重试');
+      }
       throw new Error('网络请求失败');
+    } finally {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
     }
 
     if (!response.ok) {
@@ -1160,7 +1184,8 @@
         opts.headers || {}
       ),
       body: JSON.stringify(payload),
-      onUnauthorized: opts.onUnauthorized
+      onUnauthorized: opts.onUnauthorized,
+      timeoutMs: opts.timeoutMs
     });
   }
 

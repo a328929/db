@@ -134,6 +134,31 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("display.formatDateTime(item.msg_date_text)", app_source)
         self.assertIn("formatDateTime(item.msg_date_text)", sync_source)
 
+    def test_admin_fetch_json_supports_abort_timeout(self) -> None:
+        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("requestOptions.timeoutMs", source)
+        self.assertIn("typeof AbortController === 'function'", source)
+        self.assertIn("controller.abort()", source)
+        self.assertIn("请求超时，请稍后重试", source)
+        self.assertIn("window.clearTimeout(timeoutId)", source)
+        self.assertIn("timeoutMs: opts.timeoutMs", source)
+
+    def test_sync_dashboard_does_not_block_stats_on_live_messages(self) -> None:
+        source = (ROOT / "static" / "admin_sync.js").read_text(encoding="utf-8")
+        self.assertIn("SYNC_STATS_TIMEOUT_MS", source)
+        self.assertIn("LIVE_MESSAGES_TIMEOUT_MS", source)
+        self.assertIn("/api/admin/sync/stats', { timeoutMs: SYNC_STATS_TIMEOUT_MS }", source)
+        self.assertIn("{ timeoutMs: LIVE_MESSAGES_TIMEOUT_MS }", source)
+        self.assertNotIn("Promise.all", source)
+        dashboard_start = source.index("async function loadSyncDashboard")
+        dashboard_end = source.index("function primeSyncDashboard", dashboard_start)
+        dashboard_source = source[dashboard_start:dashboard_end]
+        self.assertIn("var statsLoaded = await loadSyncStats(elements);", dashboard_source)
+        self.assertIn("loadLiveMessages(elements", dashboard_source)
+        self.assertNotIn("await loadLiveMessages", dashboard_source)
+
     def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
         for template_name in (
             "admin_manage.html",

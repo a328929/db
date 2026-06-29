@@ -29,6 +29,7 @@ def _create_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
         is_public        INTEGER NOT NULL DEFAULT 0,
         chat_type        TEXT,
         message_count    INTEGER NOT NULL DEFAULT 0,
+        last_message_created_at TEXT NOT NULL DEFAULT '',
         first_seen_at    TEXT NOT NULL DEFAULT (datetime('now')),
         last_seen_at     TEXT NOT NULL DEFAULT (datetime('now'))
     ){strict_suffix}
@@ -525,6 +526,10 @@ def _ensure_chats_schema(cur: sqlite3.Cursor) -> None:
             ("is_public", "is_public INTEGER NOT NULL DEFAULT 0"),
             ("chat_type", "chat_type TEXT"),
             ("message_count", "message_count INTEGER NOT NULL DEFAULT 0"),
+            (
+                "last_message_created_at",
+                "last_message_created_at TEXT NOT NULL DEFAULT ''",
+            ),
             ("first_seen_at", "first_seen_at TEXT NOT NULL DEFAULT (datetime('now'))"),
             ("last_seen_at", "last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
@@ -880,33 +885,38 @@ def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:
         cur.execute(
             "ALTER TABLE chats ADD COLUMN message_count INTEGER NOT NULL DEFAULT 0"
         )
+    if not _column_exists(cur, "chats", "last_message_created_at"):
+        cur.execute(
+            "ALTER TABLE chats ADD COLUMN last_message_created_at TEXT NOT NULL DEFAULT ''"
+        )
 
 
-def _count_chat_message_count_mismatches(cur: sqlite3.Cursor) -> int:
+def _count_chat_message_summary_mismatches(cur: sqlite3.Cursor) -> int:
     cur.execute(
         """
         SELECT COUNT(*) AS c
-        FROM (
-            SELECT c.chat_id
-            FROM chats c
-            LEFT JOIN (
-                SELECT chat_id, COUNT(*) AS real_count
-                FROM messages
-                GROUP BY chat_id
-            ) m ON m.chat_id = c.chat_id
-            WHERE COALESCE(c.message_count, 0) <> COALESCE(m.real_count, 0)
-        )
+        FROM chats c
+        WHERE COALESCE(c.message_count, 0) <> COALESCE((
+                SELECT COUNT(*)
+                FROM messages m
+                WHERE m.chat_id = c.chat_id
+            ), 0)
+           OR COALESCE(c.last_message_created_at, '') <> COALESCE((
+                SELECT MAX(m.created_at)
+                FROM messages m
+                WHERE m.chat_id = c.chat_id
+            ), '')
         """
     )
     return int(cur.fetchone()["c"] or 0)
 
 
-def _heal_chat_message_counts_if_needed(cur: sqlite3.Cursor) -> None:
-    mismatch_count = _count_chat_message_count_mismatches(cur)
+def _heal_chat_message_summaries_if_needed(cur: sqlite3.Cursor) -> None:
+    mismatch_count = _count_chat_message_summary_mismatches(cur)
     if mismatch_count <= 0:
         return
     logging.warning(
-        f"检测到 chats.message_count 与 messages 实际条数不一致，开始修复 {mismatch_count} 个群聊摘要"
+        f"检测到 chats 消息摘要与 messages 实际数据不一致，开始修复 {mismatch_count} 个群聊摘要"
     )
     _refresh_chat_message_counts(cur, chat_ids=None)
 
@@ -934,11 +944,17 @@ def _refresh_chat_message_counts(
         cur.execute(
             """
             UPDATE chats
-            SET message_count = COALESCE((
-                SELECT COUNT(*)
-                FROM messages
-                WHERE messages.chat_id = chats.chat_id
-            ), 0)
+            SET
+                message_count = COALESCE((
+                    SELECT COUNT(*)
+                    FROM messages
+                    WHERE messages.chat_id = chats.chat_id
+                ), 0),
+                last_message_created_at = COALESCE((
+                    SELECT MAX(created_at)
+                    FROM messages
+                    WHERE messages.chat_id = chats.chat_id
+                ), '')
             """
         )
         return
@@ -951,11 +967,17 @@ def _refresh_chat_message_counts(
     cur.execute(
         f"""
         UPDATE chats
-        SET message_count = COALESCE((
-            SELECT COUNT(*)
-            FROM messages
-            WHERE messages.chat_id = chats.chat_id
-        ), 0)
+        SET
+            message_count = COALESCE((
+                SELECT COUNT(*)
+                FROM messages
+                WHERE messages.chat_id = chats.chat_id
+            ), 0),
+            last_message_created_at = COALESCE((
+                SELECT MAX(created_at)
+                FROM messages
+                WHERE messages.chat_id = chats.chat_id
+            ), '')
         WHERE chat_id IN ({placeholders})
         """,
         normalized_chat_ids,
@@ -997,8 +1019,8 @@ def create_schema(
         _ensure_admin_clone_migrations_schema(cur)
         _ensure_admin_clone_message_map_schema(cur)
         _ensure_chat_summary_columns(cur)
-        _heal_chat_message_counts_if_needed(cur)
         _indexes._create_indexes(cur)
+        _heal_chat_message_summaries_if_needed(cur)
         _search_terms._create_message_search_terms_queue_triggers(cur)
 
         if feats.supports_fts5:

@@ -20,7 +20,8 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
                 chat_title TEXT NOT NULL,
                 chat_username TEXT,
                 chat_type TEXT,
-                message_count INTEGER NOT NULL DEFAULT 0
+                message_count INTEGER NOT NULL DEFAULT 0,
+                last_message_created_at TEXT NOT NULL DEFAULT ''
             )
             """
         )
@@ -39,8 +40,16 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
             """
         )
         self.conn.executemany(
-            "INSERT INTO chats(chat_id, chat_title, chat_username, chat_type, message_count) VALUES (?, ?, ?, ?, ?)",
-            [(1, "A", "chat_a", "channel", 3), (2, "B", "chat_b", "channel", 5)],
+            """
+            INSERT INTO chats(
+                chat_id, chat_title, chat_username, chat_type,
+                message_count, last_message_created_at
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (1, "A", "chat_a", "channel", 3, ""),
+                (2, "B", "chat_b", "channel", 5, ""),
+            ],
         )
         self.conn.commit()
 
@@ -76,6 +85,12 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
                 (2, 201, "2026-06-28 10:30:00"),
                 (2, 202, "2026-06-27 13:00:00"),
             ],
+        )
+        self.conn.execute(
+            "UPDATE chats SET message_count = 2, last_message_created_at = '2026-06-28 11:55:00' WHERE chat_id = 1"
+        )
+        self.conn.execute(
+            "UPDATE chats SET message_count = 2, last_message_created_at = '2026-06-28 10:30:00' WHERE chat_id = 2"
         )
         self.conn.commit()
 
@@ -115,6 +130,12 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
                 (2, 202, "2026-06-27 13:00:00"),
             ],
         )
+        self.conn.execute(
+            "UPDATE chats SET message_count = 2, last_message_created_at = '2026-06-28 11:55:00' WHERE chat_id = 1"
+        )
+        self.conn.execute(
+            "UPDATE chats SET message_count = 2, last_message_created_at = '2026-06-28 10:30:00' WHERE chat_id = 2"
+        )
         self.conn.commit()
 
         statements = []
@@ -146,9 +167,16 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         )
         self.assertTrue(
             any(
-                "SELECT chat_id, MAX(created_at) AS latest_created_at" in sql
+                "SUM(CASE WHEN last_message_created_at >=" in sql
+                and "FROM chats" in sql
                 for sql in select_statements
             )
+        )
+        self.assertFalse(
+            any("COUNT(DISTINCT chat_id)" in sql for sql in select_statements)
+        )
+        self.assertFalse(
+            any("GROUP BY chat_id" in sql for sql in select_statements)
         )
         self.assertFalse(
             any("LEFT JOIN messages m ON m.created_at >= w.cutoff_at" in sql for sql in select_statements)

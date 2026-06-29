@@ -4455,6 +4455,61 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         self.assertEqual(0, int(cur.fetchone()["c"]))
 
+    def test_batch_upsert_refreshes_chat_message_summary(self) -> None:
+        refresh_chat_message_counts(self.conn, [1])
+        rows = [
+            (
+                1,
+                910,
+                "2026-01-01 00:00:00",
+                1,
+                1,
+                "first",
+                "first",
+                "pure-first",
+                "dedupe-first",
+                "TEXT",
+                None,
+                0,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                5,
+            ),
+            (
+                1,
+                911,
+                "2026-01-01 00:01:00",
+                2,
+                1,
+                "second",
+                "second",
+                "pure-second",
+                "dedupe-second",
+                "TEXT",
+                None,
+                0,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                6,
+            ),
+        ]
+
+        batch_upsert(self.conn, rows, [])
+
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
+        )
+        chat_row = cur.fetchone()
+        self.assertEqual(3, int(chat_row["message_count"]))
+        self.assertTrue(str(chat_row["last_message_created_at"] or ""))
+
     def test_batch_upsert_deletes_stale_media_in_key_batches(self) -> None:
         media_messages = [
             (

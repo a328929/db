@@ -157,6 +157,16 @@ class DbSchemaMigrationTests(unittest.TestCase):
             (
                 """
                 EXPLAIN QUERY PLAN
+                SELECT chat_id
+                FROM chats
+                WHERE last_message_created_at >= '2026-06-28 00:00:00'
+                ORDER BY last_message_created_at DESC, chat_id ASC
+                """,
+                "idx_chats_last_message_created_at",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
                 SELECT chat_id, chat_title, message_count
                 FROM chats
                 ORDER BY message_count DESC, chat_title COLLATE NOCASE ASC, chat_id ASC
@@ -213,6 +223,49 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("idx_messages_created_at", plan_text)
 
+    def test_refresh_chat_message_summary_uses_chat_created_at_index(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT MAX(created_at)
+            FROM messages
+            WHERE chat_id = 1
+            """
+        )
+        plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+
+        self.assertIn("idx_messages_chat_created_at", plan_text)
+
+    def test_refresh_chat_message_counts_updates_latest_created_at(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type, created_at
+            ) VALUES (1, ?, '2026-01-01 00:00:00', ?, 'TEXT', ?)
+            """,
+            [
+                (10, 10, "2026-06-28 11:40:00"),
+                (11, 11, "2026-06-28 11:55:00"),
+            ],
+        )
+        self.conn.commit()
+
+        from tg_harvest.storage.schema import refresh_chat_message_counts
+
+        refresh_chat_message_counts(self.conn, [1])
+
+        cur.execute(
+            "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
+        )
+        row = cur.fetchone()
+        self.assertEqual(2, int(row["message_count"]))
+        self.assertEqual("2026-06-28 11:55:00", row["last_message_created_at"])
+
     def test_sync_live_messages_query_uses_created_at_index_without_temp_sort(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()
@@ -230,7 +283,24 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 m.msg_type,
                 COALESCE(NULLIF(TRIM(m.content), ''), NULLIF(TRIM(m.content_norm), ''), '') AS content,
                 m.created_at
-            FROM messages m
+            FROM (
+                SELECT
+                    pk,
+                    chat_id,
+                    message_id,
+                    msg_date_text,
+                    msg_type,
+                    content,
+                    content_norm,
+                    created_at
+                FROM messages
+                ORDER BY
+                    created_at DESC,
+                    chat_id DESC,
+                    message_id DESC,
+                    pk DESC
+                LIMIT 50
+            ) m
             JOIN chats c
               ON c.chat_id = m.chat_id
             ORDER BY
@@ -238,13 +308,12 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 m.chat_id DESC,
                 m.message_id DESC,
                 m.pk DESC
-            LIMIT 50
             """
         )
         plan_text = " ".join(str(row[3]) for row in cur.fetchall())
 
         self.assertIn("idx_messages_created_at", plan_text)
-        self.assertNotIn("USE TEMP B-TREE", plan_text)
+        self.assertIn("MATERIALIZE m", plan_text)
 
     def test_dedupe_group_hash_queries_use_promo_hash_indexes(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))

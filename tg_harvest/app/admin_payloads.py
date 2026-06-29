@@ -147,7 +147,24 @@ def build_admin_sync_live_messages_payload(
                 m.msg_type,
                 COALESCE(NULLIF(TRIM(m.content), ''), NULLIF(TRIM(m.content_norm), ''), '') AS content,
                 m.created_at
-            FROM messages m
+            FROM (
+                SELECT
+                    pk,
+                    chat_id,
+                    message_id,
+                    msg_date_text,
+                    msg_type,
+                    content,
+                    content_norm,
+                    created_at
+                FROM messages
+                ORDER BY
+                    created_at DESC,
+                    chat_id DESC,
+                    message_id DESC,
+                    pk DESC
+                LIMIT ?
+            ) m
             JOIN chats c
               ON c.chat_id = m.chat_id
             ORDER BY
@@ -155,7 +172,6 @@ def build_admin_sync_live_messages_payload(
                 m.chat_id DESC,
                 m.message_id DESC,
                 m.pk DESC
-            LIMIT ?
             """,
             (effective_limit,),
         )
@@ -274,28 +290,18 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             for index, window in enumerate(aggregate_windows):
                 cutoff_text = cutoff_texts_by_key[str(window["key"])]
                 aggregate_chat_sql.append(
-                    "    SUM(CASE WHEN latest_created_at >= ? THEN 1 ELSE 0 END) AS"
+                    "    SUM(CASE WHEN last_message_created_at >= ? THEN 1 ELSE 0 END) AS"
                     + (
                         f" chat_count_{index},"
                         if index < len(aggregate_windows) - 1
                         else f" chat_count_{index}"
                     )
                 )
-            aggregate_chat_sql.extend(
-                [
-                    "FROM (",
-                    "    SELECT chat_id, MAX(created_at) AS latest_created_at",
-                    "    FROM messages",
-                    "    WHERE created_at >= ?",
-                    "    GROUP BY chat_id",
-                    ") recent_chats",
-                ]
-            )
+            aggregate_chat_sql.append("FROM chats")
             aggregate_chat_params = [
                 cutoff_texts_by_key[str(window["key"])]
                 for window in aggregate_windows
             ]
-            aggregate_chat_params.append(largest_cutoff_text)
             cur.execute(
                 "\n".join(aggregate_chat_sql),
                 aggregate_chat_params,
@@ -326,10 +332,10 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         cur.execute(
             """
             SELECT
-                COALESCE(MAX(created_at), '') AS latest_created_at,
-                COUNT(*) AS message_count,
-                COUNT(DISTINCT chat_id) AS chat_count
-            FROM messages
+                COALESCE(MAX(last_message_created_at), '') AS latest_created_at,
+                COALESCE(SUM(message_count), 0) AS message_count,
+                SUM(CASE WHEN message_count > 0 THEN 1 ELSE 0 END) AS chat_count
+            FROM chats
             """
         )
         latest_row = cur.fetchone()

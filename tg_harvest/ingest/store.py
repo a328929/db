@@ -1,4 +1,5 @@
 import sqlite3
+from collections import defaultdict
 from contextlib import suppress
 
 from tg_harvest.storage.connection import synchronized_write
@@ -126,6 +127,84 @@ def _delete_stale_media_for_non_media_messages(
             params,
         )
 
+
+def _message_keys_from_rows(msg_rows: list[tuple]) -> list[tuple[int, int]]:
+    return sorted({(int(row[0]), int(row[1])) for row in msg_rows})
+
+
+def _count_message_keys_by_chat(keys: list[tuple[int, int]]) -> dict[int, int]:
+    counts: dict[int, int] = defaultdict(int)
+    for chat_id, _message_id in keys:
+        counts[int(chat_id)] += 1
+    return dict(counts)
+
+
+def _count_existing_message_keys_by_chat(
+    cur: sqlite3.Cursor, keys: list[tuple[int, int]]
+) -> dict[int, int]:
+    counts: dict[int, int] = defaultdict(int)
+    for start in range(0, len(keys), 400):
+        part = keys[start : start + 400]
+        placeholders = ",".join(["(?, ?)"] * len(part))
+        params: list[int] = []
+        for chat_id, message_id in part:
+            params.extend([chat_id, message_id])
+        cur.execute(
+            f"""
+            WITH target_messages(chat_id, message_id) AS (
+                VALUES {placeholders}
+            )
+            SELECT m.chat_id, COUNT(*) AS c
+            FROM messages m
+            JOIN target_messages t
+              ON t.chat_id = m.chat_id
+             AND t.message_id = m.message_id
+            GROUP BY m.chat_id
+            """,
+            params,
+        )
+        for row in cur.fetchall():
+            counts[int(row["chat_id"])] += int(row["c"] or 0)
+    return dict(counts)
+
+
+def _new_message_counts_by_chat(
+    cur: sqlite3.Cursor, msg_rows: list[tuple]
+) -> dict[int, int]:
+    keys = _message_keys_from_rows(msg_rows)
+    if not keys:
+        return {}
+    submitted_counts = _count_message_keys_by_chat(keys)
+    existing_counts = _count_existing_message_keys_by_chat(cur, keys)
+    return {
+        chat_id: submitted_count - int(existing_counts.get(chat_id, 0) or 0)
+        for chat_id, submitted_count in submitted_counts.items()
+        if submitted_count > int(existing_counts.get(chat_id, 0) or 0)
+    }
+
+
+def _increment_chat_message_summaries(
+    cur: sqlite3.Cursor, new_counts_by_chat: dict[int, int]
+) -> None:
+    for chat_id, new_count in sorted(new_counts_by_chat.items()):
+        if new_count <= 0:
+            continue
+        cur.execute(
+            """
+            UPDATE chats
+            SET
+                message_count = COALESCE(message_count, 0) + ?,
+                last_message_created_at = COALESCE((
+                    SELECT MAX(created_at)
+                    FROM messages
+                    WHERE messages.chat_id = chats.chat_id
+                ), '')
+            WHERE chat_id = ?
+            """,
+            (int(new_count), int(chat_id)),
+        )
+
+
 def load_grouped_ids_for_messages(
     conn: sqlite3.Connection, message_keys: list[tuple[int, int]]
 ) -> set[int]:
@@ -172,9 +251,11 @@ def batch_upsert(
     try:
         try:
             cur.execute("BEGIN IMMEDIATE")
+            new_counts_by_chat = _new_message_counts_by_chat(cur, msg_rows)
             _batch_upsert_messages(cur, msg_rows)
             _batch_upsert_media(cur, media_rows)
             _delete_stale_media_for_non_media_messages(cur, msg_rows, media_rows)
+            _increment_chat_message_summaries(cur, new_counts_by_chat)
             conn.commit()
         except Exception:
             with suppress(Exception):

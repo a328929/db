@@ -11,6 +11,8 @@
   var LIVE_WINDOW_KEY = 'live';
   var LIVE_MESSAGES_LIMIT = 50;
   var LIVE_POLL_INTERVAL_MS = 15000;
+  var SYNC_STATS_TIMEOUT_MS = 15000;
+  var LIVE_MESSAGES_TIMEOUT_MS = 10000;
 
   var syncState = {
     windows: [],
@@ -430,7 +432,10 @@
 
     try {
       var payload = normalizeLiveMessagesPayload(
-        await fetchJSON('/api/admin/sync/messages?limit=' + encodeURIComponent(String(LIVE_MESSAGES_LIMIT)))
+        await fetchJSON(
+          '/api/admin/sync/messages?limit=' + encodeURIComponent(String(LIVE_MESSAGES_LIMIT)),
+          { timeoutMs: LIVE_MESSAGES_TIMEOUT_MS }
+        )
       );
       if (!isCurrentLiveRequest(requestSeq)) {
         return;
@@ -449,7 +454,7 @@
       if (!isCurrentLiveRequest(requestSeq)) {
         return;
       }
-      if (!opts.silent) {
+      if (isLiveWindowSelected() || !opts.silent) {
         elements.liveStatus.textContent = '读取最近入库消息失败：' + error.message;
       }
     } finally {
@@ -462,7 +467,9 @@
   async function loadSyncStats(elements) {
     setBusy(elements, true);
     try {
-      var payload = normalizeSyncPayload(await fetchJSON('/api/admin/sync/stats'));
+      var payload = normalizeSyncPayload(
+        await fetchJSON('/api/admin/sync/stats', { timeoutMs: SYNC_STATS_TIMEOUT_MS })
+      );
       syncState.windows = payload.windows;
       if (!syncState.windows.length) {
         syncState.selectedWindowKey = '';
@@ -493,29 +500,33 @@
       } else {
         elements.latestCreatedAtValue.textContent = formatDateTime(payload.latestMessageCreatedAt);
       }
+      return true;
     } catch (error) {
       elements.status.textContent = '读取消息同步统计失败：' + error.message;
       clearLivePollTimer();
+      return false;
     } finally {
       setBusy(elements, false);
     }
   }
 
   async function loadSyncDashboard(elements) {
-    var statsTask = loadSyncStats(elements);
-    var shouldPrimeLive = !syncState.liveItems.length || isLiveWindowSelected();
-    if (!shouldPrimeLive) {
-      await statsTask;
+    var statsLoaded = await loadSyncStats(elements);
+    if (!statsLoaded) {
       return;
     }
-
-    await Promise.all([
-      statsTask,
+    if (!syncState.liveItems.length || isLiveWindowSelected()) {
       loadLiveMessages(elements, {
         silent: false,
         forceRender: true
-      })
-    ]);
+      });
+    }
+  }
+
+  function primeSyncDashboard(elements) {
+    loadSyncDashboard(elements).catch(function (error) {
+      elements.status.textContent = '读取消息同步统计失败：' + error.message;
+    });
   }
 
   async function fetchJSON(url, options) {
@@ -526,7 +537,7 @@
 
   var sessionController = shared.createAdminSessionController({
     afterAuth: async function (elements, context) {
-      await loadSyncDashboard(elements);
+      primeSyncDashboard(elements);
     },
     getElements: getElements,
     getPageElement: function () {
