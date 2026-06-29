@@ -213,6 +213,39 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("idx_messages_created_at", plan_text)
 
+    def test_sync_live_messages_query_uses_created_at_index_without_temp_sort(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT
+                m.pk,
+                m.chat_id,
+                c.chat_title,
+                c.chat_username,
+                c.chat_type,
+                m.message_id,
+                m.msg_date_text,
+                m.msg_type,
+                COALESCE(NULLIF(TRIM(m.content), ''), NULLIF(TRIM(m.content_norm), ''), '') AS content,
+                m.created_at
+            FROM messages m
+            JOIN chats c
+              ON c.chat_id = m.chat_id
+            ORDER BY
+                m.created_at DESC,
+                m.chat_id DESC,
+                m.message_id DESC,
+                m.pk DESC
+            LIMIT 50
+            """
+        )
+        plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+
+        self.assertIn("idx_messages_created_at", plan_text)
+        self.assertNotIn("USE TEMP B-TREE", plan_text)
+
     def test_dedupe_group_hash_queries_use_promo_hash_indexes(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()

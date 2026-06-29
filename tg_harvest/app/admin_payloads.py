@@ -68,6 +68,54 @@ def _truncate_text(value: Any, *, max_len: int) -> str:
     return f"{text[:max_len]}..."
 
 
+def _build_sync_window_rows(
+    *,
+    windows: list[dict[str, Any]],
+    counts_by_key: dict[str, dict[str, int]],
+    timestamps_by_key: dict[str, dict[str, str]],
+    live_message_count: int,
+    live_chat_count: int,
+    latest_created_at: str,
+) -> list[dict[str, Any]]:
+    window_rows: list[dict[str, Any]] = []
+    for window in windows:
+        window_key = str(window["key"])
+        if bool(window.get("is_live", False)):
+            window_rows.append(
+                {
+                    "window_key": window_key,
+                    "label": str(window["label"]),
+                    "seconds": int(window["seconds"]),
+                    "is_live": True,
+                    "message_count": int(live_message_count),
+                    "chat_count": int(live_chat_count),
+                    "oldest_created_at": "",
+                    "latest_created_at": latest_created_at,
+                }
+            )
+            continue
+
+        count_item = counts_by_key.get(window_key, {})
+        timestamp_item = timestamps_by_key.get(window_key, {})
+        window_rows.append(
+            {
+                "window_key": window_key,
+                "label": str(window["label"]),
+                "seconds": int(window["seconds"]),
+                "is_live": False,
+                "message_count": int(count_item.get("message_count") or 0),
+                "chat_count": int(count_item.get("chat_count") or 0),
+                "oldest_created_at": str(
+                    timestamp_item.get("oldest_created_at") or ""
+                ),
+                "latest_created_at": str(
+                    timestamp_item.get("latest_created_at") or ""
+                ),
+            }
+        )
+    return window_rows
+
+
 def build_admin_sync_live_messages_payload(
     conn: sqlite3.Connection,
     *,
@@ -145,6 +193,15 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
     windows = [dict(item) for item in _ADMIN_SYNC_WINDOWS]
     base_now = _utc_now()
     generated_at = _format_utc_text(base_now)
+    aggregate_windows = [
+        window for window in windows if not bool(window.get("is_live", False))
+    ]
+    cutoff_texts_by_key = {
+        str(window["key"]): _format_utc_text(
+            base_now - timedelta(seconds=int(window["seconds"]))
+        )
+        for window in aggregate_windows
+    }
 
     if not _table_exists(conn, "messages"):
         window_rows = [_empty_admin_sync_window_payload(window) for window in windows]
@@ -166,113 +223,132 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
 
     cur = conn.cursor()
     try:
-        values_sql = ",".join(["(?, ?, ?, ?, ?)"] * len(windows))
-        params: list[Any] = []
-        aggregate_windows = [
-            window for window in windows if not bool(window.get("is_live", False))
-        ]
-        values_sql = ",".join(["(?, ?, ?, ?, ?)"] * len(aggregate_windows))
-        params: list[Any] = []
-        for sort_order, window in enumerate(aggregate_windows, start=1):
-            cutoff_text = _format_utc_text(
-                base_now - timedelta(seconds=int(window["seconds"]))
+        latest_created_at = ""
+        live_message_count = 0
+        live_chat_count = 0
+        counts_by_key: dict[str, dict[str, int]] = {}
+        timestamps_by_key: dict[str, dict[str, str]] = {}
+
+        if aggregate_windows:
+            largest_window = aggregate_windows[-1]
+            largest_cutoff_text = cutoff_texts_by_key[str(largest_window["key"])]
+            aggregate_metrics_sql: list[str] = ["SELECT"]
+            for index, window in enumerate(aggregate_windows):
+                window_key = str(window["key"])
+                aggregate_metrics_sql.append(
+                    "    SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) AS"
+                    f" message_count_{index},"
+                )
+                aggregate_metrics_sql.append(
+                    "    COALESCE(MIN(CASE WHEN created_at >= ? THEN created_at END), '') AS"
+                    f" oldest_created_at_{index},"
+                )
+                aggregate_metrics_sql.append(
+                    "    COALESCE(MAX(CASE WHEN created_at >= ? THEN created_at END), '') AS"
+                    + (
+                        f" latest_created_at_{index},"
+                        if index < len(aggregate_windows) - 1
+                        else f" latest_created_at_{index}"
+                    )
+                )
+                cutoff_text = cutoff_texts_by_key[window_key]
+                counts_by_key[window_key] = {
+                    "message_count": 0,
+                    "chat_count": 0,
+                }
+            aggregate_metrics_sql.extend(["FROM messages", "WHERE created_at >= ?"])
+            aggregate_metrics_params: list[Any] = []
+            for window in aggregate_windows:
+                cutoff_text = cutoff_texts_by_key[str(window["key"])]
+                aggregate_metrics_params.extend(
+                    [cutoff_text, cutoff_text, cutoff_text]
+                )
+            aggregate_metrics_params.append(largest_cutoff_text)
+            cur.execute(
+                "\n".join(aggregate_metrics_sql),
+                aggregate_metrics_params,
             )
-            params.extend(
+            aggregate_metrics_row = cur.fetchone()
+
+            aggregate_chat_sql: list[str] = ["SELECT"]
+            for index, window in enumerate(aggregate_windows):
+                cutoff_text = cutoff_texts_by_key[str(window["key"])]
+                aggregate_chat_sql.append(
+                    "    SUM(CASE WHEN latest_created_at >= ? THEN 1 ELSE 0 END) AS"
+                    + (
+                        f" chat_count_{index},"
+                        if index < len(aggregate_windows) - 1
+                        else f" chat_count_{index}"
+                    )
+                )
+            aggregate_chat_sql.extend(
                 [
-                    int(sort_order),
-                    str(window["key"]),
-                    str(window["label"]),
-                    int(window["seconds"]),
-                    cutoff_text,
+                    "FROM (",
+                    "    SELECT chat_id, MAX(created_at) AS latest_created_at",
+                    "    FROM messages",
+                    "    WHERE created_at >= ?",
+                    "    GROUP BY chat_id",
+                    ") recent_chats",
                 ]
             )
-
-        aggregate_rows_by_key: dict[str, dict[str, Any]] = {}
-        if aggregate_windows:
+            aggregate_chat_params = [
+                cutoff_texts_by_key[str(window["key"])]
+                for window in aggregate_windows
+            ]
+            aggregate_chat_params.append(largest_cutoff_text)
             cur.execute(
-                f"""
-                WITH windows(
-                    sort_order,
-                    window_key,
-                    window_label,
-                    window_seconds,
-                    cutoff_at
-                ) AS (
-                    VALUES {values_sql}
-                )
-                SELECT
-                    w.sort_order,
-                    w.window_key,
-                    w.window_label,
-                    w.window_seconds,
-                    COUNT(m.rowid) AS message_count,
-                    COUNT(DISTINCT m.chat_id) AS chat_count,
-                    COALESCE(MIN(m.created_at), '') AS oldest_created_at,
-                    COALESCE(MAX(m.created_at), '') AS latest_created_at
-                FROM windows w
-                LEFT JOIN messages m
-                  ON m.created_at >= w.cutoff_at
-                GROUP BY
-                    w.sort_order,
-                    w.window_key,
-                    w.window_label,
-                    w.window_seconds
-                ORDER BY w.sort_order ASC
-                """,
-                params,
+                "\n".join(aggregate_chat_sql),
+                aggregate_chat_params,
             )
-            aggregate_rows_by_key = {
-                str(row["window_key"]): {
-                    "window_key": str(row["window_key"]),
-                    "label": str(row["window_label"]),
-                    "seconds": _row_int(row, "window_seconds"),
-                    "is_live": False,
-                    "message_count": _row_int(row, "message_count"),
-                    "chat_count": _row_int(row, "chat_count"),
-                    "oldest_created_at": str(row["oldest_created_at"] or ""),
-                    "latest_created_at": str(row["latest_created_at"] or ""),
+            aggregate_chat_row = cur.fetchone()
+
+            for index, window in enumerate(aggregate_windows):
+                window_key = str(window["key"])
+                counts_by_key[window_key] = {
+                    "message_count": _row_int(
+                        aggregate_metrics_row, f"message_count_{index}"
+                    ),
+                    "chat_count": _row_int(aggregate_chat_row, f"chat_count_{index}"),
                 }
-                for row in cur.fetchall()
-            }
+                timestamps_by_key[window_key] = {
+                    "oldest_created_at": str(
+                        aggregate_metrics_row[f"oldest_created_at_{index}"] or ""
+                    )
+                    if aggregate_metrics_row
+                    else "",
+                    "latest_created_at": str(
+                        aggregate_metrics_row[f"latest_created_at_{index}"] or ""
+                    )
+                    if aggregate_metrics_row
+                    else "",
+                }
 
         cur.execute(
-            "SELECT COALESCE(MAX(created_at), '') AS latest_created_at FROM messages"
+            """
+            SELECT
+                COALESCE(MAX(created_at), '') AS latest_created_at,
+                COUNT(*) AS message_count,
+                COUNT(DISTINCT chat_id) AS chat_count
+            FROM messages
+            """
         )
         latest_row = cur.fetchone()
         latest_created_at = (
             str(latest_row["latest_created_at"] or "") if latest_row else ""
         )
-        cur.execute("SELECT COUNT(*) AS message_count FROM messages")
-        total_message_row = cur.fetchone()
-        total_message_count = _row_int(total_message_row, "message_count")
-        cur.execute("SELECT COUNT(DISTINCT chat_id) AS chat_count FROM messages")
-        total_chat_row = cur.fetchone()
-        total_chat_count = _row_int(total_chat_row, "chat_count")
+        live_message_count = _row_int(latest_row, "message_count")
+        live_chat_count = _row_int(latest_row, "chat_count")
     finally:
         cur.close()
 
-    window_rows = []
-    for window in windows:
-        if bool(window.get("is_live", False)):
-            window_rows.append(
-                {
-                    "window_key": str(window["key"]),
-                    "label": str(window["label"]),
-                    "seconds": int(window["seconds"]),
-                    "is_live": True,
-                    "message_count": int(total_message_count),
-                    "chat_count": int(total_chat_count),
-                    "oldest_created_at": "",
-                    "latest_created_at": latest_created_at,
-                }
-            )
-            continue
-        window_rows.append(
-            aggregate_rows_by_key.get(
-                str(window["key"]),
-                _empty_admin_sync_window_payload(window),
-            )
-        )
+    window_rows = _build_sync_window_rows(
+        windows=windows,
+        counts_by_key=counts_by_key,
+        timestamps_by_key=timestamps_by_key,
+        live_message_count=live_message_count,
+        live_chat_count=live_chat_count,
+        latest_created_at=latest_created_at,
+    )
 
     latest_window = window_rows[-1] if window_rows else {}
     return {

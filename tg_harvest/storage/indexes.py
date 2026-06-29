@@ -121,7 +121,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         cur,
         "idx_messages_created_at",
         "CREATE INDEX idx_messages_created_at "
-        "ON messages(created_at DESC, chat_id, message_id)"
+        "ON messages(created_at DESC, chat_id DESC, message_id DESC, pk DESC)"
     )
 
     if table_has_column(cur, "messages", SEARCH_TEXT_PRESENT_COLUMN):

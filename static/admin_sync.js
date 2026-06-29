@@ -17,7 +17,9 @@
     selectedWindowKey: '',
     busy: false,
     liveItems: [],
-    livePollTimerId: null
+    livePollTimerId: null,
+    liveRequestSeq: 0,
+    liveActiveRequestSeq: 0
   };
 
   document.addEventListener('DOMContentLoaded', async function () {
@@ -79,6 +81,8 @@
     elements.metricNote.textContent = '';
     elements.windowGrid.textContent = '';
     elements.liveList.textContent = '';
+    elements.status.textContent = '正在读取消息同步统计...';
+    elements.liveStatus.textContent = '正在读取最近入库消息...';
     setBusy(elements, false);
   }
 
@@ -93,7 +97,7 @@
       }
     });
     elements.refreshBtn.addEventListener('click', function () {
-      loadSyncStats(elements);
+      loadSyncDashboard(elements);
     });
     elements.windowSelect.addEventListener('change', function () {
       syncState.selectedWindowKey = String(elements.windowSelect.value || '');
@@ -138,6 +142,16 @@
     }
     window.clearTimeout(syncState.livePollTimerId);
     syncState.livePollTimerId = null;
+  }
+
+  function nextLiveRequestSeq() {
+    syncState.liveRequestSeq += 1;
+    syncState.liveActiveRequestSeq = syncState.liveRequestSeq;
+    return syncState.liveActiveRequestSeq;
+  }
+
+  function isCurrentLiveRequest(requestSeq) {
+    return Number(requestSeq) === Number(syncState.liveActiveRequestSeq);
   }
 
   function scheduleLivePoll(elements) {
@@ -384,7 +398,8 @@
     });
   }
 
-  function updateLiveSectionVisibility(elements) {
+  function updateLiveSectionVisibility(elements, options) {
+    var opts = options || {};
     var showLive = isLiveWindowSelected();
     elements.liveSection.hidden = !showLive;
     if (!showLive) {
@@ -392,12 +407,19 @@
       return;
     }
     renderLiveMessages(elements);
+    if (opts.skipReload) {
+      scheduleLivePoll(elements);
+      return;
+    }
     loadLiveMessages(elements, { silent: true });
   }
 
   async function loadLiveMessages(elements, options) {
     var opts = options || {};
-    if (!isLiveWindowSelected()) {
+    var requestSeq = nextLiveRequestSeq();
+    var shouldRender = opts.forceRender === true || isLiveWindowSelected();
+
+    if (!shouldRender) {
       clearLivePollTimer();
       return;
     }
@@ -410,8 +432,13 @@
       var payload = normalizeLiveMessagesPayload(
         await fetchJSON('/api/admin/sync/messages?limit=' + encodeURIComponent(String(LIVE_MESSAGES_LIMIT)))
       );
+      if (!isCurrentLiveRequest(requestSeq)) {
+        return;
+      }
       syncState.liveItems = payload.items;
-      renderLiveMessages(elements);
+      if (isLiveWindowSelected()) {
+        renderLiveMessages(elements);
+      }
       if (!payload.items.length) {
         elements.liveStatus.textContent = '时时模式下暂无最近入库消息。';
       } else {
@@ -419,11 +446,16 @@
           '最近已入库 ' + formatNumber(payload.items.length) + ' 条消息，数据生成时间 ' + formatDateTime(payload.generatedAt) + '。';
       }
     } catch (error) {
+      if (!isCurrentLiveRequest(requestSeq)) {
+        return;
+      }
       if (!opts.silent) {
         elements.liveStatus.textContent = '读取最近入库消息失败：' + error.message;
       }
     } finally {
-      scheduleLivePoll(elements);
+      if (isCurrentLiveRequest(requestSeq)) {
+        scheduleLivePoll(elements);
+      }
     }
   }
 
@@ -450,7 +482,7 @@
       renderWindowOptions(elements);
       renderSelectedWindow(elements);
       renderWindowCards(elements);
-      updateLiveSectionVisibility(elements);
+      updateLiveSectionVisibility(elements, { skipReload: true });
 
       elements.metricNote.textContent = payload.metricNote
         ? payload.metricNote + ' 数据生成时间：' + formatDateTime(payload.generatedAt) + '。'
@@ -469,6 +501,23 @@
     }
   }
 
+  async function loadSyncDashboard(elements) {
+    var statsTask = loadSyncStats(elements);
+    var shouldPrimeLive = !syncState.liveItems.length || isLiveWindowSelected();
+    if (!shouldPrimeLive) {
+      await statsTask;
+      return;
+    }
+
+    await Promise.all([
+      statsTask,
+      loadLiveMessages(elements, {
+        silent: false,
+        forceRender: true
+      })
+    ]);
+  }
+
   async function fetchJSON(url, options) {
     return sharedFetchJSON(url, Object.assign({}, options || {}, {
       onUnauthorized: sessionController.handleUnauthorizedResponse
@@ -477,10 +526,7 @@
 
   var sessionController = shared.createAdminSessionController({
     afterAuth: async function (elements, context) {
-      await loadSyncStats(elements);
-      if (context.reason === 'login') {
-        elements.status.textContent = '认证成功，已进入消息同步统计。';
-      }
+      await loadSyncDashboard(elements);
     },
     getElements: getElements,
     getPageElement: function () {

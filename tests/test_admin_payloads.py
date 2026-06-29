@@ -105,6 +105,55 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         self.assertEqual(4, windows_by_key["2d"]["message_count"])
         self.assertEqual(2, windows_by_key["2d"]["chat_count"])
 
+    def test_sync_stats_uses_window_bounded_aggregates_without_multi_window_join(self) -> None:
+        self.conn.executemany(
+            "INSERT INTO messages(chat_id, message_id, created_at) VALUES (?, ?, ?)",
+            [
+                (1, 101, "2026-06-28 11:55:00"),
+                (1, 102, "2026-06-28 11:40:00"),
+                (2, 201, "2026-06-28 10:30:00"),
+                (2, 202, "2026-06-27 13:00:00"),
+            ],
+        )
+        self.conn.commit()
+
+        statements = []
+        self.conn.set_trace_callback(
+            lambda sql: statements.append(" ".join(str(sql).split()))
+        )
+        try:
+            with unittest.mock.patch(
+                "tg_harvest.app.admin_payloads._utc_now",
+                return_value=__import__("datetime").datetime(
+                    2026, 6, 28, 12, 0, 0, tzinfo=__import__("datetime").timezone.utc
+                ),
+            ):
+                payload = build_admin_sync_stats_payload(self.conn)
+        finally:
+            self.conn.set_trace_callback(None)
+
+        select_statements = [
+            sql for sql in statements if sql.upper().startswith("SELECT")
+        ]
+        self.assertTrue(payload["ok"])
+        self.assertGreaterEqual(len(select_statements), 3)
+        self.assertTrue(
+            any(
+                "SUM(CASE WHEN created_at >=" in sql
+                and "COUNT(DISTINCT CASE WHEN created_at >=" not in sql
+                for sql in select_statements
+            )
+        )
+        self.assertTrue(
+            any(
+                "SELECT chat_id, MAX(created_at) AS latest_created_at" in sql
+                for sql in select_statements
+            )
+        )
+        self.assertFalse(
+            any("LEFT JOIN messages m ON m.created_at >= w.cutoff_at" in sql for sql in select_statements)
+        )
+
     def test_sync_stats_returns_zero_windows_when_messages_table_missing(self) -> None:
         self.conn.execute("DROP TABLE messages")
         self.conn.commit()
