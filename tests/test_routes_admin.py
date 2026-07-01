@@ -46,8 +46,10 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             parse_admin_chat_id_fn=lambda value: value,
             build_admin_chats_payload_fn=lambda _conn: {"ok": True, "items": []},
             build_admin_stats_payload_fn=lambda _conn, _chat_id: ({"ok": True}, 200),
-            build_admin_sync_stats_payload_fn=lambda _conn: {"ok": True, "windows": []},
+            build_admin_sync_stats_payload_fn=lambda _conn, **_kwargs: {"ok": True, "windows": []},
             build_admin_sync_live_messages_payload_fn=lambda _conn, **_kwargs: {"ok": True, "items": []},
+            get_sync_health_snapshot_fn=lambda: {"status": "healthy", "reasons": [], "actions": [], "listener": {}},
+            trigger_sync_remediation_fn=lambda: {"ok": True, "triggered": 0, "items": [], "message": "done"},
             admin_get_chat_brief_fn=lambda _conn, chat_id: {
                 "chat_id": chat_id,
                 "chat_title": f"chat-{chat_id}",
@@ -274,7 +276,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertEqual("job-active", payload["job"]["job_id"])
 
     def test_sync_stats_reads_payload_from_service(self) -> None:
-        self.handler.build_admin_sync_stats_payload_fn = lambda _conn: {
+        self.handler.build_admin_sync_stats_payload_fn = lambda _conn, **_kwargs: {
             "ok": True,
             "default_window_key": "live",
             "windows": [{"window_key": "10m", "message_count": 3}],
@@ -306,6 +308,24 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(1, payload["items"][0]["chat_id"])
         self.assertEqual(101, payload["items"][0]["message_id"])
+
+    def test_sync_diagnose_returns_payload_from_service(self) -> None:
+        self.handler.trigger_sync_remediation_fn = lambda: {
+            "ok": True,
+            "triggered": 1,
+            "items": [{"chat_id": 1, "status": "changed"}],
+            "message": "已完成即时轮巡探测",
+        }
+
+        with self.app.test_request_context("/api/admin/sync/diagnose", method="POST"):
+            response, status_code = self.handler.api_admin_sync_diagnose.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertEqual(200, status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(1, payload["triggered"])
 
     def test_job_stop_marks_active_job_and_logs_request(self) -> None:
         stop_calls = []

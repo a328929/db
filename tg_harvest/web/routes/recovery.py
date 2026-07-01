@@ -4,6 +4,7 @@ from contextlib import closing
 from flask import jsonify, render_template
 
 from tg_harvest.app.services import RecoveryRouteServices
+from tg_harvest.domain.coerce import clean_username
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
     create_started_exclusive_job_response,
@@ -55,6 +56,102 @@ def _parse_recovery_harvest_target(
     if len(target) > max_len:
         return None, json_error(f"target 长度不能超过 {max_len}", 400)
     return target, None
+
+
+def _parse_optional_recovery_int(
+    payload: dict,
+    key: str,
+) -> tuple[int | None, object | None]:
+    raw_value = payload.get(key)
+    if raw_value in (None, ""):
+        return None, None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None, json_error(f"{key} 参数非法", 400)
+    if value == 0:
+        return None, json_error(f"{key} 参数非法", 400)
+    return value, None
+
+
+def _parse_optional_recovery_text(
+    payload: dict,
+    key: str,
+    *,
+    max_len: int,
+    username: bool = False,
+) -> tuple[str, object | None]:
+    raw_value = payload.get(key)
+    if raw_value is None:
+        return "", None
+    if not isinstance(raw_value, str):
+        return "", json_error(f"{key} 参数必须为字符串", 400)
+
+    value = str(raw_value or "").strip()
+    if username:
+        value = clean_username(value)
+    if len(value) > max_len:
+        return "", json_error(f"{key} 长度不能超过 {max_len}", 400)
+    return value, None
+
+
+def _parse_recovery_harvest_hint(
+    payload: dict,
+    *,
+    max_len: int,
+) -> tuple[dict[str, object] | None, object | None]:
+    chat_id, error_response = _parse_optional_recovery_int(payload, "chat_id")
+    if error_response is not None:
+        return None, error_response
+    source_entity_id, error_response = _parse_optional_recovery_int(
+        payload,
+        "source_entity_id",
+    )
+    if error_response is not None:
+        return None, error_response
+    source_access_hash, error_response = _parse_optional_recovery_int(
+        payload,
+        "source_access_hash",
+    )
+    if error_response is not None:
+        return None, error_response
+    chat_username, error_response = _parse_optional_recovery_text(
+        payload,
+        "chat_username",
+        max_len=max_len,
+        username=True,
+    )
+    if error_response is not None:
+        return None, error_response
+    chat_title, error_response = _parse_optional_recovery_text(
+        payload,
+        "chat_title",
+        max_len=max_len,
+    )
+    if error_response is not None:
+        return None, error_response
+    source_session, error_response = _parse_optional_recovery_text(
+        payload,
+        "source_session",
+        max_len=max_len,
+    )
+    if error_response is not None:
+        return None, error_response
+
+    hint: dict[str, object] = {}
+    if chat_id is not None:
+        hint["chat_id"] = chat_id
+    if chat_username:
+        hint["chat_username"] = chat_username
+    if chat_title:
+        hint["chat_title"] = chat_title
+    if source_session:
+        hint["source_session"] = source_session
+    if source_entity_id is not None:
+        hint["source_entity_id"] = source_entity_id
+    if source_access_hash is not None:
+        hint["source_access_hash"] = source_access_hash
+    return (hint or None), None
 
 
 def _resolve_recovery_services(
@@ -208,6 +305,12 @@ def register_recovery_routes(
         )
         if error_response is not None:
             return error_response
+        harvest_hint, error_response = _parse_recovery_harvest_hint(
+            data,
+            max_len=services.admin_harvest_target_max_len,
+        )
+        if error_response is not None:
+            return error_response
 
         return create_started_exclusive_job_response(
             services.admin_try_create_exclusive_job_fn,
@@ -228,6 +331,7 @@ def register_recovery_routes(
                 admin_make_job_log_handler_fn=services.admin_make_job_log_handler_fn,
                 admin_job_set_status_fn=services.admin_job_set_status_fn,
                 admin_job_append_log_fn=services.admin_job_append_log_fn,
+                harvest_hint=harvest_hint,
             ),
         )
 

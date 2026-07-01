@@ -1,7 +1,8 @@
 import logging
 from collections.abc import Callable
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
 from typing import Any
 
 from tg_harvest.admin_jobs.common import (
@@ -21,11 +22,14 @@ from tg_harvest.admin_jobs.sessions import (
     _ensure_base_session_valid,
 )
 from tg_harvest.domain.chat_inventory import (
+    ChatInventoryRow,
+    RestrictedChatInventoryRow,
+    chat_identity_key,
     find_database_chats_not_joined,
     find_missing_joined_chats,
     find_restricted_joined_chats,
     load_joined_chat_inventory,
-    load_known_chat_ids,
+    load_known_chat_identities,
 )
 from tg_harvest.storage.channel_management import (
     list_database_channels,
@@ -44,26 +48,184 @@ class _ChannelInventoryScanSpec:
     build_success_message_fn: Callable[[int], str]
 
 
-def _scan_missing_chat_rows(
-    ensure_client: Callable[[], Any],
+@dataclass(frozen=True)
+class _ScanAccount:
+    key: str
+    label: str
+    cfg: Any
+
+
+def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
+    values = dict(getattr(cfg, "__dict__", {}) or {})
+    if not values:
+        values = {
+            "api_id": getattr(cfg, "api_id", 0),
+            "api_hash": getattr(cfg, "api_hash", ""),
+        }
+    values["session_name"] = session_name
+    return SimpleNamespace(**values)
+
+
+def _scan_accounts(cfg: Any) -> list[_ScanAccount]:
+    accounts = [_ScanAccount(key="primary", label="主账号", cfg=cfg)]
+    primary_session_name = str(getattr(cfg, "session_name", "") or "").strip()
+    secondary_session_name = str(
+        getattr(cfg, "secondary_session_name", "") or ""
+    ).strip()
+    if secondary_session_name and secondary_session_name != primary_session_name:
+        accounts.append(
+            _ScanAccount(
+                key="secondary",
+                label="第二账号",
+                cfg=_cfg_with_session_name(cfg, secondary_session_name),
+            )
+        )
+    return accounts
+
+
+def _dedupe_texts(values: list[str]) -> str:
+    items: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        text = str(value or "").strip()
+        if not text:
+            continue
+        key = text.casefold()
+        if key in seen:
+            continue
+        seen.add(key)
+        items.append(text)
+    return "；".join(items)
+
+
+def _chat_row_priority(row: ChatInventoryRow) -> tuple[int, int, int, str, int]:
+    return (
+        1 if str(row.unavailable_reason or "").strip() else 0,
+        0 if row.chat_username else 1,
+        -(row.last_message_ts or 0),
+        row.chat_title.casefold(),
+        row.chat_id,
+    )
+
+
+def _merge_chat_inventory_row(
+    current: ChatInventoryRow | None,
+    incoming: ChatInventoryRow,
+) -> ChatInventoryRow:
+    if current is None:
+        return incoming
+    preferred = current if _chat_row_priority(current) <= _chat_row_priority(incoming) else incoming
+    other = incoming if preferred is current else current
+    merged_reason = _dedupe_texts(
+        [preferred.unavailable_reason, other.unavailable_reason]
+    )
+    if merged_reason == str(preferred.unavailable_reason or ""):
+        return preferred
+    return replace(preferred, unavailable_reason=merged_reason)
+
+
+def _restricted_row_priority(
+    row: RestrictedChatInventoryRow,
+) -> tuple[int, int, str, int]:
+    return (
+        0 if row.chat_username else 1,
+        -(row.last_message_ts or 0),
+        row.chat_title.casefold(),
+        row.chat_id,
+    )
+
+
+def _merge_restricted_chat_row(
+    current: RestrictedChatInventoryRow | None,
+    incoming: RestrictedChatInventoryRow,
+) -> RestrictedChatInventoryRow:
+    if current is None:
+        return incoming
+    return current if _restricted_row_priority(current) <= _restricted_row_priority(incoming) else incoming
+
+
+def _scan_account_rows(
+    account: _ScanAccount,
     *,
+    job_id: str,
+    worker_suffix: str,
+    admin_job_append_log_fn: Callable[[str, str], Any],
+    scan_fn: Callable[[Any], list[Any]],
+) -> list[Any] | None:
+    admin_job_append_log_fn(job_id, f"正在验证{account.label} Telegram 会话...")
+    if not _ensure_base_session_valid(account.cfg, job_id, admin_job_append_log_fn):
+        admin_job_append_log_fn(job_id, f"{account.label}会话不可用，本轮扫描已跳过")
+        return None
+
+    worker_id = f"{job_id}_{worker_suffix}_{account.key}"
+    client = None
+    try:
+        client = _create_isolated_worker_client(account.cfg, worker_id)
+        return scan_fn(client)
+    finally:
+        if client is not None:
+            with suppress(Exception):
+                _disconnect_worker_client(client)
+        _cleanup_isolated_worker_session(account.cfg, worker_id)
+
+
+def _scan_missing_chat_rows(
+    *,
+    cfg: Any,
     get_conn_fn: Callable[[], Any],
     admin_job_append_log_fn: Callable[[str, str], Any],
     job_id: str,
 ) -> list[Any]:
     admin_job_append_log_fn(job_id, "正在读取数据库已有群组清单...")
-    known_chat_ids = call_with_conn(get_conn_fn, load_known_chat_ids)
-    admin_job_append_log_fn(job_id, f"数据库中已有 {len(known_chat_ids)} 个群组/频道")
-    admin_job_append_log_fn(job_id, "正在连接 Telegram 并扫描当前账号已加入会话...")
-    return find_missing_joined_chats(
-        ensure_client().iter_dialogs(),
-        known_chat_ids,
+    known_chat_ids = call_with_conn(get_conn_fn, load_known_chat_identities)
+    admin_job_append_log_fn(job_id, f"数据库中已有 {len(known_chat_ids)} 个群组/频道身份")
+
+    merged_rows: dict[tuple[str, int], ChatInventoryRow] = {}
+    scanned_account_count = 0
+    for account in _scan_accounts(cfg):
+        account_rows = _scan_account_rows(
+            account,
+            job_id=job_id,
+            worker_suffix="missing_chats",
+            admin_job_append_log_fn=admin_job_append_log_fn,
+            scan_fn=lambda client: find_missing_joined_chats(
+                client.iter_dialogs(),
+                known_chat_ids,
+                include_unavailable=True,
+            ),
+        )
+        if account_rows is None:
+            continue
+        scanned_account_count += 1
+        unavailable_count = sum(
+            1 for row in account_rows if str(row.unavailable_reason or "").strip()
+        )
+        admin_job_append_log_fn(
+            job_id,
+            f"{account.label}扫描到 {len(account_rows)} 个未入库候选，"
+            f"其中 {unavailable_count} 个当前不可访问",
+        )
+        for row in account_rows:
+            key = chat_identity_key(row.chat_id, row.chat_type)
+            merged_rows[key] = _merge_chat_inventory_row(merged_rows.get(key), row)
+
+    if scanned_account_count <= 0:
+        raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
+
+    rows = list(merged_rows.values())
+    rows.sort(
+        key=lambda item: (
+            1 if str(item.unavailable_reason or "").strip() else 0,
+            item.chat_title.casefold(),
+            item.chat_id,
+        )
     )
+    return rows
 
 
 def _scan_absent_chat_rows(
-    ensure_client: Callable[[], Any],
     *,
+    cfg: Any,
     get_conn_fn: Callable[[], Any],
     admin_job_append_log_fn: Callable[[str, str], Any],
     job_id: str,
@@ -75,41 +237,97 @@ def _scan_absent_chat_rows(
         sort="message_count_desc",
     )
     admin_job_append_log_fn(job_id, f"数据库中已有 {len(database_rows)} 个群组/频道")
-    admin_job_append_log_fn(job_id, "正在连接 Telegram 并扫描当前账号已加入会话...")
-    joined_rows = load_joined_chat_inventory(ensure_client().iter_dialogs())
-    unavailable_chat_reasons = {
-        int(row.chat_id): str(row.unavailable_reason).strip()
-        for row in joined_rows
-        if str(row.unavailable_reason or "").strip()
+    accessible_chat_keys: set[tuple[str, int]] = set()
+    unavailable_chat_reasons: dict[tuple[str, int], list[str]] = {}
+    scanned_account_count = 0
+
+    for account in _scan_accounts(cfg):
+        joined_rows = _scan_account_rows(
+            account,
+            job_id=job_id,
+            worker_suffix="absent_chats",
+            admin_job_append_log_fn=admin_job_append_log_fn,
+            scan_fn=lambda client: load_joined_chat_inventory(client.iter_dialogs()),
+        )
+        if joined_rows is None:
+            continue
+        scanned_account_count += 1
+        accessible_count = 0
+        unavailable_count = 0
+        for row in joined_rows:
+            key = chat_identity_key(row.chat_id, row.chat_type)
+            if str(row.unavailable_reason or "").strip():
+                unavailable_count += 1
+                unavailable_chat_reasons.setdefault(key, []).append(
+                    f"{account.label}：{row.unavailable_reason}"
+                )
+                continue
+            accessible_count += 1
+            accessible_chat_keys.add(key)
+        admin_job_append_log_fn(
+            job_id,
+            f"{account.label}当前可访问 {accessible_count} 个群组/频道，"
+            f"发现 {unavailable_count} 个已加入但不可用的群组/频道",
+        )
+
+    if scanned_account_count <= 0:
+        raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
+
+    normalized_unavailable_reasons = {
+        key: _dedupe_texts(reasons)
+        for key, reasons in unavailable_chat_reasons.items()
+        if key not in accessible_chat_keys
     }
-    joined_chat_ids = {
-        int(row.chat_id) for row in joined_rows if not row.unavailable_reason
-    }
-    admin_job_append_log_fn(
-        job_id,
-        f"当前账号可访问 {len(joined_chat_ids)} 个群组/频道，"
-        f"发现 {len(unavailable_chat_reasons)} 个已加入但不可用的群组/频道",
-    )
     return find_database_chats_not_joined(
         database_rows,
-        joined_chat_ids,
-        unavailable_chat_reasons=unavailable_chat_reasons,
+        accessible_chat_keys,
+        unavailable_chat_reasons=normalized_unavailable_reasons,
     )
 
 
 def _scan_restricted_chat_rows(
-    ensure_client: Callable[[], Any],
     *,
+    cfg: Any,
     get_conn_fn: Callable[[], Any],
     admin_job_append_log_fn: Callable[[str, str], Any],
     job_id: str,
 ) -> list[Any]:
     del get_conn_fn
-    admin_job_append_log_fn(
-        job_id,
-        "正在连接 Telegram 并扫描内容限制/风险标记...",
-    )
-    return find_restricted_joined_chats(ensure_client().iter_dialogs())
+    merged_rows: dict[tuple[str, int], RestrictedChatInventoryRow] = {}
+    scanned_account_count = 0
+
+    for account in _scan_accounts(cfg):
+        admin_job_append_log_fn(
+            job_id,
+            f"正在连接{account.label}并扫描内容限制/风险标记...",
+        )
+        account_rows = _scan_account_rows(
+            account,
+            job_id=job_id,
+            worker_suffix="restricted_chats",
+            admin_job_append_log_fn=admin_job_append_log_fn,
+            scan_fn=lambda client: find_restricted_joined_chats(client.iter_dialogs()),
+        )
+        if account_rows is None:
+            continue
+        scanned_account_count += 1
+        admin_job_append_log_fn(
+            job_id,
+            f"{account.label}扫描到 {len(account_rows)} 个内容限制/风险标记候选",
+        )
+        for row in account_rows:
+            key = chat_identity_key(row.chat_id, row.chat_type)
+            merged_rows[key] = _merge_restricted_chat_row(
+                merged_rows.get(key),
+                row,
+            )
+
+    if scanned_account_count <= 0:
+        raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
+
+    rows = list(merged_rows.values())
+    rows.sort(key=lambda item: (item.chat_title.casefold(), item.chat_id))
+    return rows
 
 
 def _run_channel_inventory_scan_job(
@@ -122,8 +340,6 @@ def _run_channel_inventory_scan_job(
     spec: _ChannelInventoryScanSpec,
 ) -> None:
     heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
-    local_client = None
-    worker_id = f"{job_id}_{spec.worker_suffix}"
     try:
         mark_admin_job_running(
             job_id,
@@ -135,19 +351,8 @@ def _run_channel_inventory_scan_job(
             total=None,
             stage="running",
         )
-        admin_job_append_log_fn(job_id, "正在验证 Telegram 会话...")
-        if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
-            admin_job_set_status_fn(job_id, "error")
-            return
-
-        def ensure_client() -> Any:
-            nonlocal local_client
-            if local_client is None:
-                local_client = _create_isolated_worker_client(cfg, worker_id)
-            return local_client
-
         rows = spec.scan_rows_fn(
-            ensure_client,
+            cfg=cfg,
             get_conn_fn=get_conn_fn,
             admin_job_append_log_fn=admin_job_append_log_fn,
             job_id=job_id,
@@ -177,10 +382,6 @@ def _run_channel_inventory_scan_job(
         admin_job_set_status_fn(job_id, "error")
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if local_client:
-            with suppress(Exception):
-                _disconnect_worker_client(local_client)
-        _cleanup_isolated_worker_session(cfg, worker_id)
 
 
 _MISSING_CHATS_SCAN_SPEC = _ChannelInventoryScanSpec(

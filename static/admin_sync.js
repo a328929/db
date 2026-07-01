@@ -13,6 +13,8 @@
   var LIVE_POLL_INTERVAL_MS = 15000;
   var SYNC_STATS_TIMEOUT_MS = 15000;
   var LIVE_MESSAGES_TIMEOUT_MS = 10000;
+  var SYNC_STATS_SLOW_MS = 4000;
+  var LIVE_MESSAGES_SLOW_MS = 3000;
 
   var syncState = {
     windows: [],
@@ -21,7 +23,26 @@
     liveItems: [],
     livePollTimerId: null,
     liveRequestSeq: 0,
-    liveActiveRequestSeq: 0
+    liveActiveRequestSeq: 0,
+    health: null,
+    apiSignals: {
+      stats: {
+        lastDurationMs: 0,
+        lastSlow: false,
+        slowCount: 0,
+        timeoutCount: 0,
+        failureCount: 0,
+        lastError: ''
+      },
+      live: {
+        lastDurationMs: 0,
+        lastSlow: false,
+        slowCount: 0,
+        timeoutCount: 0,
+        failureCount: 0,
+        lastError: ''
+      }
+    }
   };
 
   document.addEventListener('DOMContentLoaded', async function () {
@@ -47,6 +68,13 @@
       liveSection: document.getElementById('admin-sync-live-section'),
       liveStatus: document.getElementById('admin-sync-live-status'),
       liveList: document.getElementById('admin-sync-live-list'),
+      healthPanel: document.getElementById('admin-sync-health-panel'),
+      healthStatus: document.getElementById('admin-sync-health-status'),
+      healthBanner: document.getElementById('admin-sync-health-banner'),
+      healthReasons: document.getElementById('admin-sync-health-reasons'),
+      healthActions: document.getElementById('admin-sync-health-actions'),
+      diagnoseBtn: document.getElementById('admin-sync-diagnose-btn'),
+      diagnoseResult: document.getElementById('admin-sync-diagnose-result'),
       loginDialog: document.getElementById('admin-login-dialog'),
       loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
@@ -66,6 +94,13 @@
       'liveSection',
       'liveStatus',
       'liveList',
+      'healthPanel',
+      'healthStatus',
+      'healthBanner',
+      'healthReasons',
+      'healthActions',
+      'diagnoseBtn',
+      'diagnoseResult',
       'loginDialog',
       'loginStatus',
       'passwordInput',
@@ -85,6 +120,12 @@
     elements.liveList.textContent = '';
     elements.status.textContent = '正在读取消息同步统计...';
     elements.liveStatus.textContent = '正在读取最近入库消息...';
+    elements.healthStatus.textContent = '正在检测同步链路...';
+    elements.healthBanner.textContent = '等待健康检查结果...';
+    elements.healthBanner.className = 'sync-health-banner is-neutral';
+    elements.healthReasons.textContent = '';
+    elements.healthActions.textContent = '';
+    elements.diagnoseResult.textContent = '';
     setBusy(elements, false);
   }
 
@@ -100,6 +141,9 @@
     });
     elements.refreshBtn.addEventListener('click', function () {
       loadSyncDashboard(elements);
+    });
+    elements.diagnoseBtn.addEventListener('click', function () {
+      triggerSyncDiagnosis(elements);
     });
     elements.windowSelect.addEventListener('change', function () {
       syncState.selectedWindowKey = String(elements.windowSelect.value || '');
@@ -122,6 +166,7 @@
     syncState.busy = !!isBusy;
     setElementDisabled(elements.refreshBtn, syncState.busy);
     setElementDisabled(elements.windowSelect, syncState.busy);
+    setElementDisabled(elements.diagnoseBtn, syncState.busy);
     if (elements.windowGrid && typeof elements.windowGrid.setAttribute === 'function') {
       elements.windowGrid.setAttribute('aria-busy', syncState.busy ? 'true' : 'false');
     }
@@ -268,12 +313,174 @@
     });
   }
 
+  function normalizeSyncHealth(payload) {
+    var health = payload && payload.health ? payload.health : {};
+    var reasons = Array.isArray(health.reasons) ? health.reasons : [];
+    var actions = Array.isArray(health.actions) ? health.actions : [];
+    return {
+      status: String(health.status || 'healthy'),
+      checkedAt: String(health.checked_at || ''),
+      latestMessageAgeSeconds: typeof health.latest_message_age_seconds === 'number'
+        ? Number(health.latest_message_age_seconds)
+        : null,
+      reasons: reasons.map(function (item) {
+        return {
+          code: String(item && item.code || ''),
+          severity: String(item && item.severity || 'warning'),
+          message: String(item && item.message || '')
+        };
+      }).filter(function (item) {
+        return !!item.message;
+      }),
+      actions: actions.map(function (item) { return String(item || ''); }).filter(Boolean),
+      listener: health.listener || {}
+    };
+  }
+
+  function signalApiOutcome(key, options) {
+    var entry = syncState.apiSignals[key];
+    if (!entry) return;
+    var opts = options || {};
+    if (typeof opts.durationMs === 'number') {
+      entry.lastDurationMs = Math.max(0, Number(opts.durationMs));
+    }
+    if (opts.slow === true) {
+      entry.lastSlow = true;
+      entry.slowCount += 1;
+    } else if (opts.success === true) {
+      entry.lastSlow = false;
+      entry.slowCount = 0;
+    }
+    if (opts.timeout === true) {
+      entry.timeoutCount += 1;
+      entry.failureCount += 1;
+      entry.lastError = String(opts.errorMessage || '请求超时，请稍后重试');
+      return;
+    }
+    if (opts.failed === true) {
+      entry.failureCount += 1;
+      entry.lastError = String(opts.errorMessage || '请求失败');
+      return;
+    }
+      if (opts.success === true) {
+        entry.lastError = '';
+        entry.failureCount = 0;
+        entry.timeoutCount = 0;
+    }
+  }
+
+  function isTimeoutMessage(message) {
+    return String(message || '').indexOf('请求超时') >= 0;
+  }
+
+  function buildApiHealthOverlay() {
+    var reasons = [];
+    var actions = [];
+    ['stats', 'live'].forEach(function (key) {
+      var entry = syncState.apiSignals[key];
+      if (!entry) return;
+      var label = key === 'stats' ? '同步统计接口' : '实时消息接口';
+      if (entry.timeoutCount > 0) {
+        reasons.push({
+          code: key + '_timeout',
+          severity: 'critical',
+          message: label + '最近发生超时，可能存在 API 长等待或后端阻塞。'
+        });
+        actions.push('检查 ' + label + ' 的数据库查询、锁等待和服务负载。');
+        return;
+      }
+      if (entry.failureCount > 0) {
+        reasons.push({
+          code: key + '_failure',
+          severity: 'warning',
+          message: label + '最近请求失败：' + String(entry.lastError || '未知错误')
+        });
+        actions.push('检查 ' + label + ' 返回状态和服务日志。');
+        return;
+      }
+      if (entry.lastSlow === true) {
+        reasons.push({
+          code: key + '_slow',
+          severity: 'warning',
+          message: label + '响应偏慢，最近耗时约 ' + String(entry.lastDurationMs) + 'ms。'
+        });
+      }
+    });
+    return {
+      reasons: reasons,
+      actions: actions
+    };
+  }
+
+  function renderSyncHealth(elements) {
+    var health = syncState.health || {
+      status: 'healthy',
+      checkedAt: '',
+      reasons: [],
+      actions: []
+    };
+    var overlay = buildApiHealthOverlay();
+    var allReasons = health.reasons.slice().concat(overlay.reasons);
+    var allActions = health.actions.slice().concat(overlay.actions);
+    var status = health.status || 'healthy';
+    if (overlay.reasons.some(function (item) { return item.severity === 'critical'; })) {
+      status = 'critical';
+    } else if (
+      status === 'healthy'
+      && overlay.reasons.some(function (item) { return item.severity === 'warning'; })
+    ) {
+      status = 'warning';
+    }
+
+    elements.healthReasons.textContent = '';
+    elements.healthActions.textContent = '';
+
+    elements.healthBanner.className = 'sync-health-banner is-' + status;
+    if (status === 'critical') {
+      elements.healthBanner.textContent = '同步链路存在明确异常，建议立即执行诊断并检查监听状态。';
+    } else if (status === 'warning') {
+      elements.healthBanner.textContent = '同步链路存在风险信号，建议关注最近入库与接口时延。';
+    } else {
+      elements.healthBanner.textContent = '同步链路当前未发现明确异常。';
+    }
+
+    elements.healthStatus.textContent =
+      '健康状态：' + status
+      + (health.checkedAt ? '，检测时间 ' + formatDateTime(health.checkedAt) : '');
+
+    if (!allReasons.length) {
+      elements.healthReasons.appendChild(
+        createTextElement('div', 'sync-health-item', '当前没有异常原因。')
+      );
+    } else {
+      allReasons.forEach(function (item) {
+        var box = createTextElement(
+          'div',
+          'sync-health-item is-' + String(item.severity || 'warning'),
+          String(item.message || '')
+        );
+        elements.healthReasons.appendChild(box);
+      });
+    }
+
+    var uniqueActions = [];
+    allActions.forEach(function (item) {
+      if (item && uniqueActions.indexOf(item) < 0) uniqueActions.push(item);
+    });
+    uniqueActions.forEach(function (item) {
+      elements.healthActions.appendChild(
+        createTextElement('div', 'sync-health-action', String(item))
+      );
+    });
+  }
+
   function normalizeSyncPayload(payload) {
     var windows = Array.isArray(payload && payload.windows) ? payload.windows : [];
     return {
       generatedAt: String(payload && payload.generated_at || ''),
       latestMessageCreatedAt: String(payload && payload.latest_message_created_at || ''),
       metricNote: String(payload && payload.metric_note || ''),
+      health: normalizeSyncHealth(payload),
       windows: windows.map(function (item) {
         return {
           window_key: String(item && item.window_key || ''),
@@ -431,12 +638,19 @@
     }
 
     try {
+      var startedAt = Date.now();
       var payload = normalizeLiveMessagesPayload(
         await fetchJSON(
           '/api/admin/sync/messages?limit=' + encodeURIComponent(String(LIVE_MESSAGES_LIMIT)),
           { timeoutMs: LIVE_MESSAGES_TIMEOUT_MS }
         )
       );
+      var elapsedMs = Date.now() - startedAt;
+      signalApiOutcome('live', {
+        success: true,
+        durationMs: elapsedMs,
+        slow: elapsedMs >= LIVE_MESSAGES_SLOW_MS
+      });
       if (!isCurrentLiveRequest(requestSeq)) {
         return;
       }
@@ -451,6 +665,11 @@
           '最近已入库 ' + formatNumber(payload.items.length) + ' 条消息，数据生成时间 ' + formatDateTime(payload.generatedAt) + '。';
       }
     } catch (error) {
+      signalApiOutcome('live', {
+        failed: !isTimeoutMessage(error && error.message),
+        timeout: isTimeoutMessage(error && error.message),
+        errorMessage: error && error.message
+      });
       if (!isCurrentLiveRequest(requestSeq)) {
         return;
       }
@@ -459,6 +678,7 @@
       }
     } finally {
       if (isCurrentLiveRequest(requestSeq)) {
+        renderSyncHealth(elements);
         scheduleLivePoll(elements);
       }
     }
@@ -467,10 +687,18 @@
   async function loadSyncStats(elements) {
     setBusy(elements, true);
     try {
+      var startedAt = Date.now();
       var payload = normalizeSyncPayload(
         await fetchJSON('/api/admin/sync/stats', { timeoutMs: SYNC_STATS_TIMEOUT_MS })
       );
+      var elapsedMs = Date.now() - startedAt;
+      signalApiOutcome('stats', {
+        success: true,
+        durationMs: elapsedMs,
+        slow: elapsedMs >= SYNC_STATS_SLOW_MS
+      });
       syncState.windows = payload.windows;
+      syncState.health = payload.health;
       if (!syncState.windows.length) {
         syncState.selectedWindowKey = '';
       } else if (
@@ -489,6 +717,7 @@
       renderWindowOptions(elements);
       renderSelectedWindow(elements);
       renderWindowCards(elements);
+      renderSyncHealth(elements);
       updateLiveSectionVisibility(elements, { skipReload: true });
 
       elements.metricNote.textContent = payload.metricNote
@@ -502,7 +731,13 @@
       }
       return true;
     } catch (error) {
+      signalApiOutcome('stats', {
+        failed: !isTimeoutMessage(error && error.message),
+        timeout: isTimeoutMessage(error && error.message),
+        errorMessage: error && error.message
+      });
       elements.status.textContent = '读取消息同步统计失败：' + error.message;
+      renderSyncHealth(elements);
       clearLivePollTimer();
       return false;
     } finally {
@@ -526,7 +761,38 @@
   function primeSyncDashboard(elements) {
     loadSyncDashboard(elements).catch(function (error) {
       elements.status.textContent = '读取消息同步统计失败：' + error.message;
+      renderSyncHealth(elements);
     });
+  }
+
+  async function triggerSyncDiagnosis(elements) {
+    elements.diagnoseResult.textContent = '正在执行即时诊断...';
+    setElementDisabled(elements.diagnoseBtn, true);
+    try {
+      var payload = await fetchJSON('/api/admin/sync/diagnose', {
+        method: 'POST',
+        timeoutMs: 20000
+      });
+      var items = Array.isArray(payload && payload.items) ? payload.items : [];
+      var parts = [String(payload && payload.message || '诊断完成')];
+      if (items.length) {
+        parts.push(items.map(function (item) {
+          var title = String(item.chat_title || ('Chat ' + String(item.chat_id || 0)));
+          var status = String(item.status || 'unknown');
+          return title + '：' + status;
+        }).join('；'));
+      }
+      elements.diagnoseResult.textContent = parts.join(' ');
+      await loadSyncStats(elements);
+      if (isLiveWindowSelected()) {
+        loadLiveMessages(elements, { silent: false, forceRender: true });
+      }
+    } catch (error) {
+      elements.diagnoseResult.textContent = '执行即时诊断失败：' + error.message;
+      renderSyncHealth(elements);
+    } finally {
+      setElementDisabled(elements.diagnoseBtn, syncState.busy);
+    }
   }
 
   async function fetchJSON(url, options) {

@@ -57,6 +57,7 @@ class SessionChatRecoveryRow:
     source_session: str = ""
     source_entity_id: int | None = None
     source_access_hash: int | None = None
+    availability_reason: str = ""
     session_entity_date: str = ""
     session_entity_ts: int | None = None
 
@@ -64,6 +65,7 @@ class SessionChatRecoveryRow:
 _RESTRICTION_TOKEN_SPLIT_RE = re.compile(r"[、,，;；|/]+")
 UNAVAILABLE_RESTRICTION_PLATFORM = "all"
 UNAVAILABLE_RESTRICTION_REASONS = frozenset({"terms", "tos"})
+ChatIdentity = tuple[str, int]
 
 
 def load_known_chat_ids(conn: Any) -> set[int]:
@@ -75,6 +77,18 @@ def load_known_chat_ids(conn: Any) -> set[int]:
         cur.close()
 
 
+def load_known_chat_identities(conn: Any) -> set[ChatIdentity]:
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT chat_id, chat_type FROM chats")
+        keys: set[ChatIdentity] = set()
+        for row in cur.fetchall():
+            keys.update(chat_identity_candidates(row["chat_id"], row["chat_type"]))
+        return keys
+    finally:
+        cur.close()
+
+
 def _chat_id_identity(raw_chat_id: Any) -> int:
     original = int(raw_chat_id)
     value = abs(original)
@@ -82,6 +96,68 @@ def _chat_id_identity(raw_chat_id: Any) -> int:
     if original < 0 and raw.startswith("100") and len(raw) > 3:
         return int(raw[3:])
     return value
+
+
+def normalize_chat_type_category(chat_type: Any) -> str:
+    normalized = str(chat_type or "").strip().lower().lstrip("_")
+    if normalized.startswith("channel"):
+        return "channel"
+    if normalized.startswith("chat"):
+        return "chat"
+    return ""
+
+
+def chat_identity_key(chat_id: Any, chat_type: Any) -> ChatIdentity:
+    return (
+        normalize_chat_type_category(chat_type),
+        _chat_id_identity(chat_id),
+    )
+
+
+def chat_identity_candidates(chat_id: Any, chat_type: Any) -> set[ChatIdentity]:
+    identity = _chat_id_identity(chat_id)
+    kind = normalize_chat_type_category(chat_type)
+    if kind:
+        return {(kind, identity)}
+    return {("chat", identity), ("channel", identity)}
+
+
+def _identity_candidates_from_item(item: Any) -> set[ChatIdentity]:
+    if isinstance(item, ChatInventoryRow):
+        return chat_identity_candidates(item.chat_id, item.chat_type)
+    if isinstance(item, Mapping):
+        if "chat_id" not in item:
+            return set()
+        return chat_identity_candidates(
+            item.get("chat_id", 0),
+            item.get("chat_type", ""),
+        )
+    if isinstance(item, tuple) and len(item) == 2 and isinstance(item[0], str):
+        return chat_identity_candidates(item[1], item[0])
+    try:
+        return chat_identity_candidates(int(item), "")
+    except (TypeError, ValueError):
+        return set()
+
+
+def _normalize_identity_keys(items: Iterable[Any]) -> set[ChatIdentity]:
+    keys: set[ChatIdentity] = set()
+    for item in items:
+        keys.update(_identity_candidates_from_item(item))
+    return keys
+
+
+def _normalize_identity_reason_map(
+    values: Mapping[Any, str] | None,
+) -> dict[ChatIdentity, str]:
+    reasons: dict[ChatIdentity, str] = {}
+    for item, reason in (values or {}).items():
+        text = str(reason or "").strip()
+        if not text:
+            continue
+        for key in _identity_candidates_from_item(item):
+            reasons[key] = text
+    return reasons
 
 
 def _is_joined_group_or_channel(dialog: Any) -> bool:
@@ -156,13 +232,13 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
 
 def load_joined_chat_inventory(dialogs: Iterable[Any]) -> list[ChatInventoryRow]:
     rows: list[ChatInventoryRow] = []
-    seen_chat_ids: set[int] = set()
+    seen_chat_ids: set[ChatIdentity] = set()
 
     for dialog in dialogs:
         row = _row_from_dialog(dialog)
         if row is None:
             continue
-        identity = _chat_id_identity(row.chat_id)
+        identity = chat_identity_key(row.chat_id, row.chat_type)
         if identity in seen_chat_ids:
             continue
         seen_chat_ids.add(identity)
@@ -242,7 +318,7 @@ def _entity_risk_flags(entity: Any) -> str:
 
 def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatInventoryRow]:
     rows: list[RestrictedChatInventoryRow] = []
-    seen_chat_ids: set[int] = set()
+    seen_chat_ids: set[ChatIdentity] = set()
 
     for dialog in dialogs:
         base_row = _row_from_dialog(dialog)
@@ -255,7 +331,7 @@ def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatI
         if not any((platforms, reasons, reason_text, risk_flags)):
             continue
 
-        identity = _chat_id_identity(base_row.chat_id)
+        identity = chat_identity_key(base_row.chat_id, base_row.chat_type)
         if identity in seen_chat_ids:
             continue
         seen_chat_ids.add(identity)
@@ -284,21 +360,43 @@ def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatI
     return rows
 
 
-def find_missing_joined_chats(
-    dialogs: Iterable[Any], known_chat_ids: set[int]
+def filter_missing_joined_rows(
+    joined_rows: Iterable[ChatInventoryRow],
+    known_chat_ids: Iterable[Any],
+    *,
+    include_unavailable: bool = False,
 ) -> list[ChatInventoryRow]:
     rows: list[ChatInventoryRow] = []
-    known_identities = {_chat_id_identity(chat_id) for chat_id in known_chat_ids}
+    known_identities = _normalize_identity_keys(known_chat_ids)
 
-    for row in load_joined_chat_inventory(dialogs):
-        if row.unavailable_reason:
+    for row in joined_rows:
+        if row.unavailable_reason and not include_unavailable:
             continue
-        if _chat_id_identity(row.chat_id) in known_identities:
+        if chat_identity_key(row.chat_id, row.chat_type) in known_identities:
             continue
         rows.append(row)
 
-    rows.sort(key=lambda item: (item.chat_title.casefold(), item.chat_id))
+    rows.sort(
+        key=lambda item: (
+            1 if str(item.unavailable_reason or "").strip() else 0,
+            item.chat_title.casefold(),
+            item.chat_id,
+        )
+    )
     return rows
+
+
+def find_missing_joined_chats(
+    dialogs: Iterable[Any],
+    known_chat_ids: Iterable[Any],
+    *,
+    include_unavailable: bool = False,
+) -> list[ChatInventoryRow]:
+    return filter_missing_joined_rows(
+        load_joined_chat_inventory(dialogs),
+        known_chat_ids,
+        include_unavailable=include_unavailable,
+    )
 
 
 def _generic_row_value(row: Any, key: str, default: Any = "") -> Any:
@@ -315,12 +413,12 @@ def filter_database_chats_to_joined(
     database_rows: Iterable[Any], joined_rows: Iterable[ChatInventoryRow]
 ) -> list[Any]:
     joined_identities = {
-        _chat_id_identity(row.chat_id)
+        chat_identity_key(row.chat_id, row.chat_type)
         for row in joined_rows
         if not str(row.unavailable_reason or "").strip()
     }
     rows: list[Any] = []
-    seen_chat_identities: set[int] = set()
+    seen_chat_identities: set[tuple[int, str]] = set()
 
     for row in database_rows:
         try:
@@ -329,11 +427,18 @@ def filter_database_chats_to_joined(
             continue
         if chat_id == 0:
             continue
-        identity = _chat_id_identity(chat_id)
-        if identity in seen_chat_identities:
+        dedupe_key = (
+            _chat_id_identity(chat_id),
+            normalize_chat_type_category(_generic_row_value(row, "chat_type", "")),
+        )
+        identity_candidates = chat_identity_candidates(
+            chat_id,
+            _generic_row_value(row, "chat_type", ""),
+        )
+        if dedupe_key in seen_chat_identities:
             continue
-        seen_chat_identities.add(identity)
-        if identity not in joined_identities:
+        seen_chat_identities.add(dedupe_key)
+        if joined_identities.isdisjoint(identity_candidates):
             continue
         rows.append(row)
 
@@ -347,29 +452,42 @@ def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
 
 def find_database_chats_not_joined(
     database_rows: Iterable[Mapping[str, Any]],
-    joined_chat_ids: set[int],
-    unavailable_chat_reasons: Mapping[int, str] | None = None,
+    joined_chat_ids: Iterable[Any],
+    unavailable_chat_reasons: Mapping[Any, str] | None = None,
 ) -> list[dict]:
-    joined_identities = {_chat_id_identity(chat_id) for chat_id in joined_chat_ids}
-    unavailable_reasons = {
-        _chat_id_identity(chat_id): str(reason or "").strip()
-        for chat_id, reason in (unavailable_chat_reasons or {}).items()
-        if str(reason or "").strip()
-    }
+    joined_identities = _normalize_identity_keys(joined_chat_ids)
+    unavailable_reasons = _normalize_identity_reason_map(unavailable_chat_reasons)
     rows: list[dict] = []
-    seen_chat_ids: set[int] = set()
+    seen_chat_ids: set[tuple[int, str]] = set()
 
     for row in database_rows:
         chat_id = int(_mapping_value(row, "chat_id", 0) or 0)
         if chat_id == 0:
             continue
-        identity = _chat_id_identity(chat_id)
-        if identity in seen_chat_ids:
+        dedupe_key = (
+            _chat_id_identity(chat_id),
+            normalize_chat_type_category(_mapping_value(row, "chat_type", "")),
+        )
+        identity_candidates = chat_identity_candidates(
+            chat_id,
+            _mapping_value(row, "chat_type", ""),
+        )
+        if dedupe_key in seen_chat_ids:
             continue
-        if identity in joined_identities and identity not in unavailable_reasons:
+        if (
+            not joined_identities.isdisjoint(identity_candidates)
+            and all(candidate not in unavailable_reasons for candidate in identity_candidates)
+        ):
             continue
-        seen_chat_ids.add(identity)
-        scan_reason = unavailable_reasons.get(identity) or "账号未加入"
+        seen_chat_ids.add(dedupe_key)
+        scan_reason = next(
+            (
+                unavailable_reasons[candidate]
+                for candidate in identity_candidates
+                if candidate in unavailable_reasons
+            ),
+            "账号未加入",
+        )
         rows.append(
             {
                 "chat_id": chat_id,

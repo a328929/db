@@ -149,6 +149,8 @@ class FrontendSafetyTests(unittest.TestCase):
         source = (ROOT / "static" / "admin_sync.js").read_text(encoding="utf-8")
         self.assertIn("SYNC_STATS_TIMEOUT_MS", source)
         self.assertIn("LIVE_MESSAGES_TIMEOUT_MS", source)
+        self.assertIn("SYNC_STATS_SLOW_MS", source)
+        self.assertIn("LIVE_MESSAGES_SLOW_MS", source)
         self.assertIn("/api/admin/sync/stats', { timeoutMs: SYNC_STATS_TIMEOUT_MS }", source)
         self.assertIn("{ timeoutMs: LIVE_MESSAGES_TIMEOUT_MS }", source)
         self.assertNotIn("Promise.all", source)
@@ -158,6 +160,19 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("var statsLoaded = await loadSyncStats(elements);", dashboard_source)
         self.assertIn("loadLiveMessages(elements", dashboard_source)
         self.assertNotIn("await loadLiveMessages", dashboard_source)
+
+    def test_sync_dashboard_exposes_health_panel_and_diagnose_action(self) -> None:
+        template = (ROOT / "templates" / "admin_sync.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_sync.js").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "admin_sync.css").read_text(encoding="utf-8")
+        self.assertIn('id="admin-sync-health-panel"', template)
+        self.assertIn('id="admin-sync-diagnose-btn"', template)
+        self.assertIn("renderSyncHealth(elements)", source)
+        self.assertIn("triggerSyncDiagnosis(elements)", source)
+        self.assertIn("/api/admin/sync/diagnose", source)
+        self.assertIn("sync-health-banner", styles)
 
     def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
         for template_name in (
@@ -564,7 +579,7 @@ class FrontendSafetyTests(unittest.TestCase):
     def test_admin_recovery_ready_filter_requires_empty_database_chat(self) -> None:
         source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
         self.assertIn(
-            "return !isCandidatePending(item) && Number((item && item.message_count) || 0) <= 0;",
+            "return !isCandidatePending(item) && !hasCandidateAvailabilityIssue(item) && Number((item && item.message_count) || 0) <= 0;",
             source,
         )
         self.assertIn("return items.filter(isCandidateReady);", source)
@@ -581,6 +596,7 @@ class FrontendSafetyTests(unittest.TestCase):
     def test_admin_recovery_uses_dedicated_add_route(self) -> None:
         source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
         self.assertIn("/api/admin/recovery/add", source)
+        self.assertIn("source_access_hash: item.source_access_hash || ''", source)
         self.assertNotIn("/api/admin/jobs/harvest", source)
 
     def test_card_action_buttons_have_item_specific_accessible_names(self) -> None:

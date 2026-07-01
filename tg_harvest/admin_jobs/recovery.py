@@ -1,6 +1,7 @@
 import logging
 from collections.abc import Callable, Iterable
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any
 
 from telethon.tl.functions.channels import GetChannelsRequest
@@ -156,41 +157,54 @@ def _resolve_recovery_candidate_entity(client: Any, row: Any) -> Any:
     raise RuntimeError("无法识别群组/频道 ID")
 
 
-def _keep_recovery_row_for_entity(entity: Any, stats: dict[str, Any]) -> bool:
+def _row_with_availability_reason(row: Any, reason: str) -> Any:
+    normalized_reason = str(reason or "").strip()
+    if not normalized_reason:
+        return row
+    if str(getattr(row, "availability_reason", "") or "").strip() == normalized_reason:
+        return row
+    return replace(row, availability_reason=normalized_reason)
+
+
+def _keep_recovery_row_for_entity(
+    row: Any,
+    entity: Any,
+    stats: dict[str, Any],
+) -> Any | None:
     exclusion_reason = _entity_exclusion_reason(entity)
     if exclusion_reason == "该群组/频道已解散或不存在":
         stats["dissolved_count"] += 1
-        return False
+        return None
     if exclusion_reason:
         stats["unavailable_count"] += 1
-        return False
-    return True
+        return _row_with_availability_reason(row, exclusion_reason)
+    return row
 
 
 def _keep_recovery_row_for_exception(
     row: Any,
     exc: Exception,
     stats: dict[str, Any],
-) -> bool:
+) -> Any | None:
     dissolved_reason = _dissolved_exception_reason(exc)
     unavailable_reason = _unavailable_exception_reason(exc)
     if dissolved_reason:
         stats["dissolved_count"] += 1
-        return False
+        return None
     if unavailable_reason:
         stats["unavailable_count"] += 1
-        return False
+        return _row_with_availability_reason(row, unavailable_reason)
     stats["warning_count"] += 1
     stats["warnings"].append(f"{_row_chat_label(row)}：{admin_error_message(exc)}")
-    return True
+    return row
 
 
-def _validate_recovery_row(client: Any, row: Any, stats: dict[str, Any]) -> bool:
+def _validate_recovery_row(client: Any, row: Any, stats: dict[str, Any]) -> Any | None:
     try:
         entity = _resolve_recovery_candidate_entity(client, row)
     except Exception as exc:
         return _keep_recovery_row_for_exception(row, exc, stats)
-    return _keep_recovery_row_for_entity(entity, stats)
+    return _keep_recovery_row_for_entity(row, entity, stats)
 
 
 def _batch_resolve_recovery_channel_entities(
@@ -239,12 +253,12 @@ def _filter_recovery_chat_scan_rows(
         "warnings": [],
     }
     total = len(row_list)
-    row_keep_by_index: dict[int, bool] = {}
+    row_results_by_index: dict[int, Any | None] = {}
     processed_count = 0
 
-    def mark_processed(row_index: int, keep: bool) -> None:
+    def mark_processed(row_index: int, resolved_row: Any | None) -> None:
         nonlocal processed_count
-        row_keep_by_index[row_index] = keep
+        row_results_by_index[row_index] = resolved_row
         processed_count += 1
         if progress_callback is not None:
             progress_callback(processed_count, total)
@@ -269,18 +283,19 @@ def _filter_recovery_chat_scan_rows(
         for row_index, row, _input_channel in batch:
             entity = resolved_entities.get(row_index)
             if entity is None:
-                keep = _validate_recovery_row(client, row, stats)
+                resolved_row = _validate_recovery_row(client, row, stats)
             else:
-                keep = _keep_recovery_row_for_entity(entity, stats)
-            mark_processed(row_index, keep)
+                resolved_row = _keep_recovery_row_for_entity(row, entity, stats)
+            mark_processed(row_index, resolved_row)
 
     for row_index, row in individual_rows:
         mark_processed(row_index, _validate_recovery_row(client, row, stats))
 
     kept_rows = [
-        row
-        for row_index, row in enumerate(row_list)
-        if bool(row_keep_by_index.get(row_index))
+        resolved_row
+        for row_index, _row in enumerate(row_list)
+        for resolved_row in [row_results_by_index.get(row_index)]
+        if resolved_row is not None
     ]
 
     return kept_rows, stats
@@ -390,7 +405,7 @@ def _admin_recovery_scan_job_runner(
                 "候选验证完成："
                 f"保留 {len(rows)} 个，"
                 f"过滤已解散 {int(filter_stats.get('dissolved_count') or 0)} 个，"
-                f"过滤不可访问 {int(filter_stats.get('unavailable_count') or 0)} 个，"
+                f"标记不可访问 {int(filter_stats.get('unavailable_count') or 0)} 个，"
                 f"验证异常保留 {int(filter_stats.get('warning_count') or 0)} 个",
             )
             update_admin_job_progress(

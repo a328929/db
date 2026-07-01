@@ -58,7 +58,8 @@ def _create_recovery_schema(conn):
             chat_type TEXT,
             message_count INTEGER NOT NULL DEFAULT 0,
             first_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
-            last_seen_at TEXT NOT NULL DEFAULT (datetime('now'))
+            last_seen_at TEXT NOT NULL DEFAULT (datetime('now')),
+            last_message_created_at TEXT NOT NULL DEFAULT ''
         )
         """
     )
@@ -72,6 +73,8 @@ def _create_recovery_schema(conn):
             is_public INTEGER NOT NULL DEFAULT 0,
             source_session TEXT,
             source_entity_id INTEGER,
+            source_access_hash INTEGER,
+            availability_reason TEXT,
             session_entity_date TEXT,
             session_entity_ts INTEGER,
             recovered_at TEXT,
@@ -88,6 +91,7 @@ def _create_recovery_schema(conn):
             message_id INTEGER NOT NULL,
             msg_date_text TEXT NOT NULL,
             msg_date_ts INTEGER NOT NULL,
+            created_at TEXT NOT NULL DEFAULT '',
             PRIMARY KEY(chat_id, message_id)
         )
         """
@@ -143,6 +147,7 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
                     is_public=1,
                     source_session="main.session",
                     source_entity_id=-1001,
+                    source_access_hash=9001,
                     session_entity_date="2026-04-01 10:00:00",
                     session_entity_ts=1775037600,
                 ),
@@ -151,6 +156,8 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
                     chat_title="Recovered Two",
                     source_session="main.session",
                     source_entity_id=-1002,
+                    source_access_hash=9002,
+                    availability_reason="Telegram 返回该会话不可访问",
                     session_entity_ts=1775037500,
                 ),
             ],
@@ -179,7 +186,10 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
         rows_by_id = {row["chat_id"]: row for row in rows}
         assert rows_by_id[1]["in_database"] == 1
         assert rows_by_id[1]["recovered_job_id"] == "restore-1"
+        assert rows_by_id[1]["source_access_hash"] == 9001
         assert rows_by_id[2]["in_database"] == 0
+        assert rows_by_id[2]["source_access_hash"] == 9002
+        assert rows_by_id[2]["availability_reason"] == "Telegram 返回该会话不可访问"
 
         cur = conn.cursor()
         cur.execute("SELECT chat_title, chat_username, is_public FROM chats WHERE chat_id = 1")
@@ -214,6 +224,7 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
                     is_public=1,
                     source_session="main.session",
                     source_entity_id=-1001,
+                    source_access_hash=9001,
                     session_entity_ts=1775037700,
                 ),
             ],
@@ -227,6 +238,7 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
         assert replaced_rows[0]["chat_title"] == "Recovered One Renamed"
         assert replaced_rows[0]["scan_job_id"] == "scan-2"
         assert replaced_rows[0]["recovered_job_id"] == "restore-1"
+        assert replaced_rows[0]["source_access_hash"] == 9001
         replaced_overview = build_recovery_overview(conn)
         assert replaced_overview["total_count"] == 1
     finally:
@@ -308,7 +320,7 @@ class _BatchedRecoveryValidationClient(_RecoveryValidationClient):
         return super().get_entity(value)
 
 
-def test_recovery_validation_filters_dissolved_and_unavailable_but_keeps_other_restrictions():
+def test_recovery_validation_marks_unavailable_rows_but_keeps_them():
     rows = [
         SessionChatRecoveryRow(
             chat_id=1001,
@@ -341,7 +353,12 @@ def test_recovery_validation_filters_dissolved_and_unavailable_but_keeps_other_r
         rows,
     )
 
-    assert [row.chat_id for row in filtered_rows] == [1001, 1003]
+    assert [row.chat_id for row in filtered_rows] == [1001, 1002, 1003]
+    filtered_by_id = {row.chat_id: row for row in filtered_rows}
+    assert (
+        filtered_by_id[1002].availability_reason
+        == "Telegram 返回全部平台/违反条款，该会话不可访问"
+    )
     assert stats["dissolved_count"] == 1
     assert stats["unavailable_count"] == 1
     assert stats["warning_count"] == 0
@@ -379,7 +396,12 @@ def test_recovery_validation_uses_batched_channel_lookup_when_possible():
         ),
     )
 
-    assert [row.chat_id for row in filtered_rows] == [1001, 1003]
+    assert [row.chat_id for row in filtered_rows] == [1001, 1002, 1003]
+    filtered_by_id = {row.chat_id: row for row in filtered_rows}
+    assert (
+        filtered_by_id[1002].availability_reason
+        == "Telegram 返回全部平台/违反条款，该会话不可访问"
+    )
     assert stats["dissolved_count"] == 0
     assert stats["unavailable_count"] == 1
     assert stats["warning_count"] == 0
@@ -407,7 +429,12 @@ def test_recovery_validation_falls_back_when_batch_lookup_fails():
 
     filtered_rows, stats = _filter_recovery_chat_scan_rows(client, rows)
 
-    assert [row.chat_id for row in filtered_rows] == [1001]
+    assert [row.chat_id for row in filtered_rows] == [1001, 1002]
+    filtered_by_id = {row.chat_id: row for row in filtered_rows}
+    assert (
+        filtered_by_id[1002].availability_reason
+        == "Telegram 返回全部平台/违反条款，该会话不可访问"
+    )
     assert stats["dissolved_count"] == 0
     assert stats["unavailable_count"] == 1
     assert stats["warning_count"] == 0

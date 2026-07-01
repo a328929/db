@@ -211,12 +211,20 @@
     return Number(item && item.in_database) !== 1;
   }
 
+  function hasCandidateAvailabilityIssue(item) {
+    return Boolean(String((item && item.availability_reason) || '').trim());
+  }
+
   function isCandidateReady(item) {
-    return !isCandidatePending(item) && Number((item && item.message_count) || 0) <= 0;
+    return !isCandidatePending(item) && !hasCandidateAvailabilityIssue(item) && Number((item && item.message_count) || 0) <= 0;
+  }
+
+  function isCandidateSummaryOnly(item) {
+    return !isCandidatePending(item) && hasCandidateAvailabilityIssue(item) && Number((item && item.message_count) || 0) <= 0;
   }
 
   function isCandidateImported(item) {
-    return !isCandidatePending(item) && !isCandidateReady(item);
+    return !isCandidatePending(item) && !isCandidateReady(item) && !isCandidateSummaryOnly(item);
   }
 
   function filterCandidates(items) {
@@ -254,6 +262,7 @@
 
   function getCandidateStateLabel(item) {
     if (isCandidatePending(item)) return '待恢复摘要';
+    if (isCandidateSummaryOnly(item)) return '当前不可访问';
     if (isCandidateReady(item)) return '准备恢复';
     return '已在库';
   }
@@ -331,6 +340,13 @@
         handleAddCandidateToDatabaseClick(elements, item);
       });
       actions.appendChild(addBtn);
+    } else if (isCandidateSummaryOnly(item)) {
+      var unavailableBtn = document.createElement('button');
+      unavailableBtn.type = 'button';
+      unavailableBtn.textContent = '当前不可访问';
+      unavailableBtn.disabled = true;
+      unavailableBtn.setAttribute('aria-label', candidateLabel + ' 当前不可访问，暂不能继续抓取');
+      actions.appendChild(unavailableBtn);
     } else if (isCandidateImported(item)) {
       var importedBtn = document.createElement('button');
       importedBtn.type = 'button';
@@ -390,17 +406,27 @@
     meta.appendChild(createInfoPill('用户名', item.chat_username ? '@' + item.chat_username : ''));
     meta.appendChild(createInfoPill('来源', item.source_session || ''));
     meta.appendChild(createInfoPill('实体 ID', item.source_entity_id ? String(item.source_entity_id) : ''));
+    if (item.source_access_hash) {
+      meta.appendChild(createInfoPill('Access Hash', String(item.source_access_hash)));
+    }
     meta.appendChild(createInfoPill('扫描', formatDateTime(item.scanned_at)));
     meta.appendChild(createInfoPill('摘要恢复', formatDateTime(item.recovered_at || item.database_last_seen_at)));
     article.appendChild(meta);
 
     article.appendChild(createCandidateActions(elements, item));
+    var noteParts = [];
+    if (hasCandidateAvailabilityIssue(item)) {
+      noteParts.push(String(item.availability_reason || '').trim());
+    }
     if (!item.has_public_link) {
+      noteParts.push('私有群组通常没有稳定网页入口；可复制信息后在 Telegram 中核对。');
+    }
+    if (noteParts.length > 0) {
       article.appendChild(
         createTextElement(
           'p',
           'recovery-note',
-          '私有群组通常没有稳定网页入口；可复制信息后在 Telegram 中核对。'
+          noteParts.join(' | ')
         )
       );
     }
@@ -475,7 +501,9 @@
       'chat_id: ' + item.chat_id,
       item.chat_username ? '@' + item.chat_username : '',
       item.source_session ? 'source: ' + item.source_session : '',
-      item.source_entity_id ? 'entity_id: ' + item.source_entity_id : ''
+      item.source_entity_id ? 'entity_id: ' + item.source_entity_id : '',
+      item.source_access_hash ? 'access_hash: ' + item.source_access_hash : '',
+      item.availability_reason ? 'availability: ' + item.availability_reason : ''
     ].filter(Boolean).join('\n');
 
     if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -634,7 +662,13 @@
 
     try {
       var data = await postJSON('/api/admin/recovery/add', {
-        target: target
+        target: target,
+        chat_id: item.chat_id,
+        chat_title: item.chat_title || '',
+        chat_username: item.chat_username || '',
+        source_session: item.source_session || '',
+        source_entity_id: item.source_entity_id || '',
+        source_access_hash: item.source_access_hash || ''
       });
       var jobId = getCreatedJobId(data);
       appendLog(elements, '添加入库任务已创建：' + jobId);

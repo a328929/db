@@ -139,21 +139,29 @@ def _load_raw_config_values() -> dict:
         "db_listener_enabled": _env_int("TG_DB_LISTENER_ENABLED", 1),
         # 数据库内群组缓存刷新周期，单位秒。
         "db_listener_refresh_seconds": _env_int("TG_DB_LISTENER_REFRESH_SECONDS", 120),
-        # 是否启用公开群的低频定向探测。
+        # 是否启用数据库群组的低频轮巡探测。
         "db_listener_public_probe_enabled": _env_int(
             "TG_DB_LISTENER_PUBLIC_PROBE_ENABLED", 1
         ),
-        # 公开群低频定向探测的轮询周期，单位秒。
+        # 低频轮巡探测的轮询周期，单位秒。
         "db_listener_public_probe_interval_seconds": _env_int(
             "TG_DB_LISTENER_PUBLIC_PROBE_INTERVAL_SECONDS", 180
         ),
-        # 每轮公开群低频定向探测最多处理的群组数。
+        # 每轮低频轮巡探测最多处理的群组数。
         "db_listener_public_probe_batch_size": _env_int(
             "TG_DB_LISTENER_PUBLIC_PROBE_BATCH_SIZE", 4
         ),
-        # 同一公开群两次定向探测之间的最小间隔，单位秒。
+        # 未加入但可探测群组两次轮巡之间的最小间隔，单位秒。
         "db_listener_public_probe_chat_cooldown_seconds": _env_int(
             "TG_DB_LISTENER_PUBLIC_PROBE_CHAT_COOLDOWN_SECONDS", 3600
+        ),
+        # 已加入群组的低频补探测最小间隔，单位秒。
+        "db_listener_joined_probe_chat_cooldown_seconds": _env_int(
+            "TG_DB_LISTENER_JOINED_PROBE_CHAT_COOLDOWN_SECONDS", 10800
+        ),
+        # 长期不活跃群组的额外低频探测最小间隔，单位秒。
+        "db_listener_inactive_probe_chat_cooldown_seconds": _env_int(
+            "TG_DB_LISTENER_INACTIVE_PROBE_CHAT_COOLDOWN_SECONDS", 43200
         ),
         # 可选运维机器人；默认关闭，只用于任务通知，不参与历史消息采集。
         "ops_bot_enabled": _env_int("TG_OPS_BOT_ENABLED", 0),
@@ -245,6 +253,13 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["db_listener_public_probe_chat_cooldown_seconds"] = max(
         300, int(normalized["db_listener_public_probe_chat_cooldown_seconds"])
     )
+    normalized["db_listener_joined_probe_chat_cooldown_seconds"] = max(
+        1800, int(normalized["db_listener_joined_probe_chat_cooldown_seconds"])
+    )
+    normalized["db_listener_inactive_probe_chat_cooldown_seconds"] = max(
+        int(normalized["db_listener_joined_probe_chat_cooldown_seconds"]),
+        int(normalized["db_listener_inactive_probe_chat_cooldown_seconds"]),
+    )
     normalized["ops_bot_enabled"] = enabled_int(normalized["ops_bot_enabled"])
     if normalized["ops_bot_timeout_seconds"] is None:
         normalized["ops_bot_timeout_seconds"] = 3.0
@@ -310,6 +325,12 @@ def _build_app_config(values: dict) -> "AppConfig":
         db_listener_public_probe_chat_cooldown_seconds=values[
             "db_listener_public_probe_chat_cooldown_seconds"
         ],
+        db_listener_joined_probe_chat_cooldown_seconds=values[
+            "db_listener_joined_probe_chat_cooldown_seconds"
+        ],
+        db_listener_inactive_probe_chat_cooldown_seconds=values[
+            "db_listener_inactive_probe_chat_cooldown_seconds"
+        ],
         ops_bot_enabled=values["ops_bot_enabled"],
         ops_bot_token=values["ops_bot_token"],
         ops_bot_notify_chat_id=values["ops_bot_notify_chat_id"],
@@ -370,6 +391,8 @@ class AppConfig:
     db_listener_public_probe_interval_seconds: int
     db_listener_public_probe_batch_size: int
     db_listener_public_probe_chat_cooldown_seconds: int
+    db_listener_joined_probe_chat_cooldown_seconds: int
+    db_listener_inactive_probe_chat_cooldown_seconds: int
     ops_bot_enabled: int
     ops_bot_token: str
     ops_bot_notify_chat_id: str

@@ -7,6 +7,8 @@ from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
     _optional_int,
+    chat_identity_candidates,
+    load_known_chat_identities,
 )
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
@@ -98,6 +100,17 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
         cur.close()
 
 
+def _has_current_chat_identity(
+    known_chat_identities: set[tuple[str, int]],
+    *,
+    chat_id: Any,
+    chat_type: Any,
+) -> bool:
+    return not known_chat_identities.isdisjoint(
+        chat_identity_candidates(chat_id, chat_type)
+    )
+
+
 @synchronized_write
 def replace_missing_chat_scan_results(
     conn: sqlite3.Connection,
@@ -119,17 +132,19 @@ def replace_missing_chat_scan_results(
                 chat_username,
                 chat_type,
                 is_public,
+                unavailable_reason,
                 last_message_at,
                 last_message_ts,
                 scan_job_id,
                 scanned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = excluded.chat_title,
                 chat_username = excluded.chat_username,
                 chat_type = excluded.chat_type,
                 is_public = excluded.is_public,
+                unavailable_reason = excluded.unavailable_reason,
                 last_message_at = excluded.last_message_at,
                 last_message_ts = excluded.last_message_ts,
                 scan_job_id = excluded.scan_job_id,
@@ -142,6 +157,7 @@ def replace_missing_chat_scan_results(
                     clean_username(getattr(row, "chat_username", "")),
                     str(getattr(row, "chat_type", "") or ""),
                     enabled_int(getattr(row, "is_public", None)),
+                    str(getattr(row, "unavailable_reason", "") or "").strip(),
                     str(getattr(row, "last_message_at", "") or ""),
                     _optional_int(getattr(row, "last_message_ts", None)),
                     str(scan_job_id or ""),
@@ -163,6 +179,7 @@ def replace_missing_chat_scan_results(
 def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
+        known_chat_identities = load_known_chat_identities(conn)
         cur.execute(
             """
             SELECT
@@ -171,6 +188,7 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                 a.chat_username,
                 a.chat_type,
                 a.is_public,
+                a.unavailable_reason,
                 COALESCE(
                     NULLIF(a.last_message_at, ''),
                     lm.msg_date_text,
@@ -192,15 +210,18 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     ORDER BY m.msg_date_ts DESC, m.message_id DESC
                     LIMIT 1
                 )
-            WHERE NOT EXISTS (
-                SELECT 1 FROM chats c WHERE c.chat_id = a.chat_id
-            )
             ORDER BY a.chat_title COLLATE NOCASE ASC, a.chat_id ASC
             """
         )
         rows = []
         for row in cur.fetchall():
             chat_id = int(row["chat_id"])
+            if _has_current_chat_identity(
+                known_chat_identities,
+                chat_id=chat_id,
+                chat_type=row["chat_type"],
+            ):
+                continue
             rows.append(
                 {
                     "chat_id": chat_id,
@@ -208,6 +229,7 @@ def list_missing_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
                     "is_public": _row_int(row, "is_public"),
+                    "unavailable_reason": str(row["unavailable_reason"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
                     "scan_job_id": str(row["scan_job_id"] or ""),
@@ -294,6 +316,7 @@ def replace_absent_chat_scan_results(
 def list_absent_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
+        known_chat_identities = load_known_chat_identities(conn)
         cur.execute(
             """
             SELECT
@@ -326,9 +349,6 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     ORDER BY m.msg_date_ts DESC, m.message_id DESC
                     LIMIT 1
                 )
-            WHERE EXISTS (
-                SELECT 1 FROM chats c WHERE c.chat_id = a.chat_id
-            )
             ORDER BY
                 COALESCE(a.message_count, 0) DESC,
                 COALESCE(last_message_ts, 0) DESC,
@@ -339,6 +359,12 @@ def list_absent_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
         rows = []
         for row in cur.fetchall():
             chat_id = int(row["chat_id"])
+            if not _has_current_chat_identity(
+                known_chat_identities,
+                chat_id=chat_id,
+                chat_type=row["chat_type"],
+            ):
+                continue
             rows.append(
                 {
                     "chat_id": chat_id,

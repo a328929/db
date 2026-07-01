@@ -65,7 +65,10 @@ from tg_harvest.app.services import (
 from tg_harvest.config import CFG
 from tg_harvest.domain.meta_payload import _build_meta_payload
 from tg_harvest.ingest.parse import setup_logging
-from tg_harvest.runtime.db_listener import ensure_database_chat_listener_runtime
+from tg_harvest.runtime.db_listener import (
+    ensure_database_chat_listener_runtime,
+    get_database_chat_listener_runtime,
+)
 from tg_harvest.search.maintenance import (
     configure_message_search_maintenance,
     schedule_message_search_maintenance,
@@ -254,6 +257,57 @@ def _request_requires_runtime_db() -> bool:
 
 
 def _build_admin_route_services() -> AdminRouteServices:
+    def _sync_health_snapshot() -> dict[str, object]:
+        runtime = get_database_chat_listener_runtime()
+        if runtime is None:
+            return {
+                "started": False,
+                "listener_enabled": False,
+                "public_probe_enabled": False,
+                "tracked_chat_count": 0,
+                "queued_chat_count": 0,
+                "queue_size": 0,
+                "active_listener_count": 0,
+                "configured_listener_count": 0,
+                "worker_thread_alive": False,
+                "refresh_thread_alive": False,
+                "public_probe_thread_alive": False,
+                "joined_snapshot_updated_at": "",
+                "last_event_at": "",
+                "last_event_age_seconds": None,
+                "last_event_reason": "",
+                "last_event_chat_id": 0,
+                "last_update_attempt_at": "",
+                "last_update_success_at": "",
+                "last_update_success_age_seconds": None,
+                "last_update_success_chat_id": 0,
+                "last_update_failure_at": "",
+                "last_update_failure_age_seconds": None,
+                "last_update_failure_chat_id": 0,
+                "last_update_failure_message": "",
+                "last_probe_attempt_at": "",
+                "last_probe_result_at": "",
+                "last_probe_result_age_seconds": None,
+                "last_probe_status": "",
+                "last_probe_chat_id": 0,
+                "manual_probe_requested_at": "",
+                "manual_probe_completed_at": "",
+                "manual_probe_last_result": "",
+                "accounts": [],
+            }
+        return runtime.health_snapshot()
+
+    def _trigger_sync_remediation() -> dict[str, object]:
+        runtime = get_database_chat_listener_runtime()
+        if runtime is None:
+            return {
+                "ok": False,
+                "message": "数据库监听运行时尚未初始化",
+                "items": [],
+                "triggered": 0,
+            }
+        return runtime.trigger_manual_probe(limit=3)
+
     return AdminRouteServices(
         logger=logger,
         cfg=CFG,
@@ -263,6 +317,8 @@ def _build_admin_route_services() -> AdminRouteServices:
         build_admin_stats_payload_fn=build_admin_stats_payload,
         build_admin_sync_stats_payload_fn=build_admin_sync_stats_payload,
         build_admin_sync_live_messages_payload_fn=build_admin_sync_live_messages_payload,
+        get_sync_health_snapshot_fn=_sync_health_snapshot,
+        trigger_sync_remediation_fn=_trigger_sync_remediation,
         admin_get_chat_brief_fn=get_admin_chat_brief,
         admin_job_get_snapshot_fn=_admin_job_get_snapshot,
         admin_job_get_logs_fn=_admin_job_get_logs,

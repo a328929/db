@@ -29,6 +29,25 @@ def _format_utc_text(value: datetime) -> str:
     )
 
 
+def _parse_utc_text(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return None
+
+
+def _age_seconds_from_text(base_now: datetime, value: Any) -> int | None:
+    parsed = _parse_utc_text(value)
+    if parsed is None:
+        return None
+    return max(0, int((base_now - parsed).total_seconds()))
+
+
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
     cur = conn.cursor()
     try:
@@ -114,6 +133,184 @@ def _build_sync_window_rows(
             }
         )
     return window_rows
+
+
+def _evaluate_sync_health(
+    *,
+    base_now: datetime,
+    windows_by_key: dict[str, dict[str, Any]],
+    latest_created_at: str,
+    health_snapshot: dict[str, Any] | None,
+) -> dict[str, Any]:
+    snapshot = dict(health_snapshot or {})
+    reasons: list[dict[str, str]] = []
+    actions: list[str] = []
+    status = "healthy"
+
+    ten_min_window = dict(windows_by_key.get("10m") or {})
+    ten_min_count = int(ten_min_window.get("message_count") or 0)
+    latest_message_age_seconds = _age_seconds_from_text(base_now, latest_created_at)
+    listener_enabled = bool(snapshot.get("listener_enabled"))
+    public_probe_enabled = bool(snapshot.get("public_probe_enabled"))
+    active_listener_count = int(snapshot.get("active_listener_count") or 0)
+    configured_listener_count = int(snapshot.get("configured_listener_count") or 0)
+    worker_thread_alive = bool(snapshot.get("worker_thread_alive"))
+    refresh_thread_alive = bool(snapshot.get("refresh_thread_alive"))
+    public_probe_thread_alive = bool(snapshot.get("public_probe_thread_alive"))
+    queue_size = int(snapshot.get("queue_size") or 0)
+    last_update_success_age_seconds = snapshot.get("last_update_success_age_seconds")
+    last_update_failure_age_seconds = snapshot.get("last_update_failure_age_seconds")
+    last_update_failure_message = str(
+        snapshot.get("last_update_failure_message") or ""
+    ).strip()
+    last_probe_status = str(snapshot.get("last_probe_status") or "").strip()
+    last_probe_result_age_seconds = snapshot.get("last_probe_result_age_seconds")
+    tracked_chat_count = int(snapshot.get("tracked_chat_count") or 0)
+
+    if listener_enabled and configured_listener_count > 0 and active_listener_count <= 0:
+        status = "critical"
+        reasons.append(
+            {
+                "code": "listener_disconnected",
+                "severity": "critical",
+                "message": "监听线程未连接到任何账号，实时同步可能已中断。",
+            }
+        )
+        actions.append("检查 Telegram 账号会话是否失效，并执行一次即时诊断。")
+
+    if listener_enabled and not worker_thread_alive:
+        status = "critical"
+        reasons.append(
+            {
+                "code": "worker_not_alive",
+                "severity": "critical",
+                "message": "监听更新处理线程未运行，事件可能无法入库。",
+            }
+        )
+        actions.append("重启服务或检查后台运行时线程状态。")
+
+    if listener_enabled and not refresh_thread_alive:
+        status = "critical"
+        reasons.append(
+            {
+                "code": "refresh_not_alive",
+                "severity": "critical",
+                "message": "监听缓存刷新线程未运行，群组追踪状态可能已过期。",
+            }
+        )
+
+    if public_probe_enabled and not public_probe_thread_alive:
+        status = "critical" if status == "healthy" else status
+        reasons.append(
+            {
+                "code": "probe_not_alive",
+                "severity": "critical",
+                "message": "低频轮巡探测线程未运行，补救同步能力已失效。",
+            }
+        )
+
+    if queue_size >= 100:
+        status = "critical"
+        reasons.append(
+            {
+                "code": "queue_backlog_high",
+                "severity": "critical",
+                "message": f"监听更新队列积压 {queue_size} 项，入库处理明显滞后。",
+            }
+        )
+        actions.append("检查数据库写入性能和 Telegram 接口可用性。")
+    elif queue_size >= 20 and status == "healthy":
+        status = "warning"
+        reasons.append(
+            {
+                "code": "queue_backlog_warn",
+                "severity": "warning",
+                "message": f"监听更新队列积压 {queue_size} 项，入库可能出现延迟。",
+            }
+        )
+
+    if (
+        ten_min_count <= 0
+        and tracked_chat_count > 0
+        and latest_message_age_seconds is not None
+        and latest_message_age_seconds >= 10 * 60
+    ):
+        severity = "warning"
+        message = "最近 10 分钟无新入库消息。"
+        if (
+            active_listener_count <= 0
+            or bool(last_update_failure_message)
+            or (last_probe_status and last_probe_status in {"failed", "flood_wait", "no_account"})
+        ):
+            severity = "critical"
+            message = "最近 10 分钟无新入库消息，且监听/探测状态异常，疑似同步链路故障。"
+        if severity == "critical":
+            status = "critical"
+        elif status == "healthy":
+            status = "warning"
+        reasons.append(
+            {
+                "code": "no_recent_ingest",
+                "severity": severity,
+                "message": message,
+            }
+        )
+        actions.append("执行一次即时诊断，并核查目标群组近 10 分钟是否确有新消息。")
+
+    if (
+        last_update_success_age_seconds is not None
+        and last_update_success_age_seconds >= 10 * 60
+        and tracked_chat_count > 0
+        and status == "healthy"
+    ):
+        status = "warning"
+        reasons.append(
+            {
+                "code": "update_success_stale",
+                "severity": "warning",
+                "message": "监听链路超过 10 分钟没有成功完成单群更新。",
+            }
+        )
+
+    if bool(last_update_failure_message) and (
+        last_update_failure_age_seconds is None
+        or int(last_update_failure_age_seconds) <= 10 * 60
+    ):
+        if status == "healthy":
+            status = "warning"
+        reasons.append(
+            {
+                "code": "recent_update_failure",
+                "severity": "warning" if status != "critical" else "critical",
+                "message": "最近一次增量更新失败：" + last_update_failure_message,
+            }
+        )
+
+    if last_probe_status in {"failed", "flood_wait", "no_account"} and (
+        last_probe_result_age_seconds is None
+        or int(last_probe_result_age_seconds) <= 10 * 60
+    ):
+        if status == "healthy":
+            status = "warning"
+        reasons.append(
+            {
+                "code": "recent_probe_issue",
+                "severity": "warning" if status != "critical" else "critical",
+                "message": "最近一次低频轮巡探测状态异常：" + last_probe_status,
+            }
+        )
+
+    if not actions:
+        actions.append("当前未发现明确异常，可继续观察或手动刷新。")
+
+    return {
+        "status": status,
+        "checked_at": _format_utc_text(base_now),
+        "latest_message_age_seconds": latest_message_age_seconds,
+        "reasons": reasons,
+        "actions": actions,
+        "listener": snapshot,
+    }
 
 
 def build_admin_sync_live_messages_payload(
@@ -205,7 +402,11 @@ def build_admin_sync_live_messages_payload(
     }
 
 
-def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
+def build_admin_sync_stats_payload(
+    conn: sqlite3.Connection,
+    *,
+    health_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     windows = [dict(item) for item in _ADMIN_SYNC_WINDOWS]
     base_now = _utc_now()
     generated_at = _format_utc_text(base_now)
@@ -235,6 +436,14 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
             },
             "windows": window_rows,
             "default_window_key": "live",
+            "health": _evaluate_sync_health(
+                base_now=base_now,
+                windows_by_key={
+                    str(item["window_key"]): dict(item) for item in window_rows
+                },
+                latest_created_at="",
+                health_snapshot=health_snapshot,
+            ),
         }
 
     cur = conn.cursor()
@@ -372,6 +581,12 @@ def build_admin_sync_stats_payload(conn: sqlite3.Connection) -> dict[str, Any]:
         },
         "windows": window_rows,
         "default_window_key": "live",
+        "health": _evaluate_sync_health(
+            base_now=base_now,
+            windows_by_key={str(item["window_key"]): dict(item) for item in window_rows},
+            latest_created_at=latest_created_at,
+            health_snapshot=health_snapshot,
+        ),
     }
 
 

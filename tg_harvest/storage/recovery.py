@@ -35,6 +35,8 @@ def _recovery_row_params(row: Any, *, scan_job_id: str, scanned_at: str) -> tupl
         enabled_int(_scan_row_value(row, "is_public", 0)),
         str(_scan_row_value(row, "source_session", "")).strip(),
         _optional_int(_scan_row_value(row, "source_entity_id", None)),
+        _optional_int(_scan_row_value(row, "source_access_hash", None)),
+        str(_scan_row_value(row, "availability_reason", "")).strip(),
         str(_scan_row_value(row, "session_entity_date", "")).strip(),
         _optional_int(_scan_row_value(row, "session_entity_ts", None)),
         str(scan_job_id or ""),
@@ -71,12 +73,14 @@ def replace_recovery_chat_scan_results(
                 is_public,
                 source_session,
                 source_entity_id,
+                source_access_hash,
+                availability_reason,
                 session_entity_date,
                 session_entity_ts,
                 scan_job_id,
                 scanned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = excluded.chat_title,
                 chat_username = excluded.chat_username,
@@ -84,6 +88,8 @@ def replace_recovery_chat_scan_results(
                 is_public = excluded.is_public,
                 source_session = excluded.source_session,
                 source_entity_id = excluded.source_entity_id,
+                source_access_hash = excluded.source_access_hash,
+                availability_reason = excluded.availability_reason,
                 session_entity_date = excluded.session_entity_date,
                 session_entity_ts = excluded.session_entity_ts,
                 scan_job_id = excluded.scan_job_id,
@@ -145,6 +151,8 @@ def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
                 a.is_public,
                 a.source_session,
                 a.source_entity_id,
+                a.source_access_hash,
+                a.availability_reason,
                 a.session_entity_date,
                 a.session_entity_ts,
                 a.recovered_at,
@@ -190,6 +198,8 @@ def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
                     "is_public": _row_int(row, "is_public"),
                     "source_session": str(row["source_session"] or ""),
                     "source_entity_id": _optional_int(row["source_entity_id"]),
+                    "source_access_hash": _optional_int(row["source_access_hash"]),
+                    "availability_reason": str(row["availability_reason"] or ""),
                     "session_entity_date": str(row["session_entity_date"] or ""),
                     "session_entity_ts": _optional_int(row["session_entity_ts"]),
                     "recovered_at": str(row["recovered_at"] or ""),

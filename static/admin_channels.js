@@ -477,7 +477,7 @@
       empty.className = 'empty-box';
       empty.textContent = '暂无未入库扫描结果。';
       elements.missingList.appendChild(empty);
-      elements.missingStatus.textContent = '暂无未入库扫描结果，可点击“扫描当前账号”。';
+      elements.missingStatus.textContent = '暂无未入库扫描结果，可点击“扫描已配置账号”。';
       return;
     }
 
@@ -490,7 +490,7 @@
         return '正在显示 ' + visible + '/' + total + ' 个未入库扫描结果...';
       },
       doneText: function (total) {
-        return '发现 ' + total + ' 个已加入但未入库的群组/频道。';
+        return '发现 ' + total + ' 个已配置账号已加入但未入库的群组/频道。';
       },
       createItem: function (item) {
         var metaParts = [];
@@ -508,12 +508,17 @@
             { label: 'chat_id', value: String(item.chat_id) },
             { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
             { label: '类型', value: item.chat_type || '' },
+            { label: '状态', value: item.unavailable_reason ? '已加入但当前不可访问' : '已加入' },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements),
-          note: item.has_public_link
-            ? ''
-            : '私有群组通常没有稳定网页入口；客户端链接不可用时可复制信息后在 Telegram 中定位。'
+          note: item.unavailable_reason
+            ? item.unavailable_reason
+            : (
+                item.has_public_link
+                  ? ''
+                  : '私有群组通常没有稳定网页入口；客户端链接不可用时可复制信息后在 Telegram 中定位。'
+              )
         });
       }
     });
@@ -818,7 +823,7 @@
   }
 
   async function handleScanMissingClick(elements) {
-    if (!window.confirm('确认扫描当前 Telegram 账号中已加入但未入库的群组或频道？')) {
+    if (!window.confirm('确认扫描已配置 Telegram 账号中已加入但未入库的群组或频道？')) {
       appendLog(elements, '已取消扫描');
       return;
     }

@@ -49,6 +49,33 @@
         </li>
       </ul>
 
+      <section
+        id="admin-sync-health-panel"
+        class="sync-health-panel"
+        aria-labelledby="syncHealthTitle"
+      >
+        <div class="sync-health-head">
+          <div>
+            <h3 id="syncHealthTitle" class="section-title">同步健康状态</h3>
+            <p id="admin-sync-health-status" class="sync-subline" role="status" aria-live="polite">正在检测同步链路...</p>
+          </div>
+          <div class="sync-toolbar">
+            <button
+              id="admin-sync-diagnose-btn"
+              class="btn"
+              type="button"
+              aria-label="执行消息同步即时诊断"
+            >
+              立即诊断
+            </button>
+          </div>
+        </div>
+        <div id="admin-sync-health-banner" class="sync-health-banner is-neutral">等待健康检查结果...</div>
+        <div id="admin-sync-health-reasons" class="sync-health-list" aria-label="同步健康问题列表"></div>
+        <div id="admin-sync-health-actions" class="sync-health-actions" aria-label="同步健康处理建议"></div>
+        <div id="admin-sync-diagnose-result" class="sync-health-diagnose" aria-live="polite"></div>
+      </section>
+
       <p id="admin-sync-metric-note" class="sync-note" aria-live="polite"></p>
     </section>
 

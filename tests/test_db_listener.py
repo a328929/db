@@ -179,7 +179,9 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         self.assertEqual(3, len(client.handlers))
         self.assertTrue(all(iscoroutinefunction(callback) for callback, _ in client.handlers))
 
-    def test_public_probe_candidate_rows_exclude_only_joined_public_chats(self) -> None:
+    def test_public_probe_candidate_rows_include_joined_public_and_cached_private_chats(
+        self,
+    ) -> None:
         cfg = SimpleNamespace(
             session_name="primary",
             secondary_session_name="secondary",
@@ -218,11 +220,26 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         with patch.object(
             db_listener,
             "_read_session_cached_chat_ids",
-            side_effect=[{1, 2}, set()],
+            side_effect=[{1, 2}, {4}],
         ):
             rows = runtime._public_probe_candidate_rows()
 
-        self.assertEqual([2, 3], [int(row["chat_id"]) for row in rows])
+        self.assertEqual([1, 2, 3, 4], [int(row["chat_id"]) for row in rows])
+        scope_by_chat_id = {
+            int(row["chat_id"]): str(row.get("probe_scope") or "") for row in rows
+        }
+        self.assertEqual("joined", scope_by_chat_id[1])
+        self.assertEqual("public", scope_by_chat_id[2])
+        self.assertEqual("public", scope_by_chat_id[3])
+        self.assertEqual("cached", scope_by_chat_id[4])
+        preferred_accounts_by_chat_id = {
+            int(row["chat_id"]): tuple(row.get("probe_account_keys") or ())
+            for row in rows
+        }
+        self.assertEqual(("primary",), preferred_accounts_by_chat_id[1])
+        self.assertEqual(("primary",), preferred_accounts_by_chat_id[2])
+        self.assertEqual(("primary", "secondary"), preferred_accounts_by_chat_id[3])
+        self.assertEqual(("secondary",), preferred_accounts_by_chat_id[4])
 
     def test_public_probe_candidate_rows_fallback_to_session_cache_before_joined_snapshot_ready(
         self,
@@ -255,7 +272,10 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         ):
             rows = runtime._public_probe_candidate_rows()
 
-        self.assertEqual([2], [int(row["chat_id"]) for row in rows])
+        self.assertEqual([1, 2], [int(row["chat_id"]) for row in rows])
+        row_by_chat_id = {int(row["chat_id"]): row for row in rows}
+        self.assertEqual("public", row_by_chat_id[1]["probe_scope"])
+        self.assertEqual(("primary",), row_by_chat_id[1]["probe_account_keys"])
 
     def test_account_priority_prefers_source_account(self) -> None:
         cfg = SimpleNamespace(
@@ -275,6 +295,27 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         )
 
         accounts = runtime._account_priority_for_item(item)
+
+        self.assertEqual(["secondary", "primary"], [account.key for account in accounts])
+
+    def test_probe_account_priority_prefers_joined_accounts(self) -> None:
+        cfg = SimpleNamespace(
+            session_name="primary",
+            secondary_session_name="secondary",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        row = {
+            "chat_id": 1,
+            "chat_title": "one",
+            "chat_username": "",
+            "probe_scope": "joined",
+            "probe_account_keys": ("secondary",),
+        }
+
+        accounts = runtime._probe_account_priority_for_row(row)
 
         self.assertEqual(["secondary", "primary"], [account.key for account in accounts])
 
@@ -413,6 +454,69 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         self.assertIn(2, batch_ids)
         self.assertIn(4, batch_ids)
 
+    def test_next_public_probe_batch_reserves_slots_for_joined_and_unjoined_rows(
+        self,
+    ) -> None:
+        cfg = SimpleNamespace(
+            db_listener_public_probe_batch_size=4,
+            session_name="primary",
+            secondary_session_name="secondary",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        rows = [
+            {
+                "chat_id": 1,
+                "chat_title": "public-1",
+                "chat_username": "public1",
+                "last_message_id": 1000,
+                "last_message_ts": 1000,
+                "probe_scope": "public",
+                "probe_account_keys": ("primary", "secondary"),
+            },
+            {
+                "chat_id": 2,
+                "chat_title": "public-2",
+                "chat_username": "public2",
+                "last_message_id": 900,
+                "last_message_ts": 900,
+                "probe_scope": "public",
+                "probe_account_keys": ("primary", "secondary"),
+            },
+            {
+                "chat_id": 3,
+                "chat_title": "joined-1",
+                "chat_username": "",
+                "last_message_id": 800,
+                "last_message_ts": 800,
+                "probe_scope": "joined",
+                "probe_account_keys": ("primary",),
+            },
+            {
+                "chat_id": 4,
+                "chat_title": "joined-2",
+                "chat_username": "",
+                "last_message_id": 700,
+                "last_message_ts": 700,
+                "probe_scope": "joined",
+                "probe_account_keys": ("secondary",),
+            },
+        ]
+
+        with patch.object(
+            runtime,
+            "_public_probe_candidate_rows",
+            return_value=rows,
+        ):
+            batch = runtime._next_public_probe_batch()
+
+        self.assertEqual(4, len(batch))
+        scopes = {str(row.get("probe_scope") or "") for row in batch}
+        self.assertIn("public", scopes)
+        self.assertIn("joined", scopes)
+
     def test_next_public_probe_batch_reuses_hot_slots_when_no_cold_rows_available(
         self,
     ) -> None:
@@ -533,6 +637,50 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
 
         self.assertEqual("changed", outcome.status)
         self.assertEqual(900, outcome.cooldown_seconds)
+
+    def test_probe_public_row_uses_long_inactive_cooldown_for_joined_chat(self) -> None:
+        cfg = SimpleNamespace(
+            db_listener_joined_probe_chat_cooldown_seconds=7200,
+            db_listener_inactive_probe_chat_cooldown_seconds=43200,
+            session_name="primary",
+            secondary_session_name="",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        row = {
+            "chat_id": 1,
+            "chat_title": "one",
+            "chat_username": "",
+            "probe_scope": "joined",
+            "probe_inactive": True,
+            "probe_account_keys": ("primary",),
+        }
+        account = _ListenerAccount(
+            key="primary",
+            label="主账号",
+            cfg=cfg,
+            session_name="primary",
+        )
+
+        with patch.object(
+            runtime,
+            "_probe_account_priority_for_row",
+            return_value=[account],
+        ), patch.object(
+            db_listener,
+            "_ensure_base_session_valid",
+            return_value=True,
+        ), patch.object(
+            runtime,
+            "_probe_public_row_with_account",
+            return_value=False,
+        ):
+            outcome = runtime._probe_public_row(row)
+
+        self.assertEqual("unchanged", outcome.status)
+        self.assertEqual(43200, outcome.cooldown_seconds)
 
     def test_probe_public_row_returns_short_failure_cooldown_on_flood_wait(self) -> None:
         cfg = SimpleNamespace(
@@ -723,6 +871,79 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
 
         batch_mock.assert_not_called()
         probe_mock.assert_not_called()
+
+    def test_health_snapshot_reports_listener_and_queue_state(self) -> None:
+        cfg = SimpleNamespace(
+            db_listener_enabled=1,
+            db_listener_public_probe_enabled=1,
+            session_name="primary",
+            secondary_session_name="secondary",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        runtime._started = True
+        runtime._db_chat_rows_by_id = {1: {"chat_id": 1}, 2: {"chat_id": 2}}
+        runtime._queued_chat_ids = {1, 2, 3}
+        runtime._listener_clients = {"primary": object()}
+        runtime._listener_connected_at = {"primary": 100.0}
+        runtime._listener_last_error = {"secondary": "session invalid"}
+        runtime._listener_last_error_at = {"secondary": 120.0}
+        runtime._last_update_success_at = 150.0
+        runtime._last_probe_status = "changed"
+        runtime._last_probe_result_at = 160.0
+
+        with patch.object(db_listener.time, "time", return_value=200.0):
+            snapshot = runtime.health_snapshot()
+
+        self.assertTrue(snapshot["started"])
+        self.assertEqual(2, snapshot["tracked_chat_count"])
+        self.assertEqual(3, snapshot["queued_chat_count"])
+        self.assertEqual(1, snapshot["active_listener_count"])
+        self.assertEqual(2, snapshot["configured_listener_count"])
+        self.assertEqual("1970-01-01 00:02:30", snapshot["last_update_success_at"])
+        self.assertEqual("changed", snapshot["last_probe_status"])
+        accounts = {item["key"]: item for item in snapshot["accounts"]}
+        self.assertTrue(accounts["primary"]["connected"])
+        self.assertEqual("session invalid", accounts["secondary"]["last_error"])
+
+    def test_trigger_manual_probe_returns_probe_results(self) -> None:
+        cfg = SimpleNamespace(
+            session_name="primary",
+            secondary_session_name="",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        rows = [
+            {"chat_id": 1, "chat_title": "one", "chat_username": "one"},
+            {"chat_id": 2, "chat_title": "two", "chat_username": "two"},
+        ]
+
+        with patch.object(
+            runtime,
+            "_next_public_probe_batch",
+            return_value=rows,
+        ), patch.object(
+            runtime,
+            "_probe_public_row",
+            side_effect=[
+                _PublicProbeOutcome(status="changed", cooldown_seconds=120),
+                _PublicProbeOutcome(status="unchanged", cooldown_seconds=300),
+            ],
+        ), patch.object(
+            runtime,
+            "_set_public_probe_cooldown",
+        ) as cooldown_mock:
+            result = runtime.trigger_manual_probe(limit=2)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(1, result["triggered"])
+        self.assertEqual(2, len(result["items"]))
+        cooldown_mock.assert_any_call(1, seconds=120)
+        cooldown_mock.assert_any_call(2, seconds=300)
 
     def test_ensure_database_chat_listener_runtime_starts_once(self) -> None:
         cfg = SimpleNamespace()

@@ -60,6 +60,8 @@ class RecoveryRoutesTests(unittest.TestCase):
                     "is_public": 1,
                     "source_session": "my_session.session",
                     "source_entity_id": -1001,
+                    "source_access_hash": 9001,
+                    "availability_reason": "",
                     "session_entity_date": "2026-04-01 10:00:00",
                     "session_entity_ts": 1775037600,
                     "recovered_at": "",
@@ -168,15 +170,34 @@ class RecoveryRoutesTests(unittest.TestCase):
             csrf_token = self._login_admin()
             response = self.client.post(
                 "/api/admin/recovery/add",
-                json={"target": "  @recoverable  "},
+                json={
+                    "target": "  @recoverable  ",
+                    "chat_id": 1,
+                    "chat_title": "Recoverable",
+                    "chat_username": "recoverable",
+                    "source_session": "my_session.session",
+                    "source_entity_id": -1001,
+                    "source_access_hash": 9001,
+                },
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
         self.assertEqual(200, response.status_code)
         self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
         self.assertEqual(1, len(self.started_harvests))
-        args, _kwargs = self.started_harvests[0]
+        args, kwargs = self.started_harvests[0]
         self.assertEqual(("job-1", "@recoverable"), args[:2])
+        self.assertEqual(
+            {
+                "chat_id": 1,
+                "chat_title": "Recoverable",
+                "chat_username": "recoverable",
+                "source_session": "my_session.session",
+                "source_entity_id": -1001,
+                "source_access_hash": 9001,
+            },
+            kwargs["harvest_hint"],
+        )
         self.assertEqual(
             [
                 ("job-1", "已接收恢复候选添加入库请求"),

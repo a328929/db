@@ -13,6 +13,8 @@ from typing import Any
 
 import tg_harvest.storage.fts as _fts
 import tg_harvest.storage.search_terms as _search_terms
+from telethon.tl.types import InputPeerChannel, InputPeerChat
+
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -1689,6 +1691,19 @@ def _find_matching_entity(candidate_entities: list[Any], target_entity: Any) -> 
     return None
 
 
+def _unique_entities_by_identity(entities: list[Any]) -> list[Any]:
+    unique_entities: list[Any] = []
+    seen_identities: set[tuple[str, int]] = set()
+    for entity in entities:
+        identity = _entity_identity(entity)
+        dedupe_key = ("identity", identity) if identity else ("object", id(entity))
+        if dedupe_key in seen_identities:
+            continue
+        seen_identities.add(dedupe_key)
+        unique_entities.append(entity)
+    return unique_entities
+
+
 @dataclass
 class _HarvestTarget:
     entity: Any
@@ -1763,6 +1778,85 @@ def _raise_if_account_flood_wait(
     )
 
 
+def _harvest_hint_value(harvest_hint: Any, key: str) -> Any:
+    if not isinstance(harvest_hint, dict):
+        return None
+    return harvest_hint.get(key)
+
+
+def _harvest_hint_lookup_values(harvest_hint: Any) -> list[Any]:
+    values: list[Any] = []
+    source_entity_id = safe_int(_harvest_hint_value(harvest_hint, "source_entity_id"))
+    source_access_hash = optional_int(
+        _harvest_hint_value(harvest_hint, "source_access_hash")
+    )
+    chat_id = safe_int(_harvest_hint_value(harvest_hint, "chat_id"))
+    chat_username = clean_username(_harvest_hint_value(harvest_hint, "chat_username"))
+
+    if source_entity_id != 0:
+        raw_entity_text = str(abs(source_entity_id))
+        if (
+            raw_entity_text.startswith("100")
+            and len(raw_entity_text) > 3
+            and source_access_hash is not None
+        ):
+            values.append(
+                InputPeerChannel(
+                    int(raw_entity_text[3:]),
+                    int(source_access_hash),
+                )
+            )
+        elif source_entity_id < 0:
+            values.append(InputPeerChat(abs(source_entity_id)))
+        values.append(source_entity_id)
+
+    if chat_id != 0 and chat_id != source_entity_id:
+        values.append(chat_id)
+    if chat_username:
+        values.append(chat_username)
+    return values
+
+
+def _resolve_hint_entities_for_account(
+    client: Any,
+    harvest_hint: Any,
+    *,
+    cfg: Any,
+    account_label: str,
+    scope: str,
+) -> list[Any]:
+    resolved_entities: list[Any] = []
+    if not isinstance(harvest_hint, dict):
+        return resolved_entities
+
+    seen_entities: set[tuple[str, int]] = set()
+    for lookup_value in _harvest_hint_lookup_values(harvest_hint):
+        try:
+            with bind_client_event_loop(client):
+                entity = client.get_entity(lookup_value)
+        except Exception as exc:
+            _raise_if_account_flood_wait(
+                exc,
+                cfg=cfg,
+                account_label=account_label,
+                scope=f"{scope}:hint",
+            )
+            continue
+
+        if entity is None:
+            continue
+        identity = _entity_identity(entity)
+        dedupe_key = ("identity", identity) if identity else ("object", id(entity))
+        if dedupe_key in seen_entities:
+            continue
+        seen_entities.add(dedupe_key)
+        resolved_entities.append(entity)
+        if identity:
+            break
+
+    return resolved_entities
+
+
 def _resolve_target_entities_for_account(
     client: Any,
     target: str,
@@ -1770,12 +1864,23 @@ def _resolve_target_entities_for_account(
     cfg: Any,
     account_label: str,
     scope: str,
+    harvest_hint: dict[str, Any] | None = None,
 ) -> list[Any]:
     from tg_harvest.ingest.parse import resolve_target_entities
 
+    hint_entities = _resolve_hint_entities_for_account(
+        client,
+        harvest_hint,
+        cfg=cfg,
+        account_label=account_label,
+        scope=scope,
+    )
+    if hint_entities:
+        return _unique_entities_by_identity(hint_entities)
+
     try:
         with bind_client_event_loop(client):
-            return resolve_target_entities(client, target)
+            return _unique_entities_by_identity(resolve_target_entities(client, target))
     except Exception as exc:
         _raise_if_account_flood_wait(
             exc,
@@ -1793,6 +1898,7 @@ def _resolve_matching_entity_for_account(
     *,
     cfg: Any,
     account_label: str,
+    harvest_hint: dict[str, Any] | None = None,
 ) -> Any | None:
     target_entities = _resolve_target_entities_for_account(
         client,
@@ -1800,6 +1906,7 @@ def _resolve_matching_entity_for_account(
         cfg=cfg,
         account_label=account_label,
         scope="resolve-matching-target",
+        harvest_hint=harvest_hint,
     )
     matched_entity = _find_matching_entity(target_entities, source_entity)
     if matched_entity is not None:
@@ -1833,6 +1940,7 @@ def _resolve_harvest_targets(
     cfg: Any,
     primary_client: Any,
     admin_job_append_log_fn: Callable[[str, str], Any],
+    harvest_hint: dict[str, Any] | None = None,
 ) -> _HarvestTargetResolution:
     try:
         primary_entities = _resolve_target_entities_for_account(
@@ -1841,6 +1949,7 @@ def _resolve_harvest_targets(
             cfg=cfg,
             account_label="primary",
             scope="resolve-harvest-target",
+            harvest_hint=harvest_hint,
         )
     except AccountFloodWaitError as exc:
         _remember_account_cooldown(
@@ -1858,7 +1967,7 @@ def _resolve_harvest_targets(
     if primary_entities:
         return _HarvestTargetResolution(
             _primary_harvest_targets(
-                primary_entities,
+                _unique_entities_by_identity(primary_entities),
                 client=primary_client,
                 cfg=cfg,
             ),
@@ -1897,9 +2006,10 @@ def _resolve_harvest_targets(
             secondary_entities = _resolve_target_entities_for_account(
                 secondary_client,
                 target,
-                cfg=cfg,
+                cfg=secondary_cfg,
                 account_label="secondary",
                 scope="resolve-harvest-target",
+                harvest_hint=harvest_hint,
             )
         except AccountFloodWaitError as exc:
             _remember_account_cooldown(
@@ -1913,6 +2023,7 @@ def _resolve_harvest_targets(
             if primary_flood_wait_exc is not None:
                 raise primary_flood_wait_exc from exc
             return _HarvestTargetResolution([], [])
+        secondary_entities = _unique_entities_by_identity(secondary_entities)
         if not secondary_entities:
             if primary_flood_wait_exc is not None:
                 raise primary_flood_wait_exc
@@ -1935,6 +2046,7 @@ def _resolve_harvest_targets(
             )
 
         resolved_for_primary: list[Any] = []
+        unmatched_secondary_entities: list[Any] = []
         seen_identities: set[int] = set()
         for secondary_entity in secondary_entities:
             try:
@@ -1944,6 +2056,7 @@ def _resolve_harvest_targets(
                     secondary_entity,
                     cfg=cfg,
                     account_label="primary",
+                    harvest_hint=harvest_hint,
                 )
             except AccountFloodWaitError as exc:
                 admin_job_append_log_fn(
@@ -1964,6 +2077,7 @@ def _resolve_harvest_targets(
                     [(secondary_cfg, secondary_worker_id, secondary_client)],
                 )
             if primary_entity is None:
+                unmatched_secondary_entities.append(secondary_entity)
                 continue
             identity = _entity_identity(primary_entity)
             if not identity or identity in seen_identities:
@@ -1976,13 +2090,33 @@ def _resolve_harvest_targets(
                 job_id,
                 f"主账号未按名称匹配到目标，已通过第二账号解析并在主账号确认 {len(resolved_for_primary)} 个会话",
             )
+        if unmatched_secondary_entities:
+            keep_secondary_client = True
+            admin_job_append_log_fn(
+                job_id,
+                "第二账号额外解析到主账号无法确认的目标，"
+                f"将由第二账号直接采集 {len(unmatched_secondary_entities)} 个会话",
+            )
+        resolved_targets = _primary_harvest_targets(
+            resolved_for_primary,
+            client=primary_client,
+            cfg=cfg,
+        )
+        if unmatched_secondary_entities:
+            resolved_targets.extend(
+                _secondary_harvest_targets(
+                    unmatched_secondary_entities,
+                    client=secondary_client,
+                    cfg=secondary_cfg,
+                )
+            )
         return _HarvestTargetResolution(
-            _primary_harvest_targets(
-                resolved_for_primary,
-                client=primary_client,
-                cfg=cfg,
+            resolved_targets,
+            (
+                [(secondary_cfg, secondary_worker_id, secondary_client)]
+                if unmatched_secondary_entities
+                else []
             ),
-            [],
         )
     finally:
         if secondary_client and not keep_secondary_client:
@@ -2423,6 +2557,7 @@ def _admin_harvest_job_runner(
     admin_make_job_log_handler_fn: Callable[[str], logging.Handler],
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
+    harvest_hint: dict[str, Any] | None = None,
 ) -> None:
     root_logger = logging.getLogger()
     job_log_handler = admin_make_job_log_handler_fn(job_id)
@@ -2436,6 +2571,11 @@ def _admin_harvest_job_runner(
         job_context.set(str(job_id))
         admin_job_set_status_fn(job_id, "running")
         admin_job_append_log_fn(job_id, f"开始新增数据采集：目标={target}")
+        if isinstance(harvest_hint, dict) and harvest_hint:
+            admin_job_append_log_fn(
+                job_id,
+                "已启用恢复候选提示解析，优先使用 Session 实体和用户名精确定位目标",
+            )
         admin_job_append_log_fn(job_id, "正在验证 Telegram 会话...")
 
         if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
@@ -2451,6 +2591,7 @@ def _admin_harvest_job_runner(
             cfg=cfg,
             primary_client=local_client,
             admin_job_append_log_fn=admin_job_append_log_fn,
+            harvest_hint=harvest_hint,
         )
         harvest_targets = target_resolution.targets
 

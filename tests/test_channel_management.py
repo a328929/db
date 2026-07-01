@@ -42,6 +42,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 chat_username TEXT,
                 chat_type TEXT,
                 is_public INTEGER NOT NULL DEFAULT 0,
+                unavailable_reason TEXT,
                 last_message_at TEXT,
                 last_message_ts INTEGER,
                 scan_job_id TEXT,
@@ -197,6 +198,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(1, rows[0]["is_public"])
         self.assertEqual("2026-04-01 10:00:00", rows[0]["last_message_at"])
         self.assertEqual(1775037600, rows[0]["last_message_ts"])
+        self.assertEqual("", rows[0]["unavailable_reason"])
 
     def test_list_missing_chat_scan_results_hides_imported_chat(self) -> None:
         replace_missing_chat_scan_results(
@@ -227,6 +229,26 @@ class ChannelManagementStorageTests(unittest.TestCase):
 
         rows = list_missing_chat_scan_results(self.conn)
         self.assertEqual(["Still Missing"], [row["chat_title"] for row in rows])
+
+    def test_list_missing_chat_scan_results_keeps_same_numeric_id_with_other_type(self) -> None:
+        replace_missing_chat_scan_results(
+            self.conn,
+            [
+                ChatInventoryRow(
+                    chat_id=3,
+                    chat_title="Channel With Chat Id Collision",
+                    chat_type="Channel",
+                    unavailable_reason="Telegram 返回该会话不可访问",
+                )
+            ],
+            scan_job_id="job-1",
+            scanned_at="2026-04-01T00:00:00+00:00",
+        )
+
+        rows = list_missing_chat_scan_results(self.conn)
+        self.assertEqual(1, len(rows))
+        self.assertEqual("Channel With Chat Id Collision", rows[0]["chat_title"])
+        self.assertEqual("Telegram 返回该会话不可访问", rows[0]["unavailable_reason"])
 
     def test_replace_and_list_absent_chat_scan_results(self) -> None:
         count = replace_absent_chat_scan_results(
@@ -277,6 +299,26 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     "chat_title": "Deleted",
                     "message_count": 1,
                     "last_seen_at": "2026-01-01 00:00:00",
+                }
+            ],
+            scan_job_id="job-3",
+            scanned_at="2026-04-03T00:00:00+00:00",
+        )
+
+        rows = list_absent_chat_scan_results(self.conn)
+        self.assertEqual([], rows)
+
+    def test_list_absent_chat_scan_results_hides_same_numeric_id_with_other_type(self) -> None:
+        replace_absent_chat_scan_results(
+            self.conn,
+            [
+                {
+                    "chat_id": 3,
+                    "chat_title": "Channel With Chat Id Collision",
+                    "chat_type": "Channel",
+                    "message_count": 4,
+                    "last_seen_at": "2026-04-01 00:00:00",
+                    "scan_reason": "账号未加入",
                 }
             ],
             scan_job_id="job-3",

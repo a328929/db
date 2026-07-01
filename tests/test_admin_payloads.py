@@ -196,6 +196,79 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
             all(int(item["message_count"]) == 0 for item in payload["windows"])
         )
 
+    def test_sync_stats_reports_critical_health_when_recent_ingest_stalls_and_listener_down(
+        self,
+    ) -> None:
+        self.conn.execute(
+            "UPDATE chats SET message_count = 1, last_message_created_at = '2026-06-28 11:40:00' WHERE chat_id = 1"
+        )
+        self.conn.execute(
+            "INSERT INTO messages(chat_id, message_id, created_at) VALUES (?, ?, ?)",
+            (1, 101, "2026-06-28 11:40:00"),
+        )
+        self.conn.commit()
+
+        health_snapshot = {
+            "listener_enabled": True,
+            "public_probe_enabled": True,
+            "active_listener_count": 0,
+            "configured_listener_count": 1,
+            "worker_thread_alive": False,
+            "refresh_thread_alive": True,
+            "public_probe_thread_alive": True,
+            "queue_size": 0,
+            "tracked_chat_count": 1,
+            "last_update_success_age_seconds": 1200,
+            "last_update_failure_age_seconds": 30,
+            "last_update_failure_message": "session invalid",
+            "last_probe_status": "failed",
+            "last_probe_result_age_seconds": 60,
+            "accounts": [],
+        }
+
+        with unittest.mock.patch(
+            "tg_harvest.app.admin_payloads._utc_now",
+            return_value=__import__("datetime").datetime(
+                2026, 6, 28, 12, 0, 0, tzinfo=__import__("datetime").timezone.utc
+            ),
+        ):
+            payload = build_admin_sync_stats_payload(
+                self.conn,
+                health_snapshot=health_snapshot,
+            )
+
+        self.assertEqual("critical", payload["health"]["status"])
+        reason_codes = {item["code"] for item in payload["health"]["reasons"]}
+        self.assertIn("listener_disconnected", reason_codes)
+        self.assertIn("no_recent_ingest", reason_codes)
+
+    def test_sync_stats_reports_warning_when_queue_is_backlogged(self) -> None:
+        health_snapshot = {
+            "listener_enabled": True,
+            "public_probe_enabled": True,
+            "active_listener_count": 1,
+            "configured_listener_count": 1,
+            "worker_thread_alive": True,
+            "refresh_thread_alive": True,
+            "public_probe_thread_alive": True,
+            "queue_size": 25,
+            "tracked_chat_count": 2,
+            "accounts": [],
+        }
+
+        payload = build_admin_sync_stats_payload(
+            self.conn,
+            health_snapshot=health_snapshot,
+        )
+
+        self.assertEqual("warning", payload["health"]["status"])
+        self.assertTrue(
+            any(
+                item["code"] == "queue_backlog_warn"
+                for item in payload["health"]["reasons"]
+            )
+        )
+
     def test_sync_live_messages_returns_recent_messages(self) -> None:
         self.conn.executemany(
             """

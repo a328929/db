@@ -34,6 +34,8 @@ class AdminRoutesHandler:
         self.build_admin_sync_live_messages_payload_fn = (
             services.build_admin_sync_live_messages_payload_fn
         )
+        self.get_sync_health_snapshot_fn = services.get_sync_health_snapshot_fn
+        self.trigger_sync_remediation_fn = services.trigger_sync_remediation_fn
         self.admin_get_chat_brief_fn = services.admin_get_chat_brief_fn
         self.admin_job_get_snapshot_fn = services.admin_job_get_snapshot_fn
         self.admin_job_get_logs_fn = services.admin_job_get_logs_fn
@@ -213,7 +215,10 @@ class AdminRoutesHandler:
     def api_admin_sync_stats(self):
         try:
             with closing(self.get_conn_fn()) as conn:
-                payload = self.build_admin_sync_stats_payload_fn(conn)
+                payload = self.build_admin_sync_stats_payload_fn(
+                    conn,
+                    health_snapshot=self.get_sync_health_snapshot_fn(),
+                )
             return jsonify(payload)
         except sqlite3.Error:
             self.logger.exception("读取消息同步统计失败")
@@ -245,6 +250,16 @@ class AdminRoutesHandler:
         except Exception:
             self.logger.exception("系统异常")
             return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_sync_diagnose(self):
+        try:
+            payload = self.trigger_sync_remediation_fn()
+            status_code = 200 if bool(payload.get("ok")) else 503
+            return jsonify(payload), status_code
+        except Exception:
+            self.logger.exception("执行消息同步诊断失败")
+            return self._json_error("执行消息同步诊断失败", 500)
 
     @admin_login_required
     def api_admin_job_snapshot(self, job_id: str):
@@ -564,6 +579,7 @@ def register_admin_routes(app, *, services: AdminRouteServices) -> None:
     app.get("/api/admin/stats")(handler.api_admin_stats)
     app.get("/api/admin/sync/stats")(handler.api_admin_sync_stats)
     app.get("/api/admin/sync/messages")(handler.api_admin_sync_live_messages)
+    app.post("/api/admin/sync/diagnose")(handler.api_admin_sync_diagnose)
     app.get("/api/admin/jobs/active")(handler.api_admin_active_job)
     app.get("/api/admin/jobs/<job_id>")(handler.api_admin_job_snapshot)
     app.get("/api/admin/jobs/<job_id>/logs")(handler.api_admin_job_logs)

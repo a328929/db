@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from queue import Empty, Queue
 from typing import Any
 
@@ -38,6 +39,9 @@ _DEFAULT_PROBE_EVENT_REASON = "public_probe"
 _DEFAULT_JOINED_SNAPSHOT_REFRESH_SECONDS = 1800.0
 _DEFAULT_HOT_PROBE_SLOT_RATIO = 0.75
 _DEFAULT_PUBLIC_PROBE_ACCOUNT_GAP_SECONDS = 6.0
+_DEFAULT_JOINED_PROBE_CHANGED_COOLDOWN_SECONDS = 1800
+_DEFAULT_PUBLIC_PROBE_CHANGED_COOLDOWN_SECONDS = 900
+_DEFAULT_INACTIVE_PROBE_AGE_SECONDS = 7 * 24 * 60 * 60
 
 _LISTENER_SINGLETON: "DatabaseChatListenerRuntime | None" = None
 _LISTENER_SINGLETON_LOCK = threading.Lock()
@@ -52,8 +56,32 @@ def _safe_int(value: Any) -> int:
     return int(parsed or 0)
 
 
-def _safe_timestamp_text_sort_key(value: Any) -> str:
-    return str(value or "").strip()
+def _parse_utc_text_timestamp(value: Any) -> float:
+    text = str(value or "").strip()
+    if not text:
+        return 0.0
+    try:
+        return (
+            datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+            .replace(tzinfo=timezone.utc)
+            .timestamp()
+        )
+    except Exception:
+        return 0.0
+
+
+def _utc_now_ts() -> float:
+    return time.time()
+
+
+def _format_utc_timestamp(value: float) -> str:
+    if float(value or 0) <= 0:
+        return ""
+    return (
+        datetime.fromtimestamp(float(value), tz=timezone.utc)
+        .replace(microsecond=0)
+        .strftime("%Y-%m-%d %H:%M:%S")
+    )
 
 
 def _load_database_chat_rows(conn: Any) -> list[dict[str, Any]]:
@@ -76,7 +104,8 @@ def _load_database_chat_rows(conn: Any) -> list[dict[str, Any]]:
                     c.chat_title,
                     c.chat_username,
                     c.last_seen_at,
-                    COALESCE(lm.message_id, 0) AS last_message_id
+                    COALESCE(lm.message_id, 0) AS last_message_id,
+                    COALESCE(lm.msg_date_ts, 0) AS last_message_ts
                 FROM chats c
                 LEFT JOIN messages lm
                   ON lm.chat_id = c.chat_id
@@ -102,7 +131,8 @@ def _load_database_chat_rows(conn: Any) -> list[dict[str, Any]]:
                     c.chat_title,
                     c.chat_username,
                     c.last_seen_at,
-                    0 AS last_message_id
+                    0 AS last_message_id,
+                    0 AS last_message_ts
                 FROM chats c
                 ORDER BY c.last_seen_at DESC, c.chat_id ASC
                 """
@@ -120,6 +150,7 @@ def _load_database_chat_rows(conn: Any) -> list[dict[str, Any]]:
                     "chat_username": clean_username(row["chat_username"]),
                     "last_seen_at": str(row["last_seen_at"] or "").strip(),
                     "last_message_id": _safe_int(row["last_message_id"]),
+                    "last_message_ts": _safe_int(row["last_message_ts"]),
                 }
             )
         return result
@@ -180,9 +211,47 @@ class DatabaseChatListenerRuntime:
         self._public_probe_account_next_allowed_lock = threading.Lock()
         self._public_probe_account_next_allowed: dict[str, float] = {}
         self._public_probe_cursor_lock = threading.Lock()
-        self._public_probe_cursor = 0
+        self._public_probe_cursor: dict[str, int] = {}
         self._listener_clients_lock = threading.Lock()
         self._listener_clients: dict[str, Any] = {}
+        self._listener_connected_at_lock = threading.Lock()
+        self._listener_connected_at: dict[str, float] = {}
+        self._listener_last_error_lock = threading.Lock()
+        self._listener_last_error: dict[str, str] = {}
+        self._listener_last_error_at_lock = threading.Lock()
+        self._listener_last_error_at: dict[str, float] = {}
+        self._last_event_at_lock = threading.Lock()
+        self._last_event_at = 0.0
+        self._last_event_reason_lock = threading.Lock()
+        self._last_event_reason = ""
+        self._last_event_chat_id_lock = threading.Lock()
+        self._last_event_chat_id = 0
+        self._last_update_attempt_at_lock = threading.Lock()
+        self._last_update_attempt_at = 0.0
+        self._last_update_success_at_lock = threading.Lock()
+        self._last_update_success_at = 0.0
+        self._last_update_failure_at_lock = threading.Lock()
+        self._last_update_failure_at = 0.0
+        self._last_update_failure_message_lock = threading.Lock()
+        self._last_update_failure_message = ""
+        self._last_update_success_chat_id_lock = threading.Lock()
+        self._last_update_success_chat_id = 0
+        self._last_update_failure_chat_id_lock = threading.Lock()
+        self._last_update_failure_chat_id = 0
+        self._last_probe_attempt_at_lock = threading.Lock()
+        self._last_probe_attempt_at = 0.0
+        self._last_probe_result_at_lock = threading.Lock()
+        self._last_probe_result_at = 0.0
+        self._last_probe_status_lock = threading.Lock()
+        self._last_probe_status = ""
+        self._last_probe_chat_id_lock = threading.Lock()
+        self._last_probe_chat_id = 0
+        self._manual_probe_requested_at_lock = threading.Lock()
+        self._manual_probe_requested_at = 0.0
+        self._manual_probe_completed_at_lock = threading.Lock()
+        self._manual_probe_completed_at = 0.0
+        self._manual_probe_last_result_lock = threading.Lock()
+        self._manual_probe_last_result = ""
         self._worker_stop = threading.Event()
         self._watcher_stop = threading.Event()
         self._worker_thread = threading.Thread(
@@ -203,6 +272,266 @@ class DatabaseChatListenerRuntime:
         self._listener_threads: list[threading.Thread] = []
         self._started = False
         self._job_id = "db-listener"
+
+    def _mark_listener_connected(self, account_key: str) -> None:
+        now = _utc_now_ts()
+        with self._listener_connected_at_lock:
+            self._listener_connected_at[str(account_key)] = now
+        with self._listener_last_error_lock:
+            self._listener_last_error.pop(str(account_key), None)
+        with self._listener_last_error_at_lock:
+            self._listener_last_error_at.pop(str(account_key), None)
+
+    def _mark_listener_error(self, account_key: str, message: str) -> None:
+        now = _utc_now_ts()
+        with self._listener_last_error_lock:
+            self._listener_last_error[str(account_key)] = str(message or "").strip()
+        with self._listener_last_error_at_lock:
+            self._listener_last_error_at[str(account_key)] = now
+
+    def _record_event_observed(self, *, reason: str, chat_id: int) -> None:
+        now = _utc_now_ts()
+        with self._last_event_at_lock:
+            self._last_event_at = now
+        with self._last_event_reason_lock:
+            self._last_event_reason = str(reason or "").strip()
+        with self._last_event_chat_id_lock:
+            self._last_event_chat_id = int(chat_id or 0)
+
+    def _record_update_attempt(self) -> None:
+        with self._last_update_attempt_at_lock:
+            self._last_update_attempt_at = _utc_now_ts()
+
+    def _record_update_success(self, *, chat_id: int) -> None:
+        now = _utc_now_ts()
+        with self._last_update_success_at_lock:
+            self._last_update_success_at = now
+        with self._last_update_success_chat_id_lock:
+            self._last_update_success_chat_id = int(chat_id or 0)
+        with self._last_update_failure_message_lock:
+            self._last_update_failure_message = ""
+
+    def _record_update_failure(self, *, chat_id: int, message: str) -> None:
+        now = _utc_now_ts()
+        with self._last_update_failure_at_lock:
+            self._last_update_failure_at = now
+        with self._last_update_failure_chat_id_lock:
+            self._last_update_failure_chat_id = int(chat_id or 0)
+        with self._last_update_failure_message_lock:
+            self._last_update_failure_message = str(message or "").strip()
+
+    def _record_probe_attempt(self) -> None:
+        with self._last_probe_attempt_at_lock:
+            self._last_probe_attempt_at = _utc_now_ts()
+
+    def _record_probe_result(self, *, status: str, chat_id: int) -> None:
+        now = _utc_now_ts()
+        with self._last_probe_result_at_lock:
+            self._last_probe_result_at = now
+        with self._last_probe_status_lock:
+            self._last_probe_status = str(status or "").strip()
+        with self._last_probe_chat_id_lock:
+            self._last_probe_chat_id = int(chat_id or 0)
+
+    def _record_manual_probe_requested(self) -> None:
+        with self._manual_probe_requested_at_lock:
+            self._manual_probe_requested_at = _utc_now_ts()
+
+    def _record_manual_probe_completed(self, result: str) -> None:
+        now = _utc_now_ts()
+        with self._manual_probe_completed_at_lock:
+            self._manual_probe_completed_at = now
+        with self._manual_probe_last_result_lock:
+            self._manual_probe_last_result = str(result or "").strip()
+
+    def _snapshot_listener_clients(self) -> dict[str, Any]:
+        with self._listener_clients_lock:
+            return dict(self._listener_clients)
+
+    def _snapshot_listener_connected_at(self) -> dict[str, float]:
+        with self._listener_connected_at_lock:
+            return dict(self._listener_connected_at)
+
+    def _snapshot_listener_last_error(self) -> dict[str, str]:
+        with self._listener_last_error_lock:
+            return dict(self._listener_last_error)
+
+    def _snapshot_listener_last_error_at(self) -> dict[str, float]:
+        with self._listener_last_error_at_lock:
+            return dict(self._listener_last_error_at)
+
+    def _queue_size(self) -> int:
+        try:
+            return int(self._queue.qsize())
+        except Exception:
+            return len(self._queued_chat_ids_snapshot())
+
+    def _queued_chat_ids_snapshot(self) -> set[int]:
+        with self._queued_chat_ids_lock:
+            return set(self._queued_chat_ids)
+
+    def health_snapshot(self) -> dict[str, Any]:
+        accounts = self._listener_accounts()
+        clients = self._snapshot_listener_clients()
+        connected_at = self._snapshot_listener_connected_at()
+        last_errors = self._snapshot_listener_last_error()
+        last_error_at = self._snapshot_listener_last_error_at()
+        with self._last_event_at_lock:
+            last_event_at = float(self._last_event_at)
+        with self._last_event_reason_lock:
+            last_event_reason = str(self._last_event_reason or "")
+        with self._last_event_chat_id_lock:
+            last_event_chat_id = int(self._last_event_chat_id or 0)
+        with self._last_update_attempt_at_lock:
+            last_update_attempt_at = float(self._last_update_attempt_at)
+        with self._last_update_success_at_lock:
+            last_update_success_at = float(self._last_update_success_at)
+        with self._last_update_failure_at_lock:
+            last_update_failure_at = float(self._last_update_failure_at)
+        with self._last_update_failure_message_lock:
+            last_update_failure_message = str(self._last_update_failure_message or "")
+        with self._last_update_success_chat_id_lock:
+            last_update_success_chat_id = int(self._last_update_success_chat_id or 0)
+        with self._last_update_failure_chat_id_lock:
+            last_update_failure_chat_id = int(self._last_update_failure_chat_id or 0)
+        with self._last_probe_attempt_at_lock:
+            last_probe_attempt_at = float(self._last_probe_attempt_at)
+        with self._last_probe_result_at_lock:
+            last_probe_result_at = float(self._last_probe_result_at)
+        with self._last_probe_status_lock:
+            last_probe_status = str(self._last_probe_status or "")
+        with self._last_probe_chat_id_lock:
+            last_probe_chat_id = int(self._last_probe_chat_id or 0)
+        with self._manual_probe_requested_at_lock:
+            manual_probe_requested_at = float(self._manual_probe_requested_at)
+        with self._manual_probe_completed_at_lock:
+            manual_probe_completed_at = float(self._manual_probe_completed_at)
+        with self._manual_probe_last_result_lock:
+            manual_probe_last_result = str(self._manual_probe_last_result or "")
+        now = _utc_now_ts()
+        account_snapshots = []
+        active_listener_count = 0
+        for account in accounts:
+            is_connected = str(account.key) in clients
+            if is_connected:
+                active_listener_count += 1
+            cooldown_seconds = _account_cooldown_remaining(account)
+            account_snapshots.append(
+                {
+                    "key": str(account.key),
+                    "label": str(account.label),
+                    "connected": is_connected,
+                    "connected_at": _format_utc_timestamp(connected_at.get(str(account.key), 0.0)),
+                    "last_error": str(last_errors.get(str(account.key), "") or ""),
+                    "last_error_at": _format_utc_timestamp(last_error_at.get(str(account.key), 0.0)),
+                    "cooldown_seconds": int(cooldown_seconds or 0),
+                }
+            )
+        return {
+            "started": bool(self._started),
+            "listener_enabled": enabled_int(getattr(self._cfg, "db_listener_enabled", 1)) == 1,
+            "public_probe_enabled": enabled_int(
+                getattr(self._cfg, "db_listener_public_probe_enabled", 1)
+            )
+            == 1,
+            "tracked_chat_count": len(self._database_chat_ids()),
+            "queued_chat_count": len(self._queued_chat_ids_snapshot()),
+            "queue_size": self._queue_size(),
+            "active_listener_count": active_listener_count,
+            "configured_listener_count": len(accounts),
+            "worker_thread_alive": self._worker_thread.is_alive(),
+            "refresh_thread_alive": self._refresh_thread.is_alive(),
+            "public_probe_thread_alive": self._public_probe_thread.is_alive(),
+            "joined_snapshot_updated_at": _format_utc_timestamp(
+                float(self._joined_chat_snapshot_updated_at or 0.0)
+            ),
+            "last_event_at": _format_utc_timestamp(last_event_at),
+            "last_event_age_seconds": max(0, int(now - last_event_at)) if last_event_at > 0 else None,
+            "last_event_reason": last_event_reason,
+            "last_event_chat_id": last_event_chat_id,
+            "last_update_attempt_at": _format_utc_timestamp(last_update_attempt_at),
+            "last_update_success_at": _format_utc_timestamp(last_update_success_at),
+            "last_update_success_age_seconds": max(0, int(now - last_update_success_at))
+            if last_update_success_at > 0
+            else None,
+            "last_update_success_chat_id": last_update_success_chat_id,
+            "last_update_failure_at": _format_utc_timestamp(last_update_failure_at),
+            "last_update_failure_age_seconds": max(0, int(now - last_update_failure_at))
+            if last_update_failure_at > 0
+            else None,
+            "last_update_failure_chat_id": last_update_failure_chat_id,
+            "last_update_failure_message": last_update_failure_message,
+            "last_probe_attempt_at": _format_utc_timestamp(last_probe_attempt_at),
+            "last_probe_result_at": _format_utc_timestamp(last_probe_result_at),
+            "last_probe_result_age_seconds": max(0, int(now - last_probe_result_at))
+            if last_probe_result_at > 0
+            else None,
+            "last_probe_status": last_probe_status,
+            "last_probe_chat_id": last_probe_chat_id,
+            "manual_probe_requested_at": _format_utc_timestamp(manual_probe_requested_at),
+            "manual_probe_completed_at": _format_utc_timestamp(manual_probe_completed_at),
+            "manual_probe_last_result": manual_probe_last_result,
+            "accounts": account_snapshots,
+        }
+
+    def trigger_manual_probe(self, *, limit: int = 3) -> dict[str, Any]:
+        self._record_manual_probe_requested()
+        rows = self._next_public_probe_batch()
+        if not rows:
+            result = {
+                "ok": True,
+                "triggered": 0,
+                "message": "当前没有可立即探测的轮巡目标",
+                "items": [],
+            }
+            self._record_manual_probe_completed("no_due_public_probe_rows")
+            return result
+
+        items = []
+        triggered = 0
+        for row in rows[: max(1, int(limit or 1))]:
+            chat_id = int(row["chat_id"])
+            self._record_probe_attempt()
+            try:
+                outcome = self._probe_public_row(row)
+                self._record_probe_result(status=outcome.status, chat_id=chat_id)
+                self._set_public_probe_cooldown(
+                    chat_id,
+                    seconds=max(60, int(outcome.cooldown_seconds)),
+                )
+                if outcome.status == "changed":
+                    triggered += 1
+                items.append(
+                    {
+                        "chat_id": chat_id,
+                        "chat_title": str(row.get("chat_title") or ""),
+                        "status": str(outcome.status),
+                        "cooldown_seconds": int(outcome.cooldown_seconds),
+                    }
+                )
+            except Exception as exc:
+                message = admin_error_message(exc)
+                self._record_probe_result(status="failed", chat_id=chat_id)
+                self._set_public_probe_cooldown(
+                    chat_id,
+                    seconds=self._public_probe_failure_cooldown_seconds(),
+                )
+                items.append(
+                    {
+                        "chat_id": chat_id,
+                        "chat_title": str(row.get("chat_title") or ""),
+                        "status": "failed",
+                        "error": message,
+                    }
+                )
+        result_key = "triggered_updates" if triggered > 0 else "completed_without_changes"
+        self._record_manual_probe_completed(result_key)
+        return {
+            "ok": True,
+            "triggered": triggered,
+            "message": "已完成即时轮巡探测",
+            "items": items,
+        }
 
     def start(self) -> None:
         if self._started:
@@ -381,6 +710,26 @@ class DatabaseChatListenerRuntime:
         if wait_seconds > 0:
             time.sleep(wait_seconds)
 
+    def _session_cached_chat_ids_by_account(self) -> dict[str, set[int]]:
+        return {
+            account.key: _read_session_cached_chat_ids(account.session_name)
+            for account in self._listener_accounts()
+        }
+
+    def _probe_row_last_activity_ts(self, row: dict[str, Any]) -> float:
+        return max(
+            float(_safe_int(row.get("last_message_ts"))),
+            float(_parse_utc_text_timestamp(row.get("last_seen_at"))),
+        )
+
+    def _probe_row_is_inactive(self, row: dict[str, Any]) -> bool:
+        last_activity_ts = self._probe_row_last_activity_ts(row)
+        if last_activity_ts <= 0:
+            return True
+        return (_utc_now_ts() - last_activity_ts) >= float(
+            _DEFAULT_INACTIVE_PROBE_AGE_SECONDS
+        )
+
     def _enqueue_chat_update(
         self,
         *,
@@ -467,6 +816,7 @@ class DatabaseChatListenerRuntime:
                             receive_updates=True,
                         )
                         self._remember_listener_client(account.key, client)
+                        self._mark_listener_connected(account.key)
                         self._register_client_event_handlers(client, account_key=account.key)
                         _listener_log(self._job_id, f"{account.label} 监听线程已连接")
                     client.run_until_disconnected()
@@ -479,6 +829,7 @@ class DatabaseChatListenerRuntime:
                 except Exception as exc:
                     if self._watcher_stop.is_set():
                         break
+                    self._mark_listener_error(account.key, str(exc))
                     logging.warning(
                         "数据库监听账号线程异常: account=%s error=%s",
                         account.key,
@@ -552,6 +903,7 @@ class DatabaseChatListenerRuntime:
             chat_id = self._event_chat_id(event)
             if chat_id <= 0 or not self._is_database_chat(chat_id):
                 return
+            self._record_event_observed(reason=reason, chat_id=chat_id)
             message = getattr(event, "message", None)
             chat_title = ""
             chat_username = None
@@ -615,6 +967,7 @@ class DatabaseChatListenerRuntime:
         account: _ListenerAccount,
         item: _QueuedChatUpdate,
     ) -> None:
+        self._record_update_attempt()
         worker_id = f"{self._job_id}_{account.key}_single_{item.chat_id}"
         client = None
         try:
@@ -633,6 +986,7 @@ class DatabaseChatListenerRuntime:
                 account_label=account.label,
                 enable_progress_probe=False,
             )
+            self._record_update_success(chat_id=item.chat_id)
         finally:
             if client is not None:
                 with suppress(Exception):
@@ -660,6 +1014,7 @@ class DatabaseChatListenerRuntime:
                     _remember_account_cooldown(account, exc)
                     continue
                 message = admin_error_message(exc)
+                self._record_update_failure(chat_id=item.chat_id, message=message)
                 if (
                     "本地实体缓存未命中" in message
                     or "不存在" in message
@@ -702,36 +1057,70 @@ class DatabaseChatListenerRuntime:
         if not rows:
             return []
 
+        accounts = self._listener_accounts()
+        if not accounts:
+            return []
+        all_account_keys = [account.key for account in accounts]
         joined_by_account = self._joined_chat_ids_by_account_snapshot()
+        cached_by_account = self._session_cached_chat_ids_by_account()
         use_joined_snapshot = any(joined_by_account.values())
-        if not use_joined_snapshot:
-            # 启动早期或异常场景下退回到 session 实体缓存近似判定，避免完全失效。
-            joined_by_account = {
-                account.key: _read_session_cached_chat_ids(account.session_name)
-                for account in self._listener_accounts()
-            }
 
-        public_only: list[dict[str, Any]] = []
+        probe_rows: list[dict[str, Any]] = []
         for row in rows:
             chat_id = int(row["chat_id"])
             chat_username = clean_username(row.get("chat_username"))
-            if not chat_username:
+            joined_account_keys = [
+                account_key
+                for account_key, joined_chat_ids in joined_by_account.items()
+                if chat_id in joined_chat_ids
+            ]
+            cached_account_keys = [
+                account_key
+                for account_key, cached_chat_ids in cached_by_account.items()
+                if chat_id in cached_chat_ids
+            ]
+
+            probe_scope = ""
+            preferred_account_keys: list[str] = []
+            probe_reason = _DEFAULT_PROBE_EVENT_REASON
+
+            if joined_account_keys:
+                probe_scope = "joined"
+                preferred_account_keys = joined_account_keys
+                probe_reason = "joined_probe"
+            elif chat_username:
+                probe_scope = "public"
+                preferred_account_keys = cached_account_keys or all_account_keys
+                probe_reason = _DEFAULT_PROBE_EVENT_REASON
+            elif cached_account_keys:
+                probe_scope = "cached"
+                preferred_account_keys = cached_account_keys
+                probe_reason = "cached_probe"
+            elif not use_joined_snapshot:
+                # 启动早期或 joined 快照异常时，尽量只保留明确能解析的公开群。
                 continue
-            if use_joined_snapshot:
-                # 至少一个账号真实出现在 dialogs 中，说明它更适合交给事件监听。
-                if any(chat_id in joined for joined in joined_by_account.values()):
-                    continue
             else:
-                # 仅在 joined 快照还不可用时，才用 session entities 作为保守近似。
-                if any(chat_id in cached for cached in joined_by_account.values()):
-                    continue
-            public_only.append(dict(row))
-        return public_only
+                continue
+
+            candidate_row = dict(row)
+            candidate_row["chat_username"] = chat_username or ""
+            candidate_row["probe_scope"] = probe_scope
+            candidate_row["probe_reason"] = probe_reason
+            candidate_row["probe_account_keys"] = tuple(preferred_account_keys)
+            candidate_row["probe_inactive"] = self._probe_row_is_inactive(candidate_row)
+            probe_rows.append(candidate_row)
+        return probe_rows
 
     def _public_probe_hot_row_sort_key(self, row: dict[str, Any]) -> tuple[Any, ...]:
+        scope_priority = {"public": 0, "cached": 1, "joined": 2}.get(
+            str(row.get("probe_scope") or "").strip(),
+            3,
+        )
         return (
+            scope_priority,
+            -max(0, int(row.get("last_message_ts", 0) or 0)),
+            -max(0, int(self._probe_row_last_activity_ts(row)) or 0),
             -max(0, int(row.get("last_message_id", 0) or 0)),
-            _safe_timestamp_text_sort_key(row.get("last_seen_at")),
             str(row.get("chat_title") or "").casefold(),
             int(row.get("chat_id") or 0),
         )
@@ -775,14 +1164,15 @@ class DatabaseChatListenerRuntime:
             inspected += 1
         return due_rows, index
 
-    def _next_public_probe_batch(self) -> list[dict[str, Any]]:
-        rows = self._public_probe_candidate_rows()
-        if not rows:
+    def _next_due_public_probe_rows(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        batch_size: int,
+        cursor_key: str,
+    ) -> list[dict[str, Any]]:
+        if not rows or batch_size <= 0:
             return []
-        batch_size = max(
-            1,
-            int(getattr(self._cfg, "db_listener_public_probe_batch_size", 4) or 4),
-        )
         hot_rows, cold_rows = self._split_public_probe_rows(rows)
         hot_slot_count = max(
             1,
@@ -798,7 +1188,7 @@ class DatabaseChatListenerRuntime:
 
         with self._public_probe_cursor_lock:
             total = len(rows)
-            start = self._public_probe_cursor % total
+            start = int(self._public_probe_cursor.get(str(cursor_key), 0) or 0) % total
             hot_start = min(start, len(hot_rows)) if hot_rows else 0
             cold_base = max(0, start - len(hot_rows))
             cold_start = min(cold_base, len(cold_rows)) if cold_rows else 0
@@ -864,7 +1254,117 @@ class DatabaseChatListenerRuntime:
                 if hot_idx >= len(hot_due_rows) and cold_idx >= len(cold_due_rows):
                     break
 
-            self._public_probe_cursor = next_hot_index + len(hot_rows) + next_cold_index
+            self._public_probe_cursor[str(cursor_key)] = (
+                next_hot_index + len(hot_rows) + next_cold_index
+            )
+        return merged_rows
+
+    def _merge_public_probe_batches(
+        self,
+        *batches: list[dict[str, Any]],
+        batch_size: int,
+    ) -> list[dict[str, Any]]:
+        if batch_size <= 0:
+            return []
+        pending = [list(batch) for batch in batches if batch]
+        if not pending:
+            return []
+        merged_rows: list[dict[str, Any]] = []
+        seen_chat_ids: set[int] = set()
+        while pending and len(merged_rows) < batch_size:
+            next_pending: list[list[dict[str, Any]]] = []
+            for batch in pending:
+                while batch and int(batch[0].get("chat_id") or 0) in seen_chat_ids:
+                    batch.pop(0)
+                if not batch:
+                    continue
+                row = batch.pop(0)
+                chat_id = int(row.get("chat_id") or 0)
+                if chat_id > 0 and chat_id not in seen_chat_ids:
+                    merged_rows.append(row)
+                    seen_chat_ids.add(chat_id)
+                if batch:
+                    next_pending.append(batch)
+                if len(merged_rows) >= batch_size:
+                    break
+            pending = next_pending
+        return merged_rows
+
+    def _next_public_probe_batch(self) -> list[dict[str, Any]]:
+        rows = self._public_probe_candidate_rows()
+        if not rows:
+            return []
+        batch_size = max(
+            1,
+            int(getattr(self._cfg, "db_listener_public_probe_batch_size", 4) or 4),
+        )
+        joined_rows = [
+            dict(row)
+            for row in rows
+            if str(row.get("probe_scope") or "").strip() == "joined"
+        ]
+        unjoined_rows = [
+            dict(row)
+            for row in rows
+            if str(row.get("probe_scope") or "").strip() != "joined"
+        ]
+
+        if joined_rows and unjoined_rows and batch_size > 1:
+            unjoined_quota = max(1, min(batch_size - 1, (batch_size + 1) // 2))
+            joined_quota = max(1, batch_size - unjoined_quota)
+        elif unjoined_rows:
+            unjoined_quota = batch_size
+            joined_quota = 0
+        else:
+            unjoined_quota = 0
+            joined_quota = batch_size
+
+        unjoined_batch = self._next_due_public_probe_rows(
+            unjoined_rows,
+            batch_size=unjoined_quota,
+            cursor_key="unjoined",
+        )
+        joined_batch = self._next_due_public_probe_rows(
+            joined_rows,
+            batch_size=joined_quota,
+            cursor_key="joined",
+        )
+        merged_rows = self._merge_public_probe_batches(
+            unjoined_batch,
+            joined_batch,
+            batch_size=batch_size,
+        )
+        seen_chat_ids = {int(row.get("chat_id") or 0) for row in merged_rows}
+        remaining_slots = max(0, batch_size - len(merged_rows))
+        if remaining_slots > 0 and unjoined_rows:
+            extra_unjoined_rows = self._next_due_public_probe_rows(
+                unjoined_rows,
+                batch_size=remaining_slots,
+                cursor_key="unjoined",
+            )
+            for row in extra_unjoined_rows:
+                chat_id = int(row.get("chat_id") or 0)
+                if chat_id <= 0 or chat_id in seen_chat_ids:
+                    continue
+                merged_rows.append(row)
+                seen_chat_ids.add(chat_id)
+                if len(merged_rows) >= batch_size:
+                    return merged_rows
+        remaining_slots = max(0, batch_size - len(merged_rows))
+        if remaining_slots > 0 and joined_rows:
+            extra_joined_rows = self._next_due_public_probe_rows(
+                joined_rows,
+                batch_size=remaining_slots,
+                cursor_key="joined",
+            )
+            for row in extra_joined_rows:
+                chat_id = int(row.get("chat_id") or 0)
+                if chat_id <= 0 or chat_id in seen_chat_ids:
+                    continue
+                merged_rows.append(row)
+                seen_chat_ids.add(chat_id)
+                if len(merged_rows) >= batch_size:
+                    break
         return merged_rows
 
     def _load_local_last_message_id(self, chat_id: int) -> int:
@@ -880,6 +1380,26 @@ class DatabaseChatListenerRuntime:
                 with suppress(Exception):
                     conn.close()
 
+    def _probe_account_priority_for_row(self, row: dict[str, Any]) -> list[_ListenerAccount]:
+        accounts = self._listener_accounts()
+        preferred_account_keys = [
+            str(account_key or "").strip()
+            for account_key in (row.get("probe_account_keys") or ())
+            if str(account_key or "").strip()
+        ]
+        preferred_order = {
+            account_key: index for index, account_key in enumerate(preferred_account_keys)
+        }
+        accounts.sort(
+            key=lambda account: (
+                0 if account.key in preferred_order else 1,
+                preferred_order.get(account.key, len(preferred_order)),
+                _account_cooldown_remaining(account),
+                account.key,
+            )
+        )
+        return accounts
+
     def _probe_public_row_with_account(
         self,
         *,
@@ -892,13 +1412,11 @@ class DatabaseChatListenerRuntime:
         try:
             client = _create_isolated_worker_client(account.cfg, worker_id)
             chat_username = clean_username(row.get("chat_username"))
-            if not chat_username:
-                return False
             entity = resolve_chat_entity(
                 client,
                 int(row["chat_id"]),
                 chat_username,
-                retry_scope="db-listener-public-probe",
+                retry_scope="db-listener-probe",
             )
             remote_last_id = int(read_latest_message_id(client, entity) or 0)
             local_last_id = self._load_local_last_message_id(int(row["chat_id"]))
@@ -907,7 +1425,7 @@ class DatabaseChatListenerRuntime:
                     chat_id=int(row["chat_id"]),
                     chat_title=str(row.get("chat_title") or ""),
                     chat_username=chat_username,
-                    reason=_DEFAULT_PROBE_EVENT_REASON,
+                    reason=str(row.get("probe_reason") or _DEFAULT_PROBE_EVENT_REASON),
                     source_account=account.key,
                 )
                 return True
@@ -918,20 +1436,61 @@ class DatabaseChatListenerRuntime:
                     _disconnect_worker_client(client)
             _cleanup_isolated_worker_session(account.cfg, worker_id)
 
-    def _public_probe_success_cooldown_seconds(self, *, changed: bool) -> int:
-        base_seconds = max(
-            300,
-            int(
-                getattr(
-                    self._cfg,
-                    "db_listener_public_probe_chat_cooldown_seconds",
-                    3600,
-                )
-                or 3600
-            ),
-        )
+    def _public_probe_base_cooldown_seconds(self, row: dict[str, Any]) -> int:
+        scope = str(row.get("probe_scope") or "").strip()
+        if scope == "joined":
+            base_seconds = max(
+                1800,
+                int(
+                    getattr(
+                        self._cfg,
+                        "db_listener_joined_probe_chat_cooldown_seconds",
+                        10800,
+                    )
+                    or 10800
+                ),
+            )
+        else:
+            base_seconds = max(
+                300,
+                int(
+                    getattr(
+                        self._cfg,
+                        "db_listener_public_probe_chat_cooldown_seconds",
+                        3600,
+                    )
+                    or 3600
+                ),
+            )
+        if bool(row.get("probe_inactive")):
+            return max(
+                base_seconds,
+                int(
+                    getattr(
+                        self._cfg,
+                        "db_listener_inactive_probe_chat_cooldown_seconds",
+                        43200,
+                    )
+                    or 43200
+                ),
+            )
+        return base_seconds
+
+    def _public_probe_success_cooldown_seconds(
+        self,
+        row: dict[str, Any],
+        *,
+        changed: bool,
+    ) -> int:
+        base_seconds = self._public_probe_base_cooldown_seconds(row)
         if changed:
-            return max(300, min(base_seconds, 900))
+            scope = str(row.get("probe_scope") or "").strip()
+            short_cooldown_seconds = (
+                _DEFAULT_JOINED_PROBE_CHANGED_COOLDOWN_SECONDS
+                if scope == "joined"
+                else _DEFAULT_PUBLIC_PROBE_CHANGED_COOLDOWN_SECONDS
+            )
+            return max(300, min(base_seconds, int(short_cooldown_seconds)))
         return base_seconds
 
     def _public_probe_failure_cooldown_seconds(self, *, flood_wait_seconds: int = 0) -> int:
@@ -940,26 +1499,31 @@ class DatabaseChatListenerRuntime:
         return 180
 
     def _probe_public_row(self, row: dict[str, Any]) -> _PublicProbeOutcome:
-        accounts = self._listener_accounts()
+        self._record_probe_attempt()
+        accounts = self._probe_account_priority_for_row(row)
         if not accounts:
             return _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
         last_exc: Exception | None = None
-        for account in sorted(
-            accounts,
-            key=lambda item: _account_cooldown_remaining(item),
-        ):
+        cache_miss_only = False
+        for account in accounts:
             if _account_cooldown_remaining(account) > 0:
                 continue
             if not _ensure_base_session_valid(account.cfg, self._job_id, _listener_log):
                 continue
             try:
                 changed = self._probe_public_row_with_account(row=row, account=account)
-                return _PublicProbeOutcome(
+                outcome = _PublicProbeOutcome(
                     status="changed" if changed else "unchanged",
                     cooldown_seconds=self._public_probe_success_cooldown_seconds(
+                        row,
                         changed=changed
                     ),
                 )
+                self._record_probe_result(
+                    status=outcome.status,
+                    chat_id=int(row.get("chat_id") or 0),
+                )
+                return outcome
             except Exception as exc:
                 last_exc = exc
                 if isinstance(exc, AccountFloodWaitError):
@@ -967,29 +1531,69 @@ class DatabaseChatListenerRuntime:
                     continue
                 message = admin_error_message(exc)
                 if "本地实体缓存未命中" in message:
+                    cache_miss_only = True
                     continue
+                cache_miss_only = False
                 if "不存在" in message or "解散" in message:
-                    return _PublicProbeOutcome(
+                    outcome = _PublicProbeOutcome(
                         status="missing",
                         cooldown_seconds=int(_DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS),
                     )
-                return _PublicProbeOutcome(
+                    self._record_probe_result(
+                        status=outcome.status,
+                        chat_id=int(row.get("chat_id") or 0),
+                    )
+                    return outcome
+                outcome = _PublicProbeOutcome(
                     status="failed",
                     cooldown_seconds=self._public_probe_failure_cooldown_seconds(),
                 )
+                self._record_probe_result(
+                    status=outcome.status,
+                    chat_id=int(row.get("chat_id") or 0),
+                )
+                return outcome
         if isinstance(last_exc, AccountFloodWaitError):
-            return _PublicProbeOutcome(
+            outcome = _PublicProbeOutcome(
                 status="flood_wait",
                 cooldown_seconds=self._public_probe_failure_cooldown_seconds(
                     flood_wait_seconds=int(last_exc.seconds)
                 ),
             )
+            self._record_probe_result(
+                status=outcome.status,
+                chat_id=int(row.get("chat_id") or 0),
+            )
+            return outcome
+        if last_exc is not None and cache_miss_only:
+            outcome = _PublicProbeOutcome(
+                status="cache_miss",
+                cooldown_seconds=max(
+                    600,
+                    self._public_probe_base_cooldown_seconds(row),
+                ),
+            )
+            self._record_probe_result(
+                status=outcome.status,
+                chat_id=int(row.get("chat_id") or 0),
+            )
+            return outcome
         if last_exc is not None:
-            return _PublicProbeOutcome(
+            outcome = _PublicProbeOutcome(
                 status="failed",
                 cooldown_seconds=self._public_probe_failure_cooldown_seconds(),
             )
-        return _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
+            self._record_probe_result(
+                status=outcome.status,
+                chat_id=int(row.get("chat_id") or 0),
+            )
+            return outcome
+        outcome = _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
+        self._record_probe_result(
+            status=outcome.status,
+            chat_id=int(row.get("chat_id") or 0),
+        )
+        return outcome
 
     def _public_probe_loop(self) -> None:
         interval_seconds = max(
@@ -1025,7 +1629,7 @@ class DatabaseChatListenerRuntime:
                         seconds=max(60, int(outcome.cooldown_seconds)),
                     )
                 except Exception:
-                    logging.exception("公开群低频定向探测失败: chat_id=%s", chat_id)
+                    logging.exception("数据库群组低频轮巡探测失败: chat_id=%s", chat_id)
                     self._set_public_probe_cooldown(
                         chat_id,
                         seconds=self._public_probe_failure_cooldown_seconds(),
@@ -1046,4 +1650,9 @@ def ensure_database_chat_listener_runtime(
             )
             runtime.start()
             _LISTENER_SINGLETON = runtime
+        return _LISTENER_SINGLETON
+
+
+def get_database_chat_listener_runtime() -> DatabaseChatListenerRuntime | None:
+    with _LISTENER_SINGLETON_LOCK:
         return _LISTENER_SINGLETON
