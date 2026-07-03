@@ -1,9 +1,10 @@
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from tg_harvest.domain.chat_titles import chat_sort_key, chat_title_or_fallback
 from tg_harvest.domain.coerce import safe_int
+from tg_harvest.storage import sync_scheduler
 from tg_harvest.storage.row_access import row_int as _row_int
 
 _ADMIN_SYNC_WINDOWS: tuple[dict[str, Any], ...] = (
@@ -20,11 +21,11 @@ _ADMIN_SYNC_WINDOWS: tuple[dict[str, Any], ...] = (
 
 
 def _utc_now() -> datetime:
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 def _format_utc_text(value: datetime) -> str:
-    return value.astimezone(timezone.utc).replace(microsecond=0).strftime(
+    return value.astimezone(UTC).replace(microsecond=0).strftime(
         "%Y-%m-%d %H:%M:%S"
     )
 
@@ -35,7 +36,7 @@ def _parse_utc_text(value: Any) -> datetime | None:
         return None
     try:
         return datetime.strptime(text, "%Y-%m-%d %H:%M:%S").replace(
-            tzinfo=timezone.utc
+            tzinfo=UTC
         )
     except ValueError:
         return None
@@ -158,6 +159,9 @@ def _evaluate_sync_health(
     refresh_thread_alive = bool(snapshot.get("refresh_thread_alive"))
     public_probe_thread_alive = bool(snapshot.get("public_probe_thread_alive"))
     queue_size = int(snapshot.get("queue_size") or 0)
+    scheduler_enabled = bool(snapshot.get("scheduler_enabled"))
+    due_update_count = int(snapshot.get("due_update_count") or 0)
+    in_flight_update_count = int(snapshot.get("in_flight_update_count") or 0)
     last_update_success_age_seconds = snapshot.get("last_update_success_age_seconds")
     last_update_failure_age_seconds = snapshot.get("last_update_failure_age_seconds")
     last_update_failure_message = str(
@@ -226,6 +230,25 @@ def _evaluate_sync_health(
                 "code": "queue_backlog_warn",
                 "severity": "warning",
                 "message": f"监听更新队列积压 {queue_size} 项，入库可能出现延迟。",
+            }
+        )
+
+    if scheduler_enabled and due_update_count >= 20 and status == "healthy":
+        status = "warning"
+        reasons.append(
+            {
+                "code": "scheduler_due_backlog",
+                "severity": "warning",
+                "message": f"智能调度已有 {due_update_count} 个到期任务等待执行。",
+            }
+        )
+
+    if scheduler_enabled and in_flight_update_count > 0 and status == "healthy":
+        reasons.append(
+            {
+                "code": "scheduler_in_flight",
+                "severity": "info",
+                "message": f"智能调度当前有 {in_flight_update_count} 个任务正在执行。",
             }
         )
 
@@ -423,6 +446,10 @@ def build_admin_sync_stats_payload(
     if not _table_exists(conn, "messages"):
         window_rows = [_empty_admin_sync_window_payload(window) for window in windows]
         latest_window = window_rows[-1] if window_rows else {}
+        scheduler_payload = sync_scheduler.build_scheduler_summary(
+            conn,
+            health_snapshot=health_snapshot,
+        )
         return {
             "ok": True,
             "generated_at": generated_at,
@@ -434,6 +461,7 @@ def build_admin_sync_stats_payload(
                 "largest_window_message_count": 0,
                 "largest_window_chat_count": 0,
             },
+            "scheduler": scheduler_payload,
             "windows": window_rows,
             "default_window_key": "live",
             "health": _evaluate_sync_health(
@@ -566,6 +594,10 @@ def build_admin_sync_stats_payload(
     )
 
     latest_window = window_rows[-1] if window_rows else {}
+    scheduler_payload = sync_scheduler.build_scheduler_summary(
+        conn,
+        health_snapshot=health_snapshot,
+    )
     return {
         "ok": True,
         "generated_at": generated_at,
@@ -579,6 +611,7 @@ def build_admin_sync_stats_payload(
             ),
             "largest_window_chat_count": int(latest_window.get("chat_count") or 0),
         },
+        "scheduler": scheduler_payload,
         "windows": window_rows,
         "default_window_key": "live",
         "health": _evaluate_sync_health(

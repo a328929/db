@@ -76,6 +76,22 @@
         <div id="admin-sync-diagnose-result" class="sync-health-diagnose" aria-live="polite"></div>
       </section>
 
+      <section
+        id="admin-sync-scheduler-panel"
+        class="sync-scheduler-panel"
+        aria-labelledby="syncSchedulerTitle"
+      >
+        <div class="sync-health-head">
+          <div>
+            <h3 id="syncSchedulerTitle" class="section-title">智能调度</h3>
+            <p id="admin-sync-scheduler-status" class="sync-subline" role="status" aria-live="polite">正在读取调度状态...</p>
+          </div>
+        </div>
+        <div id="admin-sync-scheduler-grid" class="sync-scheduler-grid" aria-label="智能调度核心指标"></div>
+        <div id="admin-sync-scheduler-model" class="sync-scheduler-model" aria-label="同步模型状态"></div>
+        <div id="admin-sync-scheduler-failures" class="sync-health-list" aria-label="最近调度失败"></div>
+      </section>
+
       <p id="admin-sync-metric-note" class="sync-note" aria-live="polite"></p>
     </section>
 

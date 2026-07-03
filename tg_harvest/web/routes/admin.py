@@ -5,6 +5,8 @@ from typing import Any
 from flask import jsonify, request
 
 from tg_harvest.app.services import AdminRouteServices
+from tg_harvest.runtime.db_listener import get_database_chat_listener_runtime
+from tg_harvest.storage import sync_scheduler
 from tg_harvest.web.auth import admin_login_required
 from tg_harvest.web.responses import (
     create_started_exclusive_job_response,
@@ -260,6 +262,81 @@ class AdminRoutesHandler:
         except Exception:
             self.logger.exception("执行消息同步诊断失败")
             return self._json_error("执行消息同步诊断失败", 500)
+
+    @admin_login_required
+    def api_admin_sync_scheduler(self):
+        try:
+            health_snapshot = self.get_sync_health_snapshot_fn()
+            with closing(self.get_conn_fn()) as conn:
+                scheduler_payload = sync_scheduler.build_scheduler_summary(
+                    conn,
+                    health_snapshot=health_snapshot,
+                )
+            return jsonify({"ok": True, "scheduler": scheduler_payload})
+        except sqlite3.Error:
+            self.logger.exception("读取同步调度状态失败")
+            return self._json_error("读取同步调度状态失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_sync_chats(self):
+        raw_limit = str(request.args.get("limit", "") or "").strip()
+        raw_offset = str(request.args.get("offset", "") or "").strip()
+        try:
+            limit = int(raw_limit) if raw_limit else 100
+            offset = int(raw_offset) if raw_offset else 0
+        except (TypeError, ValueError):
+            return self._json_error("分页参数非法", 400)
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = sync_scheduler.list_scheduler_chats(
+                    conn,
+                    membership=str(request.args.get("membership", "") or "").strip(),
+                    status=str(request.args.get("status", "") or "").strip(),
+                    limit=limit,
+                    offset=offset,
+                )
+            return jsonify(payload)
+        except sqlite3.Error:
+            self.logger.exception("读取同步调度群组状态失败")
+            return self._json_error("读取同步调度群组状态失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_sync_chat_probe(self, chat_id: int):
+        try:
+            safe_chat_id = int(chat_id)
+        except (TypeError, ValueError):
+            return self._json_error("chat_id 参数非法", 400)
+        runtime = get_database_chat_listener_runtime()
+        if runtime is None:
+            return self._json_error("数据库监听运行时尚未初始化", 503)
+        try:
+            payload = runtime.trigger_manual_chat_probe(safe_chat_id)
+            status_code = 200 if bool(payload.get("ok")) else 503
+            if str(payload.get("message") or "") == "chat_id 不存在":
+                status_code = 404
+            return jsonify(payload), status_code
+        except Exception:
+            self.logger.exception("执行单群同步调度诊断失败")
+            return self._json_error("执行单群同步调度诊断失败", 500)
+
+    @admin_login_required
+    def api_admin_sync_model_reset(self):
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = sync_scheduler.reset_model_state(conn)
+            return jsonify(payload)
+        except sqlite3.Error:
+            self.logger.exception("重置同步模型状态失败")
+            return self._json_error("重置同步模型状态失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
 
     @admin_login_required
     def api_admin_job_snapshot(self, job_id: str):
@@ -580,6 +657,12 @@ def register_admin_routes(app, *, services: AdminRouteServices) -> None:
     app.get("/api/admin/sync/stats")(handler.api_admin_sync_stats)
     app.get("/api/admin/sync/messages")(handler.api_admin_sync_live_messages)
     app.post("/api/admin/sync/diagnose")(handler.api_admin_sync_diagnose)
+    app.get("/api/admin/sync/scheduler")(handler.api_admin_sync_scheduler)
+    app.get("/api/admin/sync/chats")(handler.api_admin_sync_chats)
+    app.post("/api/admin/sync/chats/<int:chat_id>/probe")(
+        handler.api_admin_sync_chat_probe
+    )
+    app.post("/api/admin/sync/model/reset")(handler.api_admin_sync_model_reset)
     app.get("/api/admin/jobs/active")(handler.api_admin_active_job)
     app.get("/api/admin/jobs/<job_id>")(handler.api_admin_job_snapshot)
     app.get("/api/admin/jobs/<job_id>/logs")(handler.api_admin_job_logs)

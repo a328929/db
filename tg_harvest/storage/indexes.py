@@ -519,6 +519,45 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_sync_pending_due",
+        "CREATE INDEX idx_sync_pending_due "
+        "ON sync_pending_updates(in_flight, due_at ASC, priority_score DESC, chat_id ASC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_pending_updated",
+        "CREATE INDEX idx_sync_pending_updated "
+        "ON sync_pending_updates(updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_chat_state_status",
+        "CREATE INDEX idx_sync_chat_state_status "
+        "ON sync_chat_state(status, next_update_at ASC, priority_score DESC, chat_id ASC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_chat_state_probe",
+        "CREATE INDEX idx_sync_chat_state_probe "
+        "ON sync_chat_state(membership_scope, next_probe_at ASC, chat_id ASC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_learning_chat_created",
+        "CREATE INDEX idx_sync_learning_chat_created "
+        "ON sync_learning_events(chat_id, created_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_learning_type_created",
+        "CREATE INDEX idx_sync_learning_type_created "
+        "ON sync_learning_events(event_type, created_at DESC)",
+    )
+
+
 def _create_indexes(cur: sqlite3.Cursor):
     _create_chat_indexes(cur)
     _create_message_indexes(cur)
@@ -534,3 +573,4 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_clone_run_indexes(cur)
     _create_admin_clone_plan_indexes(cur)
     _create_admin_clone_migration_indexes(cur)
+    _create_sync_scheduler_indexes(cur)

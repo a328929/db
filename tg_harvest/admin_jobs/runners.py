@@ -1441,7 +1441,7 @@ def _admin_process_single_chat_update(
     total: int,
     account_label: str = "主账号",
     enable_progress_probe: bool = True,
-) -> None:
+) -> Any:
     chat_label = _chat_log_label(chat_id, chat_title)
     admin_job_append_log_fn(
         job_id,
@@ -1511,6 +1511,7 @@ def _admin_process_single_chat_update(
             total=1,
             stage="done",
         )
+        return result
     except Exception:
         stream_failed = True
         raise
@@ -2987,6 +2988,56 @@ def _delete_from_optional_chat_targets_table(
     return int(cur.rowcount or 0)
 
 
+def _clear_sync_scheduler_state_for_chat(cur: Any, chat_id: int) -> None:
+    if _optional_table_exists(cur, "sync_pending_updates"):
+        cur.execute("DELETE FROM sync_pending_updates WHERE chat_id = ?", (int(chat_id),))
+    if _optional_table_exists(cur, "sync_chat_state"):
+        cur.execute(
+            """
+            UPDATE sync_chat_state
+            SET
+                status = 'deleted',
+                is_active = 0,
+                priority_score = 0,
+                next_probe_at = '',
+                next_update_at = '',
+                updated_at = datetime('now')
+            WHERE chat_id = ?
+            """,
+            (int(chat_id),),
+        )
+
+
+def _clear_sync_scheduler_state_for_chat_targets(cur: Any, target_table: str) -> None:
+    if _optional_table_exists(cur, "sync_pending_updates"):
+        cur.execute(
+            f"""
+            DELETE FROM sync_pending_updates
+            WHERE chat_id IN (
+                SELECT chat_id
+                FROM {target_table}
+            )
+            """
+        )
+    if _optional_table_exists(cur, "sync_chat_state"):
+        cur.execute(
+            f"""
+            UPDATE sync_chat_state
+            SET
+                status = 'deleted',
+                is_active = 0,
+                priority_score = 0,
+                next_probe_at = '',
+                next_update_at = '',
+                updated_at = datetime('now')
+            WHERE chat_id IN (
+                SELECT chat_id
+                FROM {target_table}
+            )
+            """
+        )
+
+
 def _delete_from_optional_message_pk_targets_table(
     cur: Any, table_name: str, target_table: str
 ) -> int:
@@ -3123,6 +3174,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         _delete_from_optional_chat_table(cur, "admin_absent_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
+        _clear_sync_scheduler_state_for_chat(cur, chat_id)
         _delete_from_optional_message_pk_targets_table(
             cur, "message_search_terms", "temp_delete_chat_messages"
         )
@@ -3186,6 +3238,7 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         _delete_from_optional_chat_targets_table(
             cur, "admin_restricted_chats", "temp_delete_empty_chats"
         )
+        _clear_sync_scheduler_state_for_chat_targets(cur, "temp_delete_empty_chats")
         cur.execute(
             """
             DELETE FROM dedupe_actions

@@ -51,9 +51,57 @@ def normalize_channel_sort(raw_sort: Any) -> str:
     return CHANNEL_SORT_DEFAULT
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """,
+            (str(table_name or "").strip(),),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+
+
 def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]:
     normalized_sort = normalize_channel_sort(sort)
     order_sql = CHANNEL_SORT_OPTIONS[normalized_sort]
+    has_sync_state = _table_exists(conn, "sync_chat_state")
+    sync_select_sql = (
+        """
+                s.membership_scope AS sync_membership_scope,
+                s.status AS sync_status,
+                s.source_accounts AS sync_source_accounts,
+                s.last_source_account AS sync_last_source_account,
+                s.next_probe_at AS sync_next_probe_at,
+                s.next_update_at AS sync_next_update_at,
+                s.priority_score AS sync_priority_score,
+                s.quarantine_reason AS sync_quarantine_reason,
+                s.last_probe_status AS sync_last_probe_status,
+        """
+        if has_sync_state
+        else """
+                '' AS sync_membership_scope,
+                '' AS sync_status,
+                '' AS sync_source_accounts,
+                '' AS sync_last_source_account,
+                '' AS sync_next_probe_at,
+                '' AS sync_next_update_at,
+                0 AS sync_priority_score,
+                '' AS sync_quarantine_reason,
+                '' AS sync_last_probe_status,
+        """
+    )
+    sync_join_sql = (
+        "LEFT JOIN sync_chat_state s ON s.chat_id = c.chat_id"
+        if has_sync_state
+        else ""
+    )
     cur = conn.cursor()
     try:
         cur.execute(
@@ -65,6 +113,7 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
                 c.chat_type,
                 c.message_count,
                 c.last_seen_at,
+{sync_select_sql}
                 lm.msg_date_text AS last_message_at,
                 lm.msg_date_ts AS last_message_ts
             FROM chats c
@@ -74,9 +123,10 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
                     SELECT m.message_id
                     FROM messages m
                     WHERE m.chat_id = c.chat_id
-                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                    LIMIT 1
-                )
+                        ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                        LIMIT 1
+                    )
+            {sync_join_sql}
             ORDER BY {order_sql}
             """
         )
@@ -93,6 +143,19 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),
+                    "sync_membership_scope": str(row["sync_membership_scope"] or ""),
+                    "sync_status": str(row["sync_status"] or ""),
+                    "sync_source_accounts": str(row["sync_source_accounts"] or ""),
+                    "sync_last_source_account": str(
+                        row["sync_last_source_account"] or ""
+                    ),
+                    "sync_next_probe_at": str(row["sync_next_probe_at"] or ""),
+                    "sync_next_update_at": str(row["sync_next_update_at"] or ""),
+                    "sync_priority_score": float(row["sync_priority_score"] or 0.0),
+                    "sync_quarantine_reason": str(
+                        row["sync_quarantine_reason"] or ""
+                    ),
+                    "sync_last_probe_status": str(row["sync_last_probe_status"] or ""),
                 }
             )
         return channels

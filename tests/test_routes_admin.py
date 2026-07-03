@@ -1,4 +1,6 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from flask import Flask
 
@@ -326,6 +328,84 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertEqual(200, status_code)
         self.assertTrue(payload["ok"])
         self.assertEqual(1, payload["triggered"])
+
+    def test_sync_scheduler_returns_scheduler_summary(self) -> None:
+        with patch(
+            "tg_harvest.web.routes.admin.sync_scheduler.build_scheduler_summary",
+            return_value={"enabled": True, "pending_count": 2},
+        ) as build_summary, self.app.test_request_context(
+            "/api/admin/sync/scheduler",
+            method="GET",
+        ):
+            response = self.handler.api_admin_sync_scheduler.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(2, payload["scheduler"]["pending_count"])
+        self.assertEqual(1, build_summary.call_count)
+
+    def test_sync_chats_returns_filtered_scheduler_rows(self) -> None:
+        with patch(
+            "tg_harvest.web.routes.admin.sync_scheduler.list_scheduler_chats",
+            return_value={
+                "ok": True,
+                "items": [{"chat_id": 7, "membership_scope": "both_joined"}],
+                "count": 1,
+            },
+        ) as list_chats, self.app.test_request_context(
+            "/api/admin/sync/chats?membership=both_joined&status=pending&limit=20&offset=5",
+            method="GET",
+        ):
+            response = self.handler.api_admin_sync_chats.__wrapped__(self.handler)
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(7, payload["items"][0]["chat_id"])
+        self.assertEqual("both_joined", list_chats.call_args.kwargs["membership"])
+        self.assertEqual("pending", list_chats.call_args.kwargs["status"])
+        self.assertEqual(20, list_chats.call_args.kwargs["limit"])
+        self.assertEqual(5, list_chats.call_args.kwargs["offset"])
+
+    def test_sync_chat_probe_uses_listener_runtime(self) -> None:
+        runtime = SimpleNamespace(
+            trigger_manual_chat_probe=lambda chat_id: {
+                "ok": True,
+                "triggered": 1,
+                "items": [{"chat_id": chat_id, "status": "changed"}],
+                "message": "done",
+            }
+        )
+        with patch(
+            "tg_harvest.web.routes.admin.get_database_chat_listener_runtime",
+            return_value=runtime,
+        ), self.app.test_request_context(
+            "/api/admin/sync/chats/42/probe",
+            method="POST",
+        ):
+            response, status_code = self.handler.api_admin_sync_chat_probe.__wrapped__(
+                self.handler,
+                42,
+            )
+
+        payload = response.get_json()
+        self.assertEqual(200, status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(42, payload["items"][0]["chat_id"])
+
+    def test_sync_model_reset_returns_reset_payload(self) -> None:
+        with patch(
+            "tg_harvest.web.routes.admin.sync_scheduler.reset_model_state",
+            return_value={"ok": True, "removed_artifact": True},
+        ), self.app.test_request_context("/api/admin/sync/model/reset", method="POST"):
+            response = self.handler.api_admin_sync_model_reset.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["removed_artifact"])
 
     def test_job_stop_marks_active_job_and_logs_request(self) -> None:
         stop_calls = []

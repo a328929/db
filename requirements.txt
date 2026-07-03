@@ -1,5 +1,8 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+
 Flask>=3.0,<4
 telethon>=1.36,<2
 pypinyin>=0.53,<1
 cryptography>=42.0,<43
 python-dotenv>=1.0,<2
+torch==2.12.1+cpu

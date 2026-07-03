@@ -372,7 +372,9 @@ def filter_missing_joined_rows(
     for row in joined_rows:
         if row.unavailable_reason and not include_unavailable:
             continue
-        if chat_identity_key(row.chat_id, row.chat_type) in known_identities:
+        if not known_identities.isdisjoint(
+            chat_identity_candidates(row.chat_id, row.chat_type)
+        ):
             continue
         rows.append(row)
 
@@ -412,11 +414,11 @@ def _generic_row_value(row: Any, key: str, default: Any = "") -> Any:
 def filter_database_chats_to_joined(
     database_rows: Iterable[Any], joined_rows: Iterable[ChatInventoryRow]
 ) -> list[Any]:
-    joined_identities = {
-        chat_identity_key(row.chat_id, row.chat_type)
-        for row in joined_rows
-        if not str(row.unavailable_reason or "").strip()
-    }
+    joined_identities: set[ChatIdentity] = set()
+    for row in joined_rows:
+        if str(row.unavailable_reason or "").strip():
+            continue
+        joined_identities.update(chat_identity_candidates(row.chat_id, row.chat_type))
     rows: list[Any] = []
     seen_chat_identities: set[tuple[int, str]] = set()
 

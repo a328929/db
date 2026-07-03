@@ -1,0 +1,1647 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+from contextlib import suppress
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
+
+from tg_harvest.domain.coerce import clean_username, enabled_int, optional_int, safe_int
+from tg_harvest.runtime.paths import runtime_dir
+from tg_harvest.storage.connection import synchronized_write
+
+UTC_TEXT_FORMAT = "%Y-%m-%d %H:%M:%S"
+MODEL_KEY = "temporal_batch_predictor"
+DEFAULT_MAX_NORMAL_DELAY_SECONDS = 30 * 60
+
+
+class MembershipScope:
+    UNKNOWN = "unknown"
+    NONE_JOINED = "none_joined"
+    BOTH_JOINED = "both_joined"
+    SINGLE_JOINED_PRIMARY = "single_joined_primary"
+    SINGLE_JOINED_SECONDARY = "single_joined_secondary"
+    UNOBSERVABLE = "unobservable"
+
+
+@dataclass(frozen=True)
+class SyncObservation:
+    chat_id: int
+    chat_title: str = ""
+    chat_username: str | None = None
+    reason: str = "event"
+    source_account: str = "primary"
+    observed_at: str = ""
+
+
+@dataclass(frozen=True)
+class SyncDecision:
+    due_at: str
+    quiet_delay_seconds: int
+    priority_score: float
+    preferred_account: str
+    source: str
+    prediction: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class SyncPendingTask:
+    chat_id: int
+    chat_title: str
+    chat_username: str | None
+    reason: str
+    preferred_source_account: str
+    source_accounts: str
+    event_count: int
+    generation: int
+    in_flight_generation: int
+    quiet_delay_seconds: int
+    priority_score: float
+    first_event_at: str
+    last_event_at: str
+    due_at: str
+
+
+@dataclass(frozen=True)
+class SyncUpdateResult:
+    chat_id: int
+    chat_title: str = ""
+    chat_username: str | None = None
+    source_account: str = ""
+    added_message_count: int = 0
+    scanned_message_count: int = 0
+    local_last_id: int = 0
+    remote_last_id: int = 0
+    duration_seconds: float = 0.0
+    api_cost: float = 0.0
+    failure_type: str = ""
+    failure_message: str = ""
+    retry_after_seconds: int = 0
+
+
+def utc_now_text() -> str:
+    return datetime.now(UTC).replace(microsecond=0).strftime(UTC_TEXT_FORMAT)
+
+
+def utc_text_from_seconds(seconds: float) -> str:
+    return (
+        datetime.fromtimestamp(float(seconds), tz=UTC)
+        .replace(microsecond=0)
+        .strftime(UTC_TEXT_FORMAT)
+    )
+
+
+def parse_utc_text(value: Any) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        return datetime.strptime(text, UTC_TEXT_FORMAT).replace(tzinfo=UTC)
+    except ValueError:
+        return None
+
+
+def add_seconds_to_utc_text(value: str, seconds: int) -> str:
+    base = parse_utc_text(value) or datetime.now(UTC)
+    return (base + timedelta(seconds=max(0, int(seconds)))).strftime(UTC_TEXT_FORMAT)
+
+
+def default_model_artifact_path() -> str:
+    return str(runtime_dir() / "models" / "sync_predictor.pt")
+
+
+def scheduler_enabled(cfg: Any) -> bool:
+    if not hasattr(cfg, "sync_scheduler_enabled"):
+        return False
+    return enabled_int(getattr(cfg, "sync_scheduler_enabled", 1)) == 1
+
+
+def ai_enabled(cfg: Any) -> bool:
+    if not hasattr(cfg, "sync_ai_enabled"):
+        return False
+    return enabled_int(getattr(cfg, "sync_ai_enabled", 0)) == 1
+
+
+def ai_shadow_enabled(cfg: Any) -> bool:
+    if not hasattr(cfg, "sync_ai_shadow"):
+        return True
+    return enabled_int(getattr(cfg, "sync_ai_shadow", 1)) == 1
+
+
+def cfg_int(cfg: Any, name: str, default: int, *, minimum: int = 0) -> int:
+    return max(int(minimum), int(getattr(cfg, name, default) or default))
+
+
+def _json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return "{}"
+
+
+def _split_csv(value: Any) -> list[str]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in str(value or "").replace("|", ",").split(","):
+        key = item.strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return result
+
+
+def _join_csv(values: Any) -> str:
+    result: list[str] = []
+    seen: set[str] = set()
+    for value in values or []:
+        key = str(value or "").strip()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        result.append(key)
+    return ",".join(result)
+
+
+def _row_int(row: Any, key: str, default: int = 0) -> int:
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except Exception:
+        value = default
+    return int(optional_int(value) or default)
+
+
+def _row_text(row: Any, key: str, default: str = "") -> str:
+    if row is None:
+        return default
+    try:
+        value = row[key]
+    except Exception:
+        value = default
+    return str(value or default).strip()
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = ?
+            LIMIT 1
+            """,
+            (str(table_name or "").strip(),),
+        )
+        return cur.fetchone() is not None
+    finally:
+        cur.close()
+
+
+def classify_membership_scope(
+    *,
+    chat_id: int,
+    account_keys: list[str],
+    joined_account_keys: list[str],
+    cached_account_keys: list[str],
+    chat_username: str | None,
+) -> str:
+    safe_chat_id = int(chat_id or 0)
+    if safe_chat_id <= 0:
+        return MembershipScope.UNKNOWN
+
+    accounts = [str(key or "").strip() for key in account_keys if str(key or "").strip()]
+    joined = {
+        str(key or "").strip()
+        for key in joined_account_keys
+        if str(key or "").strip()
+    }
+    cached = {
+        str(key or "").strip()
+        for key in cached_account_keys
+        if str(key or "").strip()
+    }
+
+    if joined:
+        if len(accounts) >= 2 and all(key in joined for key in accounts[:2]):
+            return MembershipScope.BOTH_JOINED
+        if "primary" in joined:
+            return MembershipScope.SINGLE_JOINED_PRIMARY
+        if "secondary" in joined:
+            return MembershipScope.SINGLE_JOINED_SECONDARY
+        return MembershipScope.SINGLE_JOINED_PRIMARY
+
+    if clean_username(chat_username) or cached:
+        return MembershipScope.NONE_JOINED
+    return MembershipScope.UNOBSERVABLE if accounts else MembershipScope.UNKNOWN
+
+
+def _scope_base_priority(scope: str) -> float:
+    return {
+        MembershipScope.BOTH_JOINED: 140.0,
+        MembershipScope.SINGLE_JOINED_PRIMARY: 122.0,
+        MembershipScope.SINGLE_JOINED_SECONDARY: 118.0,
+        MembershipScope.NONE_JOINED: 72.0,
+        MembershipScope.UNOBSERVABLE: 0.0,
+    }.get(str(scope or ""), 45.0)
+
+
+def _scope_idle_status(scope: str) -> str:
+    if str(scope or "") == MembershipScope.UNOBSERVABLE:
+        return "unobservable"
+    return "idle"
+
+
+def _learning_event_dict(
+    *,
+    chat_id: int,
+    event_type: str,
+    reason: str = "",
+    source_account: str = "",
+    membership_scope: str = MembershipScope.UNKNOWN,
+    status: str = "",
+    features: dict[str, Any] | None = None,
+    prediction: dict[str, Any] | None = None,
+    outcome: dict[str, Any] | None = None,
+    quiet_delay_seconds: int = 0,
+    priority_score: float = 0.0,
+    added_message_count: int = 0,
+    wait_seconds: int = 0,
+    api_cost: float = 0.0,
+    failure_type: str = "",
+    created_at: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "chat_id": int(chat_id),
+        "event_type": str(event_type or "").strip(),
+        "reason": str(reason or "").strip(),
+        "source_account": str(source_account or "").strip(),
+        "membership_scope": str(membership_scope or MembershipScope.UNKNOWN).strip(),
+        "status": str(status or "").strip(),
+        "features_json": _json_dumps(features or {}),
+        "prediction_json": _json_dumps(prediction or {}),
+        "outcome_json": _json_dumps(outcome or {}),
+        "quiet_delay_seconds": max(0, int(quiet_delay_seconds or 0)),
+        "priority_score": float(priority_score or 0.0),
+        "added_message_count": max(0, int(added_message_count or 0)),
+        "wait_seconds": max(0, int(wait_seconds or 0)),
+        "api_cost": float(api_cost or 0.0),
+        "failure_type": str(failure_type or "").strip(),
+        "created_at": str(created_at or utc_now_text()),
+    }
+
+
+def _insert_learning_event_cur(cur: sqlite3.Cursor, item: dict[str, Any]) -> None:
+    cur.execute(
+        """
+        INSERT INTO sync_learning_events(
+            chat_id,
+            event_type,
+            reason,
+            source_account,
+            membership_scope,
+            status,
+            features_json,
+            prediction_json,
+            outcome_json,
+            quiet_delay_seconds,
+            priority_score,
+            added_message_count,
+            wait_seconds,
+            api_cost,
+            failure_type,
+            created_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            item["chat_id"],
+            item["event_type"],
+            item["reason"],
+            item["source_account"],
+            item["membership_scope"],
+            item["status"],
+            item["features_json"],
+            item["prediction_json"],
+            item["outcome_json"],
+            item["quiet_delay_seconds"],
+            item["priority_score"],
+            item["added_message_count"],
+            item["wait_seconds"],
+            item["api_cost"],
+            item["failure_type"],
+            item["created_at"],
+        ),
+    )
+
+
+def build_heuristic_decision(
+    conn: sqlite3.Connection,
+    cfg: Any,
+    observation: SyncObservation,
+    *,
+    now_text: str | None = None,
+) -> SyncDecision:
+    now = str(now_text or observation.observed_at or utc_now_text())
+    min_delay = cfg_int(cfg, "sync_min_delay_seconds", 15, minimum=1)
+    max_active_delay = cfg_int(
+        cfg, "sync_max_active_delay_seconds", 10 * 60, minimum=min_delay
+    )
+    max_cold_delay = cfg_int(
+        cfg, "sync_max_cold_delay_seconds", 2 * 60 * 60, minimum=max_active_delay
+    )
+    max_normal_delay = min(DEFAULT_MAX_NORMAL_DELAY_SECONDS, max_cold_delay)
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                s.membership_scope,
+                s.remote_last_id,
+                s.local_last_id,
+                s.failure_count,
+                s.last_event_at,
+                s.source_accounts,
+                s.last_source_account,
+                p.event_count
+            FROM sync_chat_state s
+            LEFT JOIN sync_pending_updates p ON p.chat_id = s.chat_id
+            WHERE s.chat_id = ?
+            LIMIT 1
+            """,
+            (int(observation.chat_id),),
+        )
+        row = cur.fetchone()
+    finally:
+        cur.close()
+
+    membership_scope = _row_text(row, "membership_scope", MembershipScope.UNKNOWN)
+    existing_event_count = _row_int(row, "event_count")
+    event_count = existing_event_count + 1
+    failure_count = _row_int(row, "failure_count")
+    remote_last_id = _row_int(row, "remote_last_id")
+    local_last_id = _row_int(row, "local_last_id")
+    local_gap = max(0, remote_last_id - local_last_id)
+    reason = str(observation.reason or "event").strip()
+    is_probe = "probe" in reason
+    last_event_dt = parse_utc_text(_row_text(row, "last_event_at"))
+    now_dt = parse_utc_text(now) or datetime.now(UTC)
+    last_event_age = (
+        int((now_dt - last_event_dt).total_seconds()) if last_event_dt else None
+    )
+    hot_chat = event_count >= 5 or (last_event_age is not None and last_event_age <= 600)
+
+    if membership_scope == MembershipScope.UNOBSERVABLE:
+        quiet_delay = max_normal_delay
+    elif is_probe:
+        quiet_delay = min(max_active_delay, max(min_delay, 30))
+    elif event_count >= 20:
+        quiet_delay = min(max_active_delay, 120)
+    elif event_count >= 5:
+        quiet_delay = min(max_active_delay, 60)
+    elif membership_scope == MembershipScope.NONE_JOINED:
+        quiet_delay = min(max_normal_delay, 180)
+    else:
+        quiet_delay = min(max_active_delay if hot_chat else max_normal_delay, 30)
+
+    quiet_delay = max(min_delay, min(int(quiet_delay), max_cold_delay))
+    priority = _scope_base_priority(membership_scope)
+    priority += min(event_count, 50) * 4.0
+    priority += min(local_gap, 5000) / 100.0
+    if is_probe:
+        priority += 4.0
+    priority -= min(failure_count, 10) * 8.0
+    priority = max(0.0, round(priority, 3))
+
+    preferred_account = str(observation.source_account or "").strip()
+    if not preferred_account:
+        preferred_account = _row_text(row, "last_source_account")
+    if not preferred_account:
+        source_accounts = _split_csv(_row_text(row, "source_accounts"))
+        preferred_account = source_accounts[0] if source_accounts else "primary"
+
+    due_at = add_seconds_to_utc_text(now, quiet_delay)
+    prediction = {
+        "kind": "heuristic",
+        "membership_scope": membership_scope,
+        "event_count": event_count,
+        "local_gap": local_gap,
+        "failure_count": failure_count,
+        "hot_chat": hot_chat,
+        "ai_enabled": ai_enabled(cfg),
+        "ai_shadow": ai_shadow_enabled(cfg),
+    }
+    source = "heuristic"
+    if ai_enabled(cfg):
+        prediction["heuristic"] = {
+            "quiet_delay_seconds": quiet_delay,
+            "priority_score": priority,
+            "due_at": due_at,
+        }
+        try:
+            from tg_harvest.ml.sync_predictor import predict_sync_decision
+
+            suggestion = predict_sync_decision(
+                conn,
+                cfg,
+                chat_id=int(observation.chat_id),
+                now_text=now,
+                observation_reason=reason,
+                source_account=preferred_account,
+                heuristic_delay_seconds=quiet_delay,
+                heuristic_priority_score=priority,
+                heuristic_context=prediction,
+            )
+            model_prediction = suggestion.to_prediction_dict()
+            prediction["model"] = model_prediction
+            if suggestion.available:
+                source = "heuristic_with_model_shadow"
+                if suggestion.active:
+                    quiet_delay = max(
+                        min_delay,
+                        min(int(suggestion.quiet_delay_seconds), max_cold_delay),
+                    )
+                    priority = max(0.0, round(float(suggestion.priority_score), 3))
+                    due_at = add_seconds_to_utc_text(now, quiet_delay)
+                    source = "torch_model_active"
+                    prediction["kind"] = "torch_model"
+                    prediction["active_model"] = {
+                        "quiet_delay_seconds": quiet_delay,
+                        "priority_score": priority,
+                        "due_at": due_at,
+                    }
+            else:
+                source = (
+                    "heuristic_with_model_shadow"
+                    if ai_shadow_enabled(cfg)
+                    else "heuristic_ai_fallback"
+                )
+                prediction["ai_reason"] = suggestion.reason
+        except Exception as exc:
+            logging_message = f"{type(exc).__name__}: {exc}"
+            source = (
+                "heuristic_with_model_shadow"
+                if ai_shadow_enabled(cfg)
+                else "heuristic_ai_fallback"
+            )
+            prediction["ai_reason"] = "model_prediction_failed"
+            prediction["model_error"] = logging_message
+
+    return SyncDecision(
+        due_at=due_at,
+        quiet_delay_seconds=quiet_delay,
+        priority_score=priority,
+        preferred_account=preferred_account,
+        source=source,
+        prediction=prediction,
+    )
+
+
+@synchronized_write
+def refresh_chat_states(
+    conn: sqlite3.Connection,
+    *,
+    chat_rows: list[dict[str, Any]],
+    joined_by_account: dict[str, set[int]],
+    cached_by_account: dict[str, set[int]],
+    account_keys: list[str],
+    now_text: str | None = None,
+) -> dict[str, Any]:
+    now = str(now_text or utc_now_text())
+    cur = conn.cursor()
+    active_chat_ids = [int(row["chat_id"]) for row in chat_rows if int(row["chat_id"]) > 0]
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        for row in chat_rows:
+            chat_id = int(row["chat_id"])
+            if chat_id <= 0:
+                continue
+            chat_username = clean_username(row.get("chat_username"))
+            joined_account_keys = [
+                account_key
+                for account_key, joined_chat_ids in joined_by_account.items()
+                if chat_id in joined_chat_ids
+            ]
+            cached_account_keys = [
+                account_key
+                for account_key, cached_chat_ids in cached_by_account.items()
+                if chat_id in cached_chat_ids
+            ]
+            scope = classify_membership_scope(
+                chat_id=chat_id,
+                account_keys=account_keys,
+                joined_account_keys=joined_account_keys,
+                cached_account_keys=cached_account_keys,
+                chat_username=chat_username,
+            )
+            source_accounts = _join_csv(joined_account_keys or cached_account_keys)
+            priority_score = _scope_base_priority(scope)
+            initial_next_probe_at = now if scope in {
+                MembershipScope.NONE_JOINED,
+                MembershipScope.UNOBSERVABLE,
+            } else ""
+            cur.execute(
+                """
+                INSERT INTO sync_chat_state(
+                    chat_id,
+                    chat_title,
+                    chat_username,
+                    membership_scope,
+                    status,
+                    local_last_id,
+                    priority_score,
+                    source_accounts,
+                    next_probe_at,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    chat_title = excluded.chat_title,
+                    chat_username = excluded.chat_username,
+                    membership_scope = excluded.membership_scope,
+                    status = CASE
+                        WHEN sync_chat_state.status IN ('pending', 'updating', 'backoff')
+                            THEN sync_chat_state.status
+                        ELSE excluded.status
+                    END,
+                    local_last_id = excluded.local_last_id,
+                    priority_score = CASE
+                        WHEN sync_chat_state.status IN ('pending', 'updating')
+                            THEN sync_chat_state.priority_score
+                        ELSE excluded.priority_score
+                    END,
+                    source_accounts = excluded.source_accounts,
+                    next_probe_at = CASE
+                        WHEN sync_chat_state.next_probe_at = '' AND excluded.next_probe_at <> ''
+                            THEN excluded.next_probe_at
+                        ELSE sync_chat_state.next_probe_at
+                    END,
+                    is_active = 1,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    chat_id,
+                    str(row.get("chat_title") or "").strip() or f"Chat {chat_id}",
+                    chat_username,
+                    scope,
+                    _scope_idle_status(scope),
+                    safe_int(row.get("last_message_id"), 0),
+                    priority_score,
+                    source_accounts,
+                    initial_next_probe_at,
+                    now,
+                    now,
+                ),
+            )
+
+        if active_chat_ids:
+            placeholders = ",".join(["?"] * len(active_chat_ids))
+            cur.execute(
+                f"""
+                UPDATE sync_chat_state
+                SET
+                    status = 'deleted',
+                    is_active = 0,
+                    priority_score = 0,
+                    next_probe_at = '',
+                    next_update_at = '',
+                    updated_at = ?
+                WHERE chat_id NOT IN ({placeholders})
+                """,
+                [now, *active_chat_ids],
+            )
+            cur.execute(
+                f"""
+                DELETE FROM sync_pending_updates
+                WHERE chat_id NOT IN ({placeholders})
+                """,
+                active_chat_ids,
+            )
+        else:
+            cur.execute(
+                """
+                UPDATE sync_chat_state
+                SET
+                    status = 'deleted',
+                    is_active = 0,
+                    priority_score = 0,
+                    next_probe_at = '',
+                    next_update_at = '',
+                    updated_at = ?
+                """,
+                (now,),
+            )
+            cur.execute("DELETE FROM sync_pending_updates")
+        conn.commit()
+        return {"active_chat_count": len(active_chat_ids), "updated_at": now}
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def enqueue_observation(
+    conn: sqlite3.Connection,
+    *,
+    cfg: Any,
+    observation: SyncObservation,
+) -> SyncDecision:
+    observed_at = str(observation.observed_at or utc_now_text())
+    safe_observation = SyncObservation(
+        chat_id=int(observation.chat_id),
+        chat_title=str(observation.chat_title or "").strip()
+        or f"Chat {int(observation.chat_id)}",
+        chat_username=clean_username(observation.chat_username),
+        reason=str(observation.reason or "event").strip() or "event",
+        source_account=str(observation.source_account or "").strip() or "primary",
+        observed_at=observed_at,
+    )
+    decision = build_heuristic_decision(conn, cfg, safe_observation, now_text=observed_at)
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            SELECT *
+            FROM sync_pending_updates
+            WHERE chat_id = ?
+            LIMIT 1
+            """,
+            (safe_observation.chat_id,),
+        )
+        existing = cur.fetchone()
+        generation = _row_int(existing, "generation") + 1
+        event_count = _row_int(existing, "event_count") + 1
+        first_event_at = _row_text(existing, "first_event_at") or observed_at
+        source_accounts = _join_csv(
+            [
+                *_split_csv(_row_text(existing, "source_accounts")),
+                safe_observation.source_account,
+            ]
+        )
+        reasons = _join_csv(
+            [*_split_csv(_row_text(existing, "reasons")), safe_observation.reason]
+        )
+        in_flight = _row_int(existing, "in_flight")
+        in_flight_generation = _row_int(existing, "in_flight_generation")
+        dirty_generation = generation if in_flight else _row_int(existing, "dirty_generation")
+        cur.execute(
+            """
+            INSERT INTO sync_pending_updates(
+                chat_id,
+                chat_title,
+                chat_username,
+                first_event_at,
+                last_event_at,
+                event_count,
+                source_accounts,
+                reasons,
+                preferred_source_account,
+                due_at,
+                priority_score,
+                quiet_delay_seconds,
+                generation,
+                in_flight,
+                in_flight_generation,
+                dirty_generation,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                chat_title = excluded.chat_title,
+                chat_username = excluded.chat_username,
+                last_event_at = excluded.last_event_at,
+                event_count = excluded.event_count,
+                source_accounts = excluded.source_accounts,
+                reasons = excluded.reasons,
+                preferred_source_account = excluded.preferred_source_account,
+                due_at = excluded.due_at,
+                priority_score = excluded.priority_score,
+                quiet_delay_seconds = excluded.quiet_delay_seconds,
+                generation = excluded.generation,
+                dirty_generation = excluded.dirty_generation,
+                updated_at = excluded.updated_at
+            """,
+            (
+                safe_observation.chat_id,
+                safe_observation.chat_title,
+                safe_observation.chat_username,
+                first_event_at,
+                observed_at,
+                event_count,
+                source_accounts,
+                reasons,
+                decision.preferred_account,
+                decision.due_at,
+                decision.priority_score,
+                decision.quiet_delay_seconds,
+                generation,
+                in_flight,
+                in_flight_generation,
+                dirty_generation,
+                observed_at,
+                observed_at,
+            ),
+        )
+        cur.execute(
+            """
+            UPDATE sync_chat_state
+            SET
+                chat_title = ?,
+                chat_username = ?,
+                status = CASE WHEN ? = 1 THEN 'updating' ELSE 'pending' END,
+                last_event_at = ?,
+                last_event_reason = ?,
+                next_update_at = ?,
+                model_delay_seconds = ?,
+                priority_score = ?,
+                source_accounts = ?,
+                last_source_account = ?,
+                is_active = 1,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                safe_observation.chat_title,
+                safe_observation.chat_username,
+                in_flight,
+                observed_at,
+                safe_observation.reason,
+                decision.due_at,
+                decision.quiet_delay_seconds,
+                decision.priority_score,
+                source_accounts,
+                safe_observation.source_account,
+                observed_at,
+                safe_observation.chat_id,
+            ),
+        )
+        if cur.rowcount <= 0:
+            cur.execute(
+                """
+                INSERT INTO sync_chat_state(
+                    chat_id,
+                    chat_title,
+                    chat_username,
+                    membership_scope,
+                    status,
+                    last_event_at,
+                    last_event_reason,
+                    next_update_at,
+                    model_delay_seconds,
+                    priority_score,
+                    source_accounts,
+                    last_source_account,
+                    is_active,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                """,
+                (
+                    safe_observation.chat_id,
+                    safe_observation.chat_title,
+                    safe_observation.chat_username,
+                    "updating" if in_flight else "pending",
+                    observed_at,
+                    safe_observation.reason,
+                    decision.due_at,
+                    decision.quiet_delay_seconds,
+                    decision.priority_score,
+                    source_accounts,
+                    safe_observation.source_account,
+                    observed_at,
+                    observed_at,
+                ),
+            )
+        _insert_learning_event_cur(
+            cur,
+            _learning_event_dict(
+                chat_id=safe_observation.chat_id,
+                event_type="observation",
+                reason=safe_observation.reason,
+                source_account=safe_observation.source_account,
+                membership_scope=str(decision.prediction.get("membership_scope") or ""),
+                status="pending",
+                features={
+                    "event_count": event_count,
+                    "generation": generation,
+                    "in_flight": bool(in_flight),
+                },
+                prediction=decision.prediction
+                | {
+                    "due_at": decision.due_at,
+                    "source": decision.source,
+                },
+                quiet_delay_seconds=decision.quiet_delay_seconds,
+                priority_score=decision.priority_score,
+                created_at=observed_at,
+            ),
+        )
+        conn.commit()
+        return decision
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def claim_due_pending_updates(
+    conn: sqlite3.Connection,
+    *,
+    now_text: str | None = None,
+    limit: int = 1,
+) -> list[SyncPendingTask]:
+    now = str(now_text or utc_now_text())
+    effective_limit = max(1, int(limit or 1))
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            SELECT p.*
+            FROM sync_pending_updates p
+            LEFT JOIN sync_chat_state s ON s.chat_id = p.chat_id
+            WHERE p.in_flight = 0
+              AND p.due_at <> ''
+              AND p.due_at <= ?
+              AND COALESCE(s.is_active, 1) = 1
+            ORDER BY p.due_at ASC, p.priority_score DESC, p.chat_id ASC
+            LIMIT ?
+            """,
+            (now, effective_limit),
+        )
+        rows = cur.fetchall()
+        tasks: list[SyncPendingTask] = []
+        for row in rows:
+            chat_id = int(row["chat_id"])
+            generation = _row_int(row, "generation")
+            cur.execute(
+                """
+                UPDATE sync_pending_updates
+                SET
+                    in_flight = 1,
+                    in_flight_generation = ?,
+                    updated_at = ?
+                WHERE chat_id = ?
+                  AND in_flight = 0
+                  AND generation = ?
+                """,
+                (generation, now, chat_id, generation),
+            )
+            if cur.rowcount <= 0:
+                continue
+            cur.execute(
+                """
+                UPDATE sync_chat_state
+                SET status = 'updating', updated_at = ?
+                WHERE chat_id = ?
+                """,
+                (now, chat_id),
+            )
+            tasks.append(
+                SyncPendingTask(
+                    chat_id=chat_id,
+                    chat_title=str(row["chat_title"] or "") or f"Chat {chat_id}",
+                    chat_username=clean_username(row["chat_username"]),
+                    reason=str(row["reasons"] or "event"),
+                    preferred_source_account=str(row["preferred_source_account"] or ""),
+                    source_accounts=str(row["source_accounts"] or ""),
+                    event_count=_row_int(row, "event_count"),
+                    generation=generation,
+                    in_flight_generation=generation,
+                    quiet_delay_seconds=_row_int(row, "quiet_delay_seconds"),
+                    priority_score=float(row["priority_score"] or 0.0),
+                    first_event_at=str(row["first_event_at"] or ""),
+                    last_event_at=str(row["last_event_at"] or ""),
+                    due_at=str(row["due_at"] or ""),
+                )
+            )
+        conn.commit()
+        return tasks
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def _wait_seconds(task: SyncPendingTask, now_text: str) -> int:
+    first_dt = parse_utc_text(task.first_event_at)
+    now_dt = parse_utc_text(now_text)
+    if first_dt is None or now_dt is None:
+        return 0
+    return max(0, int((now_dt - first_dt).total_seconds()))
+
+
+def _pending_has_new_generation(row: Any, task: SyncPendingTask) -> bool:
+    if row is None:
+        return False
+    return max(
+        _row_int(row, "generation"),
+        _row_int(row, "dirty_generation"),
+    ) > int(task.in_flight_generation)
+
+
+@synchronized_write
+def complete_pending_update(
+    conn: sqlite3.Connection,
+    *,
+    task: SyncPendingTask,
+    result: SyncUpdateResult,
+    now_text: str | None = None,
+) -> None:
+    now = str(now_text or utc_now_text())
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            "SELECT * FROM sync_pending_updates WHERE chat_id = ? LIMIT 1",
+            (int(task.chat_id),),
+        )
+        pending_row = cur.fetchone()
+        has_new_generation = _pending_has_new_generation(pending_row, task)
+        status = "pending" if has_new_generation else "idle"
+        if has_new_generation:
+            due_at = _row_text(pending_row, "due_at")
+            if not due_at or due_at <= now:
+                due_at = add_seconds_to_utc_text(
+                    now,
+                    max(1, _row_int(pending_row, "quiet_delay_seconds", task.quiet_delay_seconds)),
+                )
+            cur.execute(
+                """
+                UPDATE sync_pending_updates
+                SET
+                    in_flight = 0,
+                    in_flight_generation = 0,
+                    dirty_generation = 0,
+                    due_at = ?,
+                    updated_at = ?
+                WHERE chat_id = ?
+                """,
+                (due_at, now, int(task.chat_id)),
+            )
+        else:
+            cur.execute(
+                "DELETE FROM sync_pending_updates WHERE chat_id = ?",
+                (int(task.chat_id),),
+            )
+        cur.execute(
+            """
+            UPDATE sync_chat_state
+            SET
+                status = ?,
+                last_update_at = ?,
+                last_success_at = ?,
+                last_failure_message = '',
+                failure_count = 0,
+                local_last_id = MAX(local_last_id, ?),
+                remote_last_id = MAX(remote_last_id, ?),
+                next_update_at = CASE WHEN ? = 'pending' THEN next_update_at ELSE '' END,
+                last_source_account = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                status,
+                now,
+                now,
+                max(0, int(result.local_last_id or 0)),
+                max(0, int(result.remote_last_id or 0)),
+                status,
+                str(result.source_account or ""),
+                now,
+                int(task.chat_id),
+            ),
+        )
+        _insert_learning_event_cur(
+            cur,
+            _learning_event_dict(
+                chat_id=task.chat_id,
+                event_type="update_outcome",
+                reason=task.reason,
+                source_account=result.source_account,
+                status="success",
+                outcome={
+                    "scanned_message_count": int(result.scanned_message_count or 0),
+                    "duration_seconds": float(result.duration_seconds or 0.0),
+                    "event_count": int(task.event_count or 0),
+                    "has_new_generation": has_new_generation,
+                },
+                quiet_delay_seconds=task.quiet_delay_seconds,
+                priority_score=task.priority_score,
+                added_message_count=int(result.added_message_count or 0),
+                wait_seconds=_wait_seconds(task, now),
+                api_cost=float(result.api_cost or 0.0),
+                created_at=now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def fail_pending_update(
+    conn: sqlite3.Connection,
+    *,
+    cfg: Any,
+    task: SyncPendingTask,
+    result: SyncUpdateResult,
+    now_text: str | None = None,
+) -> None:
+    now = str(now_text or utc_now_text())
+    max_cold_delay = cfg_int(cfg, "sync_max_cold_delay_seconds", 2 * 60 * 60, minimum=60)
+    if result.failure_type == "flood_wait" and result.retry_after_seconds > 0:
+        retry_delay = max(60, min(int(result.retry_after_seconds), max_cold_delay))
+    elif result.failure_type == "no_account":
+        retry_delay = 120
+    else:
+        retry_delay = min(15 * 60, max(180, int(task.quiet_delay_seconds or 0)))
+    due_at = add_seconds_to_utc_text(now, retry_delay)
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            UPDATE sync_pending_updates
+            SET
+                in_flight = 0,
+                in_flight_generation = 0,
+                dirty_generation = 0,
+                due_at = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (due_at, now, int(task.chat_id)),
+        )
+        cur.execute(
+            """
+            UPDATE sync_chat_state
+            SET
+                status = 'backoff',
+                last_update_at = ?,
+                last_failure_at = ?,
+                last_failure_message = ?,
+                failure_count = failure_count + 1,
+                next_update_at = ?,
+                last_source_account = ?,
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (
+                now,
+                now,
+                str(result.failure_message or result.failure_type or "failed")[:500],
+                due_at,
+                str(result.source_account or ""),
+                now,
+                int(task.chat_id),
+            ),
+        )
+        _insert_learning_event_cur(
+            cur,
+            _learning_event_dict(
+                chat_id=task.chat_id,
+                event_type="update_outcome",
+                reason=task.reason,
+                source_account=result.source_account,
+                status="failed",
+                outcome={
+                    "retry_delay_seconds": retry_delay,
+                    "event_count": int(task.event_count or 0),
+                    "message": str(result.failure_message or ""),
+                },
+                quiet_delay_seconds=task.quiet_delay_seconds,
+                priority_score=task.priority_score,
+                wait_seconds=_wait_seconds(task, now),
+                api_cost=float(result.api_cost or 0.0),
+                failure_type=result.failure_type or "failed",
+                created_at=now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def record_probe_result(
+    conn: sqlite3.Connection,
+    *,
+    chat_id: int,
+    chat_title: str = "",
+    chat_username: str | None = None,
+    status: str,
+    source_account: str = "",
+    remote_last_id: int = 0,
+    local_last_id: int = 0,
+    cooldown_seconds: int = 0,
+    reason: str = "probe",
+    now_text: str | None = None,
+) -> None:
+    now = str(now_text or utc_now_text())
+    next_probe_at = add_seconds_to_utc_text(now, max(0, int(cooldown_seconds or 0)))
+    normalized_status = str(status or "").strip() or "unknown"
+    if normalized_status == "changed":
+        state_status = "pending"
+        quarantine_reason = ""
+    elif normalized_status in {"missing", "cache_miss"}:
+        state_status = "quarantined"
+        quarantine_reason = normalized_status
+    elif normalized_status in {"failed", "flood_wait", "no_account"}:
+        state_status = "backoff"
+        quarantine_reason = ""
+    else:
+        state_status = "idle"
+        quarantine_reason = ""
+
+    safe_chat_id = int(chat_id)
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            INSERT INTO sync_chat_state(
+                chat_id,
+                chat_title,
+                chat_username,
+                membership_scope,
+                status,
+                last_probe_at,
+                last_probe_status,
+                remote_last_id,
+                local_last_id,
+                quarantine_reason,
+                next_probe_at,
+                last_source_account,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, 'unknown', ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+            ON CONFLICT(chat_id) DO UPDATE SET
+                chat_title = CASE WHEN excluded.chat_title <> '' THEN excluded.chat_title ELSE sync_chat_state.chat_title END,
+                chat_username = COALESCE(excluded.chat_username, sync_chat_state.chat_username),
+                status = CASE
+                    WHEN sync_chat_state.status = 'pending' AND ? = 'changed'
+                        THEN sync_chat_state.status
+                    ELSE excluded.status
+                END,
+                last_probe_at = excluded.last_probe_at,
+                last_probe_status = excluded.last_probe_status,
+                remote_last_id = MAX(sync_chat_state.remote_last_id, excluded.remote_last_id),
+                local_last_id = MAX(sync_chat_state.local_last_id, excluded.local_last_id),
+                quarantine_reason = excluded.quarantine_reason,
+                next_probe_at = excluded.next_probe_at,
+                last_source_account = excluded.last_source_account,
+                is_active = 1,
+                updated_at = excluded.updated_at
+            """,
+            (
+                safe_chat_id,
+                str(chat_title or "").strip() or f"Chat {safe_chat_id}",
+                clean_username(chat_username),
+                state_status,
+                now,
+                normalized_status,
+                max(0, int(remote_last_id or 0)),
+                max(0, int(local_last_id or 0)),
+                quarantine_reason,
+                next_probe_at,
+                str(source_account or ""),
+                now,
+                now,
+                normalized_status,
+            ),
+        )
+        _insert_learning_event_cur(
+            cur,
+            _learning_event_dict(
+                chat_id=safe_chat_id,
+                event_type="probe",
+                reason=reason,
+                source_account=source_account,
+                status=normalized_status,
+                outcome={
+                    "remote_last_id": int(remote_last_id or 0),
+                    "local_last_id": int(local_last_id or 0),
+                    "cooldown_seconds": int(cooldown_seconds or 0),
+                },
+                failure_type=normalized_status
+                if normalized_status in {"failed", "flood_wait", "no_account", "missing", "cache_miss"}
+                else "",
+                created_at=now,
+            ),
+        )
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def deactivate_chat(
+    conn: sqlite3.Connection,
+    chat_id: int,
+    *,
+    now_text: str | None = None,
+) -> None:
+    now = str(now_text or utc_now_text())
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("DELETE FROM sync_pending_updates WHERE chat_id = ?", (int(chat_id),))
+        cur.execute(
+            """
+            UPDATE sync_chat_state
+            SET
+                status = 'deleted',
+                is_active = 0,
+                priority_score = 0,
+                next_probe_at = '',
+                next_update_at = '',
+                updated_at = ?
+            WHERE chat_id = ?
+            """,
+            (now, int(chat_id)),
+        )
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def _empty_scheduler_summary(health_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
+    snapshot = dict(health_snapshot or {})
+    return {
+        "enabled": bool(snapshot.get("scheduler_enabled")),
+        "ai_enabled": bool(snapshot.get("ai_enabled")),
+        "ai_shadow": bool(snapshot.get("ai_shadow")),
+        "pending_count": 0,
+        "due_count": 0,
+        "in_flight_count": 0,
+        "avg_quiet_delay_seconds": 0,
+        "next_due_at": "",
+        "coalesced_event_count": 0,
+        "membership_counts": [],
+        "status_counts": [],
+        "accounts": list(snapshot.get("accounts") or []),
+        "model": {
+            "model_key": MODEL_KEY,
+            "model_version": "",
+            "backend": "disabled",
+            "artifact_path": default_model_artifact_path(),
+            "trained_at": "",
+            "sample_count": 0,
+            "metrics": {},
+        },
+        "recent": {
+            "update_count": 0,
+            "added_message_count": 0,
+            "avg_wait_seconds": 0,
+            "failure_count": 0,
+        },
+        "recent_failures": [],
+    }
+
+
+def _decode_json_dict(value: Any) -> dict[str, Any]:
+    try:
+        parsed = json.loads(str(value or "{}"))
+    except Exception:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def build_scheduler_summary(
+    conn: sqlite3.Connection,
+    *,
+    health_snapshot: dict[str, Any] | None = None,
+    now_text: str | None = None,
+) -> dict[str, Any]:
+    if not _table_exists(conn, "sync_chat_state") or not _table_exists(
+        conn, "sync_pending_updates"
+    ):
+        return _empty_scheduler_summary(health_snapshot)
+
+    now = str(now_text or utc_now_text())
+    payload = _empty_scheduler_summary(health_snapshot)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS pending_count,
+                SUM(CASE WHEN in_flight = 0 AND due_at <> '' AND due_at <= ? THEN 1 ELSE 0 END) AS due_count,
+                SUM(CASE WHEN in_flight <> 0 THEN 1 ELSE 0 END) AS in_flight_count,
+                COALESCE(AVG(NULLIF(quiet_delay_seconds, 0)), 0) AS avg_quiet_delay_seconds,
+                COALESCE(MIN(CASE WHEN in_flight = 0 THEN due_at END), '') AS next_due_at,
+                COALESCE(SUM(CASE WHEN event_count > 1 THEN event_count - 1 ELSE 0 END), 0) AS coalesced_event_count
+            FROM sync_pending_updates
+            """,
+            (now,),
+        )
+        row = cur.fetchone()
+        payload.update(
+            {
+                "pending_count": _row_int(row, "pending_count"),
+                "due_count": _row_int(row, "due_count"),
+                "in_flight_count": _row_int(row, "in_flight_count"),
+                "avg_quiet_delay_seconds": _row_int(row, "avg_quiet_delay_seconds"),
+                "next_due_at": _row_text(row, "next_due_at"),
+                "coalesced_event_count": _row_int(row, "coalesced_event_count"),
+            }
+        )
+
+        cur.execute(
+            """
+            SELECT membership_scope, COUNT(*) AS c
+            FROM sync_chat_state
+            WHERE is_active = 1
+            GROUP BY membership_scope
+            ORDER BY c DESC, membership_scope ASC
+            """
+        )
+        payload["membership_counts"] = [
+            {"scope": str(row["membership_scope"] or ""), "count": int(row["c"] or 0)}
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            """
+            SELECT status, COUNT(*) AS c
+            FROM sync_chat_state
+            WHERE is_active = 1
+            GROUP BY status
+            ORDER BY c DESC, status ASC
+            """
+        )
+        payload["status_counts"] = [
+            {"status": str(row["status"] or ""), "count": int(row["c"] or 0)}
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS update_count,
+                COALESCE(SUM(added_message_count), 0) AS added_message_count,
+                COALESCE(AVG(NULLIF(wait_seconds, 0)), 0) AS avg_wait_seconds,
+                SUM(CASE WHEN failure_type <> '' THEN 1 ELSE 0 END) AS failure_count
+            FROM sync_learning_events
+            WHERE event_type = 'update_outcome'
+              AND created_at >= datetime(?, '-24 hours')
+            """,
+            (now,),
+        )
+        recent = cur.fetchone()
+        payload["recent"] = {
+            "update_count": _row_int(recent, "update_count"),
+            "added_message_count": _row_int(recent, "added_message_count"),
+            "avg_wait_seconds": _row_int(recent, "avg_wait_seconds"),
+            "failure_count": _row_int(recent, "failure_count"),
+        }
+
+        cur.execute(
+            """
+            SELECT chat_id, event_type, reason, source_account, failure_type, created_at, outcome_json
+            FROM sync_learning_events
+            WHERE failure_type <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 8
+            """
+        )
+        payload["recent_failures"] = [
+            {
+                "chat_id": int(row["chat_id"] or 0),
+                "event_type": str(row["event_type"] or ""),
+                "reason": str(row["reason"] or ""),
+                "source_account": str(row["source_account"] or ""),
+                "failure_type": str(row["failure_type"] or ""),
+                "created_at": str(row["created_at"] or ""),
+                "outcome": _decode_json_dict(row["outcome_json"]),
+            }
+            for row in cur.fetchall()
+        ]
+
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS sample_count
+            FROM sync_learning_events
+            """
+        )
+        sample_count = _row_int(cur.fetchone(), "sample_count")
+        cur.execute(
+            """
+            SELECT model_key, model_version, backend, metrics_json, trained_at, artifact_path, state_json, updated_at
+            FROM sync_model_state
+            WHERE model_key = ?
+            LIMIT 1
+            """,
+            (MODEL_KEY,),
+        )
+        model_row = cur.fetchone()
+        if model_row is None:
+            backend = "torch_shadow_missing" if payload["ai_enabled"] else "disabled"
+            if payload["ai_enabled"] and not payload["ai_shadow"]:
+                backend = "heuristic_fallback"
+            payload["model"] = {
+                "model_key": MODEL_KEY,
+                "model_version": "",
+                "backend": backend,
+                "artifact_path": default_model_artifact_path(),
+                "trained_at": "",
+                "sample_count": sample_count,
+                "metrics": {},
+            }
+        else:
+            payload["model"] = {
+                "model_key": str(model_row["model_key"] or MODEL_KEY),
+                "model_version": str(model_row["model_version"] or ""),
+                "backend": str(model_row["backend"] or ""),
+                "artifact_path": str(model_row["artifact_path"] or default_model_artifact_path()),
+                "trained_at": str(model_row["trained_at"] or ""),
+                "sample_count": sample_count,
+                "metrics": _decode_json_dict(model_row["metrics_json"]),
+                "state": _decode_json_dict(model_row["state_json"]),
+                "updated_at": str(model_row["updated_at"] or ""),
+            }
+        return payload
+    finally:
+        cur.close()
+
+
+def list_scheduler_chats(
+    conn: sqlite3.Connection,
+    *,
+    membership: str = "",
+    status: str = "",
+    limit: int = 100,
+    offset: int = 0,
+) -> dict[str, Any]:
+    if not _table_exists(conn, "sync_chat_state"):
+        return {"ok": True, "items": [], "count": 0, "limit": limit, "offset": offset}
+    effective_limit = max(1, min(500, int(limit or 100)))
+    effective_offset = max(0, int(offset or 0))
+    filters = ["s.is_active = 1"]
+    params: list[Any] = []
+    if str(membership or "").strip():
+        filters.append("s.membership_scope = ?")
+        params.append(str(membership).strip())
+    if str(status or "").strip():
+        filters.append("s.status = ?")
+        params.append(str(status).strip())
+    where_sql = " AND ".join(filters)
+    cur = conn.cursor()
+    try:
+        cur.execute(f"SELECT COUNT(*) AS c FROM sync_chat_state s WHERE {where_sql}", params)
+        count = _row_int(cur.fetchone(), "c")
+        cur.execute(
+            f"""
+            SELECT
+                s.chat_id,
+                s.chat_title,
+                s.chat_username,
+                s.membership_scope,
+                s.status,
+                s.last_event_at,
+                s.last_probe_at,
+                s.last_probe_status,
+                s.last_update_at,
+                s.last_success_at,
+                s.last_failure_at,
+                s.last_failure_message,
+                s.remote_last_id,
+                s.local_last_id,
+                s.failure_count,
+                s.quarantine_reason,
+                s.next_probe_at,
+                s.next_update_at,
+                s.model_delay_seconds,
+                s.priority_score,
+                s.source_accounts,
+                s.last_source_account,
+                p.event_count,
+                p.due_at,
+                p.in_flight,
+                p.generation,
+                p.dirty_generation
+            FROM sync_chat_state s
+            LEFT JOIN sync_pending_updates p ON p.chat_id = s.chat_id
+            WHERE {where_sql}
+            ORDER BY
+                CASE WHEN p.due_at IS NULL OR p.due_at = '' THEN 1 ELSE 0 END ASC,
+                p.due_at ASC,
+                s.priority_score DESC,
+                s.chat_id ASC
+            LIMIT ? OFFSET ?
+            """,
+            [*params, effective_limit, effective_offset],
+        )
+        items = []
+        for row in cur.fetchall():
+            items.append(
+                {
+                    "chat_id": int(row["chat_id"] or 0),
+                    "chat_title": str(row["chat_title"] or ""),
+                    "chat_username": str(row["chat_username"] or ""),
+                    "membership_scope": str(row["membership_scope"] or ""),
+                    "status": str(row["status"] or ""),
+                    "last_event_at": str(row["last_event_at"] or ""),
+                    "last_probe_at": str(row["last_probe_at"] or ""),
+                    "last_probe_status": str(row["last_probe_status"] or ""),
+                    "last_update_at": str(row["last_update_at"] or ""),
+                    "last_success_at": str(row["last_success_at"] or ""),
+                    "last_failure_at": str(row["last_failure_at"] or ""),
+                    "last_failure_message": str(row["last_failure_message"] or ""),
+                    "remote_last_id": int(row["remote_last_id"] or 0),
+                    "local_last_id": int(row["local_last_id"] or 0),
+                    "failure_count": int(row["failure_count"] or 0),
+                    "quarantine_reason": str(row["quarantine_reason"] or ""),
+                    "next_probe_at": str(row["next_probe_at"] or ""),
+                    "next_update_at": str(row["next_update_at"] or ""),
+                    "model_delay_seconds": int(row["model_delay_seconds"] or 0),
+                    "priority_score": float(row["priority_score"] or 0.0),
+                    "source_accounts": str(row["source_accounts"] or ""),
+                    "last_source_account": str(row["last_source_account"] or ""),
+                    "event_count": int(row["event_count"] or 0),
+                    "due_at": str(row["due_at"] or ""),
+                    "in_flight": int(row["in_flight"] or 0),
+                    "generation": int(row["generation"] or 0),
+                    "dirty_generation": int(row["dirty_generation"] or 0),
+                }
+            )
+        return {
+            "ok": True,
+            "items": items,
+            "count": count,
+            "limit": effective_limit,
+            "offset": effective_offset,
+        }
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def reset_model_state(
+    conn: sqlite3.Connection,
+    *,
+    artifact_path: str | None = None,
+    now_text: str | None = None,
+) -> dict[str, Any]:
+    path = Path(artifact_path or default_model_artifact_path())
+    removed_artifact = False
+    with suppress(FileNotFoundError):
+        path.unlink()
+        removed_artifact = True
+    now = str(now_text or utc_now_text())
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute("DELETE FROM sync_model_state WHERE model_key = ?", (MODEL_KEY,))
+        conn.commit()
+        return {
+            "ok": True,
+            "model_key": MODEL_KEY,
+            "artifact_path": str(path),
+            "removed_artifact": removed_artifact,
+            "reset_at": now,
+        }
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()

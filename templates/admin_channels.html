@@ -31,6 +31,16 @@
             <option value="updated_desc">最后消息从新到旧</option>
             <option value="updated_asc">最后消息从旧到新</option>
           </select>
+          <label for="admin-channel-membership-filter" class="sr-only">调度状态筛选</label>
+          <select id="admin-channel-membership-filter" aria-label="按智能调度状态筛选频道列表">
+            <option value="__all__">全部调度状态</option>
+            <option value="none_joined">A 未加入</option>
+            <option value="both_joined">B 双账号</option>
+            <option value="single_joined_primary">C 主账号</option>
+            <option value="single_joined_secondary">C 第二账号</option>
+            <option value="unobservable">不可观察</option>
+            <option value="unknown">未知</option>
+          </select>
           <button id="admin-channel-refresh-btn" class="btn" type="button" aria-label="刷新数据库频道列表">
             刷新
           </button>

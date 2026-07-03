@@ -25,6 +25,7 @@
     liveRequestSeq: 0,
     liveActiveRequestSeq: 0,
     health: null,
+    scheduler: null,
     apiSignals: {
       stats: {
         lastDurationMs: 0,
@@ -75,6 +76,10 @@
       healthActions: document.getElementById('admin-sync-health-actions'),
       diagnoseBtn: document.getElementById('admin-sync-diagnose-btn'),
       diagnoseResult: document.getElementById('admin-sync-diagnose-result'),
+      schedulerStatus: document.getElementById('admin-sync-scheduler-status'),
+      schedulerGrid: document.getElementById('admin-sync-scheduler-grid'),
+      schedulerModel: document.getElementById('admin-sync-scheduler-model'),
+      schedulerFailures: document.getElementById('admin-sync-scheduler-failures'),
       loginDialog: document.getElementById('admin-login-dialog'),
       loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
@@ -101,6 +106,10 @@
       'healthActions',
       'diagnoseBtn',
       'diagnoseResult',
+      'schedulerStatus',
+      'schedulerGrid',
+      'schedulerModel',
+      'schedulerFailures',
       'loginDialog',
       'loginStatus',
       'passwordInput',
@@ -126,6 +135,10 @@
     elements.healthReasons.textContent = '';
     elements.healthActions.textContent = '';
     elements.diagnoseResult.textContent = '';
+    elements.schedulerStatus.textContent = '正在读取调度状态...';
+    elements.schedulerGrid.textContent = '';
+    elements.schedulerModel.textContent = '';
+    elements.schedulerFailures.textContent = '';
     setBusy(elements, false);
   }
 
@@ -474,6 +487,177 @@
     });
   }
 
+  function formatDurationSeconds(value) {
+    var seconds = Math.max(0, Number(value || 0));
+    if (!seconds) return '0 秒';
+    if (seconds < 60) return String(Math.round(seconds)) + ' 秒';
+    if (seconds < 3600) return String(Math.round(seconds / 60)) + ' 分钟';
+    return String(Math.round(seconds / 3600)) + ' 小时';
+  }
+
+  function normalizeCountList(items, keyName) {
+    return (Array.isArray(items) ? items : []).map(function (item) {
+      return {
+        key: String(item && item[keyName] || ''),
+        count: Number(item && item.count || 0)
+      };
+    }).filter(function (item) {
+      return !!item.key;
+    });
+  }
+
+  function normalizeScheduler(payload) {
+    var scheduler = payload && payload.scheduler ? payload.scheduler : {};
+    var model = scheduler.model || {};
+    var recent = scheduler.recent || {};
+    var failures = Array.isArray(scheduler.recent_failures) ? scheduler.recent_failures : [];
+    return {
+      enabled: scheduler.enabled === true,
+      aiEnabled: scheduler.ai_enabled === true,
+      aiShadow: scheduler.ai_shadow === true,
+      pendingCount: Number(scheduler.pending_count || 0),
+      dueCount: Number(scheduler.due_count || 0),
+      inFlightCount: Number(scheduler.in_flight_count || 0),
+      avgQuietDelaySeconds: Number(scheduler.avg_quiet_delay_seconds || 0),
+      nextDueAt: String(scheduler.next_due_at || ''),
+      coalescedEventCount: Number(scheduler.coalesced_event_count || 0),
+      membershipCounts: normalizeCountList(scheduler.membership_counts, 'scope'),
+      statusCounts: normalizeCountList(scheduler.status_counts, 'status'),
+      model: {
+        backend: String(model.backend || ''),
+        modelVersion: String(model.model_version || ''),
+        trainedAt: String(model.trained_at || ''),
+        sampleCount: Number(model.sample_count || 0),
+        artifactPath: String(model.artifact_path || ''),
+        state: model.state && typeof model.state === 'object' ? model.state : {},
+        metrics: model.metrics && typeof model.metrics === 'object' ? model.metrics : {}
+      },
+      recent: {
+        updateCount: Number(recent.update_count || 0),
+        addedMessageCount: Number(recent.added_message_count || 0),
+        avgWaitSeconds: Number(recent.avg_wait_seconds || 0),
+        failureCount: Number(recent.failure_count || 0)
+      },
+      failures: failures.map(function (item) {
+        return {
+          chatId: Number(item && item.chat_id || 0),
+          eventType: String(item && item.event_type || ''),
+          reason: String(item && item.reason || ''),
+          sourceAccount: String(item && item.source_account || ''),
+          failureType: String(item && item.failure_type || ''),
+          createdAt: String(item && item.created_at || '')
+        };
+      })
+    };
+  }
+
+  function schedulerScopeLabel(scope) {
+    var labels = {
+      none_joined: 'A 未加入',
+      both_joined: 'B 双账号',
+      single_joined_primary: 'C 主账号',
+      single_joined_secondary: 'C 第二账号',
+      unobservable: '不可观察',
+      unknown: '未知'
+    };
+    return labels[String(scope || '')] || String(scope || '未知');
+  }
+
+  function schedulerStatusLabel(status) {
+    var labels = {
+      idle: '空闲',
+      pending: '待拉取',
+      updating: '执行中',
+      backoff: '冷却',
+      quarantined: '隔离',
+      unobservable: '不可观察',
+      deleted: '已删除'
+    };
+    return labels[String(status || '')] || String(status || '未知');
+  }
+
+  function createSchedulerStat(label, value) {
+    var item = document.createElement('div');
+    item.className = 'sync-scheduler-stat';
+    item.appendChild(createTextElement('span', '', label));
+    item.appendChild(createTextElement('strong', '', value));
+    return item;
+  }
+
+  function renderSyncScheduler(elements) {
+    var scheduler = syncState.scheduler || normalizeScheduler({});
+    elements.schedulerGrid.textContent = '';
+    elements.schedulerFailures.textContent = '';
+
+    elements.schedulerStatus.textContent = scheduler.enabled
+      ? '智能调度已启用，事件会先合并为 pending 后按到期时间拉取。'
+      : '智能调度未启用，当前仍使用兼容同步路径。';
+
+    [
+      ['Pending', formatNumber(scheduler.pendingCount)],
+      ['到期任务', formatNumber(scheduler.dueCount)],
+      ['执行中', formatNumber(scheduler.inFlightCount)],
+      ['平均延迟', formatDurationSeconds(scheduler.avgQuietDelaySeconds)],
+      ['合并事件', formatNumber(scheduler.coalescedEventCount)],
+      ['24h 新增', formatNumber(scheduler.recent.addedMessageCount)]
+    ].forEach(function (entry) {
+      elements.schedulerGrid.appendChild(createSchedulerStat(entry[0], entry[1]));
+    });
+
+    var scopeText = scheduler.membershipCounts.length
+      ? scheduler.membershipCounts.map(function (item) {
+        return schedulerScopeLabel(item.key) + ' ' + formatNumber(item.count);
+      }).join('，')
+      : '暂无状态样本';
+    var statusText = scheduler.statusCounts.length
+      ? scheduler.statusCounts.map(function (item) {
+        return schedulerStatusLabel(item.key) + ' ' + formatNumber(item.count);
+      }).join('，')
+      : '暂无任务状态';
+    var modelText = [
+      '状态分布：' + scopeText,
+      '任务状态：' + statusText,
+      '模型：' + (scheduler.aiEnabled ? (scheduler.aiShadow ? 'shadow' : 'enabled') : 'disabled')
+        + ' / ' + (scheduler.model.backend || 'none')
+        + (scheduler.model.state.mode ? ' / ' + String(scheduler.model.state.mode) : '')
+        + '，样本 ' + formatNumber(scheduler.model.sampleCount)
+        + (scheduler.model.trainedAt ? '，训练 ' + formatDateTime(scheduler.model.trainedAt) : '')
+    ];
+    if (scheduler.aiEnabled) {
+      var readyRuns = Number(scheduler.model.state.consecutive_ready_count || 0);
+      var requiredReadyRuns = Number(scheduler.model.state.required_consecutive_ready_count || 0);
+      var validationAccuracy = Number(scheduler.model.metrics.validation_delay_accuracy || 0);
+      modelText.push(
+        '就绪：' + (scheduler.model.state.ready === true ? '是' : '否')
+          + (requiredReadyRuns > 0 ? '，连续达标 ' + formatNumber(readyRuns) + '/' + formatNumber(requiredReadyRuns) : '')
+          + (validationAccuracy > 0 ? '，验证准确率 ' + String(Math.round(validationAccuracy * 100)) + '%' : '')
+      );
+    }
+    if (scheduler.nextDueAt) {
+      modelText.push('下一次到期：' + formatDateTime(scheduler.nextDueAt));
+    }
+    elements.schedulerModel.textContent = modelText.join('。');
+
+    if (!scheduler.failures.length) {
+      elements.schedulerFailures.appendChild(
+        createTextElement('div', 'sync-scheduler-failure', '最近没有调度失败。')
+      );
+      return;
+    }
+    scheduler.failures.slice(0, 5).forEach(function (failure) {
+      elements.schedulerFailures.appendChild(
+        createTextElement(
+          'div',
+          'sync-scheduler-failure',
+          'Chat ' + String(failure.chatId)
+            + '：' + (failure.failureType || 'failed')
+            + (failure.sourceAccount ? ' / ' + failure.sourceAccount : '')
+            + (failure.createdAt ? ' / ' + formatDateTime(failure.createdAt) : '')
+        )
+      );
+    });
+  }
+
   function normalizeSyncPayload(payload) {
     var windows = Array.isArray(payload && payload.windows) ? payload.windows : [];
     return {
@@ -481,6 +665,7 @@
       latestMessageCreatedAt: String(payload && payload.latest_message_created_at || ''),
       metricNote: String(payload && payload.metric_note || ''),
       health: normalizeSyncHealth(payload),
+      scheduler: normalizeScheduler(payload),
       windows: windows.map(function (item) {
         return {
           window_key: String(item && item.window_key || ''),
@@ -699,6 +884,7 @@
       });
       syncState.windows = payload.windows;
       syncState.health = payload.health;
+      syncState.scheduler = payload.scheduler;
       if (!syncState.windows.length) {
         syncState.selectedWindowKey = '';
       } else if (
@@ -718,6 +904,7 @@
       renderSelectedWindow(elements);
       renderWindowCards(elements);
       renderSyncHealth(elements);
+      renderSyncScheduler(elements);
       updateLiveSectionVisibility(elements, { skipReload: true });
 
       elements.metricNote.textContent = payload.metricNote
@@ -738,6 +925,7 @@
       });
       elements.status.textContent = '读取消息同步统计失败：' + error.message;
       renderSyncHealth(elements);
+      renderSyncScheduler(elements);
       clearLivePollTimer();
       return false;
     } finally {
@@ -762,6 +950,7 @@
     loadSyncDashboard(elements).catch(function (error) {
       elements.status.textContent = '读取消息同步统计失败：' + error.message;
       renderSyncHealth(elements);
+      renderSyncScheduler(elements);
     });
   }
 

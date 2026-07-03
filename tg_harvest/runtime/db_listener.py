@@ -4,7 +4,7 @@ import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from queue import Empty, Queue
 from typing import Any
 
@@ -13,24 +13,30 @@ from telethon import events
 from tg_harvest.admin_jobs.common import admin_error_message, resolve_chat_entity
 from tg_harvest.admin_jobs.runners import (
     _account_cooldown_remaining,
+    _admin_process_single_chat_update,
     _cfg_with_session_name,
     _create_isolated_worker_client,
     _ensure_base_session_valid,
     _read_session_cached_chat_ids,
     _remember_account_cooldown,
-    _admin_process_single_chat_update,
 )
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
     _create_isolated_worker_client_with_options,
     _disconnect_worker_client,
 )
-from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
+from tg_harvest.domain.chat_inventory import load_joined_chat_inventory
 from tg_harvest.domain.coerce import clean_username, enabled_int, optional_int
 from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.range_harvest import read_latest_message_id
 from tg_harvest.ingest.store import get_last_message_id
+from tg_harvest.storage import sync_scheduler
+from tg_harvest.storage.sync_scheduler import (
+    SyncObservation,
+    SyncPendingTask,
+    SyncUpdateResult,
+)
 
 _DEFAULT_EVENT_IDLE_SLEEP_SECONDS = 1.0
 _DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS = 600.0
@@ -63,7 +69,7 @@ def _parse_utc_text_timestamp(value: Any) -> float:
     try:
         return (
             datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
-            .replace(tzinfo=timezone.utc)
+            .replace(tzinfo=UTC)
             .timestamp()
         )
     except Exception:
@@ -78,7 +84,7 @@ def _format_utc_timestamp(value: float) -> str:
     if float(value or 0) <= 0:
         return ""
     return (
-        datetime.fromtimestamp(float(value), tz=timezone.utc)
+        datetime.fromtimestamp(float(value), tz=UTC)
         .replace(microsecond=0)
         .strftime("%Y-%m-%d %H:%M:%S")
     )
@@ -185,6 +191,16 @@ class _ListenerAccount:
 class _PublicProbeOutcome:
     status: str
     cooldown_seconds: int
+    source_account: str = ""
+    remote_last_id: int = 0
+    local_last_id: int = 0
+
+
+@dataclass(frozen=True)
+class _PublicProbeRead:
+    changed: bool
+    remote_last_id: int
+    local_last_id: int
 
 
 class DatabaseChatListenerRuntime:
@@ -267,6 +283,12 @@ class DatabaseChatListenerRuntime:
         self._public_probe_thread = threading.Thread(
             target=self._public_probe_loop,
             name="db-chat-listener-public-probe",
+            daemon=True,
+        )
+        self._model_stop = threading.Event()
+        self._model_thread = threading.Thread(
+            target=self._model_training_loop,
+            name="db-chat-sync-model-trainer",
             daemon=True,
         )
         self._listener_threads: list[threading.Thread] = []
@@ -370,6 +392,43 @@ class DatabaseChatListenerRuntime:
         with self._queued_chat_ids_lock:
             return set(self._queued_chat_ids)
 
+    def _sync_scheduler_enabled(self) -> bool:
+        return sync_scheduler.scheduler_enabled(self._cfg)
+
+    def _sync_ai_enabled(self) -> bool:
+        return sync_scheduler.ai_enabled(self._cfg)
+
+    def _sync_ai_shadow_enabled(self) -> bool:
+        return sync_scheduler.ai_shadow_enabled(self._cfg)
+
+    def _sync_model_training_enabled(self) -> bool:
+        return self._sync_scheduler_enabled() and self._sync_ai_enabled()
+
+    def _pending_update_counts(self) -> dict[str, int]:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            summary = sync_scheduler.build_scheduler_summary(
+                conn,
+                health_snapshot={
+                    "scheduler_enabled": self._sync_scheduler_enabled(),
+                    "ai_enabled": self._sync_ai_enabled(),
+                    "ai_shadow": self._sync_ai_shadow_enabled(),
+                },
+            )
+            return {
+                "pending": int(summary.get("pending_count") or 0),
+                "due": int(summary.get("due_count") or 0),
+                "in_flight": int(summary.get("in_flight_count") or 0),
+            }
+        except Exception:
+            logging.exception("读取同步调度 pending 统计失败")
+            return {"pending": 0, "due": 0, "in_flight": 0}
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
     def health_snapshot(self) -> dict[str, Any]:
         accounts = self._listener_accounts()
         clients = self._snapshot_listener_clients()
@@ -427,21 +486,34 @@ class DatabaseChatListenerRuntime:
                     "cooldown_seconds": int(cooldown_seconds or 0),
                 }
             )
+        pending_counts = self._pending_update_counts() if self._sync_scheduler_enabled() else {
+            "pending": len(self._queued_chat_ids_snapshot()),
+            "due": 0,
+            "in_flight": 0,
+        }
+        queue_size = int(pending_counts.get("pending") or 0)
         return {
             "started": bool(self._started),
             "listener_enabled": enabled_int(getattr(self._cfg, "db_listener_enabled", 1)) == 1,
+            "scheduler_enabled": self._sync_scheduler_enabled(),
+            "ai_enabled": self._sync_ai_enabled(),
+            "ai_shadow": self._sync_ai_shadow_enabled(),
             "public_probe_enabled": enabled_int(
                 getattr(self._cfg, "db_listener_public_probe_enabled", 1)
             )
             == 1,
             "tracked_chat_count": len(self._database_chat_ids()),
-            "queued_chat_count": len(self._queued_chat_ids_snapshot()),
-            "queue_size": self._queue_size(),
+            "queued_chat_count": queue_size,
+            "queue_size": queue_size,
+            "pending_update_count": int(pending_counts.get("pending") or 0),
+            "due_update_count": int(pending_counts.get("due") or 0),
+            "in_flight_update_count": int(pending_counts.get("in_flight") or 0),
             "active_listener_count": active_listener_count,
             "configured_listener_count": len(accounts),
             "worker_thread_alive": self._worker_thread.is_alive(),
             "refresh_thread_alive": self._refresh_thread.is_alive(),
             "public_probe_thread_alive": self._public_probe_thread.is_alive(),
+            "model_thread_alive": self._model_thread.is_alive(),
             "joined_snapshot_updated_at": _format_utc_timestamp(
                 float(self._joined_chat_snapshot_updated_at or 0.0)
             ),
@@ -533,6 +605,94 @@ class DatabaseChatListenerRuntime:
             "items": items,
         }
 
+    def trigger_manual_chat_probe(self, chat_id: int) -> dict[str, Any]:
+        safe_chat_id = int(chat_id or 0)
+        if safe_chat_id <= 0:
+            return {"ok": False, "message": "chat_id 参数非法", "items": []}
+        self._record_manual_probe_requested()
+        rows = [
+            row
+            for row in self._public_probe_candidate_rows()
+            if int(row.get("chat_id") or 0) == safe_chat_id
+        ]
+        if not rows:
+            row = self._database_chat_row(safe_chat_id)
+            if row is None:
+                self._record_manual_probe_completed("chat_not_found")
+                return {"ok": False, "message": "chat_id 不存在", "items": []}
+            conn = None
+            try:
+                conn = self._get_conn_fn()
+                sync_scheduler.record_probe_result(
+                    conn,
+                    chat_id=safe_chat_id,
+                    chat_title=str(row.get("chat_title") or ""),
+                    chat_username=clean_username(row.get("chat_username")),
+                    status="unobservable",
+                    cooldown_seconds=int(
+                        getattr(
+                            self._cfg,
+                            "db_listener_inactive_probe_chat_cooldown_seconds",
+                            43200,
+                        )
+                        or 43200
+                    ),
+                    reason="manual_probe",
+                )
+            except Exception:
+                logging.exception("写入单群不可观察 probe 结果失败: chat_id=%s", safe_chat_id)
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
+            self._record_manual_probe_completed("unobservable")
+            return {
+                "ok": True,
+                "message": "该群组当前没有可用的 joined/public/cached 探测通道",
+                "triggered": 0,
+                "items": [
+                    {
+                        "chat_id": safe_chat_id,
+                        "chat_title": str(row.get("chat_title") or ""),
+                        "status": "unobservable",
+                    }
+                ],
+            }
+
+        row = rows[0]
+        try:
+            outcome = self._probe_public_row(row)
+            self._set_public_probe_cooldown(
+                safe_chat_id,
+                seconds=max(60, int(outcome.cooldown_seconds)),
+            )
+            self._record_manual_probe_completed(outcome.status)
+            return {
+                "ok": True,
+                "message": "已完成单群即时调度诊断",
+                "triggered": 1 if outcome.status == "changed" else 0,
+                "items": [
+                    {
+                        "chat_id": safe_chat_id,
+                        "chat_title": str(row.get("chat_title") or ""),
+                        "status": outcome.status,
+                        "remote_last_id": int(outcome.remote_last_id or 0),
+                        "local_last_id": int(outcome.local_last_id or 0),
+                        "cooldown_seconds": int(outcome.cooldown_seconds or 0),
+                    }
+                ],
+            }
+        except Exception as exc:
+            message = admin_error_message(exc)
+            self._record_probe_result(status="failed", chat_id=safe_chat_id)
+            self._record_manual_probe_completed("failed")
+            return {
+                "ok": False,
+                "message": "单群即时调度诊断失败：" + message,
+                "triggered": 0,
+                "items": [],
+            }
+
     def start(self) -> None:
         if self._started:
             return
@@ -547,6 +707,8 @@ class DatabaseChatListenerRuntime:
         self._refresh_thread.start()
         if enabled_int(getattr(self._cfg, "db_listener_public_probe_enabled", 1)) == 1:
             self._public_probe_thread.start()
+        if self._sync_model_training_enabled():
+            self._model_thread.start()
         self._start_listener_threads()
         _listener_log(
             self._job_id,
@@ -556,6 +718,7 @@ class DatabaseChatListenerRuntime:
     def stop(self) -> None:
         self._worker_stop.set()
         self._watcher_stop.set()
+        self._model_stop.set()
         with self._listener_clients_lock:
             active_clients = list(self._listener_clients.values())
         for client in active_clients:
@@ -565,6 +728,8 @@ class DatabaseChatListenerRuntime:
         self._refresh_thread.join(timeout=2.0)
         if self._public_probe_thread.is_alive():
             self._public_probe_thread.join(timeout=2.0)
+        if self._model_thread.is_alive():
+            self._model_thread.join(timeout=2.0)
         for thread in self._listener_threads:
             thread.join(timeout=2.0)
 
@@ -591,6 +756,7 @@ class DatabaseChatListenerRuntime:
             self._db_chat_rows_by_id = {
                 int(row["chat_id"]): dict(row) for row in rows if int(row["chat_id"]) > 0
             }
+        self._refresh_sync_scheduler_state()
 
     def _load_joined_chat_ids_for_account(self, account: _ListenerAccount) -> set[int]:
         worker_id = f"{self._job_id}_{account.key}_joined_snapshot"
@@ -624,6 +790,29 @@ class DatabaseChatListenerRuntime:
                 for account_key, chat_ids in snapshot.items()
             }
             self._joined_chat_snapshot_updated_at = time.time()
+        self._refresh_sync_scheduler_state()
+
+    def _refresh_sync_scheduler_state(self) -> None:
+        conn = None
+        try:
+            rows = self._database_chat_rows()
+            joined_by_account = self._joined_chat_ids_by_account_snapshot()
+            cached_by_account = self._session_cached_chat_ids_by_account()
+            account_keys = [account.key for account in self._listener_accounts()]
+            conn = self._get_conn_fn()
+            sync_scheduler.refresh_chat_states(
+                conn,
+                chat_rows=rows,
+                joined_by_account=joined_by_account,
+                cached_by_account=cached_by_account,
+                account_keys=account_keys,
+            )
+        except Exception:
+            logging.exception("刷新同步调度群组状态失败")
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
 
     def _database_chat_rows(self) -> list[dict[str, Any]]:
         with self._db_chat_rows_lock:
@@ -689,6 +878,8 @@ class DatabaseChatListenerRuntime:
             return False
 
     def _public_probe_has_pending_updates(self) -> bool:
+        if self._sync_scheduler_enabled():
+            return False
         with self._queued_chat_ids_lock:
             return bool(self._queued_chat_ids)
 
@@ -745,6 +936,29 @@ class DatabaseChatListenerRuntime:
         if not self._is_database_chat(safe_chat_id):
             return
         if self._is_chat_temporarily_suppressed(safe_chat_id):
+            return
+        if self._sync_scheduler_enabled():
+            conn = None
+            try:
+                conn = self._get_conn_fn()
+                sync_scheduler.enqueue_observation(
+                    conn,
+                    cfg=self._cfg,
+                    observation=SyncObservation(
+                        chat_id=safe_chat_id,
+                        chat_title=str(chat_title or "").strip()
+                        or f"Chat {safe_chat_id}",
+                        chat_username=clean_username(chat_username) or None,
+                        reason=str(reason or "").strip() or "event",
+                        source_account=str(source_account or "").strip() or "primary",
+                    ),
+                )
+            except Exception:
+                logging.exception("同步调度 observation 写入失败: chat_id=%s", safe_chat_id)
+            finally:
+                if conn is not None:
+                    with suppress(Exception):
+                        conn.close()
             return
         with self._queued_chat_ids_lock:
             if safe_chat_id in self._queued_chat_ids:
@@ -943,6 +1157,9 @@ class DatabaseChatListenerRuntime:
         return 0
 
     def _worker_loop(self) -> None:
+        if self._sync_scheduler_enabled():
+            self._scheduler_worker_loop()
+            return
         while not self._worker_stop.is_set():
             try:
                 item = self._queue.get(timeout=_DEFAULT_EVENT_IDLE_SLEEP_SECONDS)
@@ -953,6 +1170,146 @@ class DatabaseChatListenerRuntime:
             finally:
                 with self._queued_chat_ids_lock:
                     self._queued_chat_ids.discard(int(item.chat_id))
+
+    def _claim_due_scheduler_task(self) -> SyncPendingTask | None:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            tasks = sync_scheduler.claim_due_pending_updates(conn, limit=1)
+            return tasks[0] if tasks else None
+        except Exception:
+            logging.exception("领取同步调度任务失败")
+            return None
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
+    def _scheduler_task_to_queue_item(self, task: SyncPendingTask) -> _QueuedChatUpdate:
+        preferred_account = str(task.preferred_source_account or "").strip()
+        if not preferred_account:
+            source_accounts = [
+                part.strip()
+                for part in str(task.source_accounts or "").split(",")
+                if part.strip()
+            ]
+            preferred_account = source_accounts[0] if source_accounts else "primary"
+        return _QueuedChatUpdate(
+            chat_id=int(task.chat_id),
+            chat_title=str(task.chat_title or "").strip() or f"Chat {int(task.chat_id)}",
+            chat_username=clean_username(task.chat_username) or None,
+            reason=str(task.reason or "").strip() or "event",
+            source_account=preferred_account,
+        )
+
+    def _finish_scheduler_task(
+        self,
+        *,
+        task: SyncPendingTask,
+        result: SyncUpdateResult | None,
+    ) -> None:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            effective_result = result or SyncUpdateResult(
+                chat_id=int(task.chat_id),
+                chat_title=task.chat_title,
+                chat_username=task.chat_username,
+                failure_type="failed",
+                failure_message="调度任务未返回结果",
+            )
+            if effective_result.failure_type == "deleted":
+                sync_scheduler.deactivate_chat(conn, int(task.chat_id))
+                return
+            if effective_result.failure_type:
+                sync_scheduler.fail_pending_update(
+                    conn,
+                    cfg=self._cfg,
+                    task=task,
+                    result=effective_result,
+                )
+            else:
+                sync_scheduler.complete_pending_update(
+                    conn,
+                    task=task,
+                    result=effective_result,
+                )
+        except Exception:
+            logging.exception("写入同步调度任务结果失败: chat_id=%s", task.chat_id)
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
+    def _scheduler_worker_loop(self) -> None:
+        while not self._worker_stop.is_set():
+            task = self._claim_due_scheduler_task()
+            if task is None:
+                self._worker_stop.wait(_DEFAULT_EVENT_IDLE_SLEEP_SECONDS)
+                continue
+            result: SyncUpdateResult | None = None
+            try:
+                item = self._scheduler_task_to_queue_item(task)
+                result = self._process_queued_chat_update(item)
+            except Exception as exc:
+                logging.exception("同步调度任务执行异常: chat_id=%s", task.chat_id)
+                result = SyncUpdateResult(
+                    chat_id=int(task.chat_id),
+                    chat_title=task.chat_title,
+                    chat_username=task.chat_username,
+                    failure_type="failed",
+                    failure_message=admin_error_message(exc),
+                )
+            finally:
+                self._finish_scheduler_task(task=task, result=result)
+
+    def _run_sync_model_training_once(self) -> dict[str, Any]:
+        conn = None
+        try:
+            from tg_harvest.ml.sync_predictor import train_sync_model
+
+            conn = self._get_conn_fn()
+            result = train_sync_model(conn, self._cfg)
+            backend = str(result.get("backend") or "")
+            if bool(result.get("trained")):
+                logging.info(
+                    "同步调度模型训练完成: backend=%s sample_count=%s",
+                    backend,
+                    result.get("sample_count"),
+                )
+            elif backend and backend not in {"disabled", "waiting_for_samples"}:
+                logging.info(
+                    "同步调度模型训练未执行: backend=%s sample_count=%s",
+                    backend,
+                    result.get("sample_count"),
+                )
+            return result
+        except Exception:
+            logging.exception("同步调度模型训练失败")
+            return {"ok": False, "trained": False, "backend": "failed"}
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
+    def _model_training_loop(self) -> None:
+        if self._model_stop.wait(5.0):
+            return
+        while not self._model_stop.is_set():
+            self._run_sync_model_training_once()
+            interval_seconds = max(
+                60,
+                int(
+                    getattr(
+                        self._cfg,
+                        "sync_model_train_interval_seconds",
+                        1800,
+                    )
+                    or 1800
+                ),
+            )
+            if self._model_stop.wait(float(interval_seconds)):
+                break
 
     def _account_priority_for_item(self, item: _QueuedChatUpdate) -> list[_ListenerAccount]:
         accounts = self._listener_accounts()
@@ -966,13 +1323,14 @@ class DatabaseChatListenerRuntime:
         *,
         account: _ListenerAccount,
         item: _QueuedChatUpdate,
-    ) -> None:
+    ) -> SyncUpdateResult:
         self._record_update_attempt()
         worker_id = f"{self._job_id}_{account.key}_single_{item.chat_id}"
         client = None
+        started_at = time.perf_counter()
         try:
             client = _create_isolated_worker_client(account.cfg, worker_id)
-            _admin_process_single_chat_update(
+            harvest_result = _admin_process_single_chat_update(
                 job_id=self._job_id,
                 client=client,
                 cfg=account.cfg,
@@ -986,16 +1344,42 @@ class DatabaseChatListenerRuntime:
                 account_label=account.label,
                 enable_progress_probe=False,
             )
+            counters = getattr(harvest_result, "counters", None)
+            scanned_count = int(getattr(counters, "seen", 0) or 0)
+            added_count = int(getattr(counters, "written", 0) or 0)
+            remote_last_id = 0
+            local_last_id = self._load_local_last_message_id(item.chat_id)
             self._record_update_success(chat_id=item.chat_id)
+            return SyncUpdateResult(
+                chat_id=int(item.chat_id),
+                chat_title=item.chat_title,
+                chat_username=item.chat_username,
+                source_account=account.key,
+                added_message_count=added_count,
+                scanned_message_count=scanned_count,
+                local_last_id=local_last_id,
+                remote_last_id=remote_last_id,
+                duration_seconds=max(0.0, time.perf_counter() - started_at),
+                api_cost=max(1.0, float(scanned_count or added_count or 1)),
+            )
         finally:
             if client is not None:
                 with suppress(Exception):
                     _disconnect_worker_client(client)
             _cleanup_isolated_worker_session(account.cfg, worker_id)
 
-    def _process_queued_chat_update(self, item: _QueuedChatUpdate) -> None:
+    def _process_queued_chat_update(
+        self, item: _QueuedChatUpdate
+    ) -> SyncUpdateResult | None:
         if not self._is_database_chat(item.chat_id):
-            return
+            return SyncUpdateResult(
+                chat_id=int(item.chat_id),
+                chat_title=item.chat_title,
+                chat_username=item.chat_username,
+                source_account=item.source_account,
+                failure_type="deleted",
+                failure_message="群组已不在数据库中",
+            )
         accounts = self._account_priority_for_item(item)
         last_exc: Exception | None = None
         tried_any = False
@@ -1006,8 +1390,7 @@ class DatabaseChatListenerRuntime:
                 continue
             tried_any = True
             try:
-                self._attempt_single_chat_update(account=account, item=item)
-                return
+                return self._attempt_single_chat_update(account=account, item=item)
             except Exception as exc:
                 last_exc = exc
                 if isinstance(exc, AccountFloodWaitError):
@@ -1027,19 +1410,37 @@ class DatabaseChatListenerRuntime:
                 item.chat_id,
                 seconds=max(60, int(last_exc.seconds)),
             )
-            return
+            return SyncUpdateResult(
+                chat_id=int(item.chat_id),
+                chat_title=item.chat_title,
+                chat_username=item.chat_username,
+                source_account=item.source_account,
+                failure_type="flood_wait",
+                failure_message=f"FloodWait {int(last_exc.seconds)}s",
+                retry_after_seconds=max(60, int(last_exc.seconds)),
+            )
 
         if last_exc is None and not tried_any:
             self._suppress_chat_temporarily(item.chat_id, seconds=120)
-            return
+            return SyncUpdateResult(
+                chat_id=int(item.chat_id),
+                chat_title=item.chat_title,
+                chat_username=item.chat_username,
+                source_account=item.source_account,
+                failure_type="no_account",
+                failure_message="没有可用账号执行更新",
+                retry_after_seconds=120,
+            )
 
         if last_exc is not None:
             message = admin_error_message(last_exc)
+            failure_type = "failed"
             if (
                 "本地实体缓存未命中" in message
                 or "不存在" in message
                 or "解散" in message
             ):
+                failure_type = "unavailable"
                 self._suppress_chat_temporarily(
                     item.chat_id,
                     seconds=_DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS,
@@ -1051,6 +1452,18 @@ class DatabaseChatListenerRuntime:
                 item.source_account,
                 message,
             )
+            return SyncUpdateResult(
+                chat_id=int(item.chat_id),
+                chat_title=item.chat_title,
+                chat_username=item.chat_username,
+                source_account=item.source_account,
+                failure_type=failure_type,
+                failure_message=message,
+                retry_after_seconds=int(_DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS)
+                if failure_type == "unavailable"
+                else 0,
+            )
+        return None
 
     def _public_probe_candidate_rows(self) -> list[dict[str, Any]]:
         rows = self._database_chat_rows()
@@ -1405,7 +1818,7 @@ class DatabaseChatListenerRuntime:
         *,
         row: dict[str, Any],
         account: _ListenerAccount,
-    ) -> bool:
+    ) -> _PublicProbeRead:
         self._wait_for_public_probe_account_slot(account.key)
         worker_id = f"{self._job_id}_{account.key}_probe_{row['chat_id']}"
         client = None
@@ -1428,8 +1841,16 @@ class DatabaseChatListenerRuntime:
                     reason=str(row.get("probe_reason") or _DEFAULT_PROBE_EVENT_REASON),
                     source_account=account.key,
                 )
-                return True
-            return False
+                return _PublicProbeRead(
+                    changed=True,
+                    remote_last_id=remote_last_id,
+                    local_last_id=local_last_id,
+                )
+            return _PublicProbeRead(
+                changed=False,
+                remote_last_id=remote_last_id,
+                local_last_id=local_last_id,
+            )
         finally:
             if client is not None:
                 with suppress(Exception):
@@ -1498,11 +1919,48 @@ class DatabaseChatListenerRuntime:
             return max(120, min(int(flood_wait_seconds), 900))
         return 180
 
+    def _record_persistent_probe_result(
+        self,
+        *,
+        row: dict[str, Any],
+        outcome: _PublicProbeOutcome,
+    ) -> None:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            sync_scheduler.record_probe_result(
+                conn,
+                chat_id=int(row.get("chat_id") or 0),
+                chat_title=str(row.get("chat_title") or ""),
+                chat_username=clean_username(row.get("chat_username")),
+                status=outcome.status,
+                source_account=outcome.source_account,
+                remote_last_id=int(outcome.remote_last_id or 0),
+                local_last_id=int(outcome.local_last_id or 0),
+                cooldown_seconds=int(outcome.cooldown_seconds or 0),
+                reason=str(row.get("probe_reason") or "probe"),
+            )
+        except Exception:
+            logging.exception(
+                "写入同步调度 probe 结果失败: chat_id=%s",
+                row.get("chat_id"),
+            )
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
     def _probe_public_row(self, row: dict[str, Any]) -> _PublicProbeOutcome:
         self._record_probe_attempt()
         accounts = self._probe_account_priority_for_row(row)
         if not accounts:
-            return _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
+            outcome = _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
+            self._record_probe_result(
+                status=outcome.status,
+                chat_id=int(row.get("chat_id") or 0),
+            )
+            self._record_persistent_probe_result(row=row, outcome=outcome)
+            return outcome
         last_exc: Exception | None = None
         cache_miss_only = False
         for account in accounts:
@@ -1511,18 +1969,30 @@ class DatabaseChatListenerRuntime:
             if not _ensure_base_session_valid(account.cfg, self._job_id, _listener_log):
                 continue
             try:
-                changed = self._probe_public_row_with_account(row=row, account=account)
+                raw_read_result = self._probe_public_row_with_account(row=row, account=account)
+                read_result = (
+                    raw_read_result
+                    if isinstance(raw_read_result, _PublicProbeRead)
+                    else _PublicProbeRead(
+                        changed=bool(raw_read_result),
+                        remote_last_id=0,
+                        local_last_id=0,
+                    )
+                )
                 outcome = _PublicProbeOutcome(
-                    status="changed" if changed else "unchanged",
+                    status="changed" if read_result.changed else "unchanged",
                     cooldown_seconds=self._public_probe_success_cooldown_seconds(
                         row,
-                        changed=changed
+                        changed=read_result.changed
                     ),
+                    remote_last_id=int(read_result.remote_last_id or 0),
+                    local_last_id=int(read_result.local_last_id or 0),
                 )
                 self._record_probe_result(
                     status=outcome.status,
                     chat_id=int(row.get("chat_id") or 0),
                 )
+                self._record_persistent_probe_result(row=row, outcome=outcome)
                 return outcome
             except Exception as exc:
                 last_exc = exc
@@ -1538,20 +2008,24 @@ class DatabaseChatListenerRuntime:
                     outcome = _PublicProbeOutcome(
                         status="missing",
                         cooldown_seconds=int(_DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS),
+                        source_account=account.key,
                     )
                     self._record_probe_result(
                         status=outcome.status,
                         chat_id=int(row.get("chat_id") or 0),
                     )
+                    self._record_persistent_probe_result(row=row, outcome=outcome)
                     return outcome
                 outcome = _PublicProbeOutcome(
                     status="failed",
                     cooldown_seconds=self._public_probe_failure_cooldown_seconds(),
+                    source_account=account.key,
                 )
                 self._record_probe_result(
                     status=outcome.status,
                     chat_id=int(row.get("chat_id") or 0),
                 )
+                self._record_persistent_probe_result(row=row, outcome=outcome)
                 return outcome
         if isinstance(last_exc, AccountFloodWaitError):
             outcome = _PublicProbeOutcome(
@@ -1559,11 +2033,13 @@ class DatabaseChatListenerRuntime:
                 cooldown_seconds=self._public_probe_failure_cooldown_seconds(
                     flood_wait_seconds=int(last_exc.seconds)
                 ),
+                source_account="",
             )
             self._record_probe_result(
                 status=outcome.status,
                 chat_id=int(row.get("chat_id") or 0),
             )
+            self._record_persistent_probe_result(row=row, outcome=outcome)
             return outcome
         if last_exc is not None and cache_miss_only:
             outcome = _PublicProbeOutcome(
@@ -1577,22 +2053,26 @@ class DatabaseChatListenerRuntime:
                 status=outcome.status,
                 chat_id=int(row.get("chat_id") or 0),
             )
+            self._record_persistent_probe_result(row=row, outcome=outcome)
             return outcome
         if last_exc is not None:
             outcome = _PublicProbeOutcome(
                 status="failed",
                 cooldown_seconds=self._public_probe_failure_cooldown_seconds(),
+                source_account="",
             )
             self._record_probe_result(
                 status=outcome.status,
                 chat_id=int(row.get("chat_id") or 0),
             )
+            self._record_persistent_probe_result(row=row, outcome=outcome)
             return outcome
         outcome = _PublicProbeOutcome(status="no_account", cooldown_seconds=300)
         self._record_probe_result(
             status=outcome.status,
             chat_id=int(row.get("chat_id") or 0),
         )
+        self._record_persistent_probe_result(row=row, outcome=outcome)
         return outcome
 
     def _public_probe_loop(self) -> None:

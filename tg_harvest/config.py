@@ -32,6 +32,16 @@ def _env_int(name: str, default: int) -> int:
     return safe_int(os.getenv(name, None), default)
 
 
+def _env_float(name: str, default: float) -> float:
+    v = os.getenv(name, None)
+    if v is None:
+        return float(default)
+    try:
+        return float(v.strip())
+    except Exception:
+        return float(default)
+
+
 def _env_optional_int(name: str) -> int | None:
     v = os.getenv(name, None)
     if v is None:
@@ -163,6 +173,60 @@ def _load_raw_config_values() -> dict:
         "db_listener_inactive_probe_chat_cooldown_seconds": _env_int(
             "TG_DB_LISTENER_INACTIVE_PROBE_CHAT_COOLDOWN_SECONDS", 43200
         ),
+        # 智能调度器。开启后事件先进入持久 pending，再按 quiet delay 批量拉取。
+        "sync_scheduler_enabled": _env_int("TG_SYNC_SCHEDULER_ENABLED", 1),
+        # 本地模型预测。默认启用 shadow 学习；依赖缺失时只记录不可用状态。
+        "sync_ai_enabled": _env_int("TG_SYNC_AI_ENABLED", 1),
+        # 模型 shadow 模式。开启时模型只记录建议，不接管调度。
+        "sync_ai_shadow": _env_int("TG_SYNC_AI_SHADOW", 1),
+        # 自动晋级。模型连续达到门槛后，从 shadow 自动转入 active。
+        "sync_ai_auto_promote_enabled": _env_int(
+            "TG_SYNC_AI_AUTO_PROMOTE_ENABLED", 1
+        ),
+        # 事件到拉取的最小延迟边界，单位秒。
+        "sync_min_delay_seconds": _env_int("TG_SYNC_MIN_DELAY_SECONDS", 15),
+        # 活跃群 quiet delay 上限，单位秒。
+        "sync_max_active_delay_seconds": _env_int(
+            "TG_SYNC_MAX_ACTIVE_DELAY_SECONDS", 600
+        ),
+        # 冷门群 quiet delay 上限，单位秒。
+        "sync_max_cold_delay_seconds": _env_int(
+            "TG_SYNC_MAX_COLD_DELAY_SECONDS", 7200
+        ),
+        # 在线训练节奏配置。依赖缺失时不会启动训练线程。
+        "sync_model_train_interval_seconds": _env_int(
+            "TG_SYNC_MODEL_TRAIN_INTERVAL_SECONDS", 1800
+        ),
+        "sync_model_min_samples": _env_int("TG_SYNC_MODEL_MIN_SAMPLES", 200),
+        "sync_model_max_train_samples": _env_int(
+            "TG_SYNC_MODEL_MAX_TRAIN_SAMPLES", 16384
+        ),
+        "sync_model_train_batch_size": _env_int(
+            "TG_SYNC_MODEL_TRAIN_BATCH_SIZE", 128
+        ),
+        "sync_model_train_epochs": _env_int("TG_SYNC_MODEL_TRAIN_EPOCHS", 4),
+        "sync_model_learning_rate": _env_float(
+            "TG_SYNC_MODEL_LEARNING_RATE", 0.001
+        ),
+        "sync_model_torch_threads": _env_int("TG_SYNC_MODEL_TORCH_THREADS", 1),
+        "sync_model_min_eval_samples": _env_int(
+            "TG_SYNC_MODEL_MIN_EVAL_SAMPLES", 50
+        ),
+        "sync_model_ready_delay_accuracy": _env_float(
+            "TG_SYNC_MODEL_READY_DELAY_ACCURACY", 0.45
+        ),
+        "sync_model_ready_max_delay_mae_buckets": _env_float(
+            "TG_SYNC_MODEL_READY_MAX_DELAY_MAE_BUCKETS", 1.25
+        ),
+        "sync_model_ready_max_added_mae_log": _env_float(
+            "TG_SYNC_MODEL_READY_MAX_ADDED_MAE_LOG", 1.5
+        ),
+        "sync_model_ready_consecutive_runs": _env_int(
+            "TG_SYNC_MODEL_READY_CONSECUTIVE_RUNS", 3
+        ),
+        "sync_model_min_confidence": _env_float(
+            "TG_SYNC_MODEL_MIN_CONFIDENCE", 0.35
+        ),
         # 可选运维机器人；默认关闭，只用于任务通知，不参与历史消息采集。
         "ops_bot_enabled": _env_int("TG_OPS_BOT_ENABLED", 0),
         # 运维机器人 token，只从环境读取，禁止写入日志。
@@ -260,6 +324,65 @@ def _normalize_config_values(raw: dict) -> dict:
         int(normalized["db_listener_joined_probe_chat_cooldown_seconds"]),
         int(normalized["db_listener_inactive_probe_chat_cooldown_seconds"]),
     )
+    normalized["sync_scheduler_enabled"] = enabled_int(
+        normalized["sync_scheduler_enabled"]
+    )
+    normalized["sync_ai_enabled"] = enabled_int(normalized["sync_ai_enabled"])
+    normalized["sync_ai_shadow"] = enabled_int(normalized["sync_ai_shadow"])
+    normalized["sync_ai_auto_promote_enabled"] = enabled_int(
+        normalized["sync_ai_auto_promote_enabled"]
+    )
+    normalized["sync_min_delay_seconds"] = max(
+        1, int(normalized["sync_min_delay_seconds"])
+    )
+    normalized["sync_max_active_delay_seconds"] = max(
+        int(normalized["sync_min_delay_seconds"]),
+        int(normalized["sync_max_active_delay_seconds"]),
+    )
+    normalized["sync_max_cold_delay_seconds"] = max(
+        int(normalized["sync_max_active_delay_seconds"]),
+        int(normalized["sync_max_cold_delay_seconds"]),
+    )
+    normalized["sync_model_train_interval_seconds"] = max(
+        60, int(normalized["sync_model_train_interval_seconds"])
+    )
+    normalized["sync_model_min_samples"] = max(
+        1, int(normalized["sync_model_min_samples"])
+    )
+    normalized["sync_model_max_train_samples"] = max(
+        int(normalized["sync_model_min_samples"]),
+        int(normalized["sync_model_max_train_samples"]),
+    )
+    normalized["sync_model_train_batch_size"] = max(
+        4, int(normalized["sync_model_train_batch_size"])
+    )
+    normalized["sync_model_train_epochs"] = max(
+        1, int(normalized["sync_model_train_epochs"])
+    )
+    normalized["sync_model_learning_rate"] = max(
+        0.00001, float(normalized["sync_model_learning_rate"])
+    )
+    normalized["sync_model_torch_threads"] = max(
+        1, int(normalized["sync_model_torch_threads"])
+    )
+    normalized["sync_model_min_eval_samples"] = max(
+        1, int(normalized["sync_model_min_eval_samples"])
+    )
+    normalized["sync_model_ready_delay_accuracy"] = min(
+        1.0, max(0.0, float(normalized["sync_model_ready_delay_accuracy"]))
+    )
+    normalized["sync_model_ready_max_delay_mae_buckets"] = max(
+        0.0, float(normalized["sync_model_ready_max_delay_mae_buckets"])
+    )
+    normalized["sync_model_ready_max_added_mae_log"] = max(
+        0.0, float(normalized["sync_model_ready_max_added_mae_log"])
+    )
+    normalized["sync_model_ready_consecutive_runs"] = max(
+        1, int(normalized["sync_model_ready_consecutive_runs"])
+    )
+    normalized["sync_model_min_confidence"] = min(
+        1.0, max(0.0, float(normalized["sync_model_min_confidence"]))
+    )
     normalized["ops_bot_enabled"] = enabled_int(normalized["ops_bot_enabled"])
     if normalized["ops_bot_timeout_seconds"] is None:
         normalized["ops_bot_timeout_seconds"] = 3.0
@@ -331,6 +454,34 @@ def _build_app_config(values: dict) -> "AppConfig":
         db_listener_inactive_probe_chat_cooldown_seconds=values[
             "db_listener_inactive_probe_chat_cooldown_seconds"
         ],
+        sync_scheduler_enabled=values["sync_scheduler_enabled"],
+        sync_ai_enabled=values["sync_ai_enabled"],
+        sync_ai_shadow=values["sync_ai_shadow"],
+        sync_ai_auto_promote_enabled=values["sync_ai_auto_promote_enabled"],
+        sync_min_delay_seconds=values["sync_min_delay_seconds"],
+        sync_max_active_delay_seconds=values["sync_max_active_delay_seconds"],
+        sync_max_cold_delay_seconds=values["sync_max_cold_delay_seconds"],
+        sync_model_train_interval_seconds=values[
+            "sync_model_train_interval_seconds"
+        ],
+        sync_model_min_samples=values["sync_model_min_samples"],
+        sync_model_max_train_samples=values["sync_model_max_train_samples"],
+        sync_model_train_batch_size=values["sync_model_train_batch_size"],
+        sync_model_train_epochs=values["sync_model_train_epochs"],
+        sync_model_learning_rate=values["sync_model_learning_rate"],
+        sync_model_torch_threads=values["sync_model_torch_threads"],
+        sync_model_min_eval_samples=values["sync_model_min_eval_samples"],
+        sync_model_ready_delay_accuracy=values["sync_model_ready_delay_accuracy"],
+        sync_model_ready_max_delay_mae_buckets=values[
+            "sync_model_ready_max_delay_mae_buckets"
+        ],
+        sync_model_ready_max_added_mae_log=values[
+            "sync_model_ready_max_added_mae_log"
+        ],
+        sync_model_ready_consecutive_runs=values[
+            "sync_model_ready_consecutive_runs"
+        ],
+        sync_model_min_confidence=values["sync_model_min_confidence"],
         ops_bot_enabled=values["ops_bot_enabled"],
         ops_bot_token=values["ops_bot_token"],
         ops_bot_notify_chat_id=values["ops_bot_notify_chat_id"],
@@ -393,6 +544,26 @@ class AppConfig:
     db_listener_public_probe_chat_cooldown_seconds: int
     db_listener_joined_probe_chat_cooldown_seconds: int
     db_listener_inactive_probe_chat_cooldown_seconds: int
+    sync_scheduler_enabled: int
+    sync_ai_enabled: int
+    sync_ai_shadow: int
+    sync_ai_auto_promote_enabled: int
+    sync_min_delay_seconds: int
+    sync_max_active_delay_seconds: int
+    sync_max_cold_delay_seconds: int
+    sync_model_train_interval_seconds: int
+    sync_model_min_samples: int
+    sync_model_max_train_samples: int
+    sync_model_train_batch_size: int
+    sync_model_train_epochs: int
+    sync_model_learning_rate: float
+    sync_model_torch_threads: int
+    sync_model_min_eval_samples: int
+    sync_model_ready_delay_accuracy: float
+    sync_model_ready_max_delay_mae_buckets: float
+    sync_model_ready_max_added_mae_log: float
+    sync_model_ready_consecutive_runs: int
+    sync_model_min_confidence: float
     ops_bot_enabled: int
     ops_bot_token: str
     ops_bot_notify_chat_id: str

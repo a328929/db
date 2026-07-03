@@ -454,6 +454,99 @@ def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: st
     """)
 
 
+def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS sync_chat_state (
+        chat_id                  INTEGER PRIMARY KEY,
+        chat_title               TEXT NOT NULL DEFAULT '',
+        chat_username            TEXT,
+        membership_scope         TEXT NOT NULL DEFAULT 'unknown',
+        status                   TEXT NOT NULL DEFAULT 'idle',
+        last_event_at            TEXT NOT NULL DEFAULT '',
+        last_event_reason        TEXT NOT NULL DEFAULT '',
+        last_probe_at            TEXT NOT NULL DEFAULT '',
+        last_probe_status        TEXT NOT NULL DEFAULT '',
+        last_update_at           TEXT NOT NULL DEFAULT '',
+        last_success_at          TEXT NOT NULL DEFAULT '',
+        last_failure_at          TEXT NOT NULL DEFAULT '',
+        last_failure_message     TEXT NOT NULL DEFAULT '',
+        remote_last_id           INTEGER NOT NULL DEFAULT 0,
+        local_last_id            INTEGER NOT NULL DEFAULT 0,
+        failure_count            INTEGER NOT NULL DEFAULT 0,
+        unavailable_count        INTEGER NOT NULL DEFAULT 0,
+        quarantine_reason        TEXT NOT NULL DEFAULT '',
+        next_probe_at            TEXT NOT NULL DEFAULT '',
+        next_update_at           TEXT NOT NULL DEFAULT '',
+        model_delay_seconds      INTEGER NOT NULL DEFAULT 0,
+        priority_score           REAL NOT NULL DEFAULT 0,
+        source_accounts          TEXT NOT NULL DEFAULT '',
+        last_source_account      TEXT NOT NULL DEFAULT '',
+        is_active                INTEGER NOT NULL DEFAULT 1,
+        created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS sync_pending_updates (
+        chat_id                  INTEGER PRIMARY KEY,
+        chat_title               TEXT NOT NULL DEFAULT '',
+        chat_username            TEXT,
+        first_event_at           TEXT NOT NULL DEFAULT '',
+        last_event_at            TEXT NOT NULL DEFAULT '',
+        event_count              INTEGER NOT NULL DEFAULT 0,
+        source_accounts          TEXT NOT NULL DEFAULT '',
+        reasons                  TEXT NOT NULL DEFAULT '',
+        preferred_source_account TEXT NOT NULL DEFAULT '',
+        due_at                   TEXT NOT NULL DEFAULT '',
+        priority_score           REAL NOT NULL DEFAULT 0,
+        quiet_delay_seconds      INTEGER NOT NULL DEFAULT 0,
+        generation               INTEGER NOT NULL DEFAULT 0,
+        in_flight                INTEGER NOT NULL DEFAULT 0,
+        in_flight_generation     INTEGER NOT NULL DEFAULT 0,
+        dirty_generation         INTEGER NOT NULL DEFAULT 0,
+        created_at               TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
+        FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS sync_learning_events (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        chat_id                  INTEGER NOT NULL,
+        event_type               TEXT NOT NULL,
+        reason                   TEXT NOT NULL DEFAULT '',
+        source_account           TEXT NOT NULL DEFAULT '',
+        membership_scope         TEXT NOT NULL DEFAULT 'unknown',
+        status                   TEXT NOT NULL DEFAULT '',
+        features_json            TEXT NOT NULL DEFAULT '{{}}',
+        prediction_json          TEXT NOT NULL DEFAULT '{{}}',
+        outcome_json             TEXT NOT NULL DEFAULT '{{}}',
+        quiet_delay_seconds      INTEGER NOT NULL DEFAULT 0,
+        priority_score           REAL NOT NULL DEFAULT 0,
+        added_message_count      INTEGER NOT NULL DEFAULT 0,
+        wait_seconds             INTEGER NOT NULL DEFAULT 0,
+        api_cost                 REAL NOT NULL DEFAULT 0,
+        failure_type             TEXT NOT NULL DEFAULT '',
+        created_at               TEXT NOT NULL DEFAULT (datetime('now'))
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS sync_model_state (
+        model_key                TEXT PRIMARY KEY,
+        model_version            TEXT NOT NULL DEFAULT '',
+        backend                  TEXT NOT NULL DEFAULT '',
+        metrics_json             TEXT NOT NULL DEFAULT '{{}}',
+        trained_at               TEXT NOT NULL DEFAULT '',
+        artifact_path            TEXT NOT NULL DEFAULT '',
+        state_json               TEXT NOT NULL DEFAULT '{{}}',
+        updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
+    ){strict_suffix}
+    """)
+
+
 def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_chats_table(cur, strict_suffix)
     _create_messages_table(cur, strict_suffix)
@@ -472,6 +565,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_clone_plans_table(cur, strict_suffix)
     _create_admin_clone_migrations_table(cur, strict_suffix)
     _create_admin_clone_message_map_table(cur, strict_suffix)
+    _create_sync_scheduler_tables(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
@@ -889,6 +983,114 @@ def _ensure_admin_clone_message_map_schema(cur: sqlite3.Cursor) -> None:
     )
 
 
+def _ensure_sync_scheduler_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "sync_chat_state",
+        [
+            ("chat_title", "chat_title TEXT NOT NULL DEFAULT ''"),
+            ("chat_username", "chat_username TEXT"),
+            ("membership_scope", "membership_scope TEXT NOT NULL DEFAULT 'unknown'"),
+            ("status", "status TEXT NOT NULL DEFAULT 'idle'"),
+            ("last_event_at", "last_event_at TEXT NOT NULL DEFAULT ''"),
+            ("last_event_reason", "last_event_reason TEXT NOT NULL DEFAULT ''"),
+            ("last_probe_at", "last_probe_at TEXT NOT NULL DEFAULT ''"),
+            ("last_probe_status", "last_probe_status TEXT NOT NULL DEFAULT ''"),
+            ("last_update_at", "last_update_at TEXT NOT NULL DEFAULT ''"),
+            ("last_success_at", "last_success_at TEXT NOT NULL DEFAULT ''"),
+            ("last_failure_at", "last_failure_at TEXT NOT NULL DEFAULT ''"),
+            (
+                "last_failure_message",
+                "last_failure_message TEXT NOT NULL DEFAULT ''",
+            ),
+            ("remote_last_id", "remote_last_id INTEGER NOT NULL DEFAULT 0"),
+            ("local_last_id", "local_last_id INTEGER NOT NULL DEFAULT 0"),
+            ("failure_count", "failure_count INTEGER NOT NULL DEFAULT 0"),
+            ("unavailable_count", "unavailable_count INTEGER NOT NULL DEFAULT 0"),
+            ("quarantine_reason", "quarantine_reason TEXT NOT NULL DEFAULT ''"),
+            ("next_probe_at", "next_probe_at TEXT NOT NULL DEFAULT ''"),
+            ("next_update_at", "next_update_at TEXT NOT NULL DEFAULT ''"),
+            ("model_delay_seconds", "model_delay_seconds INTEGER NOT NULL DEFAULT 0"),
+            ("priority_score", "priority_score REAL NOT NULL DEFAULT 0"),
+            ("source_accounts", "source_accounts TEXT NOT NULL DEFAULT ''"),
+            ("last_source_account", "last_source_account TEXT NOT NULL DEFAULT ''"),
+            ("is_active", "is_active INTEGER NOT NULL DEFAULT 1"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+    _ensure_table_columns(
+        cur,
+        "sync_pending_updates",
+        [
+            ("chat_title", "chat_title TEXT NOT NULL DEFAULT ''"),
+            ("chat_username", "chat_username TEXT"),
+            ("first_event_at", "first_event_at TEXT NOT NULL DEFAULT ''"),
+            ("last_event_at", "last_event_at TEXT NOT NULL DEFAULT ''"),
+            ("event_count", "event_count INTEGER NOT NULL DEFAULT 0"),
+            ("source_accounts", "source_accounts TEXT NOT NULL DEFAULT ''"),
+            ("reasons", "reasons TEXT NOT NULL DEFAULT ''"),
+            (
+                "preferred_source_account",
+                "preferred_source_account TEXT NOT NULL DEFAULT ''",
+            ),
+            ("due_at", "due_at TEXT NOT NULL DEFAULT ''"),
+            ("priority_score", "priority_score REAL NOT NULL DEFAULT 0"),
+            (
+                "quiet_delay_seconds",
+                "quiet_delay_seconds INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("generation", "generation INTEGER NOT NULL DEFAULT 0"),
+            ("in_flight", "in_flight INTEGER NOT NULL DEFAULT 0"),
+            (
+                "in_flight_generation",
+                "in_flight_generation INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("dirty_generation", "dirty_generation INTEGER NOT NULL DEFAULT 0"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+    _ensure_table_columns(
+        cur,
+        "sync_learning_events",
+        [
+            ("chat_id", "chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("event_type", "event_type TEXT NOT NULL DEFAULT ''"),
+            ("reason", "reason TEXT NOT NULL DEFAULT ''"),
+            ("source_account", "source_account TEXT NOT NULL DEFAULT ''"),
+            ("membership_scope", "membership_scope TEXT NOT NULL DEFAULT 'unknown'"),
+            ("status", "status TEXT NOT NULL DEFAULT ''"),
+            ("features_json", "features_json TEXT NOT NULL DEFAULT '{}'"),
+            ("prediction_json", "prediction_json TEXT NOT NULL DEFAULT '{}'"),
+            ("outcome_json", "outcome_json TEXT NOT NULL DEFAULT '{}'"),
+            (
+                "quiet_delay_seconds",
+                "quiet_delay_seconds INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("priority_score", "priority_score REAL NOT NULL DEFAULT 0"),
+            ("added_message_count", "added_message_count INTEGER NOT NULL DEFAULT 0"),
+            ("wait_seconds", "wait_seconds INTEGER NOT NULL DEFAULT 0"),
+            ("api_cost", "api_cost REAL NOT NULL DEFAULT 0"),
+            ("failure_type", "failure_type TEXT NOT NULL DEFAULT ''"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+    _ensure_table_columns(
+        cur,
+        "sync_model_state",
+        [
+            ("model_version", "model_version TEXT NOT NULL DEFAULT ''"),
+            ("backend", "backend TEXT NOT NULL DEFAULT ''"),
+            ("metrics_json", "metrics_json TEXT NOT NULL DEFAULT '{}'"),
+            ("trained_at", "trained_at TEXT NOT NULL DEFAULT ''"),
+            ("artifact_path", "artifact_path TEXT NOT NULL DEFAULT ''"),
+            ("state_json", "state_json TEXT NOT NULL DEFAULT '{}'"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
 def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:
     if not _column_exists(cur, "chats", "message_count"):
         cur.execute(
@@ -1027,6 +1229,7 @@ def create_schema(
         _ensure_admin_clone_plans_schema(cur)
         _ensure_admin_clone_migrations_schema(cur)
         _ensure_admin_clone_message_map_schema(cur)
+        _ensure_sync_scheduler_schema(cur)
         _ensure_chat_summary_columns(cur)
         _indexes._create_indexes(cur)
         _heal_chat_message_summaries_if_needed(cur)

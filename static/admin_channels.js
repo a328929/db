@@ -29,6 +29,11 @@
     restricted: 0
   };
 
+  var channelState = {
+    items: [],
+    membershipFilter: '__all__'
+  };
+
   var jobPollState = {
     jobId: '',
     lastSeq: 0,
@@ -59,6 +64,7 @@
   function getElements() {
     var elements = {
       sortSelect: document.getElementById('admin-channel-sort-select'),
+      membershipFilterSelect: document.getElementById('admin-channel-membership-filter'),
       refreshChannelsBtn: document.getElementById('admin-channel-refresh-btn'),
       channelListToggleBtn: document.getElementById('admin-channel-list-toggle-btn'),
       channelCount: document.getElementById('admin-channel-count'),
@@ -89,6 +95,7 @@
 
     var requiredKeys = [
       'sortSelect',
+      'membershipFilterSelect',
       'refreshChannelsBtn',
       'channelListToggleBtn',
       'channelCount',
@@ -146,6 +153,10 @@
     });
     elements.sortSelect.addEventListener('change', function () {
       loadChannels(elements);
+    });
+    elements.membershipFilterSelect.addEventListener('change', function () {
+      channelState.membershipFilter = elements.membershipFilterSelect.value || '__all__';
+      renderChannels(elements, channelState.items);
     });
     elements.refreshChannelsBtn.addEventListener('click', function () {
       loadChannels(elements);
@@ -314,6 +325,58 @@
     return pill;
   }
 
+  function schedulerMembershipLabel(scope) {
+    var labels = {
+      none_joined: 'A 未加入',
+      both_joined: 'B 双账号',
+      single_joined_primary: 'C 主账号',
+      single_joined_secondary: 'C 第二账号',
+      unobservable: '不可观察',
+      unknown: '未知'
+    };
+    return labels[String(scope || '')] || String(scope || '未刷新');
+  }
+
+  function schedulerStatusLabel(status) {
+    var labels = {
+      idle: '空闲',
+      pending: '待拉取',
+      updating: '执行中',
+      backoff: '冷却',
+      quarantined: '隔离',
+      unobservable: '不可观察',
+      deleted: '已删除'
+    };
+    return labels[String(status || '')] || String(status || '未刷新');
+  }
+
+  function schedulerAccountLabel(value) {
+    var text = String(value || '').trim();
+    if (!text) return '';
+    return text.split(',').map(function (part) {
+      var item = part.trim();
+      if (item === 'primary') return '主账号';
+      if (item === 'secondary') return '第二账号';
+      return item;
+    }).filter(Boolean).join(', ');
+  }
+
+  function schedulerNextTime(channel) {
+    var updateAt = String(channel.sync_next_update_at || '');
+    var probeAt = String(channel.sync_next_probe_at || '');
+    if (updateAt) return '拉取 ' + formatDateTime(updateAt);
+    if (probeAt) return '探测 ' + formatDateTime(probeAt);
+    return '';
+  }
+
+  function filterChannelsByMembership(channels) {
+    var filterValue = channelState.membershipFilter || '__all__';
+    if (filterValue === '__all__') return channels;
+    return channels.filter(function (channel) {
+      return String(channel && channel.sync_membership_scope || '') === filterValue;
+    });
+  }
+
   function createChannelRecordItem(options) {
     var item = document.createElement('article');
     item.className = 'channel-list-item';
@@ -392,6 +455,17 @@
     });
     actions.appendChild(copyBtn);
 
+    if (actionOptions.allowProbe) {
+      var probeBtn = document.createElement('button');
+      probeBtn.type = 'button';
+      probeBtn.textContent = '调度诊断';
+      probeBtn.setAttribute('aria-label', '对 ' + channelLabel + ' 执行即时调度诊断');
+      probeBtn.addEventListener('click', function () {
+        handleProbeChannelSchedule(elements, item, probeBtn);
+      });
+      actions.appendChild(probeBtn);
+    }
+
     if (actionOptions.allowDelete) {
       var deleteBtn = document.createElement('button');
       deleteBtn.type = 'button';
@@ -407,9 +481,11 @@
   }
 
   function renderChannels(elements, channels) {
+    var allChannels = Array.isArray(channels) ? channels : [];
+    var visibleChannels = filterChannelsByMembership(allChannels);
     stopListRendering('channels', elements.channelList);
     elements.channelList.textContent = '';
-    if (!Array.isArray(channels) || channels.length === 0) {
+    if (!allChannels.length) {
       var empty = document.createElement('div');
       empty.className = 'empty-box';
       empty.textContent = '暂无已入库群组或频道。';
@@ -417,17 +493,28 @@
       elements.channelCount.textContent = '共 0 个群组/频道。';
       return;
     }
+    if (!visibleChannels.length) {
+      var noMatch = document.createElement('div');
+      noMatch.className = 'empty-box';
+      noMatch.textContent = '当前调度状态筛选下没有匹配结果。';
+      elements.channelList.appendChild(noMatch);
+      elements.channelCount.textContent = '当前筛选 0 个，共 ' + allChannels.length + ' 个群组/频道。';
+      return;
+    }
 
     renderItemsInBatches({
       key: 'channels',
       container: elements.channelList,
-      items: channels,
+      items: visibleChannels,
       statusElement: elements.channelCount,
       progressText: function (visible, total) {
         return '正在显示 ' + visible + '/' + total + ' 个群组/频道...';
       },
       doneText: function (total) {
-        return '共 ' + total + ' 个群组/频道。';
+        if ((channelState.membershipFilter || '__all__') === '__all__') {
+          return '共 ' + total + ' 个群组/频道。';
+        }
+        return '当前筛选 ' + total + ' 个，共 ' + allChannels.length + ' 个群组/频道。';
       },
       createItem: function (channel) {
         var parts = [];
@@ -438,14 +525,23 @@
           subtitle: parts.join(' | '),
           metrics: [
             { label: '消息数', value: formatNumber(channel.message_count) },
-            { label: '最后消息', value: formatDateTime(channel.last_message_at) }
+            { label: '最后消息', value: formatDateTime(channel.last_message_at) },
+            { label: '调度', value: schedulerStatusLabel(channel.sync_status) }
           ],
           meta: [
             { label: 'chat_id', value: String(channel.chat_id) },
             { label: '用户名', value: channel.chat_username ? '@' + channel.chat_username : '' },
             { label: '类型', value: channel.chat_type || '' },
+            { label: '状态', value: schedulerMembershipLabel(channel.sync_membership_scope) },
+            { label: '可用账号', value: schedulerAccountLabel(channel.sync_source_accounts || channel.sync_last_source_account) },
+            { label: '下次任务', value: schedulerNextTime(channel) },
+            { label: '优先级', value: Number(channel.sync_priority_score || 0).toFixed(1) },
+            { label: '隔离', value: channel.sync_quarantine_reason || channel.sync_last_probe_status || '' },
           ],
-          actions: createChannelActions(channel, elements, { allowDelete: true }),
+          actions: createChannelActions(channel, elements, {
+            allowDelete: true,
+            allowProbe: true
+          }),
           note: channel.has_public_link
             ? ''
             : '私有群组通常没有稳定网页入口；客户端链接不可用时可复制信息后在 Telegram 中定位。'
@@ -462,7 +558,8 @@
         '/api/admin/channels?sort=' + encodeURIComponent(elements.sortSelect.value)
       );
       if (!data.ok) throw new Error(data.error || '读取失败');
-      renderChannels(elements, data.channels || []);
+      channelState.items = Array.isArray(data.channels) ? data.channels : [];
+      renderChannels(elements, channelState.items);
     } catch (error) {
       stopListRendering('channels', elements.channelList);
       elements.channelCount.textContent = '读取列表失败：' + error.message;
@@ -598,7 +695,10 @@
             { label: '原因', value: item.scan_reason || '账号未加入' },
             { label: '入库更新', value: formatDateTime(item.last_seen_at) },
           ],
-          actions: createChannelActions(item, elements, { allowDelete: true }),
+          actions: createChannelActions(item, elements, {
+            allowDelete: true,
+            allowProbe: true
+          }),
           note: item.scan_reason && item.scan_reason !== '账号未加入'
             ? item.scan_reason
             : (
@@ -800,7 +900,10 @@
             { label: '标记', value: item.risk_flags || '' },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
-          actions: createChannelActions(item, elements, { allowDelete: true }),
+          actions: createChannelActions(item, elements, {
+            allowDelete: true,
+            allowProbe: true
+          }),
           note: buildRestrictedNote(item)
         });
       }
@@ -940,6 +1043,41 @@
     }
   }
 
+  async function handleProbeChannelSchedule(elements, item, button) {
+    var chatId = Number(item && item.chat_id);
+    if (!Number.isInteger(chatId) || chatId === 0) {
+      appendLog(elements, '无法诊断：chat_id 非法');
+      return;
+    }
+
+    setElementDisabled(button, true);
+    appendLog(elements, '开始即时调度诊断：' + (item.chat_title || ('Chat ' + chatId)));
+    try {
+      var payload = await fetchJSON('/api/admin/sync/chats/' + encodeURIComponent(String(chatId)) + '/probe', {
+        method: 'POST'
+      });
+      if (!payload.ok) {
+        throw new Error(payload.message || payload.error || '诊断失败');
+      }
+
+      var firstItem = Array.isArray(payload.items) && payload.items.length > 0
+        ? payload.items[0]
+        : {};
+      var details = [
+        '状态：' + (firstItem.status || '未知'),
+        '远端：' + formatNumber(firstItem.remote_last_id),
+        '本地：' + formatNumber(firstItem.local_last_id),
+        '冷却：' + formatNumber(firstItem.cooldown_seconds) + ' 秒'
+      ];
+      appendLog(elements, (payload.message || '即时调度诊断完成') + '，' + details.join('，'));
+      await loadChannels(elements);
+    } catch (error) {
+      appendLog(elements, '即时调度诊断失败：' + error.message);
+    } finally {
+      setElementDisabled(button, false);
+    }
+  }
+
   function startJobPolling(elements, jobId, options) {
     jobPollController.start(jobPollState, jobId, options);
   }
@@ -951,6 +1089,7 @@
   function setBusy(elements, isBusy) {
     var disabled = !!isBusy;
     setElementDisabled(elements.sortSelect, disabled);
+    setElementDisabled(elements.membershipFilterSelect, disabled);
     setElementDisabled(elements.refreshChannelsBtn, disabled);
     setElementDisabled(elements.channelListToggleBtn, disabled);
     setElementDisabled(elements.scanMissingBtn, disabled);

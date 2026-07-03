@@ -616,13 +616,15 @@ class FrontendSafetyTests(unittest.TestCase):
             "deleteBtn.setAttribute('aria-label', '从数据库删除 ' + channelLabel + ' 的全部数据');",
             channels_source,
         )
+        self.assertIn(
+            "probeBtn.setAttribute('aria-label', '对 ' + channelLabel + ' 执行即时调度诊断');",
+            channels_source,
+        )
         restricted_start = channels_source.index("function renderRestrictedChannels")
         restricted_end = channels_source.index("async function loadRestrictedChannels")
         restricted_render_source = channels_source[restricted_start:restricted_end]
-        self.assertIn(
-            "actions: createChannelActions(item, elements, { allowDelete: true }),",
-            restricted_render_source,
-        )
+        self.assertIn("allowDelete: true", restricted_render_source)
+        self.assertIn("allowProbe: true", restricted_render_source)
         delete_start = channels_source.index("async function handleDeleteChannelData")
         delete_end = channels_source.index("function startJobPolling")
         delete_source = channels_source[delete_start:delete_end]
