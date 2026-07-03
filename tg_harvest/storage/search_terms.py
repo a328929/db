@@ -4,6 +4,7 @@ import sqlite3
 from contextlib import suppress
 
 from tg_harvest.storage.connection import synchronized_write
+from tg_harvest.storage.search_text_state import search_text_expression
 
 
 def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
@@ -68,6 +69,7 @@ def extract_cjk_search_terms(text: str) -> list[str]:
 
 _MESSAGE_SEARCH_TERMS_VERSION_KEY = "cjk_terms_version"
 _MESSAGE_SEARCH_TERMS_VERSION = "2"
+_MESSAGE_SEARCH_TEXT_SQL = search_text_expression()
 
 
 def _read_message_search_terms_version(cur: sqlite3.Cursor) -> str:
@@ -111,8 +113,8 @@ def _sync_message_search_terms_from_scratch(conn: sqlite3.Connection) -> None:
         batch_size = 5000
         while True:
             cur.execute(
-                """
-                SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '') AS search_text
+                f"""
+                SELECT pk, {_MESSAGE_SEARCH_TEXT_SQL} AS search_text
                 FROM messages
                 WHERE pk > ?
                 ORDER BY pk ASC
@@ -207,7 +209,7 @@ def drain_message_search_terms_rebuild_queue(
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
             f"""
-            SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '') AS search_text
+            SELECT pk, {_MESSAGE_SEARCH_TEXT_SQL} AS search_text
             FROM messages
             WHERE pk IN ({placeholders})
             """,

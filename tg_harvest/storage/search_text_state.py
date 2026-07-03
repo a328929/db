@@ -3,12 +3,20 @@ import sqlite3
 SEARCH_TEXT_PRESENT_COLUMN = "search_text_present"
 
 
-def search_text_present_expression(alias: str = "") -> str:
+def search_text_expression(alias: str = "", *, trim: bool = False) -> str:
     prefix = f"{alias}." if alias else ""
+    content_norm = f"{prefix}content_norm"
+    content = f"{prefix}content"
+    if trim:
+        content_norm = f"TRIM({content_norm})"
+        content = f"TRIM({content})"
+    return f"COALESCE(NULLIF({content_norm}, ''), {content}, '')"
+
+
+def search_text_present_expression(alias: str = "") -> str:
     return (
         "CASE WHEN "
-        f"COALESCE(NULLIF(TRIM({prefix}content_norm), ''), "
-        f"NULLIF(TRIM({prefix}content), ''), '') <> '' "
+        f"NULLIF({search_text_expression(alias, trim=True)}, '') IS NOT NULL "
         "THEN 1 ELSE 0 END"
     )
 
@@ -34,8 +42,7 @@ def table_has_index(cur: sqlite3.Cursor, table_name: str, index_name: str) -> bo
 
 
 def unsearchable_message_predicate(alias: str = "") -> str:
-    prefix = f"{alias}." if alias else ""
-    return f"COALESCE(NULLIF(TRIM({prefix}content_norm), ''), NULLIF(TRIM({prefix}content), ''), '') = ''"
+    return f"NULLIF({search_text_expression(alias, trim=True)}, '') IS NULL"
 
 
 def indexed_unsearchable_message_predicate(

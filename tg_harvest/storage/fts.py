@@ -1,6 +1,8 @@
 import logging
 import sqlite3
 
+from tg_harvest.storage.search_text_state import search_text_expression
+
 _FTS_INDEX_STATUS_KEY = "fts_index_status"
 _FTS_INDEX_STATUS_READY = "ready"
 _FTS_INDEX_STATUS_INCOMPLETE = "incomplete"
@@ -24,6 +26,8 @@ _EXPECTED_FTS_TRIGGER_MARKERS = {
         "nullif(new.content_norm, '')",
     ),
 }
+
+_MESSAGE_SEARCH_TEXT_SQL = search_text_expression()
 
 
 def _message_search_terms_meta_exists(cur: sqlite3.Cursor) -> bool:
@@ -182,9 +186,9 @@ def _sync_fts_from_scratch(cur: sqlite3.Cursor, *, batch_size: int = 50000) -> N
             pk_rows[-1]["pk"] if isinstance(pk_rows[-1], sqlite3.Row) else pk_rows[-1][0]
         )
         cur.execute(
-            """
+            f"""
             INSERT INTO messages_fts(rowid, content)
-            SELECT pk, COALESCE(NULLIF(content_norm, ''), content, '')
+            SELECT pk, {_MESSAGE_SEARCH_TEXT_SQL}
             FROM messages
             WHERE pk > ? AND pk <= ?
               AND NOT EXISTS (

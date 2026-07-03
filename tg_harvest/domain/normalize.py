@@ -382,6 +382,14 @@ def normalize_text_light(text: str) -> str:
     return s
 
 
+def normalize_text_light_for_storage(text: str) -> str:
+    normalized = normalize_text_light(text)
+    if not normalized:
+        return ""
+    raw = str(text or "")
+    return "" if normalized == raw else normalized
+
+
 def normalize_search_term(text: str) -> str:
     return _safe_lower_nfkc(text or "").strip()
 

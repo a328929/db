@@ -20,7 +20,7 @@ from tg_harvest.domain.normalize import (
     _safe_lower_nfkc,
     make_hash,
     normalize_text_for_hash,
-    normalize_text_light,
+    normalize_text_light_for_storage,
 )
 
 logger = logging.getLogger(__name__)
@@ -408,7 +408,7 @@ def build_single_promo_features(
             "promo_reasons": [],
             "dedupe_eligible": 0,
             "guard_reason": None,
-            "content_norm": normalize_text_light(text),
+            "content_norm": normalize_text_light_for_storage(text),
             "pure_hash": make_hash(norm_hash) if norm_hash else "",
             "text_len": len(text or ""),
         }
@@ -500,7 +500,7 @@ def build_single_promo_features(
         "promo_reasons": reasons,
         "dedupe_eligible": dedupe_eligible,
         "guard_reason": guard_reason,
-        "content_norm": normalize_text_light(text),
+        "content_norm": normalize_text_light_for_storage(text),
         "pure_hash": make_hash(norm_hash) if norm_hash else "",
         "text_len": len(text or ""),
     }
@@ -524,7 +524,7 @@ def build_group_promo_features(
             "promo_reasons": [],
             "dedupe_eligible": 0,
             "guard_reason": None,
-            "caption_norm": normalize_text_light(text),
+            "caption_norm": normalize_text_light_for_storage(text),
             "pure_hash": pure_hash,
             "dedupe_hash": dedupe_hash,
         }

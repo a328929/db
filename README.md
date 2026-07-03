@@ -77,6 +77,16 @@ python3 tools/check_project_quality.py
 # 查看当前补丁按主题归类后的变更清单
 python3 tools/change_inventory.py
 
+# 查看 SQLite 主库空间构成
+python3 tools/db_space_report.py --db .runtime/db/tg_data.db
+
+# 在有足够临时磁盘的维护窗口生成紧凑替换库，不会修改源库；
+# 默认会显示进度、速度和 ETA，并在校验通过后才生成最终目标库
+python3 tools/compact_sqlite_db.py --source .runtime/db/tg_data.db --target /path/to/tg_data.compact.db
+
+# 手机或低内存设备可降低批大小；目标已存在时才需要 --force
+python3 tools/compact_sqlite_db.py --source /path/to/tg_data.db --target /path/to/tg_data.compact.db --batch-size 10000
+
 # 只检查变更中是否混入运行态/凭据/缓存文件
 python3 tools/change_inventory.py --check
 

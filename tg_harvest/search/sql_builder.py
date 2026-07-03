@@ -8,6 +8,7 @@ from tg_harvest.search.expression import (
     parse_query,
 )
 from tg_harvest.search.params import SearchParams, split_query_media_duration
+from tg_harvest.storage.search_text_state import search_text_expression
 
 _CJK_CHAR_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ceaf]"
@@ -236,7 +237,7 @@ def _build_search_query_spec(
     auxiliary_only_candidate = False
     # 搜索统一走规范化文本：优先 content_norm，缺失时回退 content。
     # 这样每个词只做一次 LIKE 扫描，避免对同一行重复匹配两遍。
-    content_expr = "(LOWER(COALESCE(NULLIF(m.content_norm, ''), m.content, '')) LIKE ? ESCAPE '\\')"
+    content_expr = f"(LOWER({search_text_expression('m')}) LIKE ? ESCAPE '\\')"
     like_clause, like_params = compile_like_clause(expr, content_expr=content_expr)
     if like_clause:
         has_text_filter = True

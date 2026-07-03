@@ -12,6 +12,7 @@ from .connection import SqliteFeatures
 from .search_text_state import (
     SEARCH_TEXT_PRESENT_COLUMN,
     search_text_present_column_sql,
+    search_text_present_expression,
 )
 from .search_text_state import table_has_column as _table_has_column
 
@@ -66,8 +67,7 @@ def _create_messages_table(cur: sqlite3.Cursor, strict_suffix: str):
         visual_hash_algo     TEXT,
         visual_embed_ref     TEXT,
         search_text_present  INTEGER GENERATED ALWAYS AS (
-            CASE WHEN COALESCE(NULLIF(TRIM(content_norm), ''), NULLIF(TRIM(content), ''), '') <> ''
-                 THEN 1 ELSE 0 END
+            {search_text_present_expression()}
         ) VIRTUAL,
 
         created_at           TEXT NOT NULL DEFAULT (datetime('now')),
@@ -176,13 +176,16 @@ def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str):
 
 
 def _create_message_search_terms_table(cur: sqlite3.Cursor, strict_suffix: str):
+    options = " WITHOUT ROWID"
+    if strict_suffix:
+        options = f"{strict_suffix}, WITHOUT ROWID"
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS message_search_terms (
         pk      INTEGER NOT NULL,
         term    TEXT NOT NULL,
         PRIMARY KEY (term, pk),
         FOREIGN KEY(pk) REFERENCES messages(pk) ON DELETE CASCADE
-    ){strict_suffix}
+    ){options}
     """)
 
 

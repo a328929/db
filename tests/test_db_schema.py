@@ -313,7 +313,10 @@ class DbSchemaMigrationTests(unittest.TestCase):
         plan_text = " ".join(str(row[3]) for row in cur.fetchall())
 
         self.assertIn("idx_messages_created_at", plan_text)
-        self.assertIn("MATERIALIZE m", plan_text)
+        self.assertTrue(
+            "MATERIALIZE m" in plan_text or "CO-ROUTINE m" in plan_text,
+            plan_text,
+        )
 
     def test_dedupe_group_hash_queries_use_promo_hash_indexes(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
@@ -498,6 +501,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute("PRAGMA table_info(admin_missing_chats)")
         admin_missing_chat_columns = {row[1] for row in cur.fetchall()}
         self.assertIn("chat_id", admin_missing_chat_columns)
+
         self.assertIn("chat_title", admin_missing_chat_columns)
         self.assertIn("chat_username", admin_missing_chat_columns)
         self.assertIn("unavailable_reason", admin_missing_chat_columns)
@@ -637,6 +641,15 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertTrue(cur.fetchone()["started_at"])
         cur.execute("SELECT created_at FROM dedupe_actions WHERE batch_id = 'run-1'")
         self.assertTrue(cur.fetchone()["created_at"])
+
+    def test_message_search_terms_table_is_without_rowid(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='message_search_terms'"
+        )
+        table_sql = str(cur.fetchone()["sql"])
+        self.assertIn("WITHOUT ROWID", table_sql.upper())
 
     def test_create_schema_replaces_stale_named_index_definitions(self) -> None:
         feats = detect_sqlite_features(self.conn)

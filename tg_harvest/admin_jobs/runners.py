@@ -11,10 +11,10 @@ from threading import Lock, Semaphore
 from types import SimpleNamespace
 from typing import Any
 
-import tg_harvest.storage.fts as _fts
-import tg_harvest.storage.search_terms as _search_terms
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 
+import tg_harvest.storage.fts as _fts
+import tg_harvest.storage.search_terms as _search_terms
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -63,6 +63,7 @@ from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
 from tg_harvest.storage.connection import synchronized_write
+from tg_harvest.storage.search_text_state import search_text_expression
 
 DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
 
@@ -3087,12 +3088,12 @@ def _restore_message_delete_triggers_after_bulk_delete(
 
 def _delete_fts_entries_for_chat_targets(cur: Any) -> None:
     cur.execute(
-        """
+        f"""
         INSERT INTO messages_fts(messages_fts, rowid, content)
         SELECT
             'delete',
             m.pk,
-            COALESCE(NULLIF(m.content_norm, ''), m.content, '')
+            {search_text_expression('m')}
         FROM messages m
         JOIN temp_delete_chat_messages t ON t.pk = m.pk
         """
