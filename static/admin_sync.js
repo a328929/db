@@ -24,6 +24,8 @@
     livePollTimerId: null,
     liveRequestSeq: 0,
     liveActiveRequestSeq: 0,
+    chatItems: [],
+    chatListBusy: false,
     health: null,
     scheduler: null,
     apiSignals: {
@@ -78,8 +80,14 @@
       diagnoseResult: document.getElementById('admin-sync-diagnose-result'),
       schedulerStatus: document.getElementById('admin-sync-scheduler-status'),
       schedulerGrid: document.getElementById('admin-sync-scheduler-grid'),
+      accountGrid: document.getElementById('admin-sync-account-grid'),
       schedulerModel: document.getElementById('admin-sync-scheduler-model'),
       schedulerFailures: document.getElementById('admin-sync-scheduler-failures'),
+      resetModelBtn: document.getElementById('admin-sync-reset-model-btn'),
+      membershipSelect: document.getElementById('admin-sync-membership-select'),
+      chatStatusSelect: document.getElementById('admin-sync-chat-status-select'),
+      loadChatsBtn: document.getElementById('admin-sync-load-chats-btn'),
+      chatList: document.getElementById('admin-sync-chat-list'),
       loginDialog: document.getElementById('admin-login-dialog'),
       loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
@@ -108,8 +116,14 @@
       'diagnoseResult',
       'schedulerStatus',
       'schedulerGrid',
+      'accountGrid',
       'schedulerModel',
       'schedulerFailures',
+      'resetModelBtn',
+      'membershipSelect',
+      'chatStatusSelect',
+      'loadChatsBtn',
+      'chatList',
       'loginDialog',
       'loginStatus',
       'passwordInput',
@@ -137,8 +151,10 @@
     elements.diagnoseResult.textContent = '';
     elements.schedulerStatus.textContent = '正在读取调度状态...';
     elements.schedulerGrid.textContent = '';
+    elements.accountGrid.textContent = '';
     elements.schedulerModel.textContent = '';
     elements.schedulerFailures.textContent = '';
+    elements.chatList.textContent = '';
     setBusy(elements, false);
   }
 
@@ -157,6 +173,18 @@
     });
     elements.diagnoseBtn.addEventListener('click', function () {
       triggerSyncDiagnosis(elements);
+    });
+    elements.resetModelBtn.addEventListener('click', function () {
+      resetSyncModel(elements);
+    });
+    elements.loadChatsBtn.addEventListener('click', function () {
+      loadSchedulerChats(elements);
+    });
+    elements.membershipSelect.addEventListener('change', function () {
+      loadSchedulerChats(elements);
+    });
+    elements.chatStatusSelect.addEventListener('change', function () {
+      loadSchedulerChats(elements);
     });
     elements.windowSelect.addEventListener('change', function () {
       syncState.selectedWindowKey = String(elements.windowSelect.value || '');
@@ -180,6 +208,8 @@
     setElementDisabled(elements.refreshBtn, syncState.busy);
     setElementDisabled(elements.windowSelect, syncState.busy);
     setElementDisabled(elements.diagnoseBtn, syncState.busy);
+    setElementDisabled(elements.resetModelBtn, syncState.busy);
+    setElementDisabled(elements.loadChatsBtn, syncState.busy || syncState.chatListBusy);
     if (elements.windowGrid && typeof elements.windowGrid.setAttribute === 'function') {
       elements.windowGrid.setAttribute('aria-busy', syncState.busy ? 'true' : 'false');
     }
@@ -515,14 +545,26 @@
       enabled: scheduler.enabled === true,
       aiEnabled: scheduler.ai_enabled === true,
       aiShadow: scheduler.ai_shadow === true,
+      aiAutoPromoteEnabled: scheduler.ai_auto_promote_enabled === true,
+      effectiveModelMode: String(scheduler.effective_model_mode || ''),
+      modelCanTakeOver: scheduler.model_can_take_over === true,
       pendingCount: Number(scheduler.pending_count || 0),
       dueCount: Number(scheduler.due_count || 0),
       inFlightCount: Number(scheduler.in_flight_count || 0),
+      learningEventCount: Number(scheduler.learning_event_count || 0),
+      outcomeSampleCount: Number(scheduler.outcome_sample_count || 0),
       avgQuietDelaySeconds: Number(scheduler.avg_quiet_delay_seconds || 0),
       nextDueAt: String(scheduler.next_due_at || ''),
       coalescedEventCount: Number(scheduler.coalesced_event_count || 0),
       membershipCounts: normalizeCountList(scheduler.membership_counts, 'scope'),
       statusCounts: normalizeCountList(scheduler.status_counts, 'status'),
+      accounts: Array.isArray(scheduler.accounts) ? scheduler.accounts : [],
+      accountCapacity: scheduler.account_capacity && typeof scheduler.account_capacity === 'object'
+        ? scheduler.account_capacity
+        : {},
+      backpressure: scheduler.backpressure && typeof scheduler.backpressure === 'object'
+        ? scheduler.backpressure
+        : {},
       model: {
         backend: String(model.backend || ''),
         modelVersion: String(model.model_version || ''),
@@ -553,10 +595,10 @@
 
   function schedulerScopeLabel(scope) {
     var labels = {
-      none_joined: 'A 未加入',
-      both_joined: 'B 双账号',
-      single_joined_primary: 'C 主账号',
-      single_joined_secondary: 'C 第二账号',
+      none_joined: '公开可探测',
+      both_joined: '双账号已加入',
+      single_joined_primary: '主账号已加入',
+      single_joined_secondary: '第二账号已加入',
       unobservable: '不可观察',
       unknown: '未知'
     };
@@ -566,9 +608,9 @@
   function schedulerStatusLabel(status) {
     var labels = {
       idle: '空闲',
-      pending: '待拉取',
-      updating: '执行中',
-      backoff: '冷却',
+      pending: '等待入库',
+      updating: '正在入库',
+      backoff: '冷却中',
       quarantined: '隔离',
       unobservable: '不可观察',
       deleted: '已删除'
@@ -584,25 +626,71 @@
     return item;
   }
 
+  function accountLabel(key) {
+    var labels = {
+      primary: '主账号',
+      secondary: '第二账号'
+    };
+    return labels[String(key || '')] || String(key || '账号');
+  }
+
+  function renderAccountGrid(elements, scheduler) {
+    elements.accountGrid.textContent = '';
+    var accounts = scheduler.accounts || [];
+    if (!accounts.length) {
+      elements.accountGrid.appendChild(
+        createTextElement('div', 'sync-account-item', '暂无账号运行状态。')
+      );
+      return;
+    }
+    accounts.forEach(function (account) {
+      var cooldownSeconds = Number(account && account.cooldown_seconds || 0);
+      var item = document.createElement('div');
+      item.className = 'sync-account-item' + (cooldownSeconds > 0 ? ' is-cooling' : '');
+      item.appendChild(
+        createTextElement(
+          'strong',
+          '',
+          String(account && account.label || accountLabel(account && account.key))
+        )
+      );
+      item.appendChild(
+        createTextElement(
+          'span',
+          '',
+          cooldownSeconds > 0
+            ? '冷却中，剩余约 ' + formatDurationSeconds(cooldownSeconds)
+            : (account && account.connected ? '监听已连接' : '可用于任务调度')
+        )
+      );
+      if (account && account.last_error) {
+        item.appendChild(createTextElement('span', '', '最近异常：' + String(account.last_error)));
+      }
+      elements.accountGrid.appendChild(item);
+    });
+  }
+
   function renderSyncScheduler(elements) {
     var scheduler = syncState.scheduler || normalizeScheduler({});
     elements.schedulerGrid.textContent = '';
+    elements.accountGrid.textContent = '';
     elements.schedulerFailures.textContent = '';
 
     elements.schedulerStatus.textContent = scheduler.enabled
-      ? '智能调度已启用，事件会先合并为 pending 后按到期时间拉取。'
+      ? '实时调度已启用，事件会先合并为等待入库任务，再按到期时间拉取。'
       : '智能调度未启用，当前仍使用兼容同步路径。';
 
     [
-      ['Pending', formatNumber(scheduler.pendingCount)],
+      ['等待入库', formatNumber(scheduler.pendingCount)],
       ['到期任务', formatNumber(scheduler.dueCount)],
-      ['执行中', formatNumber(scheduler.inFlightCount)],
+      ['正在入库', formatNumber(scheduler.inFlightCount)],
       ['平均延迟', formatDurationSeconds(scheduler.avgQuietDelaySeconds)],
       ['合并事件', formatNumber(scheduler.coalescedEventCount)],
       ['24h 新增', formatNumber(scheduler.recent.addedMessageCount)]
     ].forEach(function (entry) {
       elements.schedulerGrid.appendChild(createSchedulerStat(entry[0], entry[1]));
     });
+    renderAccountGrid(elements, scheduler);
 
     var scopeText = scheduler.membershipCounts.length
       ? scheduler.membershipCounts.map(function (item) {
@@ -617,10 +705,11 @@
     var modelText = [
       '状态分布：' + scopeText,
       '任务状态：' + statusText,
-      '模型：' + (scheduler.aiEnabled ? (scheduler.aiShadow ? 'shadow' : 'enabled') : 'disabled')
+      '模型模式：' + (scheduler.effectiveModelMode || (scheduler.aiEnabled ? '仅观察' : '已关闭'))
         + ' / ' + (scheduler.model.backend || 'none')
         + (scheduler.model.state.mode ? ' / ' + String(scheduler.model.state.mode) : '')
-        + '，样本 ' + formatNumber(scheduler.model.sampleCount)
+        + '，训练样本 ' + formatNumber(scheduler.outcomeSampleCount || scheduler.model.sampleCount)
+        + '，学习事件 ' + formatNumber(scheduler.learningEventCount)
         + (scheduler.model.trainedAt ? '，训练 ' + formatDateTime(scheduler.model.trainedAt) : '')
     ];
     if (scheduler.aiEnabled) {
@@ -637,6 +726,8 @@
       modelText.push('下一次到期：' + formatDateTime(scheduler.nextDueAt));
     }
     elements.schedulerModel.textContent = modelText.join('。');
+
+    renderSchedulerChats(elements);
 
     if (!scheduler.failures.length) {
       elements.schedulerFailures.appendChild(
@@ -656,6 +747,106 @@
         )
       );
     });
+  }
+
+  function renderSchedulerChats(elements) {
+    elements.chatList.textContent = '';
+    if (!syncState.chatItems.length) {
+      elements.chatList.appendChild(
+        createTextElement('div', 'sync-chat-row', '暂无调度群组列表。')
+      );
+      return;
+    }
+    syncState.chatItems.slice(0, 20).forEach(function (item) {
+      var row = document.createElement('div');
+      row.className = 'sync-chat-row';
+      var main = document.createElement('div');
+      main.className = 'sync-chat-main';
+      main.appendChild(
+        createTextElement(
+          'strong',
+          '',
+          String(item.chatTitle || ('Chat ' + String(item.chatId || 0)))
+        )
+      );
+      main.appendChild(
+        createTextElement(
+          'span',
+          '',
+          schedulerStatusLabel(item.status)
+            + ' / ' + schedulerScopeLabel(item.membershipScope)
+            + (item.dueAt ? ' / 到期 ' + formatDateTime(item.dueAt) : '')
+        )
+      );
+      row.appendChild(main);
+      var probeBtn = document.createElement('button');
+      probeBtn.className = 'btn';
+      probeBtn.type = 'button';
+      probeBtn.textContent = '单群诊断';
+      probeBtn.addEventListener('click', function () {
+        triggerChatProbe(elements, item.chatId);
+      });
+      row.appendChild(probeBtn);
+      elements.chatList.appendChild(row);
+    });
+  }
+
+  function normalizeSchedulerChatsPayload(payload) {
+    var items = Array.isArray(payload && payload.items) ? payload.items : [];
+    return items.map(function (item) {
+      return {
+        chatId: Number(item && item.chat_id || 0),
+        chatTitle: String(item && item.chat_title || ''),
+        membershipScope: String(item && item.membership_scope || ''),
+        status: String(item && item.status || ''),
+        dueAt: String(item && item.due_at || ''),
+        eventCount: Number(item && item.event_count || 0),
+        sourceAccount: String(item && item.last_source_account || item && item.source_accounts || '')
+      };
+    }).filter(function (item) {
+      return item.chatId > 0;
+    });
+  }
+
+  async function loadSchedulerChats(elements) {
+    syncState.chatListBusy = true;
+    setBusy(elements, syncState.busy);
+    elements.chatList.textContent = '正在读取调度群组...';
+    try {
+      var params = new URLSearchParams({
+        limit: '20',
+        offset: '0'
+      });
+      if (elements.membershipSelect.value) {
+        params.set('membership', elements.membershipSelect.value);
+      }
+      if (elements.chatStatusSelect.value) {
+        params.set('status', elements.chatStatusSelect.value);
+      }
+      syncState.chatItems = normalizeSchedulerChatsPayload(
+        await fetchJSON('/api/admin/sync/chats?' + params.toString(), { timeoutMs: SYNC_STATS_TIMEOUT_MS })
+      );
+      renderSchedulerChats(elements);
+    } catch (error) {
+      elements.chatList.textContent = '读取调度群组失败：' + error.message;
+    } finally {
+      syncState.chatListBusy = false;
+      setBusy(elements, syncState.busy);
+    }
+  }
+
+  async function triggerChatProbe(elements, chatId) {
+    if (!chatId) return;
+    try {
+      await fetchJSON('/api/admin/sync/chats/' + encodeURIComponent(String(chatId)) + '/probe', {
+        method: 'POST',
+        timeoutMs: 20000
+      });
+      await loadSyncStats(elements);
+      await loadSchedulerChats(elements);
+    } catch (error) {
+      elements.schedulerStatus.textContent = '单群诊断失败：' + error.message;
+    }
   }
 
   function normalizeSyncPayload(payload) {
@@ -844,7 +1035,7 @@
         renderLiveMessages(elements);
       }
       if (!payload.items.length) {
-        elements.liveStatus.textContent = '时时模式下暂无最近入库消息。';
+        elements.liveStatus.textContent = '实时模式下暂无最近入库消息。';
       } else {
         elements.liveStatus.textContent =
           '最近已入库 ' + formatNumber(payload.items.length) + ' 条消息，数据生成时间 ' + formatDateTime(payload.generatedAt) + '。';
@@ -944,6 +1135,7 @@
         forceRender: true
       });
     }
+    loadSchedulerChats(elements);
   }
 
   function primeSyncDashboard(elements) {
@@ -981,6 +1173,26 @@
       renderSyncHealth(elements);
     } finally {
       setElementDisabled(elements.diagnoseBtn, syncState.busy);
+    }
+  }
+
+  async function resetSyncModel(elements) {
+    if (!window.confirm('确认重置同步模型？实时调度会继续使用启发式策略，模型重新积累样本后再训练。')) {
+      return;
+    }
+    elements.schedulerStatus.textContent = '正在重置模型...';
+    setElementDisabled(elements.resetModelBtn, true);
+    try {
+      await fetchJSON('/api/admin/sync/model/reset', {
+        method: 'POST',
+        timeoutMs: 15000
+      });
+      elements.schedulerStatus.textContent = '模型已重置，当前调度使用启发式策略。';
+      await loadSyncStats(elements);
+    } catch (error) {
+      elements.schedulerStatus.textContent = '重置模型失败：' + error.message;
+    } finally {
+      setElementDisabled(elements.resetModelBtn, syncState.busy);
     }
   }
 

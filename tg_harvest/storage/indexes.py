@@ -522,6 +522,12 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
 def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
+        "idx_account_runtime_cooldown",
+        "CREATE INDEX idx_account_runtime_cooldown "
+        "ON account_runtime_state(cooldown_until ASC, account_key ASC)",
+    )
+    _ensure_index(
+        cur,
         "idx_sync_pending_due",
         "CREATE INDEX idx_sync_pending_due "
         "ON sync_pending_updates(in_flight, due_at ASC, priority_score DESC, chat_id ASC)",
@@ -555,6 +561,13 @@ def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
         "idx_sync_learning_type_created",
         "CREATE INDEX idx_sync_learning_type_created "
         "ON sync_learning_events(event_type, created_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_sync_learning_failure_created",
+        "CREATE INDEX idx_sync_learning_failure_created "
+        "ON sync_learning_events(created_at DESC, id DESC) "
+        "WHERE failure_type <> ''",
     )
 
 

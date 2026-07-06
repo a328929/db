@@ -223,6 +223,33 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("idx_messages_created_at", plan_text)
 
+    def test_sync_learning_failure_query_uses_partial_index(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT chat_id, failure_type, created_at
+            FROM sync_learning_events
+            WHERE failure_type <> ''
+            ORDER BY created_at DESC, id DESC
+            LIMIT 8
+            """
+        )
+        plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+
+        self.assertIn("idx_sync_learning_failure_created", plan_text)
+
+    def test_account_runtime_state_table_exists(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute("PRAGMA table_info(account_runtime_state)")
+        columns = {str(row["name"]) for row in cur.fetchall()}
+
+        self.assertIn("account_key", columns)
+        self.assertIn("cooldown_until", columns)
+        self.assertIn("public_resolve_used", columns)
+
     def test_refresh_chat_message_summary_uses_chat_created_at_index(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()

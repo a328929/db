@@ -147,6 +147,28 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertEqual(1, len(self.started_updates))
         self.assertEqual(("job-1", 42, "chat-42"), self.started_updates[0]["args"])
 
+    def test_update_preflight_returns_summary(self) -> None:
+        with patch(
+            "tg_harvest.web.routes.admin.sync_scheduler.build_update_preflight",
+            return_value={
+                "ok": True,
+                "target": {"target_count": 5},
+                "account_capacity": {"available": 1, "configured": 2},
+            },
+        ) as preflight_mock, self.app.test_request_context(
+            "/api/admin/jobs/update/preflight?chat_id=all",
+            method="GET",
+        ):
+            response, status_code = self.handler.api_admin_update_preflight.__wrapped__(
+                self.handler
+            )
+
+        payload = response.get_json()
+        self.assertEqual(200, status_code)
+        self.assertTrue(payload["ok"])
+        self.assertEqual(5, payload["target"]["target_count"])
+        self.assertEqual("all", preflight_mock.call_args.kwargs["chat_id"])
+
     def test_cleanup_empty_requires_json_body(self) -> None:
         with self.app.test_request_context("/api/admin/jobs/cleanup-empty", method="POST"):
             response, status_code = self.handler.api_admin_job_create_cleanup_empty.__wrapped__(self.handler)

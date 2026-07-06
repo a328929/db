@@ -2,6 +2,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -203,6 +204,127 @@ class _PublicProbeRead:
     local_last_id: int
 
 
+class AccountRuntimeCoordinator:
+    def __init__(
+        self,
+        *,
+        cfg: Any,
+        get_conn_fn: Callable[[], Any],
+        account_loader: Callable[[], list[_ListenerAccount]],
+    ) -> None:
+        self._cfg = cfg
+        self._get_conn_fn = get_conn_fn
+        self._account_loader = account_loader
+        self._locks_lock = threading.Lock()
+        self._locks: dict[str, threading.Lock] = {}
+
+    def scheduler_concurrency(self) -> int:
+        accounts = self._account_loader()
+        configured = max(
+            1,
+            int(getattr(self._cfg, "sync_scheduler_concurrency", 2) or 2),
+        )
+        return max(1, min(configured, max(1, len(accounts))))
+
+    def account_lock(self, account_key: str) -> threading.Lock:
+        key = str(account_key or "").strip() or "primary"
+        with self._locks_lock:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[key] = lock
+            return lock
+
+    def sync_configured_accounts(self) -> None:
+        for account in self._account_loader():
+            self._write_account_state(
+                account_key=account.key,
+                session_name=account.session_name,
+                label=account.label,
+            )
+
+    def restore_cooldowns(self) -> None:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            rows = sync_scheduler.list_account_runtime_states(conn)
+        except Exception:
+            logging.exception("恢复账号运行态冷却失败")
+            return
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+        accounts_by_key = {account.key: account for account in self._account_loader()}
+        now = time.time()
+        for row in rows:
+            account = accounts_by_key.get(str(row.get("account_key") or ""))
+            if account is None:
+                continue
+            until_ts = _parse_utc_text_timestamp(row.get("cooldown_until"))
+            remaining = int(until_ts - now)
+            if remaining <= 0:
+                continue
+            _remember_account_cooldown(
+                account,
+                AccountFloodWaitError(
+                    seconds=remaining,
+                    threshold_seconds=1,
+                    account_label=account.key,
+                    scope="runtime-restore",
+                ),
+            )
+
+    def mark_cooldown(self, account: _ListenerAccount, seconds: int) -> None:
+        cooldown_until = _format_utc_timestamp(time.time() + max(1, int(seconds or 0)))
+        self._write_account_state(
+            account_key=account.key,
+            session_name=account.session_name,
+            label=account.label,
+            cooldown_until=cooldown_until,
+            success=False,
+            failure_message=f"FloodWait {max(1, int(seconds or 0))}s",
+        )
+
+    def mark_update_start(self, account: _ListenerAccount) -> None:
+        self._write_account_state(
+            account_key=account.key,
+            session_name=account.session_name,
+            label=account.label,
+            in_flight_delta=1,
+        )
+
+    def mark_update_finish(
+        self,
+        account: _ListenerAccount,
+        *,
+        success: bool,
+        duration_seconds: float,
+        failure_message: str = "",
+    ) -> None:
+        self._write_account_state(
+            account_key=account.key,
+            session_name=account.session_name,
+            label=account.label,
+            success=success,
+            duration_seconds=duration_seconds,
+            failure_message=failure_message,
+            in_flight_delta=-1,
+        )
+
+    def _write_account_state(self, **kwargs: Any) -> None:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            sync_scheduler.upsert_account_runtime_state(conn, **kwargs)
+        except Exception:
+            logging.exception("写入账号运行态失败: account=%s", kwargs.get("account_key"))
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
+
 class DatabaseChatListenerRuntime:
     def __init__(
         self,
@@ -294,6 +416,11 @@ class DatabaseChatListenerRuntime:
         self._listener_threads: list[threading.Thread] = []
         self._started = False
         self._job_id = "db-listener"
+        self._account_runtime = AccountRuntimeCoordinator(
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            account_loader=self._listener_accounts,
+        )
 
     def _mark_listener_connected(self, account_key: str) -> None:
         now = _utc_now_ts()
@@ -401,6 +528,9 @@ class DatabaseChatListenerRuntime:
     def _sync_ai_shadow_enabled(self) -> bool:
         return sync_scheduler.ai_shadow_enabled(self._cfg)
 
+    def _sync_ai_auto_promote_enabled(self) -> bool:
+        return sync_scheduler.ai_auto_promote_enabled(self._cfg)
+
     def _sync_model_training_enabled(self) -> bool:
         return self._sync_scheduler_enabled() and self._sync_ai_enabled()
 
@@ -414,6 +544,8 @@ class DatabaseChatListenerRuntime:
                     "scheduler_enabled": self._sync_scheduler_enabled(),
                     "ai_enabled": self._sync_ai_enabled(),
                     "ai_shadow": self._sync_ai_shadow_enabled(),
+                    "ai_auto_promote_enabled": self._sync_ai_auto_promote_enabled(),
+                    "scheduler_concurrency": self._account_runtime.scheduler_concurrency(),
                 },
             )
             return {
@@ -428,6 +560,49 @@ class DatabaseChatListenerRuntime:
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
+
+    def _scheduler_backpressure_snapshot(
+        self,
+        pending_counts: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
+        if not self._sync_scheduler_enabled():
+            queue_size = self._queue_size()
+            active = queue_size > 0
+            return {
+                "active": active,
+                "reason": "legacy_queue_pending" if active else "",
+                "pending_threshold": 1,
+                "due_threshold": 0,
+            }
+        counts = pending_counts or self._pending_update_counts()
+        scheduler_concurrency = self._account_runtime.scheduler_concurrency()
+        pending_threshold = max(20, scheduler_concurrency * 10)
+        due_threshold = max(4, scheduler_concurrency * 3)
+        pending = int(counts.get("pending") or 0)
+        due = int(counts.get("due") or 0)
+        in_flight = int(counts.get("in_flight") or 0)
+        active = (
+            pending >= pending_threshold
+            or due >= due_threshold
+            or (due > 0 and in_flight >= scheduler_concurrency)
+        )
+        reason = ""
+        if active:
+            if pending >= pending_threshold:
+                reason = "pending_backlog"
+            elif due >= due_threshold:
+                reason = "due_backlog"
+            else:
+                reason = "scheduler_capacity_full"
+        return {
+            "active": active,
+            "reason": reason,
+            "pending_threshold": pending_threshold,
+            "due_threshold": due_threshold,
+            "pending": pending,
+            "due": due,
+            "in_flight": in_flight,
+        }
 
     def health_snapshot(self) -> dict[str, Any]:
         accounts = self._listener_accounts()
@@ -491,6 +666,7 @@ class DatabaseChatListenerRuntime:
             "due": 0,
             "in_flight": 0,
         }
+        backpressure = self._scheduler_backpressure_snapshot(pending_counts)
         queue_size = int(pending_counts.get("pending") or 0)
         return {
             "started": bool(self._started),
@@ -498,6 +674,7 @@ class DatabaseChatListenerRuntime:
             "scheduler_enabled": self._sync_scheduler_enabled(),
             "ai_enabled": self._sync_ai_enabled(),
             "ai_shadow": self._sync_ai_shadow_enabled(),
+            "ai_auto_promote_enabled": self._sync_ai_auto_promote_enabled(),
             "public_probe_enabled": enabled_int(
                 getattr(self._cfg, "db_listener_public_probe_enabled", 1)
             )
@@ -508,6 +685,8 @@ class DatabaseChatListenerRuntime:
             "pending_update_count": int(pending_counts.get("pending") or 0),
             "due_update_count": int(pending_counts.get("due") or 0),
             "in_flight_update_count": int(pending_counts.get("in_flight") or 0),
+            "scheduler_concurrency": self._account_runtime.scheduler_concurrency(),
+            "backpressure": backpressure,
             "active_listener_count": active_listener_count,
             "configured_listener_count": len(accounts),
             "worker_thread_alive": self._worker_thread.is_alive(),
@@ -700,6 +879,8 @@ class DatabaseChatListenerRuntime:
             _listener_log(self._job_id, "数据库内群组监听已关闭")
             self._started = True
             return
+        self._account_runtime.sync_configured_accounts()
+        self._account_runtime.restore_cooldowns()
         self._refresh_database_chat_cache()
         self._refresh_joined_chat_snapshot()
         self._started = True
@@ -879,7 +1060,7 @@ class DatabaseChatListenerRuntime:
 
     def _public_probe_has_pending_updates(self) -> bool:
         if self._sync_scheduler_enabled():
-            return False
+            return bool(self._scheduler_backpressure_snapshot().get("active"))
         with self._queued_chat_ids_lock:
             return bool(self._queued_chat_ids)
 
@@ -1171,19 +1352,31 @@ class DatabaseChatListenerRuntime:
                 with self._queued_chat_ids_lock:
                     self._queued_chat_ids.discard(int(item.chat_id))
 
-    def _claim_due_scheduler_task(self) -> SyncPendingTask | None:
+    def _claim_due_scheduler_tasks(
+        self,
+        *,
+        limit: int,
+        exclude_preferred_accounts: set[str] | None = None,
+    ) -> list[SyncPendingTask]:
         conn = None
         try:
             conn = self._get_conn_fn()
-            tasks = sync_scheduler.claim_due_pending_updates(conn, limit=1)
-            return tasks[0] if tasks else None
+            return sync_scheduler.claim_due_pending_updates(
+                conn,
+                limit=limit,
+                exclude_preferred_accounts=exclude_preferred_accounts or set(),
+            )
         except Exception:
             logging.exception("领取同步调度任务失败")
-            return None
+            return []
         finally:
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
+
+    def _claim_due_scheduler_task(self) -> SyncPendingTask | None:
+        tasks = self._claim_due_scheduler_tasks(limit=1)
+        return tasks[0] if tasks else None
 
     def _scheduler_task_to_queue_item(self, task: SyncPendingTask) -> _QueuedChatUpdate:
         preferred_account = str(task.preferred_source_account or "").strip()
@@ -1242,26 +1435,80 @@ class DatabaseChatListenerRuntime:
                     conn.close()
 
     def _scheduler_worker_loop(self) -> None:
+        concurrency = self._account_runtime.scheduler_concurrency()
+        active_futures = {}
         while not self._worker_stop.is_set():
-            task = self._claim_due_scheduler_task()
-            if task is None:
+            while len(active_futures) < concurrency and not self._worker_stop.is_set():
+                active_accounts = {
+                    self._scheduler_task_to_queue_item(task).source_account
+                    for task in active_futures.values()
+                }
+                tasks = self._claim_due_scheduler_tasks(
+                    limit=max(1, concurrency - len(active_futures)),
+                    exclude_preferred_accounts=active_accounts,
+                )
+                if not tasks:
+                    if not active_accounts:
+                        break
+                    tasks = self._claim_due_scheduler_tasks(
+                        limit=max(1, concurrency - len(active_futures)),
+                    )
+                if not tasks:
+                    break
+                if not hasattr(self, "_scheduler_executor"):
+                    self._scheduler_executor = ThreadPoolExecutor(
+                        max_workers=concurrency,
+                        thread_name_prefix="db-chat-sync-worker",
+                    )
+                for task in tasks:
+                    if len(active_futures) >= concurrency:
+                        break
+                    future = self._scheduler_executor.submit(
+                        self._execute_scheduler_task,
+                        task,
+                    )
+                    active_futures[future] = task
+            if not active_futures:
                 self._worker_stop.wait(_DEFAULT_EVENT_IDLE_SLEEP_SECONDS)
                 continue
-            result: SyncUpdateResult | None = None
+            done_futures, _pending = wait(
+                active_futures.keys(),
+                timeout=_DEFAULT_EVENT_IDLE_SLEEP_SECONDS,
+                return_when=FIRST_COMPLETED,
+            )
+            for future in done_futures:
+                task = active_futures.pop(future)
+                try:
+                    result = future.result()
+                except Exception as exc:
+                    logging.exception("同步调度任务执行异常: chat_id=%s", task.chat_id)
+                    result = SyncUpdateResult(
+                        chat_id=int(task.chat_id),
+                        chat_title=task.chat_title,
+                        chat_username=task.chat_username,
+                        failure_type="failed",
+                        failure_message=admin_error_message(exc),
+                    )
+                self._finish_scheduler_task(task=task, result=result)
+        for future, task in list(active_futures.items()):
             try:
-                item = self._scheduler_task_to_queue_item(task)
-                result = self._process_queued_chat_update(item)
-            except Exception as exc:
-                logging.exception("同步调度任务执行异常: chat_id=%s", task.chat_id)
+                result = future.result()
+            except Exception:
                 result = SyncUpdateResult(
                     chat_id=int(task.chat_id),
                     chat_title=task.chat_title,
                     chat_username=task.chat_username,
                     failure_type="failed",
-                    failure_message=admin_error_message(exc),
+                    failure_message="服务停止，调度任务未完成",
                 )
-            finally:
-                self._finish_scheduler_task(task=task, result=result)
+            self._finish_scheduler_task(task=task, result=result)
+        executor = getattr(self, "_scheduler_executor", None)
+        if executor is not None:
+            executor.shutdown(wait=False, cancel_futures=True)
+
+    def _execute_scheduler_task(self, task: SyncPendingTask) -> SyncUpdateResult | None:
+        item = self._scheduler_task_to_queue_item(task)
+        return self._process_queued_chat_update(item)
 
     def _run_sync_model_training_once(self) -> dict[str, Any]:
         conn = None
@@ -1269,6 +1516,7 @@ class DatabaseChatListenerRuntime:
             from tg_harvest.ml.sync_predictor import train_sync_model
 
             conn = self._get_conn_fn()
+            sync_scheduler.prune_learning_events(conn, self._cfg)
             result = train_sync_model(conn, self._cfg)
             backend = str(result.get("backend") or "")
             if bool(result.get("trained")):
@@ -1327,46 +1575,63 @@ class DatabaseChatListenerRuntime:
         self._record_update_attempt()
         worker_id = f"{self._job_id}_{account.key}_single_{item.chat_id}"
         client = None
-        started_at = time.perf_counter()
-        try:
-            client = _create_isolated_worker_client(account.cfg, worker_id)
-            harvest_result = _admin_process_single_chat_update(
-                job_id=self._job_id,
-                client=client,
-                cfg=account.cfg,
-                get_conn_fn=self._get_conn_fn,
-                admin_job_append_log_fn=_listener_log,
-                chat_id=item.chat_id,
-                chat_title=item.chat_title,
-                chat_username=item.chat_username,
-                idx=1,
-                total=1,
-                account_label=account.label,
-                enable_progress_probe=False,
-            )
-            counters = getattr(harvest_result, "counters", None)
-            scanned_count = int(getattr(counters, "seen", 0) or 0)
-            added_count = int(getattr(counters, "written", 0) or 0)
-            remote_last_id = 0
-            local_last_id = self._load_local_last_message_id(item.chat_id)
-            self._record_update_success(chat_id=item.chat_id)
-            return SyncUpdateResult(
-                chat_id=int(item.chat_id),
-                chat_title=item.chat_title,
-                chat_username=item.chat_username,
-                source_account=account.key,
-                added_message_count=added_count,
-                scanned_message_count=scanned_count,
-                local_last_id=local_last_id,
-                remote_last_id=remote_last_id,
-                duration_seconds=max(0.0, time.perf_counter() - started_at),
-                api_cost=max(1.0, float(scanned_count or added_count or 1)),
-            )
-        finally:
-            if client is not None:
-                with suppress(Exception):
-                    _disconnect_worker_client(client)
-            _cleanup_isolated_worker_session(account.cfg, worker_id)
+        account_lock = self._account_runtime.account_lock(account.key)
+        with account_lock:
+            started_at = time.perf_counter()
+            self._account_runtime.mark_update_start(account)
+            try:
+                client = _create_isolated_worker_client(account.cfg, worker_id)
+                harvest_result = _admin_process_single_chat_update(
+                    job_id=self._job_id,
+                    client=client,
+                    cfg=account.cfg,
+                    get_conn_fn=self._get_conn_fn,
+                    admin_job_append_log_fn=_listener_log,
+                    chat_id=item.chat_id,
+                    chat_title=item.chat_title,
+                    chat_username=item.chat_username,
+                    idx=1,
+                    total=1,
+                    account_label=account.label,
+                    enable_progress_probe=False,
+                )
+                counters = getattr(harvest_result, "counters", None)
+                scanned_count = int(getattr(counters, "seen", 0) or 0)
+                added_count = int(getattr(counters, "written", 0) or 0)
+                remote_last_id = 0
+                local_last_id = self._load_local_last_message_id(item.chat_id)
+                duration_seconds = max(0.0, time.perf_counter() - started_at)
+                self._record_update_success(chat_id=item.chat_id)
+                self._account_runtime.mark_update_finish(
+                    account,
+                    success=True,
+                    duration_seconds=duration_seconds,
+                )
+                return SyncUpdateResult(
+                    chat_id=int(item.chat_id),
+                    chat_title=item.chat_title,
+                    chat_username=item.chat_username,
+                    source_account=account.key,
+                    added_message_count=added_count,
+                    scanned_message_count=scanned_count,
+                    local_last_id=local_last_id,
+                    remote_last_id=remote_last_id,
+                    duration_seconds=duration_seconds,
+                    api_cost=max(1.0, float(scanned_count or added_count or 1)),
+                )
+            except Exception as exc:
+                self._account_runtime.mark_update_finish(
+                    account,
+                    success=False,
+                    duration_seconds=max(0.0, time.perf_counter() - started_at),
+                    failure_message=admin_error_message(exc),
+                )
+                raise
+            finally:
+                if client is not None:
+                    with suppress(Exception):
+                        _disconnect_worker_client(client)
+                _cleanup_isolated_worker_session(account.cfg, worker_id)
 
     def _process_queued_chat_update(
         self, item: _QueuedChatUpdate
@@ -1395,6 +1660,7 @@ class DatabaseChatListenerRuntime:
                 last_exc = exc
                 if isinstance(exc, AccountFloodWaitError):
                     _remember_account_cooldown(account, exc)
+                    self._account_runtime.mark_cooldown(account, int(exc.seconds))
                     continue
                 message = admin_error_message(exc)
                 self._record_update_failure(chat_id=item.chat_id, message=message)
@@ -1985,6 +2251,7 @@ class DatabaseChatListenerRuntime:
                         row,
                         changed=read_result.changed
                     ),
+                    source_account=account.key,
                     remote_last_id=int(read_result.remote_last_id or 0),
                     local_last_id=int(read_result.local_last_id or 0),
                 )
@@ -1998,6 +2265,7 @@ class DatabaseChatListenerRuntime:
                 last_exc = exc
                 if isinstance(exc, AccountFloodWaitError):
                     _remember_account_cooldown(account, exc)
+                    self._account_runtime.mark_cooldown(account, int(exc.seconds))
                     continue
                 message = admin_error_message(exc)
                 if "本地实体缓存未命中" in message:
@@ -2033,7 +2301,7 @@ class DatabaseChatListenerRuntime:
                 cooldown_seconds=self._public_probe_failure_cooldown_seconds(
                     flood_wait_seconds=int(last_exc.seconds)
                 ),
-                source_account="",
+                source_account=str(last_exc.account_label or ""),
             )
             self._record_probe_result(
                 status=outcome.status,

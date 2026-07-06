@@ -476,6 +476,30 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
+    def api_admin_update_preflight(self):
+        raw_chat_id = str(request.args.get("chat_id", "all") or "all").strip()
+        if not raw_chat_id:
+            raw_chat_id = "all"
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = sync_scheduler.build_update_preflight(
+                    conn,
+                    self.cfg,
+                    chat_id=raw_chat_id,
+                    health_snapshot=self.get_sync_health_snapshot_fn(),
+                )
+            status_code = 200 if bool(payload.get("ok", True)) else 404
+            return jsonify(payload), status_code
+        except (TypeError, ValueError):
+            return self._json_error("chat_id 参数非法", 400)
+        except sqlite3.Error:
+            self.logger.exception("读取批量更新预检失败")
+            return self._json_error("读取批量更新预检失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
     def api_admin_job_create_delete(self):
         data, error_response = self._require_json_dict()
         if error_response is not None:
@@ -668,6 +692,7 @@ def register_admin_routes(app, *, services: AdminRouteServices) -> None:
     app.get("/api/admin/jobs/<job_id>/logs")(handler.api_admin_job_logs)
     app.post("/api/admin/jobs/<job_id>/stop")(handler.api_admin_job_stop)
     app.post("/api/admin/jobs/harvest")(handler.api_admin_job_create_harvest)
+    app.get("/api/admin/jobs/update/preflight")(handler.api_admin_update_preflight)
     app.post("/api/admin/jobs/update")(handler.api_admin_job_create_update)
     app.post("/api/admin/jobs/delete")(handler.api_admin_job_create_delete)
     app.post("/api/admin/jobs/delete-empty-chats")(

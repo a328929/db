@@ -130,8 +130,22 @@ def ai_shadow_enabled(cfg: Any) -> bool:
     return enabled_int(getattr(cfg, "sync_ai_shadow", 1)) == 1
 
 
+def ai_auto_promote_enabled(cfg: Any) -> bool:
+    if not hasattr(cfg, "sync_ai_auto_promote_enabled"):
+        return False
+    return enabled_int(getattr(cfg, "sync_ai_auto_promote_enabled", 0)) == 1
+
+
 def cfg_int(cfg: Any, name: str, default: int, *, minimum: int = 0) -> int:
     return max(int(minimum), int(getattr(cfg, name, default) or default))
+
+
+def cfg_float(cfg: Any, name: str, default: float, *, minimum: float = 0.0) -> float:
+    try:
+        value = float(getattr(cfg, name, default) or default)
+    except (TypeError, ValueError):
+        value = default
+    return max(float(minimum), value)
 
 
 def _json_dumps(value: Any) -> str:
@@ -183,6 +197,16 @@ def _row_text(row: Any, key: str, default: str = "") -> str:
     except Exception:
         value = default
     return str(value or default).strip()
+
+
+def _row_to_dict(row: Any | None) -> dict[str, Any]:
+    if row is None:
+        return {}
+    try:
+        keys = row.keys()
+    except Exception:
+        keys = []
+    return {str(key): row[key] for key in keys}
 
 
 def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
@@ -410,6 +434,7 @@ def build_heuristic_decision(
         quiet_delay = min(max_active_delay if hot_chat else max_normal_delay, 30)
 
     quiet_delay = max(min_delay, min(int(quiet_delay), max_cold_delay))
+    heuristic_delay = quiet_delay
     priority = _scope_base_priority(membership_scope)
     priority += min(event_count, 50) * 4.0
     priority += min(local_gap, 5000) / 100.0
@@ -417,7 +442,6 @@ def build_heuristic_decision(
         priority += 4.0
     priority -= min(failure_count, 10) * 8.0
     priority = max(0.0, round(priority, 3))
-
     preferred_account = str(observation.source_account or "").strip()
     if not preferred_account:
         preferred_account = _row_text(row, "last_source_account")
@@ -461,20 +485,48 @@ def build_heuristic_decision(
             prediction["model"] = model_prediction
             if suggestion.available:
                 source = "heuristic_with_model_shadow"
-                if suggestion.active:
-                    quiet_delay = max(
-                        min_delay,
-                        min(int(suggestion.quiet_delay_seconds), max_cold_delay),
+                can_take_over = (
+                    suggestion.active
+                    and not ai_shadow_enabled(cfg)
+                    and enabled_int(getattr(cfg, "sync_ai_auto_promote_enabled", 0)) == 1
+                )
+                prediction["model_can_take_over"] = bool(can_take_over)
+                if can_take_over:
+                    max_factor = cfg_float(
+                        cfg,
+                        "sync_model_max_active_delay_factor",
+                        2.0,
+                        minimum=1.0,
                     )
+                    lower_bound = max(
+                        min_delay,
+                        int(max(1, round(float(heuristic_delay) * 0.5))),
+                    )
+                    upper_bound = min(
+                        max_cold_delay,
+                        int(max(heuristic_delay, round(float(heuristic_delay) * max_factor))),
+                    )
+                    model_delay = int(suggestion.quiet_delay_seconds)
+                    if float(model_prediction.get("risk_score") or 0.0) >= 0.55:
+                        lower_bound = max(lower_bound, heuristic_delay)
+                    quiet_delay = max(lower_bound, min(model_delay, upper_bound))
                     priority = max(0.0, round(float(suggestion.priority_score), 3))
                     due_at = add_seconds_to_utc_text(now, quiet_delay)
                     source = "torch_model_active"
                     prediction["kind"] = "torch_model"
                     prediction["active_model"] = {
+                        "raw_quiet_delay_seconds": model_delay,
                         "quiet_delay_seconds": quiet_delay,
                         "priority_score": priority,
                         "due_at": due_at,
+                        "lower_bound_seconds": lower_bound,
+                        "upper_bound_seconds": upper_bound,
+                        "heuristic_delay_seconds": heuristic_delay,
                     }
+                elif suggestion.active:
+                    prediction["model_takeover_blocked_reason"] = (
+                        "shadow_enabled" if ai_shadow_enabled(cfg) else "auto_promote_disabled"
+                    )
             else:
                 source = (
                     "heuristic_with_model_shadow"
@@ -865,14 +917,30 @@ def claim_due_pending_updates(
     *,
     now_text: str | None = None,
     limit: int = 1,
+    exclude_preferred_accounts: set[str] | list[str] | tuple[str, ...] | None = None,
 ) -> list[SyncPendingTask]:
     now = str(now_text or utc_now_text())
     effective_limit = max(1, int(limit or 1))
+    excluded = [
+        str(item or "").strip()
+        for item in (exclude_preferred_accounts or [])
+        if str(item or "").strip()
+    ]
+    exclusion_sql = ""
+    params: list[Any] = [now]
+    if excluded:
+        placeholders = ",".join(["?"] * len(excluded))
+        exclusion_sql = (
+            "AND COALESCE(NULLIF(p.preferred_source_account, ''), 'primary') "
+            f"NOT IN ({placeholders})"
+        )
+        params.extend(excluded)
+    params.append(effective_limit)
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
         cur.execute(
-            """
+            f"""
             SELECT p.*
             FROM sync_pending_updates p
             LEFT JOIN sync_chat_state s ON s.chat_id = p.chat_id
@@ -880,10 +948,11 @@ def claim_due_pending_updates(
               AND p.due_at <> ''
               AND p.due_at <= ?
               AND COALESCE(s.is_active, 1) = 1
+              {exclusion_sql}
             ORDER BY p.due_at ASC, p.priority_score DESC, p.chat_id ASC
             LIMIT ?
             """,
-            (now, effective_limit),
+            params,
         )
         rows = cur.fetchall()
         tasks: list[SyncPendingTask] = []
@@ -975,8 +1044,19 @@ def complete_pending_update(
             (int(task.chat_id),),
         )
         pending_row = cur.fetchone()
+        cur.execute(
+            "SELECT * FROM sync_chat_state WHERE chat_id = ? LIMIT 1",
+            (int(task.chat_id),),
+        )
+        state_row = cur.fetchone()
         has_new_generation = _pending_has_new_generation(pending_row, task)
         status = "pending" if has_new_generation else "idle"
+        effective_local_last_id = max(0, int(result.local_last_id or 0))
+        effective_remote_last_id = max(
+            0,
+            int(result.remote_last_id or 0),
+            effective_local_last_id,
+        )
         if has_new_generation:
             due_at = _row_text(pending_row, "due_at")
             if not due_at or due_at <= now:
@@ -1022,8 +1102,8 @@ def complete_pending_update(
                 status,
                 now,
                 now,
-                max(0, int(result.local_last_id or 0)),
-                max(0, int(result.remote_last_id or 0)),
+                effective_local_last_id,
+                effective_remote_last_id,
                 status,
                 str(result.source_account or ""),
                 now,
@@ -1037,12 +1117,37 @@ def complete_pending_update(
                 event_type="update_outcome",
                 reason=task.reason,
                 source_account=result.source_account,
+                membership_scope=_row_text(state_row, "membership_scope", MembershipScope.UNKNOWN),
                 status="success",
+                features={
+                    "pending_snapshot": _row_to_dict(pending_row),
+                    "state_snapshot": _row_to_dict(state_row),
+                    "task_snapshot": {
+                        "chat_id": int(task.chat_id),
+                        "event_count": int(task.event_count or 0),
+                        "generation": int(task.generation or 0),
+                        "in_flight_generation": int(task.in_flight_generation or 0),
+                        "quiet_delay_seconds": int(task.quiet_delay_seconds or 0),
+                        "priority_score": float(task.priority_score or 0.0),
+                        "first_event_at": task.first_event_at,
+                        "last_event_at": task.last_event_at,
+                        "due_at": task.due_at,
+                    },
+                    "result_snapshot": {
+                        "local_last_id": effective_local_last_id,
+                        "remote_last_id": effective_remote_last_id,
+                        "scanned_message_count": int(result.scanned_message_count or 0),
+                        "duration_seconds": float(result.duration_seconds or 0.0),
+                        "api_cost": float(result.api_cost or 0.0),
+                    },
+                },
                 outcome={
                     "scanned_message_count": int(result.scanned_message_count or 0),
                     "duration_seconds": float(result.duration_seconds or 0.0),
                     "event_count": int(task.event_count or 0),
                     "has_new_generation": has_new_generation,
+                    "local_last_id": effective_local_last_id,
+                    "remote_last_id": effective_remote_last_id,
                 },
                 quiet_delay_seconds=task.quiet_delay_seconds,
                 priority_score=task.priority_score,
@@ -1082,6 +1187,16 @@ def fail_pending_update(
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            "SELECT * FROM sync_pending_updates WHERE chat_id = ? LIMIT 1",
+            (int(task.chat_id),),
+        )
+        pending_row = cur.fetchone()
+        cur.execute(
+            "SELECT * FROM sync_chat_state WHERE chat_id = ? LIMIT 1",
+            (int(task.chat_id),),
+        )
+        state_row = cur.fetchone()
         cur.execute(
             """
             UPDATE sync_pending_updates
@@ -1126,7 +1241,30 @@ def fail_pending_update(
                 event_type="update_outcome",
                 reason=task.reason,
                 source_account=result.source_account,
+                membership_scope=_row_text(state_row, "membership_scope", MembershipScope.UNKNOWN),
                 status="failed",
+                features={
+                    "pending_snapshot": _row_to_dict(pending_row),
+                    "state_snapshot": _row_to_dict(state_row),
+                    "task_snapshot": {
+                        "chat_id": int(task.chat_id),
+                        "event_count": int(task.event_count or 0),
+                        "generation": int(task.generation or 0),
+                        "in_flight_generation": int(task.in_flight_generation or 0),
+                        "quiet_delay_seconds": int(task.quiet_delay_seconds or 0),
+                        "priority_score": float(task.priority_score or 0.0),
+                        "first_event_at": task.first_event_at,
+                        "last_event_at": task.last_event_at,
+                        "due_at": task.due_at,
+                    },
+                    "result_snapshot": {
+                        "failure_type": str(result.failure_type or ""),
+                        "failure_message": str(result.failure_message or ""),
+                        "retry_after_seconds": int(result.retry_after_seconds or 0),
+                        "retry_delay_seconds": int(retry_delay or 0),
+                        "api_cost": float(result.api_cost or 0.0),
+                    },
+                },
                 outcome={
                     "retry_delay_seconds": retry_delay,
                     "event_count": int(task.event_count or 0),
@@ -1302,21 +1440,221 @@ def deactivate_chat(
         cur.close()
 
 
+@synchronized_write
+def upsert_account_runtime_state(
+    conn: sqlite3.Connection,
+    *,
+    account_key: str,
+    session_name: str = "",
+    label: str = "",
+    cooldown_until: str = "",
+    public_resolve_used: int | None = None,
+    success: bool | None = None,
+    duration_seconds: float | None = None,
+    failure_message: str = "",
+    in_flight_delta: int = 0,
+    now_text: str | None = None,
+) -> None:
+    if not _table_exists(conn, "account_runtime_state"):
+        return
+    key = str(account_key or "").strip()
+    if not key:
+        return
+    now = str(now_text or utc_now_text())
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            INSERT INTO account_runtime_state(
+                account_key,
+                session_name,
+                label,
+                cooldown_until,
+                public_resolve_used,
+                recent_success_count,
+                recent_failure_count,
+                avg_duration_seconds,
+                last_success_at,
+                last_failure_at,
+                last_failure_message,
+                in_flight_count,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(account_key) DO UPDATE SET
+                session_name = CASE WHEN excluded.session_name <> '' THEN excluded.session_name ELSE account_runtime_state.session_name END,
+                label = CASE WHEN excluded.label <> '' THEN excluded.label ELSE account_runtime_state.label END,
+                cooldown_until = CASE WHEN excluded.cooldown_until <> '' THEN excluded.cooldown_until ELSE account_runtime_state.cooldown_until END,
+                public_resolve_used = CASE
+                    WHEN ? IS NULL THEN account_runtime_state.public_resolve_used
+                    ELSE excluded.public_resolve_used
+                END,
+                recent_success_count = account_runtime_state.recent_success_count + ?,
+                recent_failure_count = account_runtime_state.recent_failure_count + ?,
+                avg_duration_seconds = CASE
+                    WHEN ? IS NULL THEN account_runtime_state.avg_duration_seconds
+                    WHEN account_runtime_state.avg_duration_seconds <= 0 THEN excluded.avg_duration_seconds
+                    ELSE (account_runtime_state.avg_duration_seconds * 0.8) + (excluded.avg_duration_seconds * 0.2)
+                END,
+                last_success_at = CASE WHEN ? = 1 THEN excluded.last_success_at ELSE account_runtime_state.last_success_at END,
+                last_failure_at = CASE WHEN ? = 1 THEN excluded.last_failure_at ELSE account_runtime_state.last_failure_at END,
+                last_failure_message = CASE WHEN ? = 1 THEN excluded.last_failure_message ELSE account_runtime_state.last_failure_message END,
+                in_flight_count = MAX(0, account_runtime_state.in_flight_count + ?),
+                updated_at = excluded.updated_at
+            """,
+            (
+                key,
+                str(session_name or "").strip(),
+                str(label or "").strip(),
+                str(cooldown_until or "").strip(),
+                max(0, int(public_resolve_used or 0)),
+                1 if success is True else 0,
+                1 if success is False else 0,
+                max(0.0, float(duration_seconds or 0.0)),
+                now if success is True else "",
+                now if success is False else "",
+                str(failure_message or "")[:500] if success is False else "",
+                max(0, int(in_flight_delta or 0)),
+                now,
+                None if public_resolve_used is None else int(public_resolve_used),
+                1 if success is True else 0,
+                1 if success is False else 0,
+                None if duration_seconds is None else float(duration_seconds),
+                1 if success is True else 0,
+                1 if success is False else 0,
+                1 if success is False else 0,
+                int(in_flight_delta or 0),
+            ),
+        )
+        conn.commit()
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def list_account_runtime_states(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    if not _table_exists(conn, "account_runtime_state"):
+        return []
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM account_runtime_state
+            ORDER BY account_key ASC
+            """
+        )
+        return [_row_to_dict(row) for row in cur.fetchall()]
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def prune_learning_events(
+    conn: sqlite3.Connection,
+    cfg: Any,
+    *,
+    now_text: str | None = None,
+) -> dict[str, Any]:
+    if not _table_exists(conn, "sync_learning_events"):
+        return {"ok": True, "deleted": 0, "remaining": 0}
+    now = str(now_text or utc_now_text())
+    retention_days = cfg_int(cfg, "sync_learning_retention_days", 90, minimum=1)
+    max_rows = cfg_int(cfg, "sync_learning_max_rows", 200000, minimum=1000)
+    deleted = 0
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        cur.execute(
+            """
+            DELETE FROM sync_learning_events
+            WHERE created_at < datetime(?, ?)
+              AND event_type <> 'update_outcome'
+              AND failure_type = ''
+            """,
+            (now, f"-{retention_days} days"),
+        )
+        deleted += max(0, int(cur.rowcount or 0))
+        cur.execute("SELECT COUNT(*) AS c FROM sync_learning_events")
+        remaining = _row_int(cur.fetchone(), "c")
+        excess = max(0, remaining - max_rows)
+        if excess > 0:
+            cur.execute(
+                """
+                DELETE FROM sync_learning_events
+                WHERE id IN (
+                    SELECT id
+                    FROM sync_learning_events
+                    ORDER BY
+                        CASE
+                            WHEN event_type = 'update_outcome' OR failure_type <> ''
+                                THEN 1
+                            ELSE 0
+                        END ASC,
+                        created_at ASC,
+                        id ASC
+                    LIMIT ?
+                )
+                """,
+                (excess,),
+            )
+            deleted += max(0, int(cur.rowcount or 0))
+            remaining = max(0, remaining - excess)
+        conn.commit()
+        return {
+            "ok": True,
+            "deleted": deleted,
+            "remaining": remaining,
+            "retention_days": retention_days,
+            "max_rows": max_rows,
+        }
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
 def _empty_scheduler_summary(health_snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     snapshot = dict(health_snapshot or {})
+    ai_shadow = bool(snapshot.get("ai_shadow"))
+    ai_enabled_value = bool(snapshot.get("ai_enabled"))
+    auto_promote = bool(snapshot.get("ai_auto_promote_enabled"))
+    model_can_take_over = ai_enabled_value and not ai_shadow and auto_promote
+    effective_model_mode = (
+        "已接管" if model_can_take_over else "仅观察" if ai_enabled_value else "已关闭"
+    )
     return {
         "enabled": bool(snapshot.get("scheduler_enabled")),
-        "ai_enabled": bool(snapshot.get("ai_enabled")),
-        "ai_shadow": bool(snapshot.get("ai_shadow")),
+        "ai_enabled": ai_enabled_value,
+        "ai_shadow": ai_shadow,
+        "ai_auto_promote_enabled": auto_promote,
+        "effective_model_mode": effective_model_mode,
+        "model_can_take_over": model_can_take_over,
         "pending_count": 0,
         "due_count": 0,
         "in_flight_count": 0,
+        "learning_event_count": 0,
+        "outcome_sample_count": 0,
         "avg_quiet_delay_seconds": 0,
         "next_due_at": "",
         "coalesced_event_count": 0,
         "membership_counts": [],
         "status_counts": [],
         "accounts": list(snapshot.get("accounts") or []),
+        "account_capacity": {
+            "configured": int(snapshot.get("configured_listener_count") or 0),
+            "connected": int(snapshot.get("active_listener_count") or 0),
+            "available": 0,
+            "cooldown": 0,
+            "concurrency": int(snapshot.get("scheduler_concurrency") or 1),
+        },
+        "backpressure": dict(snapshot.get("backpressure") or {}),
         "model": {
             "model_key": MODEL_KEY,
             "model_version": "",
@@ -1383,6 +1721,22 @@ def build_scheduler_summary(
                 "coalesced_event_count": _row_int(row, "coalesced_event_count"),
             }
         )
+        accounts = list(payload.get("accounts") or [])
+        available_accounts = [
+            item for item in accounts if int(item.get("cooldown_seconds") or 0) <= 0
+        ]
+        cooldown_accounts = [
+            item for item in accounts if int(item.get("cooldown_seconds") or 0) > 0
+        ]
+        payload["account_capacity"] = {
+            "configured": len(accounts)
+            or int((health_snapshot or {}).get("configured_listener_count") or 0),
+            "connected": int((health_snapshot or {}).get("active_listener_count") or 0),
+            "available": len(available_accounts),
+            "cooldown": len(cooldown_accounts),
+            "concurrency": int((health_snapshot or {}).get("scheduler_concurrency") or max(1, len(accounts) or 1)),
+        }
+        payload["backpressure"] = dict((health_snapshot or {}).get("backpressure") or {})
 
         cur.execute(
             """
@@ -1436,7 +1790,7 @@ def build_scheduler_summary(
         cur.execute(
             """
             SELECT chat_id, event_type, reason, source_account, failure_type, created_at, outcome_json
-            FROM sync_learning_events
+            FROM sync_learning_events INDEXED BY idx_sync_learning_failure_created
             WHERE failure_type <> ''
             ORDER BY created_at DESC, id DESC
             LIMIT 8
@@ -1458,11 +1812,16 @@ def build_scheduler_summary(
         cur.execute(
             """
             SELECT
-                COUNT(*) AS sample_count
+                COUNT(*) AS learning_event_count,
+                SUM(CASE WHEN event_type = 'update_outcome' THEN 1 ELSE 0 END) AS outcome_sample_count
             FROM sync_learning_events
             """
         )
-        sample_count = _row_int(cur.fetchone(), "sample_count")
+        event_count_row = cur.fetchone()
+        learning_event_count = _row_int(event_count_row, "learning_event_count")
+        outcome_sample_count = _row_int(event_count_row, "outcome_sample_count")
+        payload["learning_event_count"] = learning_event_count
+        payload["outcome_sample_count"] = outcome_sample_count
         cur.execute(
             """
             SELECT model_key, model_version, backend, metrics_json, trained_at, artifact_path, state_json, updated_at
@@ -1483,19 +1842,35 @@ def build_scheduler_summary(
                 "backend": backend,
                 "artifact_path": default_model_artifact_path(),
                 "trained_at": "",
-                "sample_count": sample_count,
+                "sample_count": outcome_sample_count,
+                "learning_event_count": learning_event_count,
+                "outcome_sample_count": outcome_sample_count,
                 "metrics": {},
             }
         else:
+            model_state = _decode_json_dict(model_row["state_json"])
+            state_mode = str(model_state.get("mode") or "shadow")
+            if payload["ai_enabled"]:
+                if payload["ai_shadow"]:
+                    payload["effective_model_mode"] = "仅观察"
+                    payload["model_can_take_over"] = False
+                elif state_mode == "active" and payload.get("ai_auto_promote_enabled"):
+                    payload["effective_model_mode"] = "已接管"
+                    payload["model_can_take_over"] = True
+                else:
+                    payload["effective_model_mode"] = "启发式接管"
+                    payload["model_can_take_over"] = False
             payload["model"] = {
                 "model_key": str(model_row["model_key"] or MODEL_KEY),
                 "model_version": str(model_row["model_version"] or ""),
                 "backend": str(model_row["backend"] or ""),
                 "artifact_path": str(model_row["artifact_path"] or default_model_artifact_path()),
                 "trained_at": str(model_row["trained_at"] or ""),
-                "sample_count": sample_count,
+                "sample_count": outcome_sample_count,
+                "learning_event_count": learning_event_count,
+                "outcome_sample_count": outcome_sample_count,
                 "metrics": _decode_json_dict(model_row["metrics_json"]),
-                "state": _decode_json_dict(model_row["state_json"]),
+                "state": model_state,
                 "updated_at": str(model_row["updated_at"] or ""),
             }
         return payload
@@ -1614,6 +1989,180 @@ def list_scheduler_chats(
         cur.close()
 
 
+def build_update_preflight(
+    conn: sqlite3.Connection,
+    cfg: Any,
+    *,
+    chat_id: str | int = "all",
+    health_snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    raw_chat_id = str(chat_id or "all").strip()
+    all_scope = raw_chat_id.lower() == "all"
+    cur = conn.cursor()
+    try:
+        if all_scope:
+            cur.execute(
+                """
+                SELECT
+                    COUNT(*) AS target_count,
+                    SUM(CASE WHEN COALESCE(chat_username, '') <> '' THEN 1 ELSE 0 END) AS public_count
+                FROM chats
+                """
+            )
+            row = cur.fetchone()
+            target_count = _row_int(row, "target_count")
+            public_count = _row_int(row, "public_count")
+            target_title = "全部群聊"
+            safe_chat_id: int | None = None
+        else:
+            safe_chat_id = int(raw_chat_id)
+            cur.execute(
+                """
+                SELECT chat_id, chat_title, chat_username
+                FROM chats
+                WHERE chat_id = ?
+                LIMIT 1
+                """,
+                (safe_chat_id,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {"ok": False, "error": "chat_id 不存在"}
+            target_count = 1
+            public_count = 1 if _row_text(row, "chat_username") else 0
+            target_title = _row_text(row, "chat_title", f"Chat {safe_chat_id}")
+    finally:
+        cur.close()
+
+    snapshot = dict(health_snapshot or {})
+    account_rows = list(snapshot.get("accounts") or [])
+    if not account_rows:
+        account_rows = [
+            {
+                "key": "primary",
+                "label": "主账号",
+                "cooldown_seconds": 0,
+                "connected": False,
+            }
+        ]
+        secondary_session = str(getattr(cfg, "secondary_session_name", "") or "").strip()
+        primary_session = str(getattr(cfg, "session_name", "") or "").strip()
+        if secondary_session and secondary_session != primary_session:
+            account_rows.append(
+                {
+                    "key": "secondary",
+                    "label": "第二账号",
+                    "cooldown_seconds": 0,
+                    "connected": False,
+                }
+            )
+
+    configured_concurrency = cfg_int(cfg, "admin_update_concurrency", 4, minimum=1)
+    active_account_count = max(1, len(account_rows))
+    per_account_concurrency = max(1, configured_concurrency // active_account_count)
+    effective_concurrency = max(
+        1,
+        min(configured_concurrency, per_account_concurrency * active_account_count),
+    )
+    secondary_limit = getattr(cfg, "admin_update_secondary_public_resolve_limit", None)
+    if secondary_limit is None:
+        secondary_public_budget = max(0, min(public_count, max(2, target_count // 20)))
+    else:
+        secondary_public_budget = max(0, int(secondary_limit or 0))
+    cooldown_accounts = [
+        item
+        for item in account_rows
+        if int(item.get("cooldown_seconds") or 0) > 0
+    ]
+    available_accounts = [
+        item
+        for item in account_rows
+        if int(item.get("cooldown_seconds") or 0) <= 0
+    ]
+    risks: list[dict[str, str]] = []
+    if not available_accounts:
+        risks.append(
+            {
+                "level": "critical",
+                "message": "所有账号都处于冷却中，启动后大概率会立即等待或失败。",
+            }
+        )
+    elif cooldown_accounts:
+        risks.append(
+            {
+                "level": "warning",
+                "message": "部分账号处于冷却中，任务会降低并发并优先使用可用账号。",
+            }
+        )
+    if all_scope and target_count >= 500 and secondary_public_budget <= 0 and public_count > 0:
+        risks.append(
+            {
+                "level": "warning",
+                "message": "公开 username 主动解析预算为 0，第二账号只能处理已缓存或已加入群组。",
+            }
+        )
+    if effective_concurrency > len(available_accounts) and len(available_accounts) <= 1:
+        risks.append(
+            {
+                "level": "info",
+                "message": "当前实际可用账号较少，任务会按单账号节流执行。",
+            }
+        )
+    risk_level = "low"
+    if any(item["level"] == "critical" for item in risks):
+        risk_level = "critical"
+    elif any(item["level"] == "warning" for item in risks):
+        risk_level = "warning"
+
+    return {
+        "ok": True,
+        "target": {
+            "scope": "all" if all_scope else "chat",
+            "chat_id": None if all_scope else safe_chat_id,
+            "label": target_title,
+            "target_count": target_count,
+            "public_username_count": public_count,
+        },
+        "accounts": [
+            {
+                "key": str(item.get("key") or ""),
+                "label": str(item.get("label") or item.get("key") or ""),
+                "connected": bool(item.get("connected")),
+                "cooldown_seconds": int(item.get("cooldown_seconds") or 0),
+                "status_label": "冷却中"
+                if int(item.get("cooldown_seconds") or 0) > 0
+                else "可用",
+            }
+            for item in account_rows
+        ],
+        "account_capacity": {
+            "configured": len(account_rows),
+            "available": len(available_accounts),
+            "cooldown": len(cooldown_accounts),
+        },
+        "strategy": {
+            "configured_concurrency": configured_concurrency,
+            "effective_concurrency": effective_concurrency,
+            "per_account_concurrency": per_account_concurrency,
+            "scheduler_concurrency": cfg_int(cfg, "sync_scheduler_concurrency", 2, minimum=1),
+            "secondary_public_resolve_budget": secondary_public_budget,
+            "max_cooldown_wait_seconds": cfg_int(
+                cfg,
+                "admin_update_max_cooldown_wait_seconds",
+                45,
+                minimum=0,
+            ),
+        },
+        "risk_level": risk_level,
+        "risks": risks,
+        "confirm_summary": (
+            f"将对{target_title}执行手动全量增量更新；"
+            f"目标 {target_count} 个，可用账号 {len(available_accounts)}/{len(account_rows)}，"
+            f"预计总并发 {effective_concurrency}，公开解析预算 {secondary_public_budget}。"
+        ),
+    }
+
+
 @synchronized_write
 def reset_model_state(
     conn: sqlite3.Connection,
@@ -1626,6 +2175,10 @@ def reset_model_state(
     with suppress(FileNotFoundError):
         path.unlink()
         removed_artifact = True
+    with suppress(Exception):
+        from tg_harvest.ml.sync_predictor import invalidate_model_cache
+
+        invalidate_model_cache(str(path))
     now = str(now_text or utc_now_text())
     cur = conn.cursor()
     try:

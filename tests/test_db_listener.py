@@ -12,9 +12,9 @@ from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.runtime.db_listener import (
     DatabaseChatListenerRuntime,
     _ListenerAccount,
+    _load_database_chat_ids,
     _PublicProbeOutcome,
     _QueuedChatUpdate,
-    _load_database_chat_ids,
     ensure_database_chat_listener_runtime,
 )
 
@@ -391,6 +391,25 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
 
         self.assertEqual([1, 3], [int(row["chat_id"]) for row in batch])
 
+    def test_public_probe_pauses_when_scheduler_backpressure_active(self) -> None:
+        cfg = SimpleNamespace(
+            sync_scheduler_enabled=1,
+            sync_scheduler_concurrency=2,
+            session_name="primary",
+            secondary_session_name="",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+
+        with patch.object(
+            runtime,
+            "_pending_update_counts",
+            return_value={"pending": 50, "due": 0, "in_flight": 0},
+        ):
+            self.assertTrue(runtime._public_probe_has_pending_updates())
+
     def test_next_public_probe_batch_prioritizes_hot_rows_without_starving_cold_rows(
         self,
     ) -> None:
@@ -598,7 +617,11 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
             outcome = runtime._probe_public_row(row)
 
         self.assertEqual(
-            _PublicProbeOutcome(status="unchanged", cooldown_seconds=3600),
+            _PublicProbeOutcome(
+                status="unchanged",
+                cooldown_seconds=3600,
+                source_account="primary",
+            ),
             outcome,
         )
 

@@ -513,9 +513,16 @@
       return;
     }
 
-    var confirmText = target.isAll
-      ? '确认执行增量更新全部群聊？'
-      : buildNamedConfirmText('确认执行增量更新？', '确认执行增量更新：', target.label);
+    var preflight = null;
+    try {
+      preflight = await fetchUpdatePreflight(target);
+      appendUpdatePreflightLog(elements, preflight);
+    } catch (error) {
+      appendLog(elements, '读取更新预检失败：' + error.message);
+      return;
+    }
+
+    var confirmText = buildUpdateConfirmText(target, preflight);
 
     if (!confirmAction(elements, confirmText, '已取消更新操作')) {
       return;
@@ -541,6 +548,55 @@
     } catch (error) {
       appendLog(elements, '创建增量更新任务失败：' + error.message);
     }
+  }
+
+  async function fetchUpdatePreflight(target) {
+    var chatId = target.isAll
+      ? 'all'
+      : String(getRequiredIntegerChatId(target, 'chat_id 参数非法'));
+    var payload = await fetchJSON(
+      '/api/admin/jobs/update/preflight?chat_id=' + encodeURIComponent(chatId)
+    );
+    if (!payload || payload.ok === false) {
+      throw new Error((payload && payload.error) || '预检失败');
+    }
+    return payload;
+  }
+
+  function buildUpdateConfirmText(target, preflight) {
+    var summary = String(preflight && preflight.confirm_summary || '');
+    var risks = Array.isArray(preflight && preflight.risks) ? preflight.risks : [];
+    var lines = [];
+    lines.push(target.isAll ? '确认执行手动全量增量更新？' : buildNamedConfirmText('确认执行手动全量增量更新？', '目标：', target.label));
+    if (summary) {
+      lines.push(summary);
+    }
+    risks.slice(0, 3).forEach(function (item) {
+      if (item && item.message) {
+        lines.push('风险：' + String(item.message));
+      }
+    });
+    return lines.join('\n');
+  }
+
+  function appendUpdatePreflightLog(elements, preflight) {
+    var target = preflight && preflight.target ? preflight.target : {};
+    var capacity = preflight && preflight.account_capacity ? preflight.account_capacity : {};
+    var strategy = preflight && preflight.strategy ? preflight.strategy : {};
+    appendLog(
+      elements,
+      '更新预检：目标 ' + String(target.label || '')
+        + '，群组 ' + String(target.target_count || 0)
+        + '，可用账号 ' + String(capacity.available || 0) + '/' + String(capacity.configured || 0)
+        + '，预计并发 ' + String(strategy.effective_concurrency || 1)
+        + '，公开解析预算 ' + String(strategy.secondary_public_resolve_budget || 0)
+        + '，风险级别 ' + String(preflight && preflight.risk_level || 'low')
+    );
+    (Array.isArray(preflight && preflight.risks) ? preflight.risks : []).forEach(function (item) {
+      if (item && item.message) {
+        appendLog(elements, '预检提示：' + String(item.message));
+      }
+    });
   }
 
   async function handleStopJobClick(elements) {

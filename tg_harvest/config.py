@@ -175,13 +175,13 @@ def _load_raw_config_values() -> dict:
         ),
         # 智能调度器。开启后事件先进入持久 pending，再按 quiet delay 批量拉取。
         "sync_scheduler_enabled": _env_int("TG_SYNC_SCHEDULER_ENABLED", 1),
-        # 本地模型预测。默认启用 shadow 学习；依赖缺失时只记录不可用状态。
-        "sync_ai_enabled": _env_int("TG_SYNC_AI_ENABLED", 1),
+        # 本地模型预测。默认关闭；依赖缺失时只记录不可用状态，不阻塞入库。
+        "sync_ai_enabled": _env_int("TG_SYNC_AI_ENABLED", 0),
         # 模型 shadow 模式。开启时模型只记录建议，不接管调度。
         "sync_ai_shadow": _env_int("TG_SYNC_AI_SHADOW", 1),
-        # 自动晋级。模型连续达到门槛后，从 shadow 自动转入 active。
+        # 自动晋级。默认关闭，必须显式开启后才允许模型从观察转入接管。
         "sync_ai_auto_promote_enabled": _env_int(
-            "TG_SYNC_AI_AUTO_PROMOTE_ENABLED", 1
+            "TG_SYNC_AI_AUTO_PROMOTE_ENABLED", 0
         ),
         # 事件到拉取的最小延迟边界，单位秒。
         "sync_min_delay_seconds": _env_int("TG_SYNC_MIN_DELAY_SECONDS", 15),
@@ -197,6 +197,7 @@ def _load_raw_config_values() -> dict:
         "sync_model_train_interval_seconds": _env_int(
             "TG_SYNC_MODEL_TRAIN_INTERVAL_SECONDS", 1800
         ),
+        "sync_model_kind": _env_str("TG_SYNC_MODEL_KIND", "torch_lite"),
         "sync_model_min_samples": _env_int("TG_SYNC_MODEL_MIN_SAMPLES", 200),
         "sync_model_max_train_samples": _env_int(
             "TG_SYNC_MODEL_MAX_TRAIN_SAMPLES", 16384
@@ -227,6 +228,14 @@ def _load_raw_config_values() -> dict:
         "sync_model_min_confidence": _env_float(
             "TG_SYNC_MODEL_MIN_CONFIDENCE", 0.35
         ),
+        "sync_model_max_active_delay_factor": _env_float(
+            "TG_SYNC_MODEL_MAX_ACTIVE_DELAY_FACTOR", 2.0
+        ),
+        "sync_learning_retention_days": _env_int(
+            "TG_SYNC_LEARNING_RETENTION_DAYS", 90
+        ),
+        "sync_learning_max_rows": _env_int("TG_SYNC_LEARNING_MAX_ROWS", 200000),
+        "sync_scheduler_concurrency": _env_int("TG_SYNC_SCHEDULER_CONCURRENCY", 2),
         # 可选运维机器人；默认关闭，只用于任务通知，不参与历史消息采集。
         "ops_bot_enabled": _env_int("TG_OPS_BOT_ENABLED", 0),
         # 运维机器人 token，只从环境读取，禁止写入日志。
@@ -346,6 +355,8 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["sync_model_train_interval_seconds"] = max(
         60, int(normalized["sync_model_train_interval_seconds"])
     )
+    if normalized["sync_model_kind"] not in {"torch_lite", "torch"}:
+        normalized["sync_model_kind"] = "torch_lite"
     normalized["sync_model_min_samples"] = max(
         1, int(normalized["sync_model_min_samples"])
     )
@@ -382,6 +393,18 @@ def _normalize_config_values(raw: dict) -> dict:
     )
     normalized["sync_model_min_confidence"] = min(
         1.0, max(0.0, float(normalized["sync_model_min_confidence"]))
+    )
+    normalized["sync_model_max_active_delay_factor"] = max(
+        1.0, float(normalized["sync_model_max_active_delay_factor"])
+    )
+    normalized["sync_learning_retention_days"] = max(
+        1, int(normalized["sync_learning_retention_days"])
+    )
+    normalized["sync_learning_max_rows"] = max(
+        1000, int(normalized["sync_learning_max_rows"])
+    )
+    normalized["sync_scheduler_concurrency"] = max(
+        1, int(normalized["sync_scheduler_concurrency"])
     )
     normalized["ops_bot_enabled"] = enabled_int(normalized["ops_bot_enabled"])
     if normalized["ops_bot_timeout_seconds"] is None:
@@ -464,6 +487,7 @@ def _build_app_config(values: dict) -> "AppConfig":
         sync_model_train_interval_seconds=values[
             "sync_model_train_interval_seconds"
         ],
+        sync_model_kind=values["sync_model_kind"],
         sync_model_min_samples=values["sync_model_min_samples"],
         sync_model_max_train_samples=values["sync_model_max_train_samples"],
         sync_model_train_batch_size=values["sync_model_train_batch_size"],
@@ -482,6 +506,12 @@ def _build_app_config(values: dict) -> "AppConfig":
             "sync_model_ready_consecutive_runs"
         ],
         sync_model_min_confidence=values["sync_model_min_confidence"],
+        sync_model_max_active_delay_factor=values[
+            "sync_model_max_active_delay_factor"
+        ],
+        sync_learning_retention_days=values["sync_learning_retention_days"],
+        sync_learning_max_rows=values["sync_learning_max_rows"],
+        sync_scheduler_concurrency=values["sync_scheduler_concurrency"],
         ops_bot_enabled=values["ops_bot_enabled"],
         ops_bot_token=values["ops_bot_token"],
         ops_bot_notify_chat_id=values["ops_bot_notify_chat_id"],
@@ -552,6 +582,7 @@ class AppConfig:
     sync_max_active_delay_seconds: int
     sync_max_cold_delay_seconds: int
     sync_model_train_interval_seconds: int
+    sync_model_kind: str
     sync_model_min_samples: int
     sync_model_max_train_samples: int
     sync_model_train_batch_size: int
@@ -564,6 +595,10 @@ class AppConfig:
     sync_model_ready_max_added_mae_log: float
     sync_model_ready_consecutive_runs: int
     sync_model_min_confidence: float
+    sync_model_max_active_delay_factor: float
+    sync_learning_retention_days: int
+    sync_learning_max_rows: int
+    sync_scheduler_concurrency: int
     ops_bot_enabled: int
     ops_bot_token: str
     ops_bot_notify_chat_id: str

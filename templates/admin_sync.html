@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>消息同步统计</title>
+  <title>同步工作台</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_sync.css') }}">
@@ -12,8 +12,8 @@
   <main class="page" id="admin-sync-page">
     <header class="page-header">
       <p class="eyebrow">Sync Console</p>
-      <h1>消息同步统计</h1>
-      <p class="subtle">查看不同时间窗口内的消息入库情况</p>
+      <h1>同步工作台</h1>
+      <p class="subtle">查看实时入库、调度队列、账号状态和模型模式</p>
       <p class="subtle"><a href="/admin/manage" class="admin-link">返回后台管理</a></p>
     </header>
 
@@ -83,12 +83,42 @@
       >
         <div class="sync-health-head">
           <div>
-            <h3 id="syncSchedulerTitle" class="section-title">智能调度</h3>
+            <h3 id="syncSchedulerTitle" class="section-title">调度队列</h3>
             <p id="admin-sync-scheduler-status" class="sync-subline" role="status" aria-live="polite">正在读取调度状态...</p>
+          </div>
+          <div class="sync-toolbar">
+            <button id="admin-sync-reset-model-btn" class="btn" type="button" aria-label="重置同步模型">
+              重置模型
+            </button>
           </div>
         </div>
         <div id="admin-sync-scheduler-grid" class="sync-scheduler-grid" aria-label="智能调度核心指标"></div>
+        <div id="admin-sync-account-grid" class="sync-account-grid" aria-label="账号运行状态"></div>
         <div id="admin-sync-scheduler-model" class="sync-scheduler-model" aria-label="同步模型状态"></div>
+        <div class="sync-chat-tools" aria-label="调度群组筛选工具">
+          <label for="admin-sync-membership-select" class="sr-only">选择可观测范围</label>
+          <select id="admin-sync-membership-select" aria-label="选择可观测范围">
+            <option value="">全部范围</option>
+            <option value="both_joined">双账号已加入</option>
+            <option value="single_joined_primary">主账号已加入</option>
+            <option value="single_joined_secondary">第二账号已加入</option>
+            <option value="none_joined">公开可探测</option>
+            <option value="unobservable">不可观察</option>
+          </select>
+          <label for="admin-sync-chat-status-select" class="sr-only">选择调度状态</label>
+          <select id="admin-sync-chat-status-select" aria-label="选择调度状态">
+            <option value="">全部状态</option>
+            <option value="pending">等待入库</option>
+            <option value="updating">正在入库</option>
+            <option value="backoff">冷却中</option>
+            <option value="idle">空闲</option>
+            <option value="quarantined">隔离</option>
+          </select>
+          <button id="admin-sync-load-chats-btn" class="btn" type="button" aria-label="刷新调度群组列表">
+            刷新队列
+          </button>
+        </div>
+        <div id="admin-sync-chat-list" class="sync-chat-list" aria-label="调度群组列表"></div>
         <div id="admin-sync-scheduler-failures" class="sync-health-list" aria-label="最近调度失败"></div>
       </section>
 
@@ -99,7 +129,7 @@
       <div class="sync-panel-head">
         <div>
           <h2 id="syncWindowsTitle" class="section-title">时间窗口</h2>
-          <p class="sync-subline">默认“时时”会展示最近入库消息流；切换其他窗口查看聚合统计。</p>
+          <p class="sync-subline">默认“实时”会展示最近入库消息流；切换其他窗口查看聚合统计。</p>
         </div>
         <div class="sync-toolbar">
           <label for="admin-sync-window-select" class="sr-only">选择时间窗口</label>
@@ -118,7 +148,7 @@
     >
       <div class="sync-panel-head">
         <div>
-          <h2 id="syncLiveTitle" class="section-title">时时同步消息</h2>
+          <h2 id="syncLiveTitle" class="section-title">实时同步消息</h2>
           <p id="admin-sync-live-status" class="sync-subline" role="status" aria-live="polite">正在读取最近入库消息...</p>
         </div>
       </div>

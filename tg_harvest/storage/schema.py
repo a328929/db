@@ -456,6 +456,24 @@ def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: st
 
 def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
     cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS account_runtime_state (
+        account_key              TEXT PRIMARY KEY,
+        session_name             TEXT NOT NULL DEFAULT '',
+        label                    TEXT NOT NULL DEFAULT '',
+        cooldown_until           TEXT NOT NULL DEFAULT '',
+        public_resolve_used      INTEGER NOT NULL DEFAULT 0,
+        recent_success_count     INTEGER NOT NULL DEFAULT 0,
+        recent_failure_count     INTEGER NOT NULL DEFAULT 0,
+        avg_duration_seconds     REAL NOT NULL DEFAULT 0,
+        last_success_at          TEXT NOT NULL DEFAULT '',
+        last_failure_at          TEXT NOT NULL DEFAULT '',
+        last_failure_message     TEXT NOT NULL DEFAULT '',
+        in_flight_count          INTEGER NOT NULL DEFAULT 0,
+        updated_at               TEXT NOT NULL DEFAULT (datetime('now'))
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
     CREATE TABLE IF NOT EXISTS sync_chat_state (
         chat_id                  INTEGER PRIMARY KEY,
         chat_title               TEXT NOT NULL DEFAULT '',
@@ -984,6 +1002,24 @@ def _ensure_admin_clone_message_map_schema(cur: sqlite3.Cursor) -> None:
 
 
 def _ensure_sync_scheduler_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "account_runtime_state",
+        [
+            ("session_name", "session_name TEXT NOT NULL DEFAULT ''"),
+            ("label", "label TEXT NOT NULL DEFAULT ''"),
+            ("cooldown_until", "cooldown_until TEXT NOT NULL DEFAULT ''"),
+            ("public_resolve_used", "public_resolve_used INTEGER NOT NULL DEFAULT 0"),
+            ("recent_success_count", "recent_success_count INTEGER NOT NULL DEFAULT 0"),
+            ("recent_failure_count", "recent_failure_count INTEGER NOT NULL DEFAULT 0"),
+            ("avg_duration_seconds", "avg_duration_seconds REAL NOT NULL DEFAULT 0"),
+            ("last_success_at", "last_success_at TEXT NOT NULL DEFAULT ''"),
+            ("last_failure_at", "last_failure_at TEXT NOT NULL DEFAULT ''"),
+            ("last_failure_message", "last_failure_message TEXT NOT NULL DEFAULT ''"),
+            ("in_flight_count", "in_flight_count INTEGER NOT NULL DEFAULT 0"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
     _ensure_table_columns(
         cur,
         "sync_chat_state",

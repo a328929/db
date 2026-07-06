@@ -11,6 +11,7 @@ from tg_harvest.storage.sync_scheduler import (
     SyncObservation,
     SyncUpdateResult,
     build_scheduler_summary,
+    build_update_preflight,
     claim_due_pending_updates,
     classify_membership_scope,
     complete_pending_update,
@@ -437,6 +438,46 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         self.assertEqual(30, decision.quiet_delay_seconds)
         self.assertEqual("2026-07-03 00:00:30", decision.due_at)
 
+    def test_shadow_forces_observation_even_if_model_reports_active(self) -> None:
+        self._refresh_states()
+
+        class _Suggestion:
+            available = True
+            active = True
+            quiet_delay_seconds = 300
+            priority_score = 250.0
+
+            def to_prediction_dict(self):
+                return {
+                    "available": True,
+                    "active": True,
+                    "quiet_delay_seconds": 300,
+                    "priority_score": 250.0,
+                }
+
+        with patch(
+            "tg_harvest.ml.sync_predictor.predict_sync_decision",
+            return_value=_Suggestion(),
+        ):
+            decision = enqueue_observation(
+                self.conn,
+                cfg=_cfg(
+                    sync_ai_enabled=1,
+                    sync_ai_shadow=1,
+                    sync_ai_auto_promote_enabled=1,
+                ),
+                observation=SyncObservation(
+                    chat_id=1,
+                    chat_title="Both",
+                    reason="new_message",
+                    source_account="primary",
+                    observed_at="2026-07-03 00:00:00",
+                ),
+            )
+
+        self.assertEqual("heuristic_with_model_shadow", decision.source)
+        self.assertEqual(30, decision.quiet_delay_seconds)
+
     def test_active_model_prediction_overrides_due_at_with_bounds(self) -> None:
         self._refresh_states()
 
@@ -460,7 +501,11 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         ):
             decision = enqueue_observation(
                 self.conn,
-                cfg=_cfg(sync_ai_enabled=1),
+                cfg=_cfg(
+                    sync_ai_enabled=1,
+                    sync_ai_shadow=0,
+                    sync_ai_auto_promote_enabled=1,
+                ),
                 observation=SyncObservation(
                     chat_id=1,
                     chat_title="Both",
@@ -471,9 +516,73 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             )
 
         self.assertEqual("torch_model_active", decision.source)
-        self.assertEqual(300, decision.quiet_delay_seconds)
-        self.assertEqual("2026-07-03 00:05:00", decision.due_at)
+        self.assertEqual(60, decision.quiet_delay_seconds)
+        self.assertEqual("2026-07-03 00:01:00", decision.due_at)
         self.assertEqual(250.0, decision.priority_score)
+
+    def test_complete_pending_update_backfills_remote_last_id_from_local_last_id(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        task = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+        )[0]
+
+        complete_pending_update(
+            self.conn,
+            task=task,
+            result=SyncUpdateResult(
+                chat_id=1,
+                source_account="primary",
+                added_message_count=1,
+                scanned_message_count=3,
+                local_last_id=15,
+                remote_last_id=0,
+            ),
+            now_text="2026-07-03 00:01:20",
+        )
+
+        state = self.conn.execute(
+            "SELECT local_last_id, remote_last_id FROM sync_chat_state WHERE chat_id = 1"
+        ).fetchone()
+        self.assertEqual(15, state["local_last_id"])
+        self.assertEqual(15, state["remote_last_id"])
+
+    def test_build_update_preflight_reports_capacity_and_budget(self) -> None:
+        payload = build_update_preflight(
+            self.conn,
+            _cfg(
+                admin_update_concurrency=4,
+                admin_update_secondary_public_resolve_limit=1,
+                admin_update_max_cooldown_wait_seconds=45,
+                sync_scheduler_concurrency=2,
+                session_name="primary",
+                secondary_session_name="secondary",
+            ),
+            chat_id="all",
+            health_snapshot={
+                "accounts": [
+                    {"key": "primary", "label": "主账号", "cooldown_seconds": 0},
+                    {"key": "secondary", "label": "第二账号", "cooldown_seconds": 90},
+                ],
+            },
+        )
+        self.assertTrue(payload["ok"])
+        self.assertEqual(2, payload["account_capacity"]["configured"])
+        self.assertEqual(1, payload["account_capacity"]["available"])
+        self.assertEqual(1, payload["strategy"]["secondary_public_resolve_budget"])
+
 
 
 if __name__ == "__main__":

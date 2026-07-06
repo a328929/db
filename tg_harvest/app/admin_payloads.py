@@ -8,7 +8,7 @@ from tg_harvest.storage import sync_scheduler
 from tg_harvest.storage.row_access import row_int as _row_int
 
 _ADMIN_SYNC_WINDOWS: tuple[dict[str, Any], ...] = (
-    {"key": "live", "label": "时时", "seconds": 0, "is_live": True},
+    {"key": "live", "label": "实时", "seconds": 0, "is_live": True},
     {"key": "10m", "label": "最近10分钟", "seconds": 10 * 60},
     {"key": "30m", "label": "最近30分钟", "seconds": 30 * 60},
     {"key": "1h", "label": "最近1小时", "seconds": 60 * 60},
