@@ -2,7 +2,6 @@ import logging
 import sqlite3
 import time
 from collections.abc import Callable
-from contextlib import suppress
 from typing import Any
 
 from tg_harvest.config import CFG, AppConfig, _is_enabled
@@ -18,9 +17,9 @@ from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     bounded_retry_count,
     exponential_backoff_seconds,
-    format_retry_context,
     flood_sleep_threshold_kwargs,
     flood_wait_seconds,
+    format_retry_context,
     is_transient_telegram_error,
     maybe_refresh_entity_cursor,
     raise_if_long_flood_wait,
@@ -41,6 +40,7 @@ from tg_harvest.ingest.store import (
     get_last_message_id,
     upsert_chat,
 )
+from tg_harvest.runtime.paths import secure_session_artifacts
 from tg_harvest.storage.connection import ensure_configured_db
 from tg_harvest.storage.schema import refresh_chat_message_counts
 
@@ -635,6 +635,7 @@ def run_harvest():
             receive_updates=False,
             **flood_sleep_threshold_kwargs(CFG),
         ) as client:
+            secure_session_artifacts(CFG.session_name)
             entities = collect_target_entities(conn, client, CFG)
             if not entities:
                 logging.error("没有可抓取的群组/频道。")
@@ -659,6 +660,7 @@ def run_harvest():
                         receive_updates=False,
                         **flood_sleep_threshold_kwargs(CFG),
                     ) as secondary_client:
+                        secure_session_artifacts(secondary_session)
                         secondary_entity = _resolve_same_entity_for_client(
                             secondary_client, ent
                         )

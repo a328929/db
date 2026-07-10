@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from tg_harvest.runtime.paths import resolve_db_path as _resolve_runtime_db_path
+from tg_harvest.runtime import paths as _runtime_paths
 
 DB_WRITE_LOCK = threading.RLock()
 
@@ -81,7 +81,7 @@ def detect_sqlite_features(conn: sqlite3.Connection) -> SqliteFeatures:
 
 
 def resolve_db_path(raw_name: str) -> str:
-    return _resolve_runtime_db_path(raw_name)
+    return _runtime_paths.resolve_db_path(raw_name)
 
 
 def _open_connection(db_name: str) -> sqlite3.Connection:
@@ -144,9 +144,11 @@ def connect_db(
     set_journal_mode: bool = True,
 ) -> tuple[sqlite3.Connection, SqliteFeatures]:
     conn = _open_connection(db_name)
+    _runtime_paths.secure_sqlite_artifacts(db_name)
     _apply_pragmas(
         conn, cache_mb=cache_mb, mmap_mb=mmap_mb, set_journal_mode=set_journal_mode
     )
+    _runtime_paths.secure_sqlite_artifacts(db_name)
     feats = _load_sqlite_features(conn)
     return conn, feats
 
@@ -190,4 +192,5 @@ def ensure_configured_db(
             else skip_fts_auto_heal
         ),
     )
+    _runtime_paths.secure_sqlite_artifacts(str(runtime_cfg.db_name))
     return conn, feats

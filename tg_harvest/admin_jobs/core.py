@@ -151,6 +151,7 @@ def _admin_job_create(
         job_id = uuid.uuid4().hex
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        owner_host = _job_runtime._admin_runtime_host()
         _admin_persist_job_create(
             job_id=job_id,
             job_type=str(job_type or "unknown"),
@@ -159,6 +160,7 @@ def _admin_job_create(
             created_at=created_at,
             owner_instance_id=owner_instance_id,
             owner_pid=owner_pid,
+            owner_host=owner_host,
         )
         return _admin_finalize_created_job_locked(job_id)
 
@@ -174,6 +176,7 @@ def _admin_try_create_exclusive_job(
         job_id = uuid.uuid4().hex
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        owner_host = _job_runtime._admin_runtime_host()
 
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
@@ -208,6 +211,7 @@ def _admin_try_create_exclusive_job(
                     created_at=created_at,
                     owner_instance_id=owner_instance_id,
                     owner_pid=owner_pid,
+                    owner_host=owner_host,
                 )
                 conn.commit()
             finally:
@@ -225,6 +229,7 @@ def _admin_create_chat_job_if_absent(
         job_id = uuid.uuid4().hex
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        owner_host = _job_runtime._admin_runtime_host()
 
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
@@ -262,6 +267,7 @@ def _admin_create_chat_job_if_absent(
                     created_at=created_at,
                     owner_instance_id=owner_instance_id,
                     owner_pid=owner_pid,
+                    owner_host=owner_host,
                 )
                 conn.commit()
             finally:
@@ -340,8 +346,6 @@ def _admin_job_stop_requested(job_id: str) -> bool:
 def _admin_request_job_stop(job_id: str) -> tuple[bool, str | None]:
     with ADMIN_JOBS_LOCK:
         updated_at = _job_runtime._admin_now_iso()
-        owner_instance_id = _job_runtime._admin_runtime_instance_id()
-        owner_pid = os.getpid()
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
             try:
@@ -366,20 +370,11 @@ def _admin_request_job_stop(job_id: str) -> tuple[bool, str | None]:
                     """
                     UPDATE admin_jobs
                     SET stop_requested = 1,
-                        updated_at = ?,
-                        owner_instance_id = ?,
-                        owner_pid = ?,
-                        heartbeat_at = ?
+                        updated_at = ?
                     WHERE job_id = ?
                       AND status IN ('queued', 'running')
                     """,
-                    (
-                        updated_at,
-                        owner_instance_id,
-                        int(owner_pid),
-                        updated_at,
-                        str(job_id),
-                    ),
+                    (updated_at, str(job_id)),
                 )
                 conn.commit()
                 return int(cur.rowcount or 0) > 0, None
@@ -407,8 +402,6 @@ def _admin_job_append_log(job_id: str, message: str) -> dict[str, Any] | None:
             _admin_persist_log_locked(
                 job_id,
                 log_item,
-                owner_instance_id=_job_runtime._admin_runtime_instance_id(),
-                owner_pid=os.getpid(),
             )
             cache_entry["next_log_seq"] = int(next_log_seq) + 1
             try:
@@ -422,8 +415,6 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
     with ADMIN_JOBS_LOCK:
         normalized_status = _job_runtime._normalize_status(status)
         updated_at = _job_runtime._admin_now_iso()
-        owner_instance_id = _job_runtime._admin_runtime_instance_id()
-        owner_pid = os.getpid()
         previous_status = ""
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
@@ -446,19 +437,10 @@ def _admin_job_set_status(job_id: str, status: str) -> bool:
                     UPDATE admin_jobs
                     SET status = ?,
                         updated_at = ?,
-                        owner_instance_id = ?,
-                        owner_pid = ?,
                         heartbeat_at = ?
                     WHERE job_id = ?
                     """,
-                    (
-                        normalized_status,
-                        updated_at,
-                        owner_instance_id,
-                        int(owner_pid),
-                        updated_at,
-                        str(job_id),
-                    ),
+                    (normalized_status, updated_at, updated_at, str(job_id)),
                 )
                 conn.commit()
                 updated = int(cur.rowcount or 0) > 0
@@ -505,6 +487,7 @@ def _admin_job_update_progress(
         updated_at = _job_runtime._admin_now_iso()
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        owner_host = _job_runtime._admin_runtime_host()
 
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
@@ -519,6 +502,7 @@ def _admin_job_update_progress(
                         updated_at = ?,
                         owner_instance_id = ?,
                         owner_pid = ?,
+                        owner_host = ?,
                         heartbeat_at = ?
                     WHERE job_id = ?
                     """,
@@ -530,6 +514,7 @@ def _admin_job_update_progress(
                         updated_at,
                         owner_instance_id,
                         int(owner_pid),
+                        owner_host,
                         updated_at,
                         job_id,
                     ),
@@ -572,6 +557,7 @@ def _admin_job_update_progress(
                         updated_at = ?,
                         owner_instance_id = ?,
                         owner_pid = ?,
+                        owner_host = ?,
                         heartbeat_at = ?
                     WHERE job_id = ?
                     """,
@@ -580,6 +566,7 @@ def _admin_job_update_progress(
                         _job_runtime._admin_now_iso(),
                         owner_instance_id,
                         int(owner_pid),
+                        owner_host,
                         _job_runtime._admin_now_iso(),
                         job_id,
                     ),
@@ -595,6 +582,7 @@ def _admin_job_heartbeat(job_id: str) -> bool:
         heartbeat_at = _job_runtime._admin_now_iso()
         owner_instance_id = _job_runtime._admin_runtime_instance_id()
         owner_pid = os.getpid()
+        owner_host = _job_runtime._admin_runtime_host()
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
             try:
@@ -603,6 +591,7 @@ def _admin_job_heartbeat(job_id: str) -> bool:
                     UPDATE admin_jobs
                     SET owner_instance_id = ?,
                         owner_pid = ?,
+                        owner_host = ?,
                         heartbeat_at = ?,
                         updated_at = CASE
                             WHEN status IN ('queued', 'running') THEN updated_at
@@ -613,6 +602,7 @@ def _admin_job_heartbeat(job_id: str) -> bool:
                     (
                         owner_instance_id,
                         int(owner_pid),
+                        owner_host,
                         heartbeat_at,
                         heartbeat_at,
                         job_id,
@@ -670,41 +660,25 @@ def _admin_job_get_logs(
 def _admin_recover_interrupted_jobs_locked(*, include_foreign_owner: bool) -> int:
     now = datetime.now(UTC)
     current_instance_id = _job_runtime._admin_runtime_instance_id()
-    cutoff = (
-        now - timedelta(seconds=_job_runtime.ADMIN_JOB_STALE_AFTER_SECONDS)
-    ).isoformat()
     with closing(_admin_connect()) as conn:
         cur = conn.cursor()
         try:
-            if include_foreign_owner:
-                cur.execute(
-                    """
-                    SELECT job_id, owner_instance_id
-                    FROM admin_jobs
-                    WHERE status IN ('queued', 'running')
-                      AND (
-                          COALESCE(heartbeat_at, updated_at, created_at) < ?
-                          OR (
-                              COALESCE(owner_instance_id, '') <> ''
-                              AND owner_instance_id <> ?
-                          )
-                      )
-                    ORDER BY created_at ASC
-                    """,
-                    (cutoff, current_instance_id),
-                )
-            else:
-                cur.execute(
-                    """
-                    SELECT job_id, owner_instance_id
-                    FROM admin_jobs
-                    WHERE status IN ('queued', 'running')
-                      AND COALESCE(heartbeat_at, updated_at, created_at) < ?
-                    ORDER BY created_at ASC
-                    """,
-                    (cutoff,),
-                )
-            rows = cur.fetchall()
+            cur.execute(
+                """
+                SELECT
+                    job_id,
+                    owner_instance_id,
+                    owner_pid,
+                    owner_host,
+                    heartbeat_at,
+                    updated_at,
+                    created_at
+                FROM admin_jobs
+                WHERE status IN ('queued', 'running')
+                ORDER BY created_at ASC
+                """
+            )
+            rows = list(cur.fetchall())
         finally:
             cur.close()
 
@@ -712,6 +686,25 @@ def _admin_recover_interrupted_jobs_locked(*, include_foreign_owner: bool) -> in
     for row in rows:
         job_id = str(row["job_id"] or "")
         if not job_id:
+            continue
+        created_at = _job_runtime._admin_parse_timestamp(row["created_at"], now)
+        updated_at = _job_runtime._admin_parse_timestamp(row["updated_at"], created_at)
+        heartbeat_at = _job_runtime._admin_parse_timestamp(
+            row["heartbeat_at"], updated_at
+        )
+        is_stale = now - heartbeat_at > timedelta(
+            seconds=_job_runtime.ADMIN_JOB_STALE_AFTER_SECONDS
+        )
+        owner_instance_id = str(row["owner_instance_id"] or "").strip()
+        owner_is_confirmed_dead = (
+            include_foreign_owner
+            and owner_instance_id != current_instance_id
+            and _job_runtime._admin_owner_is_alive(
+                row["owner_pid"], row["owner_host"]
+            )
+            is False
+        )
+        if not is_stale and not owner_is_confirmed_dead:
             continue
         _admin_job_set_status(job_id, "error")
         _admin_job_append_log(

@@ -63,12 +63,15 @@ def _check_config() -> bool:
 
 
 def _check_telethon() -> bool:
+    from tg_harvest.runtime.paths import secure_session_artifacts
+
     CFG, TelegramClient = _runtime_deps()
     _print_header("Telegram 鉴权检查")
     try:
         with TelegramClient(
             CFG.session_name, CFG.api_id, CFG.api_hash, receive_updates=False
         ) as client:
+            secure_session_artifacts(CFG.session_name)
             if not client.is_user_authorized():
                 print("[FAIL] 已连接 Telegram，但当前 session 未授权或已失效")
                 return False

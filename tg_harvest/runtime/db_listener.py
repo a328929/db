@@ -1,6 +1,9 @@
 import logging
+import os
+import socket
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import suppress
@@ -416,6 +419,8 @@ class DatabaseChatListenerRuntime:
         self._listener_threads: list[threading.Thread] = []
         self._started = False
         self._job_id = "db-listener"
+        self._runtime_instance_id = f"pid-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+        self._runtime_host = socket.gethostname()
         self._account_runtime = AccountRuntimeCoordinator(
             cfg=cfg,
             get_conn_fn=get_conn_fn,
@@ -881,6 +886,7 @@ class DatabaseChatListenerRuntime:
             return
         self._account_runtime.sync_configured_accounts()
         self._account_runtime.restore_cooldowns()
+        self._recover_scheduler_in_flight_updates()
         self._refresh_database_chat_cache()
         self._refresh_joined_chat_snapshot()
         self._started = True
@@ -895,6 +901,29 @@ class DatabaseChatListenerRuntime:
             self._job_id,
             f"数据库内群组监听已启动，当前追踪 {len(self._db_chat_rows_by_id)} 个已入库群组/频道",
         )
+
+    def _recover_scheduler_in_flight_updates(self) -> int:
+        conn = None
+        try:
+            conn = self._get_conn_fn()
+            recovered = sync_scheduler.recover_in_flight_pending_updates(
+                conn,
+                local_host=self._runtime_host,
+            )
+        except Exception:
+            logging.exception("恢复中断的同步调度任务失败")
+            return 0
+        finally:
+            if conn is not None:
+                with suppress(Exception):
+                    conn.close()
+
+        if recovered > 0:
+            _listener_log(
+                self._job_id,
+                f"已恢复 {recovered} 个因进程中断而遗留的同步调度任务",
+            )
+        return recovered
 
     def stop(self) -> None:
         self._worker_stop.set()
@@ -1365,6 +1394,9 @@ class DatabaseChatListenerRuntime:
                 conn,
                 limit=limit,
                 exclude_preferred_accounts=exclude_preferred_accounts or set(),
+                owner_instance_id=self._runtime_instance_id,
+                owner_pid=os.getpid(),
+                owner_host=self._runtime_host,
             )
         except Exception:
             logging.exception("领取同步调度任务失败")
@@ -1412,7 +1444,11 @@ class DatabaseChatListenerRuntime:
                 failure_message="调度任务未返回结果",
             )
             if effective_result.failure_type == "deleted":
-                sync_scheduler.deactivate_chat(conn, int(task.chat_id))
+                sync_scheduler.deactivate_chat(
+                    conn,
+                    int(task.chat_id),
+                    task=task,
+                )
                 return
             if effective_result.failure_type:
                 sync_scheduler.fail_pending_update(

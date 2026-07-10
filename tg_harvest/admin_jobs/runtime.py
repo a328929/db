@@ -1,4 +1,5 @@
 import os
+import socket
 import uuid
 from datetime import UTC, datetime
 from typing import Any
@@ -19,6 +20,7 @@ ADMIN_JOB_STALE_AFTER_SECONDS = 15 * 60
 ADMIN_JOB_HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 _ADMIN_RUNTIME_INSTANCE_ID = f"pid-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+_ADMIN_RUNTIME_HOST = socket.gethostname()
 
 
 def _admin_now_iso() -> str:
@@ -47,6 +49,30 @@ def configure_admin_job_runtime(instance_id: str | None = None) -> str:
 
 def _admin_runtime_instance_id() -> str:
     return _ADMIN_RUNTIME_INSTANCE_ID
+
+
+def _admin_runtime_host() -> str:
+    return _ADMIN_RUNTIME_HOST
+
+
+def _admin_owner_is_alive(owner_pid: Any, owner_host: Any) -> bool | None:
+    """Return a definitive liveness result only for a local process owner."""
+    host = str(owner_host or "").strip()
+    if host and host != _ADMIN_RUNTIME_HOST:
+        return None
+    try:
+        pid = int(owner_pid or 0)
+    except (TypeError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 def _normalize_status(status: str) -> str:

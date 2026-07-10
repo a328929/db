@@ -989,6 +989,102 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         self.assertIs(first, second)
         self.assertEqual(["started"], started)
 
+    def test_start_recovers_scheduler_work_before_starting_worker(self) -> None:
+        cfg = SimpleNamespace(
+            db_listener_enabled=1,
+            sync_scheduler_enabled=1,
+            db_listener_public_probe_enabled=0,
+            sync_ai_enabled=0,
+            session_name="primary",
+            secondary_session_name="",
+        )
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+        )
+        calls = []
+
+        with patch.object(
+            runtime._account_runtime,
+            "sync_configured_accounts",
+            side_effect=lambda: calls.append("accounts"),
+        ), patch.object(
+            runtime._account_runtime,
+            "restore_cooldowns",
+            side_effect=lambda: calls.append("cooldowns"),
+        ), patch.object(
+            runtime,
+            "_recover_scheduler_in_flight_updates",
+            side_effect=lambda: calls.append("recover"),
+        ), patch.object(
+            runtime,
+            "_refresh_database_chat_cache",
+            side_effect=lambda: calls.append("cache"),
+        ), patch.object(
+            runtime,
+            "_refresh_joined_chat_snapshot",
+            side_effect=lambda: calls.append("joined"),
+        ), patch.object(
+            runtime._worker_thread,
+            "start",
+            side_effect=lambda: calls.append("worker"),
+        ), patch.object(
+            runtime._refresh_thread,
+            "start",
+            side_effect=lambda: calls.append("refresh"),
+        ), patch.object(
+            runtime,
+            "_start_listener_threads",
+            side_effect=lambda: calls.append("listeners"),
+        ):
+            runtime.start()
+
+        self.assertEqual(
+            ["accounts", "cooldowns", "recover", "cache", "joined", "worker", "refresh", "listeners"],
+            calls,
+        )
+
+    def test_scheduler_recovery_logs_only_when_work_was_released(self) -> None:
+        cfg = SimpleNamespace(sync_scheduler_enabled=1)
+        runtime = DatabaseChatListenerRuntime(
+            cfg=cfg,
+            get_conn_fn=lambda: object(),
+        )
+
+        with patch.object(
+            db_listener.sync_scheduler,
+            "recover_in_flight_pending_updates",
+            return_value=0,
+        ), patch.object(db_listener, "_listener_log") as log_mock:
+            self.assertEqual(0, runtime._recover_scheduler_in_flight_updates())
+            log_mock.assert_not_called()
+
+        with patch.object(
+            db_listener.sync_scheduler,
+            "recover_in_flight_pending_updates",
+            return_value=2,
+        ), patch.object(db_listener, "_listener_log") as log_mock:
+            self.assertEqual(2, runtime._recover_scheduler_in_flight_updates())
+            log_mock.assert_called_once()
+            self.assertIn("2", log_mock.call_args.args[1])
+
+    def test_startup_recovery_clears_account_slots_when_scheduler_is_disabled(
+        self,
+    ) -> None:
+        runtime = DatabaseChatListenerRuntime(
+            cfg=SimpleNamespace(sync_scheduler_enabled=0),
+            get_conn_fn=lambda: object(),
+        )
+
+        with patch.object(
+            db_listener.sync_scheduler,
+            "recover_in_flight_pending_updates",
+            return_value=0,
+        ) as recover_mock:
+            self.assertEqual(0, runtime._recover_scheduler_in_flight_updates())
+
+        recover_mock.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

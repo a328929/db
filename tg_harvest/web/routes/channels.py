@@ -192,6 +192,7 @@ def register_channel_routes(
             target_chat_id=None,
             target_label=target_label,
             append_log_fn=services.admin_job_append_log_fn,
+            set_status_fn=services.admin_job_set_status_fn,
             initial_logs=[received_log],
             start_job_fn=lambda job_id: start_thread_fn(
                 job_id,

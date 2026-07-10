@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from collections.abc import Callable
 from contextlib import closing
@@ -253,8 +254,14 @@ def _mark_job_start_failed(
     admin_job_set_status_fn,
     message: str,
 ) -> None:
-    admin_job_append_log_fn(job_id, f"{message}，任务未启动")
-    admin_job_set_status_fn(job_id, "error")
+    try:
+        admin_job_append_log_fn(job_id, f"{message}，任务未启动")
+    except Exception:
+        logging.exception("记录克隆任务启动失败日志失败: job_id=%s", job_id)
+    try:
+        admin_job_set_status_fn(job_id, "error")
+    except Exception:
+        logging.exception("标记克隆任务启动失败状态失败: job_id=%s", job_id)
 
 
 def _clone_target_summary(clone_run: dict) -> tuple[int, str, str, str]:
@@ -320,14 +327,54 @@ def _start_clone_job_response(
     start_job_fn: Callable[[str], Any],
     response_extra: dict[str, Any] | None = None,
 ):
-    for message in initial_logs:
-        deps.admin_job_append_log_fn(job_id, str(message))
-    start_job_fn(job_id)
+    try:
+        for message in initial_logs:
+            deps.admin_job_append_log_fn(job_id, str(message))
+        start_job_fn(job_id)
+    except Exception:
+        logging.exception("启动克隆后台任务失败: job_id=%s", job_id)
+        _mark_job_start_failed(
+            job_id,
+            admin_job_append_log_fn=deps.admin_job_append_log_fn,
+            admin_job_set_status_fn=deps.admin_job_set_status_fn,
+            message="克隆任务启动失败",
+        )
+        return json_error("克隆任务启动失败", 500)
     return created_job_snapshot_response(
         job_id,
         deps.admin_job_get_snapshot_fn,
         **(response_extra or {}),
     )
+
+
+def _active_clone_job_snapshot(
+    deps: _CloneRouteDeps,
+    *,
+    clone_run: dict,
+    latest_plan: dict | None,
+    latest_migration: dict | None,
+) -> dict | None:
+    related_records = (clone_run, latest_plan, latest_migration)
+    seen_job_ids: set[str] = set()
+    for record in related_records:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("status") or "").strip().lower() not in {
+            "queued",
+            "running",
+        }:
+            continue
+        job_id = str(record.get("job_id") or "").strip()
+        if not job_id or job_id in seen_job_ids:
+            continue
+        seen_job_ids.add(job_id)
+        snapshot = deps.admin_job_get_snapshot_fn(job_id)
+        if str((snapshot or {}).get("status") or "").strip().lower() in {
+            "queued",
+            "running",
+        }:
+            return snapshot
+    return None
 
 
 def _timeline_migration_readiness(
@@ -645,6 +692,23 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 expected_confirm = _clone_run_delete_confirm_text(clone_run)
                 if str(data.get("confirm") or "").strip() != expected_confirm:
                     return json_error("confirm 参数不匹配", 400)
+                latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
+                latest_migration = deps.load_latest_clone_migration_fn(
+                    conn,
+                    normalized_run_id,
+                )
+                active_job = _active_clone_job_snapshot(
+                    deps,
+                    clone_run=clone_run,
+                    latest_plan=latest_plan,
+                    latest_migration=latest_migration,
+                )
+                if active_job is not None:
+                    return json_error(
+                        "关联克隆任务仍在执行，不能删除本地记录",
+                        409,
+                        active_job=active_job,
+                    )
                 deleted = deps.delete_clone_run_fn(conn, run_id=normalized_run_id)
             if not deleted:
                 return json_error("克隆运行记录不存在", 404)

@@ -15,6 +15,7 @@ if str(ROOT) not in sys.path:
 _DEFAULT_COPY_BATCH_SIZE = 50000
 _DB_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
 _SEARCH_TERM_INSERT_FLUSH_SIZE = 100000
+_SNAPSHOT_BUILD_HEADROOM_BYTES = 64 * 1024 * 1024
 
 _TABLES_IN_COPY_ORDER = (
     "chats",
@@ -34,6 +35,11 @@ _TABLES_IN_COPY_ORDER = (
     "admin_clone_plans",
     "admin_clone_migrations",
     "admin_clone_message_map",
+    "account_runtime_state",
+    "sync_chat_state",
+    "sync_pending_updates",
+    "sync_learning_events",
+    "sync_model_state",
 )
 
 _COUNT_VERIFIED_COPY_TABLES = tuple(
@@ -134,6 +140,16 @@ def _same_path(left: Path, right: Path) -> bool:
 
 def _work_path_for_target(target: Path) -> Path:
     return target.with_name(f"{target.name}.building")
+
+
+def _source_snapshot_path_for_work_target(work_target: Path) -> Path:
+    return work_target.with_name(f"{work_target.name}.source-snapshot")
+
+
+def _secure_sqlite_artifacts(path: Path) -> None:
+    from tg_harvest.runtime.paths import secure_sqlite_artifacts
+
+    secure_sqlite_artifacts(path)
 
 
 def _table_exists(cur: sqlite3.Cursor, schema: str, table: str) -> bool:
@@ -243,7 +259,7 @@ def _drop_search_sync_triggers(conn: sqlite3.Connection) -> None:
 def _rebuild_search_terms(conn: sqlite3.Connection, *, batch_size: int) -> None:
     from tg_harvest.storage.search_terms import (
         _create_message_search_terms_queue_triggers,
-        _write_message_search_terms_version,
+        _finish_message_search_terms_rebuild,
         extract_cjk_search_terms,
     )
     from tg_harvest.storage.search_text_state import search_text_expression
@@ -284,7 +300,7 @@ def _rebuild_search_terms(conn: sqlite3.Connection, *, batch_size: int) -> None:
             conn.commit()
             progress.update(processed)
 
-        _write_message_search_terms_version(cur)
+        _finish_message_search_terms_rebuild(cur)
         conn.commit()
         progress.done(processed)
     finally:
@@ -412,6 +428,8 @@ def _ensure_foreign_key_check_ok(conn: sqlite3.Connection) -> None:
 
 
 def _verify_counts(conn: sqlite3.Connection, *, strict: bool) -> None:
+    from tg_harvest.storage.search_terms import message_search_terms_are_current
+
     cur = conn.cursor()
     failures: list[str] = []
     try:
@@ -438,7 +456,7 @@ def _verify_counts(conn: sqlite3.Connection, *, strict: bool) -> None:
             )
 
         cjk_version = _fetch_meta_value(cur, "cjk_terms_version")
-        cjk_status = "ok" if cjk_version == "2" else "mismatch"
+        cjk_status = "ok" if message_search_terms_are_current(conn) else "mismatch"
         print(f"  cjk_terms_version: value={cjk_version or '<missing>'} {cjk_status}")
         if cjk_status != "ok":
             failures.append(f"cjk_terms_version={cjk_version or '<missing>'}")
@@ -458,12 +476,43 @@ def _verify_counts(conn: sqlite3.Connection, *, strict: bool) -> None:
 def _open_target(path: Path) -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(_sqlite_uri(path, mode="rwc"), uri=True)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA foreign_keys=OFF")
-    conn.execute("PRAGMA main.journal_mode=OFF")
-    conn.execute("PRAGMA synchronous=OFF")
-    conn.execute("PRAGMA temp_store=MEMORY")
-    return conn
+    try:
+        _secure_sqlite_artifacts(path)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=OFF")
+        conn.execute("PRAGMA main.journal_mode=OFF")
+        conn.execute("PRAGMA synchronous=OFF")
+        conn.execute("PRAGMA temp_store=MEMORY")
+        _secure_sqlite_artifacts(path)
+        return conn
+    except Exception:
+        conn.close()
+        raise
+
+
+def _create_source_snapshot(source: Path, snapshot: Path) -> None:
+    """Create a stable, read-only source image without modifying the source."""
+    snapshot.parent.mkdir(parents=True, exist_ok=True)
+    source_conn = sqlite3.connect(
+        _sqlite_uri(source, mode="ro"),
+        uri=True,
+        timeout=300,
+    )
+    snapshot_conn = None
+    try:
+        snapshot_conn = sqlite3.connect(
+            _sqlite_uri(snapshot, mode="rwc"),
+            uri=True,
+            timeout=300,
+        )
+        _secure_sqlite_artifacts(snapshot)
+        source_conn.backup(snapshot_conn)
+        snapshot_conn.commit()
+        _secure_sqlite_artifacts(snapshot)
+    finally:
+        if snapshot_conn is not None:
+            snapshot_conn.close()
+        source_conn.close()
 
 
 def _finalize_target_pragmas(conn: sqlite3.Connection) -> None:
@@ -485,6 +534,26 @@ def _available_bytes(path: Path) -> int:
     return int(usage.free)
 
 
+def _source_artifact_bytes(source: Path) -> int:
+    total = 0
+    for artifact in _db_files(source):
+        try:
+            total += max(0, int(artifact.stat().st_size))
+        except FileNotFoundError:
+            continue
+    return total
+
+
+def _required_free_bytes(source: Path, *, min_free_gb: float) -> int:
+    configured_minimum = max(0, int(float(min_free_gb) * 1024 * 1024 * 1024))
+    # The source remains untouched while the target filesystem holds both a
+    # consistent backup image and the rebuilt compact database.
+    snapshot_and_build = (
+        _source_artifact_bytes(source) * 2 + _SNAPSHOT_BUILD_HEADROOM_BYTES
+    )
+    return max(configured_minimum, snapshot_and_build)
+
+
 def _promote_work_target(work_target: Path, target: Path, *, force: bool) -> None:
     if force:
         _remove_db_files(target)
@@ -493,6 +562,7 @@ def _promote_work_target(work_target: Path, target: Path, *, force: bool) -> Non
         source_sidecar = Path(str(work_target) + suffix)
         if source_sidecar.exists():
             source_sidecar.replace(Path(str(target) + suffix))
+    _secure_sqlite_artifacts(target)
 
 
 def _fail(message: str) -> NoReturn:
@@ -505,7 +575,10 @@ def main() -> int:
     from tg_harvest.storage.schema import create_schema
 
     parser = argparse.ArgumentParser(
-        description="Create a compact replacement SQLite database without modifying the source."
+        description=(
+            "Create a compact replacement SQLite database from a consistent "
+            "source snapshot without modifying the source."
+        )
     )
     parser.add_argument("--source", default=str(CFG.db_name), help="Source SQLite database")
     parser.add_argument("--target", required=True, help="Target compact SQLite database")
@@ -513,7 +586,10 @@ def main() -> int:
         "--min-free-gb",
         type=float,
         default=25.0,
-        help="Required free space on the target filesystem before starting",
+        help=(
+            "Required free space on the target filesystem before starting; "
+            "allow room for both the temporary source snapshot and target"
+        ),
     )
     parser.add_argument(
         "--force",
@@ -536,6 +612,7 @@ def main() -> int:
     source = Path(args.source).expanduser().resolve()
     target = Path(args.target).expanduser().resolve()
     work_target = _work_path_for_target(target)
+    source_snapshot = _source_snapshot_path_for_work_target(work_target)
     batch_size = max(1, int(args.batch_size))
     if not source.exists():
         _fail(f"source database does not exist: {source}")
@@ -543,33 +620,48 @@ def main() -> int:
         _fail("target must be different from source database")
     if _same_path(source, work_target):
         _fail("temporary target path conflicts with source database")
+    if _same_path(source, source_snapshot):
+        _fail("temporary source snapshot path conflicts with source database")
     if target == work_target:
         _fail("target path conflicts with temporary build path")
     if _any_db_file_exists(target) and not args.force:
         _fail(f"target already exists; pass --force to replace: {target}")
     if _any_db_file_exists(work_target) and not args.force:
         _fail(f"temporary target already exists; pass --force to replace: {work_target}")
+    if _any_db_file_exists(source_snapshot) and not args.force:
+        _fail(
+            "temporary source snapshot already exists; "
+            f"pass --force to replace: {source_snapshot}"
+        )
 
     if args.force:
         _remove_db_files(work_target)
+        _remove_db_files(source_snapshot)
 
     free_bytes = _available_bytes(target)
-    required_bytes = int(float(args.min_free_gb) * 1024 * 1024 * 1024)
+    required_bytes = _required_free_bytes(source, min_free_gb=args.min_free_gb)
     if free_bytes < required_bytes:
         _fail(
             f"target filesystem free space is too low: {free_bytes} bytes, "
-            f"required at least {required_bytes} bytes"
+            f"required at least {required_bytes} bytes for the source snapshot "
+            "and compact build"
         )
 
-    conn = _open_target(work_target)
+    conn = None
     try:
+        print(f"creating consistent source snapshot: {source_snapshot}")
+        _create_source_snapshot(source, source_snapshot)
+        conn = _open_target(work_target)
         create_schema(
             conn,
             detect_sqlite_features(conn),
             skip_fts_auto_heal=1,
         )
         _drop_search_sync_triggers(conn)
-        conn.execute("ATTACH DATABASE ? AS src", (_sqlite_uri(source, mode="ro"),))
+        conn.execute(
+            "ATTACH DATABASE ? AS src",
+            (_sqlite_uri(source_snapshot, mode="ro"),),
+        )
         for table in _TABLES_IN_COPY_ORDER:
             _copy_table(conn, table, batch_size=batch_size)
         conn.execute("DETACH DATABASE src")
@@ -577,15 +669,27 @@ def main() -> int:
         _rebuild_fts(conn, batch_size=batch_size)
         _finalize_target_pragmas(conn)
         if not args.no_verify:
-            conn.execute("ATTACH DATABASE ? AS src", (_sqlite_uri(source, mode="ro"),))
+            conn.execute(
+                "ATTACH DATABASE ? AS src",
+                (_sqlite_uri(source_snapshot, mode="ro"),),
+            )
             _verify_counts(conn, strict=True)
             conn.execute("DETACH DATABASE src")
             _ensure_foreign_key_check_ok(conn)
             _ensure_integrity_check_ok(conn)
-    finally:
+        _secure_sqlite_artifacts(work_target)
         conn.close()
-
-    _promote_work_target(work_target, target, force=args.force)
+        conn = None
+        _promote_work_target(work_target, target, force=args.force)
+    finally:
+        try:
+            if conn is not None:
+                conn.close()
+        finally:
+            try:
+                _secure_sqlite_artifacts(work_target)
+            finally:
+                _remove_db_files(source_snapshot)
 
     print(f"compact database ready: {target}")
     return 0

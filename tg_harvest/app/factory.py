@@ -133,7 +133,10 @@ _DB_FREE_ENDPOINTS = frozenset(
         "admin_sync_page",
         "admin_channels_page",
         "admin_clone_page",
+        "admin_clone_create_page",
+        "admin_clone_migrate_page",
         "admin_clone_runs_manage_page",
+        "admin_clone_run_detail_page",
         "admin_recovery_page",
         "chat_context_page",
         "api_auth_check",
@@ -249,6 +252,10 @@ def _ensure_runtime_db(app: Flask) -> None:
 
 
 def _request_requires_runtime_db() -> bool:
+    # A missing route has no endpoint. It must not be able to bootstrap the
+    # database and Telegram workers before Flask returns its normal 404.
+    if request.endpoint is None:
+        return False
     if str(request.path or "").startswith("/api/admin/"):
         from tg_harvest.web.auth import is_authenticated
 
@@ -516,7 +523,19 @@ def create_app(*, init_db: bool = False) -> Flask:
     register_all_routes(app, services=_build_route_services())
     return app
 
-def run_web_server(*, host: str = "0.0.0.0", port: int = 8890, debug: bool = False) -> None:
-    app = create_app(init_db=True)
-    app.extensions["tg_db_ready"] = True
+
+def _is_werkzeug_reloader_child() -> bool:
+    return os.getenv("WERKZEUG_RUN_MAIN", "").strip().lower() == "true"
+
+
+def run_web_server(
+    *, host: str = "0.0.0.0", port: int = 8890, debug: bool = False
+) -> None:
+    # Werkzeug starts a parent watchdog before serving the debug child. Runtime
+    # workers must exist only in the serving process because they share SQLite
+    # state and Telegram session files.
+    initialize_runtime = not debug or _is_werkzeug_reloader_child()
+    app = create_app(init_db=initialize_runtime)
+    if initialize_runtime:
+        app.extensions["tg_db_ready"] = True
     app.run(host=host, port=port, debug=debug)

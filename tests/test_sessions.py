@@ -1,4 +1,5 @@
 import sqlite3
+import stat
 import tempfile
 import unittest
 from pathlib import Path
@@ -6,9 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tg_harvest.admin_jobs.sessions import (
-    _copy_session_storage,
     _cleanup_isolated_worker_session,
     _configure_telethon_session_sqlite,
+    _copy_session_storage,
 )
 
 
@@ -56,10 +57,20 @@ class WorkerSessionCleanupTests(unittest.TestCase):
 
             base_path.write_text("fresh-base", encoding="utf-8")
             worker_path.write_text("stale-worker", encoding="utf-8")
+            base_wal_path = Path(f"{base_path}-wal")
+            base_wal_path.write_text("fresh-wal", encoding="utf-8")
+            base_path.chmod(0o644)
+            base_wal_path.chmod(0o644)
 
             _copy_session_storage(str(base_name), str(worker_name))
 
             self.assertEqual("fresh-base", worker_path.read_text(encoding="utf-8"))
+            self.assertEqual(0o600, stat.S_IMODE(base_path.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(worker_path.stat().st_mode))
+            worker_wal_path = Path(f"{worker_path}-wal")
+            self.assertEqual("fresh-wal", worker_wal_path.read_text(encoding="utf-8"))
+            self.assertEqual(0o600, stat.S_IMODE(base_wal_path.stat().st_mode))
+            self.assertEqual(0o600, stat.S_IMODE(worker_wal_path.stat().st_mode))
 
     def test_cleanup_merges_worker_entities_back_into_base_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

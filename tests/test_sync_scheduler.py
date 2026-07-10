@@ -1,3 +1,4 @@
+import os
 import sqlite3
 import unittest
 from types import SimpleNamespace
@@ -19,7 +20,9 @@ from tg_harvest.storage.sync_scheduler import (
     enqueue_observation,
     fail_pending_update,
     list_scheduler_chats,
+    recover_in_flight_pending_updates,
     refresh_chat_states,
+    upsert_account_runtime_state,
 )
 
 
@@ -274,6 +277,385 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         self.assertEqual("idle", state["status"])
         self.assertEqual(11, state["local_last_id"])
         self.assertEqual(0, state["failure_count"])
+
+    def test_recover_in_flight_task_preserves_new_generation_and_quiet_delay(self) -> None:
+        self._refresh_states()
+        cfg = _cfg()
+        enqueue_observation(
+            self.conn,
+            cfg=cfg,
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claimed = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+        )
+        self.assertEqual(1, len(claimed))
+
+        enqueue_observation(
+            self.conn,
+            cfg=cfg,
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="message_edited",
+                source_account="secondary",
+                observed_at="2026-07-03 00:01:05",
+            ),
+        )
+        before_recovery = self.conn.execute(
+            """
+            SELECT generation, dirty_generation, due_at
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+
+        self.assertEqual(
+            1,
+            recover_in_flight_pending_updates(
+                self.conn,
+                now_text="2026-07-03 00:01:10",
+            ),
+        )
+
+        pending = self.conn.execute(
+            """
+            SELECT generation, dirty_generation, in_flight, in_flight_generation, due_at
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        state = self.conn.execute(
+            """
+            SELECT status, next_update_at
+            FROM sync_chat_state
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        self.assertEqual(before_recovery["generation"], pending["generation"])
+        self.assertEqual(
+            before_recovery["dirty_generation"], pending["dirty_generation"]
+        )
+        self.assertEqual(0, pending["in_flight"])
+        self.assertEqual(0, pending["in_flight_generation"])
+        self.assertEqual(before_recovery["due_at"], pending["due_at"])
+        self.assertEqual("pending", state["status"])
+        self.assertEqual(before_recovery["due_at"], state["next_update_at"])
+
+        resumed = claim_due_pending_updates(
+            self.conn,
+            now_text=str(pending["due_at"]),
+            limit=1,
+        )
+        self.assertEqual(1, len(resumed))
+        self.assertEqual(pending["generation"], resumed[0].in_flight_generation)
+
+    def test_recover_in_flight_task_requeues_elapsed_work_immediately(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+        )
+
+        recovery_now = "2026-07-03 00:02:00"
+        self.assertEqual(
+            1,
+            recover_in_flight_pending_updates(self.conn, now_text=recovery_now),
+        )
+        pending = self.conn.execute(
+            """
+            SELECT in_flight, due_at
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        self.assertEqual(0, pending["in_flight"])
+        self.assertEqual(recovery_now, pending["due_at"])
+        self.assertEqual(
+            1,
+            len(
+                claim_due_pending_updates(
+                    self.conn,
+                    now_text=recovery_now,
+                    limit=1,
+                )
+            ),
+        )
+
+    def test_recovery_releases_account_slots_with_reclaimed_work(self) -> None:
+        now = "2026-07-03 00:02:00"
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+        )
+        upsert_account_runtime_state(
+            self.conn,
+            account_key="primary",
+            session_name="primary.session",
+            label="Primary",
+            in_flight_delta=2,
+            now_text="2026-07-03 00:01:00",
+        )
+
+        self.assertEqual(
+            1,
+            recover_in_flight_pending_updates(self.conn, now_text=now),
+        )
+        row = self.conn.execute(
+            """
+            SELECT in_flight_count, updated_at
+            FROM account_runtime_state
+            WHERE account_key = 'primary'
+            """
+        ).fetchone()
+        self.assertEqual(0, row["in_flight_count"])
+        self.assertEqual(now, row["updated_at"])
+
+    def test_recovery_preserves_live_or_unattributed_account_slots(self) -> None:
+        now = "2026-07-03 00:02:00"
+        upsert_account_runtime_state(
+            self.conn,
+            account_key="primary",
+            session_name="primary.session",
+            label="Primary",
+            in_flight_delta=2,
+            now_text="2026-07-03 00:01:00",
+        )
+
+        self.assertEqual(
+            0,
+            recover_in_flight_pending_updates(self.conn, now_text=now),
+        )
+        row = self.conn.execute(
+            """
+            SELECT in_flight_count, updated_at
+            FROM account_runtime_state
+            WHERE account_key = 'primary'
+            """
+        ).fetchone()
+        self.assertEqual(2, row["in_flight_count"])
+        self.assertEqual("2026-07-03 00:01:00", row["updated_at"])
+
+    def test_recovery_keeps_work_owned_by_a_live_local_process(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claimed = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+            owner_instance_id="live-worker",
+            owner_pid=os.getpid(),
+            owner_host="local-test-host",
+        )
+        self.assertEqual(1, len(claimed))
+
+        self.assertEqual(
+            0,
+            recover_in_flight_pending_updates(
+                self.conn,
+                now_text="2026-07-03 00:02:00",
+                local_host="local-test-host",
+            ),
+        )
+        pending = self.conn.execute(
+            """
+            SELECT in_flight, in_flight_owner_instance_id
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        self.assertEqual(1, pending["in_flight"])
+        self.assertEqual("live-worker", pending["in_flight_owner_instance_id"])
+
+    def test_recovery_reclaims_dead_local_owner_and_clears_lease(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claimed = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+            owner_instance_id="dead-worker",
+            owner_pid=12345,
+            owner_host="local-test-host",
+        )
+        self.assertEqual(1, len(claimed))
+
+        with patch(
+            "tg_harvest.storage.sync_scheduler._process_is_alive",
+            return_value=False,
+        ):
+            self.assertEqual(
+                1,
+                recover_in_flight_pending_updates(
+                    self.conn,
+                    now_text="2026-07-03 00:02:00",
+                    local_host="local-test-host",
+                ),
+            )
+        pending = self.conn.execute(
+            """
+            SELECT
+                in_flight,
+                in_flight_owner_instance_id,
+                in_flight_owner_pid,
+                in_flight_owner_host
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        self.assertEqual(0, pending["in_flight"])
+        self.assertEqual("", pending["in_flight_owner_instance_id"])
+        self.assertEqual(0, pending["in_flight_owner_pid"])
+        self.assertEqual("", pending["in_flight_owner_host"])
+
+    def test_recovery_leaves_remote_owner_for_its_runtime(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+            owner_instance_id="remote-worker",
+            owner_pid=12345,
+            owner_host="other-host",
+        )
+
+        with patch(
+            "tg_harvest.storage.sync_scheduler._process_is_alive",
+            return_value=False,
+        ):
+            self.assertEqual(
+                0,
+                recover_in_flight_pending_updates(
+                    self.conn,
+                    now_text="2026-07-03 00:02:00",
+                    local_host="local-test-host",
+                ),
+            )
+        self.assertEqual(
+            1,
+            self.conn.execute(
+                "SELECT in_flight FROM sync_pending_updates WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+
+    def test_old_owner_cannot_complete_a_task_reclaimed_by_another_runtime(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        old_task = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+            owner_instance_id="old-worker",
+            owner_pid=12345,
+            owner_host="local-test-host",
+        )[0]
+        with patch(
+            "tg_harvest.storage.sync_scheduler._process_is_alive",
+            return_value=False,
+        ):
+            recover_in_flight_pending_updates(
+                self.conn,
+                now_text="2026-07-03 00:02:00",
+                local_host="local-test-host",
+            )
+        new_task = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:02:00",
+            limit=1,
+            owner_instance_id="new-worker",
+            owner_pid=os.getpid(),
+            owner_host="local-test-host",
+        )[0]
+
+        complete_pending_update(
+            self.conn,
+            task=old_task,
+            result=SyncUpdateResult(chat_id=1, source_account="primary"),
+            now_text="2026-07-03 00:02:01",
+        )
+        pending = self.conn.execute(
+            """
+            SELECT in_flight, in_flight_owner_instance_id
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        self.assertEqual(1, pending["in_flight"])
+        self.assertEqual(new_task.in_flight_owner_instance_id, pending["in_flight_owner_instance_id"])
 
     def test_fail_pending_update_keeps_task_with_backoff(self) -> None:
         self._refresh_states()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 from typing import Any
 
@@ -83,6 +84,7 @@ def create_started_exclusive_job_response(
     target_chat_id: int | None = None,
     target_label: str | None = None,
     append_log_fn: Callable[[str, str], None],
+    set_status_fn: Callable[[str, str], Any],
     initial_logs: Iterable[str] = (),
     start_job_fn: Callable[[str], Any],
     response_extra: dict[str, Any] | None = None,
@@ -96,10 +98,22 @@ def create_started_exclusive_job_response(
     if error_response is not None:
         return error_response
 
-    for message in initial_logs:
-        append_log_fn(job_id, str(message))
+    try:
+        for message in initial_logs:
+            append_log_fn(job_id, str(message))
+        start_job_fn(job_id)
+    except Exception:
+        logging.exception("后台任务启动失败: job_id=%s", job_id)
+        try:
+            append_log_fn(job_id, "后台任务启动失败，已标记为失败")
+        except Exception:
+            logging.exception("记录后台任务启动失败日志失败: job_id=%s", job_id)
+        try:
+            set_status_fn(job_id, "error")
+        except Exception:
+            logging.exception("标记后台任务启动失败状态失败: job_id=%s", job_id)
+        return json_error("任务启动失败", 500)
 
-    start_job_fn(job_id)
     return created_job_snapshot_response(
         job_id,
         get_snapshot_fn,

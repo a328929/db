@@ -107,6 +107,7 @@ def _admin_insert_job_row(
     created_at: str,
     owner_instance_id: str,
     owner_pid: int,
+    owner_host: str,
 ) -> None:
     cur.execute(
         """
@@ -120,6 +121,7 @@ def _admin_insert_job_row(
             updated_at,
             owner_instance_id,
             owner_pid,
+            owner_host,
             heartbeat_at,
             progress_current,
             progress_total,
@@ -127,7 +129,7 @@ def _admin_insert_job_row(
             last_logged_current,
             stop_requested
         )
-        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'queued', 0, 0)
+        VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, 'queued', 0, 0)
         """,
         (
             job_id,
@@ -138,6 +140,7 @@ def _admin_insert_job_row(
             created_at,
             owner_instance_id,
             int(owner_pid),
+            str(owner_host or "").strip(),
             created_at,
         ),
     )
@@ -152,6 +155,7 @@ def _admin_persist_job_create(
     created_at: str,
     owner_instance_id: str,
     owner_pid: int,
+    owner_host: str,
 ) -> None:
     with closing(_admin_connect()) as conn:
         cur = conn.cursor()
@@ -165,6 +169,7 @@ def _admin_persist_job_create(
                 created_at=created_at,
                 owner_instance_id=owner_instance_id,
                 owner_pid=owner_pid,
+                owner_host=owner_host,
             )
             conn.commit()
         finally:
@@ -174,9 +179,6 @@ def _admin_persist_job_create(
 def _admin_persist_log_locked(
     job_id: str,
     log_item: dict[str, Any],
-    *,
-    owner_instance_id: str,
-    owner_pid: int,
     trim_logs: bool = True,
 ) -> None:
     with closing(_admin_connect()) as conn:
@@ -197,16 +199,10 @@ def _admin_persist_log_locked(
             cur.execute(
                 """
                 UPDATE admin_jobs
-                SET updated_at = ?,
-                    owner_instance_id = ?,
-                    owner_pid = ?,
-                    heartbeat_at = ?
+                SET updated_at = ?
                 WHERE job_id = ?
                 """,
                 (
-                    str(log_item["ts"]),
-                    owner_instance_id,
-                    int(owner_pid),
                     str(log_item["ts"]),
                     job_id,
                 ),

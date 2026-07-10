@@ -282,6 +282,7 @@ def register_recovery_routes(
             target_chat_id=None,
             target_label="Session 群组恢复扫描",
             append_log_fn=services.admin_job_append_log_fn,
+            set_status_fn=services.admin_job_set_status_fn,
             initial_logs=["已接收 Session 群组恢复扫描请求"],
             start_job_fn=lambda job_id: services.admin_start_recovery_scan_job_thread_fn(
                 job_id,
@@ -319,6 +320,7 @@ def register_recovery_routes(
             target_chat_id=None,
             target_label=target,
             append_log_fn=services.admin_job_append_log_fn,
+            set_status_fn=services.admin_job_set_status_fn,
             initial_logs=[
                 "已接收恢复候选添加入库请求",
                 f"抓取目标：{target}",
@@ -369,6 +371,7 @@ def register_recovery_routes(
             target_chat_id=None,
             target_label=target_label,
             append_log_fn=services.admin_job_append_log_fn,
+            set_status_fn=services.admin_job_set_status_fn,
             initial_logs=[
                 "已接收群组恢复请求",
                 f"目标：{target_label}",

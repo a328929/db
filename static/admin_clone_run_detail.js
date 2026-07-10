@@ -34,7 +34,6 @@
   function getElements() {
     var elements = {
       page: document.getElementById('admin-clone-run-detail-page'),
-      migrateLink: document.getElementById('admin-clone-run-detail-migrate-link'),
       migrateNavLink: document.getElementById('admin-clone-run-detail-migrate-nav-link'),
       detailStatus: document.getElementById('admin-clone-runs-detail-status'),
       detailRefreshBtn: document.getElementById('admin-clone-runs-detail-refresh-btn'),
@@ -69,7 +68,6 @@
     };
     var requiredKeys = [
       'page',
-      'migrateLink',
       'migrateNavLink',
       'detailStatus',
       'detailRefreshBtn',
@@ -597,7 +595,6 @@
     var href = state.runId
       ? buildRunMigrationHref({ run_id: state.runId })
       : '/admin/clone/migrate';
-    elements.migrateLink.href = href;
     elements.migrateNavLink.href = href;
   }
 

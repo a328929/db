@@ -13,6 +13,7 @@ from tg_harvest.storage.search_terms import (
     drain_message_search_terms_rebuild_queue,
     extract_cjk_bigrams,
     extract_cjk_search_terms,
+    message_search_terms_are_current,
 )
 
 
@@ -1220,6 +1221,34 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
         self.assertEqual(0, int(cur.fetchone()["c"]))
 
+    def test_known_empty_current_index_skips_redundant_full_rebuild(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 20, '2026-01-01 00:00:00', 20, 'TEXT', 'plain text', 'plain text', 0)
+            """
+        )
+        self.conn.commit()
+        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+
+        with patch(
+            "tg_harvest.storage.search_terms._sync_message_search_terms_from_scratch"
+        ) as rebuild_mock:
+            create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        rebuild_mock.assert_not_called()
+        cur.execute(
+            """
+            SELECT value
+            FROM message_search_terms_meta
+            WHERE key = 'cjk_terms_has_terms'
+            """
+        )
+        self.assertEqual("0", cur.fetchone()["value"])
+
     def test_update_content_norm_enqueues_rebuild(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
@@ -1240,6 +1269,244 @@ class MessageSearchTermQueueTests(unittest.TestCase):
 
         cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
         self.assertEqual("update", cur.fetchone()["reason"])
+
+    def test_clearing_search_text_enqueues_rebuild_and_removes_terms(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 13, '2026-01-01 00:00:00', 1, 'TEXT', '福利姬', '福利姬', 0)
+            """
+        )
+        self.conn.commit()
+        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+
+        cur.execute(
+            """
+            UPDATE messages
+            SET content = '', content_norm = ''
+            WHERE chat_id = 1 AND message_id = 13
+            """
+        )
+        self.conn.commit()
+
+        cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
+        self.assertEqual("update", cur.fetchone()["reason"])
+        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+
+        cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+
+    def test_schema_migrates_v2_terms_for_cleared_messages_without_full_rebuild(
+        self,
+    ) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 14, '2026-01-01 00:00:00', 1, 'TEXT', '', '', 0)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms(term, pk)
+            SELECT '福', pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 14
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES ('cjk_terms_version', '2')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        self.conn.commit()
+
+        with patch(
+            "tg_harvest.storage.search_terms._sync_message_search_terms_from_scratch"
+        ) as rebuild_mock:
+            create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        rebuild_mock.assert_not_called()
+
+        cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+        cur.execute(
+            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_version'"
+        )
+        self.assertEqual("3", cur.fetchone()["value"])
+
+    def test_schema_rebuilds_partially_committed_v2_terms(self) -> None:
+        cur = self.conn.cursor()
+        cur.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, ?, '2026-01-01 00:00:00', ?, 'TEXT', ?, ?, 0)
+            """,
+            [
+                (15, 15, "福利", "福利"),
+                (16, 16, "会员", "会员"),
+            ],
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms(term, pk)
+            SELECT '福利', pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 15
+            """
+        )
+        cur.execute("DELETE FROM message_search_terms_rebuild_queue")
+        cur.execute(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES ('cjk_terms_version', '2')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["会", "会员", "利", "员", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+        self.assertTrue(message_search_terms_are_current(self.conn))
+
+    def test_schema_recovers_marked_interrupted_search_term_rebuild(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 17, '2026-01-01 00:00:00', 17, 'TEXT', '福利', '福利', 0)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms(term, pk)
+            SELECT '福', pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 17
+            """
+        )
+        cur.execute("DELETE FROM message_search_terms_rebuild_queue")
+        cur.executemany(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [
+                ("cjk_terms_version", "3"),
+                ("cjk_terms_rebuild_state", "full"),
+            ],
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["利", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+        cur.execute(
+            "SELECT 1 FROM message_search_terms_meta WHERE key = 'cjk_terms_rebuild_state'"
+        )
+        self.assertIsNone(cur.fetchone())
+        self.assertTrue(message_search_terms_are_current(self.conn))
+
+    def test_schema_rebuilds_empty_current_index_for_searchable_messages(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 18, '2026-01-01 00:00:00', 18, 'TEXT', '福利', '福利', 0)
+            """
+        )
+        cur.execute("DELETE FROM message_search_terms_rebuild_queue")
+        cur.execute("DELETE FROM message_search_terms")
+        cur.execute(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES ('cjk_terms_version', '3')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["利", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+        self.assertTrue(message_search_terms_are_current(self.conn))
+
+    def test_schema_recovers_legacy_search_term_backfill_state(self) -> None:
+        cur = self.conn.cursor()
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 19, '2026-01-01 00:00:00', 19, 'TEXT', '福利', '福利', 0)
+            """
+        )
+        cur.execute(
+            """
+            INSERT INTO message_search_terms(term, pk)
+            SELECT '福', pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 19
+            """
+        )
+        cur.execute("DELETE FROM message_search_terms_rebuild_queue")
+        cur.executemany(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES (?, ?)
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """,
+            [
+                ("cjk_terms_version", "3"),
+                ("cjk_terms_backfill_mode", "unigram"),
+                ("cjk_terms_backfill_last_pk", "19"),
+            ],
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        cur.execute("SELECT term FROM message_search_terms ORDER BY term")
+        self.assertEqual(
+            ["利", "福", "福利"],
+            [row["term"] for row in cur.fetchall()],
+        )
+        cur.execute(
+            """
+            SELECT COUNT(*) AS c
+            FROM message_search_terms_meta
+            WHERE key IN ('cjk_terms_backfill_mode', 'cjk_terms_backfill_last_pk')
+            """
+        )
+        self.assertEqual(0, cur.fetchone()["c"])
+        self.assertTrue(message_search_terms_are_current(self.conn))
 
 
 if __name__ == "__main__":

@@ -28,10 +28,13 @@ TELEGRAM_BOT_ID = 777000
 logging.basicConfig(format='[%(levelname) 5s/%(asctime)s] %(name)s: %(message)s', level=logging.INFO)
 
 async def main():
+    from tg_harvest.runtime.paths import secure_session_artifacts
+
     print(f"正在启动客户端 (会话: {SESSION_NAME})...")
     client = TelegramClient(SESSION_NAME, API_ID, API_HASH)
     
     await client.start()
+    secure_session_artifacts(SESSION_NAME)
     me = await client.get_me()
     print(f"成功连接！当前登录用户: {me.first_name} (@{me.username or '无'})")
     print("-" * 30)

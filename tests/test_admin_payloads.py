@@ -1,6 +1,5 @@
 import sqlite3
 import unittest
-from unittest.mock import patch
 
 from tg_harvest.app.admin_payloads import (
     build_admin_stats_payload,

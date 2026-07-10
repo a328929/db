@@ -98,6 +98,7 @@ class AdminRoutesHandler:
             target_chat_id=target_chat_id,
             target_label=target_label,
             append_log_fn=self.admin_job_append_log_fn,
+            set_status_fn=self.admin_job_set_status_fn,
             initial_logs=initial_logs,
             start_job_fn=start_job_fn,
             response_extra=response_extra,

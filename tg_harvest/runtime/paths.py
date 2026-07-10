@@ -5,10 +5,46 @@ RUNTIME_ROOT = PROJECT_ROOT / ".runtime"
 RUNTIME_DB_DIR = RUNTIME_ROOT / "db"
 RUNTIME_SESSION_DIR = RUNTIME_ROOT / "sessions"
 
+_PRIVATE_DIRECTORY_MODE = 0o700
+_PRIVATE_FILE_MODE = 0o600
+_SQLITE_SIDECAR_SUFFIXES = ("-journal", "-wal", "-shm")
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True)
+    path.chmod(_PRIVATE_DIRECTORY_MODE)
+
+
+def secure_runtime_file(path: str | Path) -> None:
+    """Restrict a runtime artifact without changing its containing directory."""
+    candidate = Path(path)
+    try:
+        if candidate.is_file():
+            candidate.chmod(_PRIVATE_FILE_MODE)
+    except FileNotFoundError:
+        return
+
+
+def secure_sqlite_artifacts(path: str | Path) -> None:
+    """Restrict a SQLite database and any sidecars that currently exist."""
+    database_path = Path(path)
+    secure_runtime_file(database_path)
+    for suffix in _SQLITE_SIDECAR_SUFFIXES:
+        secure_runtime_file(Path(f"{database_path}{suffix}"))
+
+
+def secure_session_artifacts(session_name: str | Path) -> None:
+    session_path = Path(session_name)
+    if session_path.suffix != ".session":
+        session_path = Path(f"{session_path}.session")
+    secure_sqlite_artifacts(session_path)
+
 
 def ensure_runtime_layout() -> Path:
-    RUNTIME_DB_DIR.mkdir(parents=True, exist_ok=True)
-    RUNTIME_SESSION_DIR.mkdir(parents=True, exist_ok=True)
+    _ensure_private_directory(RUNTIME_ROOT)
+    _ensure_private_directory(RUNTIME_DB_DIR)
+    _ensure_private_directory(RUNTIME_SESSION_DIR)
+    _ensure_private_directory(RUNTIME_ROOT / "models")
     return RUNTIME_ROOT
 
 

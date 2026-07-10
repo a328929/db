@@ -511,6 +511,49 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
         self.assertEqual(1, len(created_apps))
         self.assertTrue(created_apps[0].extensions["tg_db_ready"])
 
+    def test_debug_reloader_parent_does_not_start_runtime_workers(self) -> None:
+        created_apps = []
+        original_create_app = app_factory.create_app
+
+        def capture_create_app(*, init_db: bool = False):
+            app = original_create_app(init_db=init_db)
+            created_apps.append(app)
+            return app
+
+        with patch.dict(os.environ, {"WERKZEUG_RUN_MAIN": ""}, clear=False), patch.object(
+            app_factory, "_ensure_db"
+        ) as ensure_db_mock, patch.object(
+            app_factory, "create_app", side_effect=capture_create_app
+        ) as create_app_mock, patch("flask.Flask.run", return_value=None) as run_mock:
+            app_factory.run_web_server(host="127.0.0.1", port=9999, debug=True)
+
+        create_app_mock.assert_called_once_with(init_db=False)
+        ensure_db_mock.assert_not_called()
+        run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=True)
+        self.assertEqual(1, len(created_apps))
+        self.assertFalse(created_apps[0].extensions["tg_db_ready"])
+
+    def test_debug_reloader_child_starts_runtime_workers(self) -> None:
+        created_apps = []
+        original_create_app = app_factory.create_app
+
+        def capture_create_app(*, init_db: bool = False):
+            app = original_create_app(init_db=init_db)
+            created_apps.append(app)
+            return app
+
+        with patch.dict(
+            os.environ, {"WERKZEUG_RUN_MAIN": "true"}, clear=False
+        ), patch.object(app_factory, "_ensure_db") as ensure_db_mock, patch.object(
+            app_factory, "create_app", side_effect=capture_create_app
+        ) as create_app_mock, patch("flask.Flask.run", return_value=None):
+            app_factory.run_web_server(host="127.0.0.1", port=9999, debug=True)
+
+        create_app_mock.assert_called_once_with(init_db=True)
+        ensure_db_mock.assert_called_once_with()
+        self.assertEqual(1, len(created_apps))
+        self.assertTrue(created_apps[0].extensions["tg_db_ready"])
+
     def test_db_free_routes_do_not_trigger_runtime_db_initialization(self) -> None:
         with patch.dict(
             os.environ,
@@ -524,12 +567,20 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
             login_response = client.get("/admin/login")
             auth_check_response = client.get("/api/admin/auth/check")
             admin_response = client.get("/admin/manage")
+            clone_create_response = client.get("/admin/clone/create")
+            clone_migrate_response = client.get("/admin/clone/migrate")
+            clone_detail_response = client.get("/admin/clone/runs/detail")
             static_response = client.get("/static/admin_login.js")
+            missing_response = client.get("/not-a-route")
 
         self.assertEqual(200, login_response.status_code)
         self.assertEqual(200, auth_check_response.status_code)
         self.assertEqual(302, admin_response.status_code)
+        self.assertEqual(302, clone_create_response.status_code)
+        self.assertEqual(302, clone_migrate_response.status_code)
+        self.assertEqual(302, clone_detail_response.status_code)
         self.assertEqual(200, static_response.status_code)
+        self.assertEqual(404, missing_response.status_code)
         ensure_db_mock.assert_not_called()
         self.assertFalse(app.extensions["tg_db_ready"])
 

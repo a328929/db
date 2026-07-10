@@ -498,7 +498,7 @@ class SearchServiceFastCountTests(unittest.TestCase):
             side_effect=[primary_spec, fallback_spec],
         ) as build_mock, patch(
             "tg_harvest.search.service._build_payload_from_spec",
-            side_effect=[empty_payload, fallback_payload],
+            return_value=fallback_payload,
         ) as payload_mock:
             result = _search_payload_service(
                 self.conn,
@@ -512,7 +512,7 @@ class SearchServiceFastCountTests(unittest.TestCase):
 
         self.assertEqual(fallback_payload, result)
         self.assertEqual(2, build_mock.call_count)
-        self.assertEqual(2, payload_mock.call_count)
+        self.assertEqual(1, payload_mock.call_count)
 
     def test_auxiliary_index_partial_result_fallbacks_when_rebuilds_are_pending(self) -> None:
         params = SearchParams(
@@ -573,7 +573,7 @@ class SearchServiceFastCountTests(unittest.TestCase):
             side_effect=[primary_spec, fallback_spec],
         ), patch(
             "tg_harvest.search.service._build_payload_from_spec",
-            side_effect=[primary_payload, fallback_payload],
+            return_value=fallback_payload,
         ):
             result = _search_payload_service(
                 self.conn,
@@ -586,6 +586,83 @@ class SearchServiceFastCountTests(unittest.TestCase):
             )
 
         self.assertEqual(fallback_payload, result)
+
+    def test_auxiliary_index_fallback_overrides_stale_positive_results(self) -> None:
+        params = SearchParams(
+            raw_query="福",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+            skip_count=True,
+        )
+        primary_spec = {
+            "count_sql": "SELECT 1 AS c",
+            "query_sql": "SELECT 1",
+            "query_sql_skip": None,
+            "prefer_skip_query": False,
+            "sql_params": ["福"],
+            "count_limit": 1,
+            "match_query": "",
+            "raw_query": "福",
+            "effective_sort": "time",
+            "effective_order": "desc",
+            "has_text_filter": True,
+            "uses_text_index": True,
+            "uses_auxiliary_terms": True,
+        }
+        fallback_spec = {
+            **primary_spec,
+            "uses_text_index": False,
+            "uses_auxiliary_terms": False,
+        }
+        primary_payload = {
+            "ok": True,
+            "query": "福",
+            "fts_query": "",
+            "page": 1,
+            "page_size": 100,
+            "data_version": "v1",
+            "total": -1,
+            "total_pages": 0,
+            "total_is_capped": False,
+            "effective_sort": "time",
+            "effective_order": "desc",
+            "items": [{"pk": 1}],
+        }
+        fallback_payload = {
+            **primary_payload,
+            "total": 0,
+            "total_pages": 0,
+            "items": [],
+        }
+
+        with patch(
+            "tg_harvest.search.maintenance.schedule_message_search_maintenance"
+        ), patch(
+            "tg_harvest.search.service._has_pending_message_search_term_rebuilds",
+            return_value=True,
+        ), patch(
+            "tg_harvest.search.service._build_search_query_spec",
+            side_effect=[primary_spec, fallback_spec],
+        ) as build_mock, patch(
+            "tg_harvest.search.service._build_payload_from_spec",
+            return_value=fallback_payload,
+        ) as payload_mock:
+            result = _search_payload_service(
+                self.conn,
+                params,
+                fts_enabled=True,
+                from_sql="FROM messages m",
+                page_size=100,
+                max_count=50000000,
+                map_search_items_fn=lambda rows: rows,
+            )
+
+        self.assertEqual(fallback_payload, result)
+        self.assertEqual(2, build_mock.call_count)
+        self.assertEqual(1, payload_mock.call_count)
 
     def test_count_cache_key_changes_after_database_file_write(self) -> None:
         fd, db_path = tempfile.mkstemp(suffix=".sqlite3")

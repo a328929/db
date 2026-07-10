@@ -42,6 +42,8 @@ class CloneRoutesTests(unittest.TestCase):
         self.clone_run_create_error = None
         self.clone_plan_create_error = None
         self.clone_migration_create_error = None
+        self.clone_structure_start_error = None
+        self.job_statuses = {}
         self.clone_runs = [
             {
                 "run_id": "run-existing",
@@ -131,9 +133,7 @@ class CloneRoutesTests(unittest.TestCase):
                 )
                 or True
             ),
-            admin_start_clone_structure_job_thread_fn=(
-                lambda *args, **kwargs: self.started_jobs.append((args, kwargs))
-            ),
+            admin_start_clone_structure_job_thread_fn=self._start_clone_structure_job,
             admin_start_clone_deep_preflight_job_thread_fn=(
                 lambda *args, **kwargs: self.started_deep_preflight_jobs.append(
                     (args, kwargs)
@@ -185,8 +185,16 @@ class CloneRoutesTests(unittest.TestCase):
         return {
             "job_id": job_id,
             "job_type": job_type,
-            "status": "queued",
+            "status": self.job_statuses.get(
+                str(job_id),
+                "queued" if str(job_id) == "job-clone-1" else "done",
+            ),
         }
+
+    def _start_clone_structure_job(self, *args, **kwargs):
+        if self.clone_structure_start_error is not None:
+            raise self.clone_structure_start_error
+        self.started_jobs.append((args, kwargs))
 
     def _create_clone_run(self, _conn, **kwargs):
         if self.clone_run_create_error is not None:
@@ -813,6 +821,32 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertFalse(payload["telegram_target_deleted"])
         self.assertEqual(["run-existing"], self.deleted_clone_run_ids)
 
+    def test_clone_run_delete_rejects_related_active_migration(self) -> None:
+        self.created_clone_migrations.append(
+            {
+                "migration_id": "migration-active",
+                "run_id": "run-existing",
+                "job_id": "job-migration-active",
+                "mode": "timeline_replay",
+                "status": "running",
+            }
+        )
+        self.job_statuses["job-migration-active"] = "running"
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.delete(
+                "/api/admin/clone/runs/run-existing",
+                json={"confirm": "DELETE-CLONE-RUN:run-existing"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(409, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("关联克隆任务仍在执行，不能删除本地记录", payload["error"])
+        self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
+        self.assertEqual([], self.deleted_clone_run_ids)
+
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
@@ -1199,6 +1233,31 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("Source Backup", kwargs["target_title"])
         self.assertEqual("megagroup", kwargs["target_kind"])
         self.assertIn(("job-clone-1", "已接收结构克隆请求"), self.logs)
+
+    def test_clone_job_marks_job_error_when_thread_start_fails(self) -> None:
+        self.clone_structure_start_error = RuntimeError("thread unavailable")
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/jobs",
+                json={
+                    "chat_id": 100,
+                    "target_title": "Source Backup",
+                    "target_kind": "megagroup",
+                    "confirm": "CLONE:STRUCTURE:100",
+                },
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(500, response.status_code)
+        self.assertEqual("克隆任务启动失败", response.get_json()["error"])
+        self.assertEqual([], self.started_jobs)
+        self.assertEqual(1, len(self.created_clone_runs))
+        self.assertIn(("job-clone-1", "error"), self.status_updates)
+        self.assertIn(
+            ("job-clone-1", "克隆任务启动失败，任务未启动"),
+            self.logs,
+        )
 
     def test_clone_job_marks_job_error_when_run_creation_fails(self) -> None:
         self.clone_run_create_error = RuntimeError("run boom")

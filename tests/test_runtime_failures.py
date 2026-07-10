@@ -41,16 +41,16 @@ from tg_harvest.admin_jobs.range_streaming import (
 from tg_harvest.admin_jobs.runners import (
     _ACCOUNT_FLOOD_COOLDOWNS,
     _admin_get_chat_message_count,
-    _admin_update_effective_start_gap_seconds,
     _admin_harvest_job_runner,
-    _admin_update_primary_soft_cap,
     _admin_process_single_chat_update,
-    _admin_update_secondary_public_resolve_reserve,
-    _admin_update_secondary_username_gap_seconds,
-    _admin_update_secondary_target_count,
     _admin_update_account_start_delay,
     _admin_update_all_chats,
     _admin_update_effective_concurrency,
+    _admin_update_effective_start_gap_seconds,
+    _admin_update_primary_soft_cap,
+    _admin_update_secondary_public_resolve_reserve,
+    _admin_update_secondary_target_count,
+    _admin_update_secondary_username_gap_seconds,
     _admin_update_start_gap_seconds,
     _auto_secondary_public_resolve_limit,
     _build_admin_update_account_assignments,
@@ -4128,13 +4128,64 @@ class PersistentAdminJobsTests(unittest.TestCase):
         admin_jobs_runtime.configure_admin_job_runtime("new-runtime")
         admin_jobs_core.ADMIN_JOBS.clear()
 
-        recovered = _admin_recover_interrupted_jobs()
+        with patch.object(
+            admin_jobs_runtime,
+            "_admin_owner_is_alive",
+            return_value=False,
+        ):
+            recovered = _admin_recover_interrupted_jobs()
         snapshot = _admin_job_get_snapshot(job_id)
 
         self.assertEqual(1, recovered)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
         self.assertEqual("error", snapshot["status"])
+
+    def test_recover_interrupted_jobs_keeps_fresh_foreign_live_owner(self) -> None:
+        admin_jobs_runtime.configure_admin_job_runtime("old-runtime")
+        job = _admin_job_create("update", target_chat_id=654, target_label="chat-654")
+        job_id = str(job["job_id"])
+        _admin_job_set_status(job_id, "running")
+
+        admin_jobs_runtime.configure_admin_job_runtime("new-runtime")
+        admin_jobs_core.ADMIN_JOBS.clear()
+        with patch.object(
+            admin_jobs_runtime,
+            "_admin_owner_is_alive",
+            return_value=True,
+        ):
+            recovered = _admin_recover_interrupted_jobs()
+
+        snapshot = _admin_job_get_snapshot(job_id)
+        self.assertEqual(0, recovered)
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        self.assertEqual("running", snapshot["status"])
+
+    def test_log_and_stop_request_do_not_take_over_job_owner(self) -> None:
+        admin_jobs_runtime.configure_admin_job_runtime("owner-runtime")
+        job = _admin_job_create("cleanup", target_chat_id=None, target_label="all")
+        job_id = str(job["job_id"])
+
+        admin_jobs_runtime.configure_admin_job_runtime("request-runtime")
+        _admin_job_append_log(job_id, "external request log")
+        self.assertTrue(_admin_request_job_stop(job_id)[0])
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            owner = conn.execute(
+                """
+                SELECT owner_instance_id, owner_pid, owner_host
+                FROM admin_jobs
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+        self.assertEqual("owner-runtime", owner[0])
+        self.assertEqual(os.getpid(), owner[1])
+        self.assertTrue(owner[2])
 
     def test_try_create_exclusive_job_rejects_second_active_job(self) -> None:
         first_job, existing = _admin_try_create_exclusive_job(

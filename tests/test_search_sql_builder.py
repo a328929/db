@@ -301,7 +301,7 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertIn("JOIN candidate_pks cp ON cp.pk = m.pk", spec["query_sql"])
         self.assertNotIn("fts.messages_fts MATCH ?", spec["where_sql"])
 
-    def test_not_query_uses_candidate_cte_when_term_supports_trigram(self) -> None:
+    def test_not_query_uses_only_positive_candidate_with_like(self) -> None:
         params = SearchParams(
             raw_query="onlyfans-magnet",
             search_type="all",
@@ -318,8 +318,32 @@ class SearchSqlBuilderTests(unittest.TestCase):
             max_count=1000,
         )
 
-        self.assertIn("EXCEPT", spec["query_sql"])
+        self.assertNotIn("EXCEPT", spec["query_sql"])
         self.assertIn("WITH candidate_pks AS", spec["query_sql"])
+        self.assertIn("LIKE", spec["where_sql"])
+
+    def test_negated_two_char_cjk_query_keeps_like_without_auxiliary_exclusion(
+        self,
+    ) -> None:
+        params = SearchParams(
+            raw_query="-福利",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=True,
+            max_count=1000,
+        )
+
+        self.assertNotIn("message_search_terms", spec["query_sql"])
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(["%福利%"], spec["sql_params"])
 
     def test_or_query_can_mix_cjk_bigram_and_trigram_candidates(self) -> None:
         params = SearchParams(
@@ -364,8 +388,33 @@ class SearchSqlBuilderTests(unittest.TestCase):
         self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
         self.assertTrue(spec["uses_text_index"])
         self.assertTrue(spec["uses_auxiliary_terms"])
-        self.assertNotIn("LIKE", spec["where_sql"])
-        self.assertEqual(["福利", "会员"], spec["sql_params"])
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(
+            ["福利", "会员", "%福利%", "%会员%"],
+            spec["sql_params"],
+        )
+
+    def test_two_char_cjk_candidate_keeps_like_for_whitespace_semantics(self) -> None:
+        params = SearchParams(
+            raw_query="福利",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=True,
+            max_count=1000,
+        )
+
+        self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
+        self.assertNotIn("EXCEPT", spec["query_sql"])
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福利", "%福利%"], spec["sql_params"])
 
     def test_one_char_cjk_query_uses_auxiliary_term_index(self) -> None:
         params = SearchParams(
@@ -411,6 +460,51 @@ class SearchSqlBuilderTests(unittest.TestCase):
 
         self.assertIn("LIKE", spec["where_sql"])
         self.assertEqual(["福利", '"onlyfans"', "%福利%", "%onlyfans%"], spec["sql_params"])
+
+    def test_auxiliary_candidate_keeps_like_for_unsupported_and_term(self) -> None:
+        params = SearchParams(
+            raw_query="福+ab",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=True,
+            max_count=1000,
+        )
+
+        self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福", "%福%", "%ab%"], spec["sql_params"])
+
+    def test_auxiliary_candidate_keeps_like_for_partially_compiled_boolean_tree(
+        self,
+    ) -> None:
+        params = SearchParams(
+            raw_query="福+(-利/姬)",
+            search_type="all",
+            sort_by_req="time",
+            order_req="desc",
+            page=1,
+            chat_id=None,
+        )
+
+        spec = _build_search_query_spec(
+            params,
+            from_sql="FROM messages m",
+            fts_enabled=True,
+            max_count=1000,
+        )
+
+        self.assertIn("FROM message_search_terms WHERE term = ?", spec["query_sql"])
+        self.assertNotIn("EXCEPT", spec["query_sql"])
+        self.assertIn("LIKE", spec["where_sql"])
+        self.assertEqual(["福", "%福%", "%利%", "%姬%"], spec["sql_params"])
 
     def test_media_sort_count_sql_uses_same_media_join_as_rows_query(self) -> None:
         params = SearchParams(

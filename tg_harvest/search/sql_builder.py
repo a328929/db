@@ -64,11 +64,7 @@ def _select_from_subquery(sql: str) -> str:
     return f"SELECT pk FROM ({sql})"
 
 
-def _compile_candidate_node(
-    node: SearchExprNode,
-    *,
-    universe_sql: str,
-) -> tuple[str, list[Any]] | None:
+def _compile_candidate_node(node: SearchExprNode) -> tuple[str, list[Any]] | None:
     if node.kind in {"TERM", "PHRASE"}:
         if _term_supports_cjk_aux_candidate(node.value):
             return (
@@ -83,63 +79,19 @@ def _compile_candidate_node(
         )
 
     if node.kind == "NOT":
-        if node.left is None:
-            return None
-        compiled = _compile_candidate_node(node.left, universe_sql=universe_sql)
-        if compiled is None:
-            return None
-        child_sql, child_params = compiled
-        return (
-            f"{universe_sql} EXCEPT {_select_from_subquery(child_sql)}",
-            child_params,
-        )
+        # A candidate for a negative condition must be an exact representation
+        # of its child. The short CJK helper intentionally matches across
+        # whitespace, so EXCEPT could otherwise discard LIKE-valid rows.
+        return None
 
     if node.kind == "AND":
-        if (
-            node.left is not None
-            and node.right is not None
-            and node.right.kind == "NOT"
-            and node.right.left is not None
-        ):
-            left = _compile_candidate_node(node.left, universe_sql=universe_sql)
-            right_negated = _compile_candidate_node(
-                node.right.left, universe_sql=universe_sql
-            )
-            if left is None:
-                return None
-            if right_negated is None:
-                return left
-            return (
-                f"{_select_from_subquery(left[0])} EXCEPT {_select_from_subquery(right_negated[0])}",
-                left[1] + right_negated[1],
-            )
-
-        if (
-            node.left is not None
-            and node.left.kind == "NOT"
-            and node.left.left is not None
-            and node.right is not None
-        ):
-            right = _compile_candidate_node(node.right, universe_sql=universe_sql)
-            left_negated = _compile_candidate_node(
-                node.left.left, universe_sql=universe_sql
-            )
-            if right is None:
-                return None
-            if left_negated is None:
-                return right
-            return (
-                f"{_select_from_subquery(right[0])} EXCEPT {_select_from_subquery(left_negated[0])}",
-                right[1] + left_negated[1],
-            )
-
         left = (
-            _compile_candidate_node(node.left, universe_sql=universe_sql)
+            _compile_candidate_node(node.left)
             if node.left is not None
             else None
         )
         right = (
-            _compile_candidate_node(node.right, universe_sql=universe_sql)
+            _compile_candidate_node(node.right)
             if node.right is not None
             else None
         )
@@ -158,12 +110,12 @@ def _compile_candidate_node(
         ):
             return None
         left = (
-            _compile_candidate_node(node.left, universe_sql=universe_sql)
+            _compile_candidate_node(node.left)
             if node.left is not None
             else None
         )
         right = (
-            _compile_candidate_node(node.right, universe_sql=universe_sql)
+            _compile_candidate_node(node.right)
             if node.right is not None
             else None
         )
@@ -182,12 +134,34 @@ def _build_candidate_fts_sql(
 ) -> tuple[str, list[Any]] | None:
     if expr is None:
         return None
-    return _compile_candidate_node(expr, universe_sql="SELECT pk FROM messages")
+    return _compile_candidate_node(expr)
 
 
 def _candidate_uses_auxiliary_terms_only(candidate_sql: str | None) -> bool:
     sql = str(candidate_sql or "")
     return "message_search_terms" in sql and "messages_fts" not in sql
+
+
+def _term_is_exactly_supported_by_auxiliary_terms(term: str) -> bool:
+    """Return whether the helper index has the same semantics as LIKE for a term."""
+    # The helper's bigrams intentionally elide whitespace in message text, while
+    # LIKE preserves it. A two-character candidate therefore only narrows the
+    # scan; a single CJK character is the only exact short-text lookup.
+    value = str(term or "")
+    return len(value) == 1 and _CJK_CHAR_RE.fullmatch(value) is not None
+
+
+def _expression_is_exactly_supported_by_auxiliary_terms(
+    expr: SearchExprNode | None,
+) -> bool:
+    # Candidate compilation can intentionally retain only a safe subset of a
+    # boolean tree. It is therefore authoritative only for a lone exact term;
+    # boolean expressions always keep their full LIKE predicate.
+    return (
+        expr is not None
+        and expr.kind in {"TERM", "PHRASE"}
+        and _term_is_exactly_supported_by_auxiliary_terms(expr.value)
+    )
 
 
 def _single_auxiliary_term(expr: SearchExprNode | None) -> str | None:
@@ -252,10 +226,14 @@ def _build_search_query_spec(
                 use_fts_join = True
                 where_parts.append("fts.messages_fts MATCH ?")
                 sql_params.append(match_query)
-        if not auxiliary_only_candidate:
-            where_parts.append(like_clause)
-        else:
+        can_trust_auxiliary_candidate = (
+            auxiliary_only_candidate
+            and _expression_is_exactly_supported_by_auxiliary_terms(expr)
+        )
+        if can_trust_auxiliary_candidate:
             like_params = []
+        else:
+            where_parts.append(like_clause)
 
     sql_params = candidate_params + like_params + sql_params
     _append_scope_filters(where_parts, sql_params, params)

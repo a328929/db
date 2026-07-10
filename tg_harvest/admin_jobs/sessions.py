@@ -12,6 +12,7 @@ from typing import Any
 from telethon.sync import TelegramClient
 
 from tg_harvest.ingest.flood_wait import flood_sleep_threshold_kwargs
+from tg_harvest.runtime.paths import secure_session_artifacts
 
 JOB_HEARTBEAT_INTERVAL_SEC = 30.0
 _SESSION_FILE_EXTENSIONS = (".session", ".session-journal", ".session-wal", ".session-shm")
@@ -64,6 +65,7 @@ def _session_file_lock(session_name: Any) -> threading.Lock:
 def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> None:
     base_lock = _session_file_lock(base_session_name)
     with base_lock:
+        secure_session_artifacts(base_session_name)
         for ext in _SESSION_FILE_EXTENSIONS:
             dst = f"{worker_session_name}{ext}"
             if os.path.exists(dst):
@@ -75,6 +77,7 @@ def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> N
             if os.path.exists(src):
                 with suppress(Exception):
                     shutil.copy2(src, dst)
+        secure_session_artifacts(worker_session_name)
 
 
 def _configure_telethon_session_sqlite(client: Any) -> None:
@@ -194,6 +197,7 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         )
         _configure_telethon_session_sqlite(client)
         client.connect()
+        secure_session_artifacts(cfg.session_name)
         if not client.is_user_authorized():
             append_log_fn(
                 job_id,
@@ -260,6 +264,7 @@ def _create_isolated_worker_client_with_options(
         client._tg_harvest_previous_loop = previous_loop
         _configure_telethon_session_sqlite(client)
         client.connect()
+        secure_session_artifacts(worker_session_name)
         return client
     except Exception:
         if client is not None:

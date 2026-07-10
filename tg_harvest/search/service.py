@@ -6,7 +6,6 @@ from typing import Any
 import tg_harvest.search.cache as _search_cache
 import tg_harvest.search.maintenance as _search_maintenance
 import tg_harvest.storage.search_terms as _search_terms
-from tg_harvest.domain.coerce import safe_int
 from tg_harvest.search.params import SearchParams
 from tg_harvest.search.sql_builder import _build_search_query_spec, _make_type_clause
 from tg_harvest.storage.row_access import row_int as _row_int
@@ -83,13 +82,6 @@ def _should_try_like_fallback(
             or _has_pending_message_search_term_rebuilds(conn)
         )
     return False
-
-
-def _payload_has_results(payload: dict[str, Any]) -> bool:
-    total_val = safe_int(payload.get("total"))
-    if total_val > 0:
-        return True
-    return total_val == -1 and len(payload.get("items") or []) > 0
 
 
 def _resolve_precise_count(
@@ -382,22 +374,17 @@ def _search_payload_service(
         fts_enabled=fts_enabled,
         max_count=max_count,
     )
-    payload = _build_payload_from_spec(
-        conn,
-        params,
-        primary_spec,
-        page_size=page_size,
-        max_count=max_count,
-        map_search_items_fn=map_search_items_fn,
-        include_chat_facets=bool(params.count_only),
-    )
-
     should_try_fallback = _should_try_like_fallback(conn, primary_spec)
-    if _payload_has_results(payload) and not should_try_fallback:
-        return payload
-
     if not should_try_fallback:
-        return payload
+        return _build_payload_from_spec(
+            conn,
+            params,
+            primary_spec,
+            page_size=page_size,
+            max_count=max_count,
+            map_search_items_fn=map_search_items_fn,
+            include_chat_facets=bool(params.count_only),
+        )
 
     fallback_spec = _build_search_query_spec(
         params,
@@ -415,9 +402,6 @@ def _search_payload_service(
         map_search_items_fn=map_search_items_fn,
         include_chat_facets=bool(params.count_only),
     )
-
-    if not _payload_has_results(fallback_payload):
-        return payload
 
     fallback_payload["fts_query"] = str(primary_spec.get("match_query") or "")
     return fallback_payload

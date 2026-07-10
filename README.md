@@ -81,7 +81,7 @@ python3 tools/change_inventory.py
 python3 tools/db_space_report.py --db .runtime/db/tg_data.db
 
 # 在有足够临时磁盘的维护窗口生成紧凑替换库，不会修改源库；
-# 默认会显示进度、速度和 ETA，并在校验通过后才生成最终目标库
+# 工具会为一致性快照和构建库预留空间，校验通过后才生成最终目标库
 python3 tools/compact_sqlite_db.py --source .runtime/db/tg_data.db --target /path/to/tg_data.compact.db
 
 # 手机或低内存设备可降低批大小；目标已存在时才需要 --force

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import socket
 import sqlite3
 from contextlib import suppress
 from dataclasses import dataclass
@@ -62,6 +64,9 @@ class SyncPendingTask:
     first_event_at: str
     last_event_at: str
     due_at: str
+    in_flight_owner_instance_id: str = ""
+    in_flight_owner_pid: int = 0
+    in_flight_owner_host: str = ""
 
 
 @dataclass(frozen=True)
@@ -918,9 +923,18 @@ def claim_due_pending_updates(
     now_text: str | None = None,
     limit: int = 1,
     exclude_preferred_accounts: set[str] | list[str] | tuple[str, ...] | None = None,
+    owner_instance_id: str = "",
+    owner_pid: int = 0,
+    owner_host: str = "",
 ) -> list[SyncPendingTask]:
     now = str(now_text or utc_now_text())
     effective_limit = max(1, int(limit or 1))
+    normalized_owner_instance_id = str(owner_instance_id or "").strip()
+    normalized_owner_host = str(owner_host or "").strip()
+    try:
+        normalized_owner_pid = max(0, int(owner_pid or 0))
+    except (TypeError, ValueError):
+        normalized_owner_pid = 0
     excluded = [
         str(item or "").strip()
         for item in (exclude_preferred_accounts or [])
@@ -965,12 +979,23 @@ def claim_due_pending_updates(
                 SET
                     in_flight = 1,
                     in_flight_generation = ?,
+                    in_flight_owner_instance_id = ?,
+                    in_flight_owner_pid = ?,
+                    in_flight_owner_host = ?,
                     updated_at = ?
                 WHERE chat_id = ?
                   AND in_flight = 0
                   AND generation = ?
                 """,
-                (generation, now, chat_id, generation),
+                (
+                    generation,
+                    normalized_owner_instance_id,
+                    normalized_owner_pid,
+                    normalized_owner_host,
+                    now,
+                    chat_id,
+                    generation,
+                ),
             )
             if cur.rowcount <= 0:
                 continue
@@ -998,10 +1023,140 @@ def claim_due_pending_updates(
                     first_event_at=str(row["first_event_at"] or ""),
                     last_event_at=str(row["last_event_at"] or ""),
                     due_at=str(row["due_at"] or ""),
+                    in_flight_owner_instance_id=normalized_owner_instance_id,
+                    in_flight_owner_pid=normalized_owner_pid,
+                    in_flight_owner_host=normalized_owner_host,
                 )
             )
         conn.commit()
         return tasks
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def _recovered_pending_due_at(due_at: str, now: str) -> str:
+    due_dt = parse_utc_text(due_at)
+    now_dt = parse_utc_text(now)
+    if due_dt is not None and now_dt is not None and due_dt > now_dt:
+        return due_at
+    return now
+
+
+def _process_is_alive(pid: int) -> bool:
+    try:
+        os.kill(int(pid), 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _in_flight_owner_can_be_recovered(row: Any, *, local_host: str) -> bool:
+    """Only reclaim legacy work or a task whose local owner is known dead."""
+    owner_instance_id = _row_text(row, "in_flight_owner_instance_id")
+    owner_pid = _row_int(row, "in_flight_owner_pid")
+    owner_host = _row_text(row, "in_flight_owner_host")
+    if not owner_instance_id and owner_pid <= 0 and not owner_host:
+        return True
+    if owner_host and owner_host != local_host:
+        return False
+    if owner_pid <= 0:
+        return False
+    return not _process_is_alive(owner_pid)
+
+
+@synchronized_write
+def recover_in_flight_pending_updates(
+    conn: sqlite3.Connection,
+    *,
+    now_text: str | None = None,
+    local_host: str | None = None,
+) -> int:
+    """Release only work whose owner is known to have exited."""
+    has_pending_updates = _table_exists(conn, "sync_pending_updates")
+    has_account_runtime_state = _table_exists(conn, "account_runtime_state")
+    if not has_pending_updates and not has_account_runtime_state:
+        return 0
+
+    now = str(now_text or utc_now_text())
+    effective_local_host = str(local_host or socket.gethostname()).strip()
+    has_chat_state = _table_exists(conn, "sync_chat_state")
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        recovered = 0
+        has_unrecovered_in_flight = False
+        if has_pending_updates:
+            cur.execute(
+                """
+                SELECT
+                    chat_id,
+                    due_at,
+                    in_flight_owner_instance_id,
+                    in_flight_owner_pid,
+                    in_flight_owner_host
+                FROM sync_pending_updates
+                WHERE in_flight <> 0
+                ORDER BY chat_id ASC
+                """,
+            )
+            rows = cur.fetchall()
+            for row in rows:
+                if not _in_flight_owner_can_be_recovered(
+                    row, local_host=effective_local_host
+                ):
+                    has_unrecovered_in_flight = True
+                    continue
+                chat_id = int(row["chat_id"])
+                due_at = _recovered_pending_due_at(_row_text(row, "due_at"), now)
+                cur.execute(
+                    """
+                    UPDATE sync_pending_updates
+                    SET
+                        in_flight = 0,
+                        in_flight_generation = 0,
+                        in_flight_owner_instance_id = '',
+                        in_flight_owner_pid = 0,
+                        in_flight_owner_host = '',
+                        due_at = ?,
+                        updated_at = ?
+                    WHERE chat_id = ?
+                      AND in_flight <> 0
+                    """,
+                    (due_at, now, chat_id),
+                )
+                if cur.rowcount <= 0:
+                    continue
+                recovered += 1
+                if has_chat_state:
+                    cur.execute(
+                        """
+                        UPDATE sync_chat_state
+                        SET
+                            status = 'pending',
+                            next_update_at = ?,
+                            updated_at = ?
+                        WHERE chat_id = ?
+                          AND is_active = 1
+                        """,
+                        (due_at, now, chat_id),
+                    )
+        if has_account_runtime_state and recovered > 0 and not has_unrecovered_in_flight:
+            cur.execute(
+                """
+                UPDATE account_runtime_state
+                SET in_flight_count = 0, updated_at = ?
+                WHERE in_flight_count <> 0
+                """,
+                (now,),
+            )
+        conn.commit()
+        return recovered
     except Exception:
         with suppress(Exception):
             conn.rollback()
@@ -1027,6 +1182,25 @@ def _pending_has_new_generation(row: Any, task: SyncPendingTask) -> bool:
     ) > int(task.in_flight_generation)
 
 
+def _task_owns_in_flight_pending_update(
+    row: Any, task: SyncPendingTask
+) -> bool:
+    if row is None or _row_int(row, "in_flight") == 0:
+        return False
+    if _row_int(row, "in_flight_generation") != int(task.in_flight_generation):
+        return False
+    expected_instance_id = str(task.in_flight_owner_instance_id or "").strip()
+    if not expected_instance_id:
+        return True
+    return (
+        _row_text(row, "in_flight_owner_instance_id") == expected_instance_id
+        and _row_int(row, "in_flight_owner_pid")
+        == int(task.in_flight_owner_pid or 0)
+        and _row_text(row, "in_flight_owner_host")
+        == str(task.in_flight_owner_host or "").strip()
+    )
+
+
 @synchronized_write
 def complete_pending_update(
     conn: sqlite3.Connection,
@@ -1044,6 +1218,9 @@ def complete_pending_update(
             (int(task.chat_id),),
         )
         pending_row = cur.fetchone()
+        if not _task_owns_in_flight_pending_update(pending_row, task):
+            conn.commit()
+            return
         cur.execute(
             "SELECT * FROM sync_chat_state WHERE chat_id = ? LIMIT 1",
             (int(task.chat_id),),
@@ -1070,6 +1247,9 @@ def complete_pending_update(
                 SET
                     in_flight = 0,
                     in_flight_generation = 0,
+                    in_flight_owner_instance_id = '',
+                    in_flight_owner_pid = 0,
+                    in_flight_owner_host = '',
                     dirty_generation = 0,
                     due_at = ?,
                     updated_at = ?
@@ -1192,6 +1372,9 @@ def fail_pending_update(
             (int(task.chat_id),),
         )
         pending_row = cur.fetchone()
+        if not _task_owns_in_flight_pending_update(pending_row, task):
+            conn.commit()
+            return
         cur.execute(
             "SELECT * FROM sync_chat_state WHERE chat_id = ? LIMIT 1",
             (int(task.chat_id),),
@@ -1203,6 +1386,9 @@ def fail_pending_update(
             SET
                 in_flight = 0,
                 in_flight_generation = 0,
+                in_flight_owner_instance_id = '',
+                in_flight_owner_pid = 0,
+                in_flight_owner_host = '',
                 dirty_generation = 0,
                 due_at = ?,
                 updated_at = ?
@@ -1411,11 +1597,20 @@ def deactivate_chat(
     chat_id: int,
     *,
     now_text: str | None = None,
+    task: SyncPendingTask | None = None,
 ) -> None:
     now = str(now_text or utc_now_text())
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
+        if task is not None:
+            cur.execute(
+                "SELECT * FROM sync_pending_updates WHERE chat_id = ? LIMIT 1",
+                (int(chat_id),),
+            )
+            if not _task_owns_in_flight_pending_update(cur.fetchone(), task):
+                conn.commit()
+                return
         cur.execute("DELETE FROM sync_pending_updates WHERE chat_id = ?", (int(chat_id),))
         cur.execute(
             """

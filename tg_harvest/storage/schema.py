@@ -223,6 +223,7 @@ def _create_admin_job_tables(cur: sqlite3.Cursor, strict_suffix: str):
         updated_at           TEXT NOT NULL,
         owner_instance_id    TEXT,
         owner_pid            INTEGER,
+        owner_host           TEXT,
         heartbeat_at         TEXT NOT NULL DEFAULT (datetime('now')),
         progress_current     INTEGER NOT NULL DEFAULT 0,
         progress_total       INTEGER,
@@ -522,6 +523,9 @@ def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
         generation               INTEGER NOT NULL DEFAULT 0,
         in_flight                INTEGER NOT NULL DEFAULT 0,
         in_flight_generation     INTEGER NOT NULL DEFAULT 0,
+        in_flight_owner_instance_id TEXT NOT NULL DEFAULT '',
+        in_flight_owner_pid      INTEGER NOT NULL DEFAULT 0,
+        in_flight_owner_host     TEXT NOT NULL DEFAULT '',
         dirty_generation         INTEGER NOT NULL DEFAULT 0,
         created_at               TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
@@ -773,6 +777,7 @@ def _ensure_admin_job_schema(cur: sqlite3.Cursor) -> None:
         [
             ("owner_instance_id", "owner_instance_id TEXT"),
             ("owner_pid", "owner_pid INTEGER"),
+            ("owner_host", "owner_host TEXT"),
             ("heartbeat_at", "heartbeat_at TEXT NOT NULL DEFAULT (datetime('now'))"),
             ("progress_current", "progress_current INTEGER NOT NULL DEFAULT 0"),
             ("progress_total", "progress_total INTEGER"),
@@ -1081,6 +1086,18 @@ def _ensure_sync_scheduler_schema(cur: sqlite3.Cursor) -> None:
             (
                 "in_flight_generation",
                 "in_flight_generation INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "in_flight_owner_instance_id",
+                "in_flight_owner_instance_id TEXT NOT NULL DEFAULT ''",
+            ),
+            (
+                "in_flight_owner_pid",
+                "in_flight_owner_pid INTEGER NOT NULL DEFAULT 0",
+            ),
+            (
+                "in_flight_owner_host",
+                "in_flight_owner_host TEXT NOT NULL DEFAULT ''",
             ),
             ("dirty_generation", "dirty_generation INTEGER NOT NULL DEFAULT 0"),
             ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),

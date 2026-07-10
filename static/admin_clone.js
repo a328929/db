@@ -26,6 +26,8 @@
     runs: [],
     sourceChatId: '',
     selectedRunId: '',
+    requestedRunId: '',
+    requestedRunError: '',
     plan: null,
     migration: null,
     timelineMigration: null,
@@ -350,6 +352,10 @@
     cloneState.sourceChatId = selected ? String(selected.chat_id || '') : '';
     if (opts.resetRunSelection || isCreatePage(elements)) {
       cloneState.selectedRunId = '';
+      if (opts.resetRunSelection) {
+        cloneState.requestedRunId = '';
+        cloneState.requestedRunError = '';
+      }
       syncUrlRunId(elements, '');
     }
     cloneState.plan = null;
@@ -678,6 +684,10 @@
       }
       cloneState.runs = Array.isArray(payload.items) ? payload.items : [];
       if (isMigratePage(elements)) {
+        await resolveRequestedCloneRun(requestToken);
+        if (requestToken !== requestState.runsToken) {
+          return;
+        }
         syncSelectedRunFromRuns();
       } else {
         cloneState.selectedRunId = '';
@@ -741,6 +751,9 @@
         : '暂无创建记录。';
     }
 
+    if (cloneState.requestedRunError) {
+      return cloneState.requestedRunError + '，请从列表中手动选择其他克隆群。';
+    }
     if (selectedSource) {
       return count
         ? '当前源群组共有 ' + total + ' 条克隆群记录；只有已创建成功的克隆群可以继续克隆消息。'
@@ -952,6 +965,10 @@
     if (cloneState.selectedRunId && isSelectableCloneRun(findCloneRun(cloneState.selectedRunId))) {
       return;
     }
+    if (cloneState.requestedRunId) {
+      cloneState.selectedRunId = '';
+      return;
+    }
     cloneState.selectedRunId = '';
     for (var i = 0; i < cloneState.runs.length; i += 1) {
       if (isSelectableCloneRun(cloneState.runs[i])) {
@@ -978,10 +995,49 @@
     return findCloneRun(cloneState.selectedRunId);
   }
 
+  async function resolveRequestedCloneRun(requestToken) {
+    var requestedRunId = String(cloneState.requestedRunId || '').trim();
+    if (!requestedRunId || findCloneRun(requestedRunId)) {
+      cloneState.requestedRunError = '';
+      return;
+    }
+
+    try {
+      var payload = await fetchJSON(
+        '/api/admin/clone/runs/'
+          + encodeURIComponent(requestedRunId)
+          + '/detail'
+      );
+      if (requestToken !== requestState.runsToken) {
+        return;
+      }
+
+      var run = payload && payload.run ? payload.run : null;
+      if (String((run && run.run_id) || '').trim() !== requestedRunId) {
+        throw new Error('指定记录不存在');
+      }
+
+      cloneState.runs = [run].concat(
+        cloneState.runs.filter(function (item) {
+          return String((item && item.run_id) || '').trim() !== requestedRunId;
+        })
+      );
+      cloneState.requestedRunError = '';
+    } catch (error) {
+      if (requestToken !== requestState.runsToken) {
+        return;
+      }
+      cloneState.selectedRunId = '';
+      cloneState.requestedRunError = '无法读取 URL 指定的克隆群记录：' + error.message;
+    }
+  }
+
   async function handleSelectCloneRun(elements, runId) {
     if (!isMigratePage(elements)) {
       return;
     }
+    cloneState.requestedRunId = '';
+    cloneState.requestedRunError = '';
     cloneState.selectedRunId = String(runId || '').trim();
     cloneState.plan = null;
     cloneState.migration = null;
@@ -1636,7 +1692,9 @@
 
   function initializeConsoleState(elements) {
     cloneState.sourceChatId = '';
-    cloneState.selectedRunId = isMigratePage(elements) ? getRunIdFromLocation() : '';
+    cloneState.requestedRunId = isMigratePage(elements) ? getRunIdFromLocation() : '';
+    cloneState.requestedRunError = '';
+    cloneState.selectedRunId = cloneState.requestedRunId;
     elements.sortSelect.value = isCreatePage(elements) ? 'message_count_desc' : 'updated_desc';
 
     if (isMigratePage(elements)) {
@@ -1660,6 +1718,9 @@
     try {
       var url = new URL(window.location.href);
       var normalized = String(runId || '').trim();
+      if (isMigratePage(elements) && !normalized) {
+        normalized = String(cloneState.requestedRunId || '').trim();
+      }
       if (isMigratePage(elements) && normalized) {
         url.searchParams.set('run_id', normalized);
       } else {

@@ -1,5 +1,5 @@
-from types import SimpleNamespace
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import tg_harvest.admin_jobs.clone_media_resolver as clone_media_resolver

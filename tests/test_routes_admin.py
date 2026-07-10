@@ -103,6 +103,31 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertEqual(1, len(self.started_harvests))
         self.assertEqual(("job-1", "@example_group"), self.started_harvests[0]["args"])
 
+    def test_harvest_marks_job_error_when_thread_start_fails(self) -> None:
+        status_updates = []
+
+        def fail_start(*_args, **_kwargs):
+            raise RuntimeError("thread unavailable")
+
+        self.handler.admin_start_harvest_job_thread_fn = fail_start
+        self.handler.admin_job_set_status_fn = (
+            lambda job_id, status: status_updates.append((job_id, status)) or True
+        )
+
+        with self.app.test_request_context(
+            "/api/admin/jobs/harvest",
+            method="POST",
+            json={"target": "@example_group"},
+        ):
+            response, status_code = self.handler.api_admin_job_create_harvest.__wrapped__(
+                self.handler
+            )
+
+        self.assertEqual(500, status_code)
+        self.assertEqual("任务启动失败", response.get_json()["error"])
+        self.assertEqual([("job-1", "error")], status_updates)
+        self.assertIn(("job-1", "后台任务启动失败，已标记为失败"), self.logs)
+
     def test_update_all_success_starts_job_with_all_scope(self) -> None:
         with self.app.test_request_context(
             "/api/admin/jobs/update",

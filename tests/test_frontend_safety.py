@@ -297,6 +297,118 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("'文本剩余'", source)
         self.assertNotIn("'数据库风险组'", source)
 
+    def test_clone_migrate_preserves_explicit_run_selection(self) -> None:
+        script = r"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync('static/admin_clone.js', 'utf8');
+        const closingMarker = '\n})();';
+        const closingIndex = source.lastIndexOf(closingMarker);
+        if (closingIndex < 0) {
+          throw new Error('clone script closing marker not found');
+        }
+        const instrumented = source.slice(0, closingIndex)
+          + '\n  window.__cloneTestHooks = {'
+          + ' cloneState: cloneState,'
+          + ' requestState: requestState,'
+          + ' resolveRequestedCloneRun: resolveRequestedCloneRun,'
+          + ' syncSelectedRunFromRuns: syncSelectedRunFromRuns'
+          + ' };'
+          + source.slice(closingIndex);
+        const shared = {
+          appendLog() {},
+          clearLogs() {},
+          ensurePlaceholder() {},
+          fetchJSON(url) {
+            if (url === '/api/admin/clone/runs/run-requested/detail') {
+              return Promise.resolve({
+                run: {
+                  run_id: 'run-requested',
+                  status: 'done',
+                  target_chat_id: 200
+                }
+              });
+            }
+            throw new Error('unexpected URL: ' + url);
+          },
+          postJSON() {},
+          getCreatedJobId() { return 'job'; },
+          setElementDisabled() {},
+          syncClearLogsButtonVisibility() {},
+          trapFocusWithin() {},
+          normalizeNonnegativeInteger() { return 0; },
+          formatDateTime() { return ''; },
+          formatNumber(value) { return String(value || 0); },
+          buildSnapshotProgressMessage() { return {}; },
+          createAdminSessionController() {
+            return {
+              checkAuth() {},
+              handleLogin() {},
+              handleUnauthorizedResponse() {}
+            };
+          }
+        };
+        const sandbox = {
+          console,
+          document: {
+            addEventListener() {},
+            getElementById() { return null; }
+          },
+          URL,
+          URLSearchParams,
+          setTimeout,
+          clearTimeout
+        };
+        sandbox.window = sandbox;
+        sandbox.AdminManageShared = shared;
+        vm.runInNewContext(instrumented, sandbox);
+        const hooks = sandbox.__cloneTestHooks;
+        hooks.cloneState.runs = [{
+          run_id: 'run-newest',
+          status: 'done',
+          target_chat_id: 100
+        }];
+        hooks.cloneState.selectedRunId = 'run-requested';
+        hooks.cloneState.requestedRunId = 'run-requested';
+        hooks.requestState.runsToken = 1;
+        (async () => {
+          await hooks.resolveRequestedCloneRun(1);
+          hooks.syncSelectedRunFromRuns();
+          if (hooks.cloneState.selectedRunId !== 'run-requested') {
+            throw new Error('explicit run selection was replaced');
+          }
+          if (!hooks.cloneState.runs.some((item) => item.run_id === 'run-requested')) {
+            throw new Error('explicit run was not resolved into the list');
+          }
+          hooks.cloneState.runs = [{
+            run_id: 'run-newest',
+            status: 'done',
+            target_chat_id: 100
+          }];
+          hooks.cloneState.selectedRunId = 'run-missing';
+          hooks.cloneState.requestedRunId = 'run-missing';
+          hooks.requestState.runsToken = 2;
+          await hooks.resolveRequestedCloneRun(2);
+          hooks.syncSelectedRunFromRuns();
+          if (hooks.cloneState.selectedRunId) {
+            throw new Error('missing explicit run fell back to another record');
+          }
+        })().catch((error) => {
+          console.error(error);
+          process.exitCode = 1;
+        });
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_admin_clone_runs_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_clone_runs.html").read_text(
             encoding="utf-8"
@@ -345,6 +457,11 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("当前将删除 “", source)
         self.assertIn("window.location.assign('/admin/clone/runs/manage');", source)
         self.assertIn("admin-clone-run-detail-migrate-nav-link", source)
+        template_ids = set(re.findall(r'\bid="([^"]+)"', template))
+        script_ids = set(
+            re.findall(r"document\.getElementById\('([^']+)'\)", source)
+        )
+        self.assertTrue(script_ids.issubset(template_ids), script_ids - template_ids)
         self.assertNotIn("Run Detail", template)
         self.assertNotIn("localStorage", source)
         self.assertNotIn("innerHTML", source)
