@@ -278,6 +278,116 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         self.assertEqual(11, state["local_last_id"])
         self.assertEqual(0, state["failure_count"])
 
+    def test_failed_claim_rolls_back_lease_and_keeps_event_pending(self) -> None:
+        self._refresh_states()
+        enqueue_observation(
+            self.conn,
+            cfg=_cfg(),
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        self.conn.execute(
+            """
+            CREATE TRIGGER abort_scheduler_claim
+            BEFORE UPDATE OF status ON sync_chat_state
+            WHEN NEW.status = 'updating'
+            BEGIN
+                SELECT RAISE(ABORT, 'claim status write failed');
+            END
+            """
+        )
+
+        with self.assertRaises(sqlite3.Error):
+            claim_due_pending_updates(
+                self.conn,
+                now_text="2026-07-03 00:01:00",
+                limit=1,
+            )
+
+        pending = self.conn.execute(
+            "SELECT in_flight, generation FROM sync_pending_updates WHERE chat_id = 1"
+        ).fetchone()
+        state = self.conn.execute(
+            "SELECT status FROM sync_chat_state WHERE chat_id = 1"
+        ).fetchone()
+        self.assertEqual(0, pending["in_flight"])
+        self.assertEqual(1, pending["generation"])
+        self.assertEqual("pending", state["status"])
+
+    def test_failed_completion_does_not_confirm_newer_event_generation(self) -> None:
+        self._refresh_states()
+        cfg = _cfg()
+        enqueue_observation(
+            self.conn,
+            cfg=cfg,
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="new_message",
+                source_account="primary",
+                observed_at="2026-07-03 00:00:00",
+            ),
+        )
+        task = claim_due_pending_updates(
+            self.conn,
+            now_text="2026-07-03 00:01:00",
+            limit=1,
+        )[0]
+        enqueue_observation(
+            self.conn,
+            cfg=cfg,
+            observation=SyncObservation(
+                chat_id=1,
+                chat_title="Both",
+                reason="message_edited",
+                source_account="secondary",
+                observed_at="2026-07-03 00:01:05",
+            ),
+        )
+        self.conn.execute(
+            """
+            CREATE TRIGGER abort_scheduler_complete
+            BEFORE UPDATE OF status ON sync_chat_state
+            WHEN NEW.status = 'pending'
+            BEGIN
+                SELECT RAISE(ABORT, 'completion state write failed');
+            END
+            """
+        )
+
+        with self.assertRaises(sqlite3.Error):
+            complete_pending_update(
+                self.conn,
+                task=task,
+                result=SyncUpdateResult(
+                    chat_id=1,
+                    source_account="primary",
+                    local_last_id=12,
+                ),
+                now_text="2026-07-03 00:01:20",
+            )
+
+        pending = self.conn.execute(
+            """
+            SELECT generation, dirty_generation, in_flight
+            FROM sync_pending_updates
+            WHERE chat_id = 1
+            """
+        ).fetchone()
+        state = self.conn.execute(
+            "SELECT status, local_last_id FROM sync_chat_state WHERE chat_id = 1"
+        ).fetchone()
+        self.assertEqual(2, pending["generation"])
+        self.assertEqual(2, pending["dirty_generation"])
+        self.assertEqual(1, pending["in_flight"])
+        self.assertEqual("updating", state["status"])
+        self.assertEqual(10, state["local_last_id"])
+
     def test_recover_in_flight_task_preserves_new_generation_and_quiet_delay(self) -> None:
         self._refresh_states()
         cfg = _cfg()

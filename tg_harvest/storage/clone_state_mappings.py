@@ -1,3 +1,4 @@
+import logging
 import sqlite3
 from typing import Any
 
@@ -112,6 +113,42 @@ def record_clone_message_mapping(
             ),
             missing_message="clone message mapping 写入后读取失败",
         )
+    except sqlite3.Error:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            logging.exception(
+                "克隆消息映射写入失败后的回滚也失败: run_id=%s source=%s/%s",
+                normalized_run_id,
+                source_chat_id,
+                source_message_id,
+            )
+        logging.exception(
+            "克隆消息映射写入失败，迁移不得确认成功: run_id=%s source=%s/%s mode=%s",
+            normalized_run_id,
+            source_chat_id,
+            source_message_id,
+            normalized_mode,
+        )
+        raise
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            logging.exception(
+                "克隆消息映射未知错误后的回滚也失败: run_id=%s source=%s/%s",
+                normalized_run_id,
+                source_chat_id,
+                source_message_id,
+            )
+        logging.exception(
+            "克隆消息映射写入发生未知错误，迁移不得确认成功: run_id=%s source=%s/%s mode=%s",
+            normalized_run_id,
+            source_chat_id,
+            source_message_id,
+            normalized_mode,
+        )
+        raise
     finally:
         cur.close()
 

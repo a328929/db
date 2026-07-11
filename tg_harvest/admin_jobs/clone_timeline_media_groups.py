@@ -14,6 +14,7 @@ from tg_harvest.admin_jobs.clone_media_resolver import (
 )
 from tg_harvest.admin_jobs.clone_timeline_state import first_required_target_message_id
 from tg_harvest.admin_jobs.clone_timeline_store import (
+    CloneMappingPersistenceError,
     load_group_messages,
     media_mapping_done,
 )
@@ -190,6 +191,11 @@ def handle_media_group_item(
                 record_group_item_success(source_message_id, target_message_id)
                 sent += 1
                 sleep_after_send(state.normalized_send_delay_ms)
+            except CloneMappingPersistenceError:
+                # A successful copy without a durable mapping is ambiguous on
+                # resume. Escalate to the job boundary instead of recording it
+                # as an ordinary per-item Telegram failure.
+                raise
             except Exception as exc:
                 failed += 1
                 message = admin_error_message(exc)
@@ -337,6 +343,8 @@ def handle_media_group_item(
                 f"items={len(resolved_message_ids)}，"
                 f"reason={_clean_text(resolved_group.get('album_reason'))}",
             )
+    except CloneMappingPersistenceError:
+        raise
     except Exception as exc:
         message = admin_error_message(exc)
         state.counters.media_failed += len(resolved_message_ids)

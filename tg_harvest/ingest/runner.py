@@ -426,9 +426,25 @@ def _harvest_messages_for_entity(
                 e,
             )
             time.sleep(sleep_seconds)
+        except sqlite3.Error as exc:
+            # A batch write is atomic in ingest.store. Retrying its exception
+            # as a Telegram read error could incorrectly advance a workflow.
+            msg_rows, media_rows = [], []
+            logging.exception(
+                "消息写入失败，已中止当前采集以保留数据一致性: chat_id=%s",
+                chat_id,
+            )
+            raise RuntimeError(
+                f"消息写入失败，采集中止 (chat_id={chat_id}): {exc}"
+            ) from exc
+        except RuntimeError:
+            # Parser and invariant failures already carry their precise cause;
+            # do not relabel them as transient Telegram failures.
+            msg_rows, media_rows = [], []
+            raise
         except Exception as e:
             msg_rows, media_rows = [], []
-            logging.error(f"采集发生未预期错误: {e}")
+            logging.exception("采集发生未预期错误: chat_id=%s", chat_id)
             raise RuntimeError(f"采集发生未预期错误 (chat_id={chat_id}): {e}") from e
 
     if not harvest_completed:

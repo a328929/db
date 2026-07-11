@@ -1,8 +1,11 @@
 import logging
+import sqlite3
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
+
+from telethon.errors import RPCError
 
 from tg_harvest.config import CFG
 from tg_harvest.domain.coerce import safe_int
@@ -46,11 +49,11 @@ def _first_message(result: Any) -> Any | None:
                 return item
     except TypeError:
         pass
-    except Exception:
+    except (AttributeError, IndexError, KeyError):
         return None
     try:
         item = result[0]
-    except Exception:
+    except (AttributeError, IndexError, KeyError, TypeError):
         return None
     return item if item is not None else None
 
@@ -101,12 +104,18 @@ def probe_history_access(
                 scope="history-latest-probe",
             )
         )
-    except Exception as exc:
+    except (RPCError, ConnectionError, OSError, TimeoutError) as exc:
         raise_if_long_flood_wait(
             exc,
             threshold_seconds=CFG.flood_wait_switch_threshold,
             account_label=account_label,
             scope="history-latest-probe",
+        )
+        return HistoryAccessProbeResult(False, 0, f"读取最新消息失败: {exc}")
+    except Exception as exc:
+        logging.exception(
+            "历史读取探测发生未知错误: account=%s scope=history-latest-probe",
+            account_label or "-",
         )
         return HistoryAccessProbeResult(False, 0, f"读取最新消息失败: {exc}")
 
@@ -134,12 +143,18 @@ def probe_history_access(
             account_label=account_label,
             scope="history-range-probe",
         )
-    except Exception as exc:
+    except (RPCError, ConnectionError, OSError, TimeoutError) as exc:
         raise_if_long_flood_wait(
             exc,
             threshold_seconds=CFG.flood_wait_switch_threshold,
             account_label=account_label,
             scope="history-range-probe",
+        )
+        return HistoryAccessProbeResult(False, latest_id, f"读取历史区间失败: {exc}")
+    except Exception as exc:
+        logging.exception(
+            "历史区间探测发生未知错误: account=%s scope=history-range-probe",
+            account_label or "-",
         )
         return HistoryAccessProbeResult(False, latest_id, f"读取历史区间失败: {exc}")
 
@@ -296,7 +311,21 @@ def harvest_message_id_range(
                 exc,
             )
             time.sleep(wait_seconds)
-        except Exception as exc:
+        except sqlite3.Error as exc:
+            # The range writer has not confirmed this range. Treat database
+            # failure as terminal rather than consuming Telegram retry budget.
+            logging.exception(
+                "区间消息写入失败，已中止当前区间: account=%s chat_id=%s range=%s-%s",
+                account_label or "-",
+                chat_id,
+                start_id,
+                end_id,
+            )
+            raise RuntimeError(
+                f"区间消息写入失败，采集中止: account={account_label or '-'} "
+                f"chat_id={chat_id} range={start_id}-{end_id}: {exc}"
+            ) from exc
+        except (RPCError, ConnectionError, OSError, TimeoutError) as exc:
             if isinstance(exc, AccountFloodWaitError):
                 raise
             retry_count += 1
@@ -334,6 +363,20 @@ def harvest_message_id_range(
                 exc,
             )
             time.sleep(wait_seconds)
+        except Exception as exc:
+            # Only a verified Telegram transport/RPC failure reaches the retry
+            # branch above. Unknown parser or writer bugs must stop the range.
+            logging.exception(
+                "区间采集发生未知错误，已中止: account=%s chat_id=%s range=%s-%s",
+                account_label or "-",
+                chat_id,
+                start_id,
+                end_id,
+            )
+            raise RuntimeError(
+                f"区间采集发生未知错误: account={account_label or '-'} "
+                f"chat_id={chat_id} range={start_id}-{end_id}: {exc}"
+            ) from exc
 
     raise RuntimeError(
         f"区间采集未完成即退出: account={account_label or '-'} chat_id={chat_id} range={start_id}-{end_id}"

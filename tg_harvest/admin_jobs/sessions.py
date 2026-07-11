@@ -9,6 +9,7 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import Any
 
+from telethon.errors import RPCError
 from telethon.sync import TelegramClient
 
 from tg_harvest.ingest.flood_wait import flood_sleep_threshold_kwargs
@@ -68,15 +69,30 @@ def _copy_session_storage(base_session_name: Any, worker_session_name: Any) -> N
         secure_session_artifacts(base_session_name)
         for ext in _SESSION_FILE_EXTENSIONS:
             dst = f"{worker_session_name}{ext}"
-            if os.path.exists(dst):
-                with suppress(Exception):
-                    os.remove(dst)
+            try:
+                os.remove(dst)
+            except FileNotFoundError:
+                # A concurrent cleanup can win this race; there is no stale file left.
+                pass
+            except OSError:
+                logging.exception(
+                    "删除旧 worker Session 文件失败，拒绝复用可能过期的副本: %s",
+                    dst,
+                )
+                raise
         for ext in _SESSION_FILE_EXTENSIONS:
             src = f"{base_session_name}{ext}"
             dst = f"{worker_session_name}{ext}"
             if os.path.exists(src):
-                with suppress(Exception):
+                try:
                     shutil.copy2(src, dst)
+                except OSError:
+                    logging.exception(
+                        "复制 worker Session 文件失败: source=%s destination=%s",
+                        src,
+                        dst,
+                    )
+                    raise
         secure_session_artifacts(worker_session_name)
 
 
@@ -88,7 +104,7 @@ def _configure_telethon_session_sqlite(client: Any) -> None:
             return
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA busy_timeout=30000")
-    except Exception:
+    except (sqlite3.Error, AttributeError):
         logging.debug("Telethon session SQLite 并发保护配置失败", exc_info=True)
 
 
@@ -149,10 +165,16 @@ def _merge_worker_session_entities_into_base_session(
             )
             conn.commit()
             return max(0, int(conn.total_changes - before_changes))
-        except Exception:
+        except sqlite3.Error:
             if conn is not None:
-                with suppress(Exception):
+                try:
                     conn.rollback()
+                except sqlite3.Error:
+                    logging.exception(
+                        "回滚 Telegram worker session 实体缓存合并失败: base=%s worker=%s",
+                        base_path,
+                        worker_path,
+                    )
             logging.exception(
                 "合并 Telegram worker session 实体缓存失败: base=%s worker=%s",
                 base_path,
@@ -161,10 +183,22 @@ def _merge_worker_session_entities_into_base_session(
             return 0
         finally:
             if conn is not None:
-                with suppress(Exception):
+                try:
                     conn.execute("DETACH DATABASE worker_db")
-                with suppress(Exception):
+                except sqlite3.Error:
+                    # ATTACH can fail before a worker DB is attached; closing is sufficient.
+                    logging.debug(
+                        "分离 Telegram worker session 数据库失败: worker=%s",
+                        worker_path,
+                        exc_info=True,
+                    )
+                try:
                     conn.close()
+                except sqlite3.Error:
+                    logging.exception(
+                        "关闭 Telegram worker session 数据库失败: base=%s",
+                        base_path,
+                    )
 
 
 @contextmanager
@@ -211,7 +245,16 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         else:
             append_log_fn(job_id, f"Session 数据库异常: {e}")
         return False
+    except (sqlite3.Error, OSError) as e:
+        logging.exception("验证 Telegram Session 失败: session=%s", cfg.session_name)
+        append_log_fn(job_id, f"Session 初始化失败: {e}")
+        return False
+    except (RPCError, ConnectionError, TimeoutError) as e:
+        logging.exception("连接 Telegram 验证 Session 失败: session=%s", cfg.session_name)
+        append_log_fn(job_id, f"连接 Telegram 失败: {e}")
+        return False
     except Exception as e:
+        logging.exception("初始化 Telegram Session 时发生未知错误: session=%s", cfg.session_name)
         append_log_fn(job_id, f"初始化 Session 失败: {e}")
         return False
     finally:
@@ -267,6 +310,8 @@ def _create_isolated_worker_client_with_options(
         secure_session_artifacts(worker_session_name)
         return client
     except Exception:
+        # This is the worker-client crash boundary. Cleanup must not hide it.
+        logging.exception("创建隔离 Telegram worker 客户端失败: worker_id=%s", worker_id)
         if client is not None:
             with suppress(Exception):
                 client.disconnect()
@@ -302,12 +347,21 @@ def _cleanup_isolated_worker_session(cfg: Any, worker_id: str):
         worker_session_name,
     )
     for ext in _SESSION_FILE_EXTENSIONS:
+        path = f"{worker_session_name}{ext}"
         try:
-            path = f"{worker_session_name}{ext}"
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
+            os.remove(path)
+        except FileNotFoundError:
+            # The worker may not have created every WAL/SHM artifact.
+            continue
+        except OSError:
+            # Cleanup is non-authoritative after the worker exits, but stale
+            # credentials must remain diagnosable for the next launch.
+            logging.warning(
+                "清理 worker Session 文件失败: worker_id=%s path=%s",
+                worker_id,
+                path,
+                exc_info=True,
+            )
 
 
 def _start_job_heartbeat(job_id: str, heartbeat_fn: Callable[[str], bool]) -> tuple[threading.Event, threading.Thread]:

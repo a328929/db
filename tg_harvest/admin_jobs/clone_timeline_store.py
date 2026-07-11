@@ -1,3 +1,5 @@
+import logging
+import sqlite3
 from collections.abc import Callable
 from typing import Any
 
@@ -9,6 +11,10 @@ from tg_harvest.storage.clone import (
     load_clone_message_mapping,
     record_clone_message_mapping,
 )
+
+
+class CloneMappingPersistenceError(RuntimeError):
+    """A Telegram send completed but its durable replay mapping did not."""
 
 CLONE_TIMELINE_BATCH_SIZE = 100
 
@@ -100,25 +106,38 @@ def record_text_mapping(
     status: str,
     error_message: str = "",
 ) -> None:
-    call_with_conn(
-        get_conn_fn,
-        record_clone_message_mapping,
-        migration_id=migration_id,
-        run_id=run_id,
-        plan_id=plan_id,
-        source_chat_id=int(source_message["chat_id"]),
-        source_message_id=int(source_message["message_id"]),
-        source_msg_date_ts=source_message.get("msg_date_ts"),
-        source_msg_date_text=source_message.get("msg_date_text"),
-        target_chat_id=int(target_chat_id),
-        target_message_id=target_message_id,
-        chunk_index=int(chunk_index),
-        chunk_count=int(chunk_count),
-        mode="text_replay",
-        status=status,
-        error_message=error_message,
-        sent_at=_admin_now_iso() if status == "done" else "",
-    )
+    try:
+        call_with_conn(
+            get_conn_fn,
+            record_clone_message_mapping,
+            migration_id=migration_id,
+            run_id=run_id,
+            plan_id=plan_id,
+            source_chat_id=int(source_message["chat_id"]),
+            source_message_id=int(source_message["message_id"]),
+            source_msg_date_ts=source_message.get("msg_date_ts"),
+            source_msg_date_text=source_message.get("msg_date_text"),
+            target_chat_id=int(target_chat_id),
+            target_message_id=target_message_id,
+            chunk_index=int(chunk_index),
+            chunk_count=int(chunk_count),
+            mode="text_replay",
+            status=status,
+            error_message=error_message,
+            sent_at=_admin_now_iso() if status == "done" else "",
+        )
+    except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logging.exception(
+            "克隆文本映射持久化失败: run_id=%s source=%s/%s chunk=%s status=%s",
+            run_id,
+            source_message.get("chat_id"),
+            source_message.get("message_id"),
+            chunk_index,
+            status,
+        )
+        raise CloneMappingPersistenceError(
+            "克隆文本已发送但映射持久化失败，迁移已中止以避免重复发送"
+        ) from exc
 
 
 def source_message_from_timeline_item(item: dict[str, Any]) -> dict[str, Any]:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import socket
 import sqlite3
@@ -229,6 +230,14 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
         return cur.fetchone() is not None
     finally:
         cur.close()
+
+
+def _rollback_write_transaction(conn: sqlite3.Connection, *, operation: str) -> None:
+    """Preserve the original write failure while making rollback observable."""
+    try:
+        conn.rollback()
+    except sqlite3.Error:
+        logging.exception("同步调度事务回滚失败: operation=%s", operation)
 
 
 def classify_membership_scope(
@@ -698,9 +707,13 @@ def refresh_chat_states(
             cur.execute("DELETE FROM sync_pending_updates")
         conn.commit()
         return {"active_chat_count": len(active_chat_ids), "updated_at": now}
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="refresh_chat_states")
+        logging.exception("刷新同步调度群组状态失败，事务已回滚")
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="refresh_chat_states")
+        logging.exception("刷新同步调度群组状态发生未知错误，事务已回滚")
         raise
     finally:
         cur.close()
@@ -908,9 +921,19 @@ def enqueue_observation(
         )
         conn.commit()
         return decision
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="enqueue_observation")
+        logging.exception(
+            "同步调度 observation 写入失败，事件未入队: chat_id=%s",
+            safe_observation.chat_id,
+        )
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="enqueue_observation")
+        logging.exception(
+            "同步调度 observation 写入发生未知错误，事件未入队: chat_id=%s",
+            safe_observation.chat_id,
+        )
         raise
     finally:
         cur.close()
@@ -1030,9 +1053,13 @@ def claim_due_pending_updates(
             )
         conn.commit()
         return tasks
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="claim_due_pending_updates")
+        logging.exception("领取同步调度任务失败，未确认任何新租约")
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="claim_due_pending_updates")
+        logging.exception("领取同步调度任务发生未知错误，未确认任何新租约")
         raise
     finally:
         cur.close()
@@ -1157,9 +1184,13 @@ def recover_in_flight_pending_updates(
             )
         conn.commit()
         return recovered
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="recover_in_flight_pending_updates")
+        logging.exception("恢复中断的同步调度任务失败，未释放任何部分租约")
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="recover_in_flight_pending_updates")
+        logging.exception("恢复中断的同步调度任务发生未知错误，未释放任何部分租约")
         raise
     finally:
         cur.close()
@@ -1338,9 +1369,21 @@ def complete_pending_update(
             ),
         )
         conn.commit()
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="complete_pending_update")
+        logging.exception(
+            "同步调度完成确认失败，任务保持 in-flight 等待恢复: chat_id=%s generation=%s",
+            task.chat_id,
+            task.in_flight_generation,
+        )
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="complete_pending_update")
+        logging.exception(
+            "同步调度完成确认发生未知错误，任务保持 in-flight 等待恢复: chat_id=%s generation=%s",
+            task.chat_id,
+            task.in_flight_generation,
+        )
         raise
     finally:
         cur.close()
@@ -1465,9 +1508,21 @@ def fail_pending_update(
             ),
         )
         conn.commit()
+    except sqlite3.Error:
+        _rollback_write_transaction(conn, operation="fail_pending_update")
+        logging.exception(
+            "同步调度失败状态写入失败，任务保持 in-flight 等待恢复: chat_id=%s generation=%s",
+            task.chat_id,
+            task.in_flight_generation,
+        )
+        raise
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        _rollback_write_transaction(conn, operation="fail_pending_update")
+        logging.exception(
+            "同步调度失败状态写入发生未知错误，任务保持 in-flight 等待恢复: chat_id=%s generation=%s",
+            task.chat_id,
+            task.in_flight_generation,
+        )
         raise
     finally:
         cur.close()

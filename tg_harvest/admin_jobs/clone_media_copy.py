@@ -1,3 +1,5 @@
+import logging
+import sqlite3
 from contextlib import suppress
 from typing import Any
 
@@ -5,6 +7,7 @@ from tg_harvest.admin_jobs.clone_forwarding import (
     clone_delete_copied_relay_messages,
     clone_forward_without_source_attribution,
 )
+from tg_harvest.admin_jobs.clone_timeline_store import CloneMappingPersistenceError
 from tg_harvest.admin_jobs.common import call_with_conn, resolve_chat_entity
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.domain.clone_plan import (
@@ -223,22 +226,35 @@ def record_clone_media_mapping(
     status: str,
     error_message: str = "",
 ) -> None:
-    call_with_conn(
-        get_conn_fn,
-        record_clone_message_mapping,
-        migration_id=migration_id,
-        run_id=run_id,
-        plan_id=plan_id,
-        source_chat_id=int(source_message["chat_id"]),
-        source_message_id=int(source_message["message_id"]),
-        source_msg_date_ts=source_message.get("msg_date_ts"),
-        source_msg_date_text=source_message.get("msg_date_text"),
-        target_chat_id=int(target_chat_id),
-        target_message_id=target_message_id,
-        chunk_index=0,
-        chunk_count=1,
-        mode=mode,
-        status=status,
-        error_message=error_message,
-        sent_at=_admin_now_iso() if status == "done" else "",
-    )
+    try:
+        call_with_conn(
+            get_conn_fn,
+            record_clone_message_mapping,
+            migration_id=migration_id,
+            run_id=run_id,
+            plan_id=plan_id,
+            source_chat_id=int(source_message["chat_id"]),
+            source_message_id=int(source_message["message_id"]),
+            source_msg_date_ts=source_message.get("msg_date_ts"),
+            source_msg_date_text=source_message.get("msg_date_text"),
+            target_chat_id=int(target_chat_id),
+            target_message_id=target_message_id,
+            chunk_index=0,
+            chunk_count=1,
+            mode=mode,
+            status=status,
+            error_message=error_message,
+            sent_at=_admin_now_iso() if status == "done" else "",
+        )
+    except (sqlite3.Error, OSError, RuntimeError, TypeError, ValueError) as exc:
+        logging.exception(
+            "克隆媒体映射持久化失败: run_id=%s source=%s/%s mode=%s status=%s",
+            run_id,
+            source_message.get("chat_id"),
+            source_message.get("message_id"),
+            mode,
+            status,
+        )
+        raise CloneMappingPersistenceError(
+            "克隆媒体已发送但映射持久化失败，迁移已中止以避免重复发送"
+        ) from exc

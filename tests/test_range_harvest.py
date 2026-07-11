@@ -1,4 +1,5 @@
 import datetime
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -113,6 +114,26 @@ class RangeHarvestRetryTests(unittest.TestCase):
         self.assertEqual(25, latest_id)
         retry_mock.assert_called_once()
         self.assertEqual("history-latest-id", retry_mock.call_args.kwargs["scope"])
+
+    def test_sqlite_write_failure_stops_range_without_retrying_telegram(self) -> None:
+        client = _FakeClient([[_FakeMessage(12)]])
+
+        def failing_writer(_msg_rows, _media_rows) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with patch(
+            "tg_harvest.ingest.range_harvest.CFG.batch_size", 1
+        ), self.assertRaisesRegex(RuntimeError, "区间消息写入失败"):
+            harvest_message_id_range(
+                client=client,
+                entity=SimpleNamespace(id=1),
+                chat_id=42,
+                message_range=MessageIdRange(start_id=10, end_id=12),
+                write_batch_fn=failing_writer,
+                account_label="secondary",
+            )
+
+        self.assertEqual(1, len(client.iter_calls))
 
     def test_probe_history_access_retries_latest_and_range_probes(self) -> None:
         client = _FakeClient([])

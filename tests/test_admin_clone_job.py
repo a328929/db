@@ -12,6 +12,10 @@ from tg_harvest.admin_jobs.clone_preflight import _admin_clone_deep_preflight_jo
 from tg_harvest.admin_jobs.clone_timeline_migration import (
     _admin_clone_timeline_migration_job_runner,
 )
+from tg_harvest.admin_jobs.clone_timeline_store import (
+    CloneMappingPersistenceError,
+    record_text_mapping,
+)
 from tg_harvest.storage.clone import (
     create_clone_migration,
     create_clone_plan,
@@ -998,6 +1002,107 @@ def test_clone_timeline_migration_limit_applies_to_remaining_items(tmp_path):
     assert existing_mapping is not None and existing_mapping["target_message_id"] == 9001
     assert next_mapping is not None and next_mapping["target_message_id"] == 9301
     assert later_mapping is None
+
+
+def test_clone_timeline_stops_when_sent_text_mapping_cannot_be_persisted(tmp_path):
+    db_path = tmp_path / "clone-timeline-mapping-write-failure.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        create_clone_migration(
+            conn,
+            migration_id="job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-timeline",
+            mode="timeline_replay",
+            target_chat_id=777,
+            target_title="Source Backup",
+            target_write_account="text:primary",
+            plan={"plan_id": "plan-text"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    client = _TimelineMigrationClient()
+    statuses = []
+    logs = []
+    with (
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._admin_job_stop_requested", return_value=False),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._ensure_base_session_valid", return_value=True),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._create_isolated_worker_client", return_value=client),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._cleanup_isolated_worker_session"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration.time.sleep"),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration.record_text_mapping",
+            side_effect=CloneMappingPersistenceError("mapping write failed"),
+        ),
+    ):
+        _admin_clone_timeline_migration_job_runner(
+            "job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            migration_id="job-timeline",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+        )
+
+    conn = _connect(db_path)
+    try:
+        migration = load_latest_clone_migration(conn, "job-clone", mode="timeline_replay")
+        mapping = load_clone_message_mapping(
+            conn,
+            run_id="job-clone",
+            source_chat_id=100,
+            source_message_id=1,
+            chunk_index=0,
+            mode="text_replay",
+        )
+    finally:
+        conn.close()
+
+    assert client.sent_messages == ["hello clone"]
+    assert migration is not None
+    assert migration["status"] == "error"
+    assert mapping is None
+    assert statuses[-1] == "error"
+    assert any("完整时间线迁移失败" in message for message in logs)
+
+
+def test_text_mapping_write_failure_is_not_reclassified_as_send_failure():
+    class _Conn:
+        def close(self):
+            return None
+
+    with patch(
+        "tg_harvest.admin_jobs.clone_timeline_store.record_clone_message_mapping",
+        side_effect=sqlite3.OperationalError("mapping write failed"),
+    ):
+        try:
+            record_text_mapping(
+                get_conn_fn=_Conn,
+                migration_id="migration-1",
+                run_id="run-1",
+                plan_id="plan-1",
+                source_message={"chat_id": 100, "message_id": 1},
+                target_chat_id=777,
+                target_message_id=9001,
+                chunk_index=0,
+                chunk_count=1,
+                status="done",
+            )
+        except CloneMappingPersistenceError as exc:
+            assert "映射持久化失败" in str(exc)
+        else:
+            raise AssertionError("expected clone mapping persistence failure")
 
 
 def test_clone_timeline_migration_job_preserves_mixed_text_media_order(tmp_path):

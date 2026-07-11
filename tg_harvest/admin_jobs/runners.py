@@ -25,7 +25,6 @@ from tg_harvest.admin_jobs.common import (
     call_with_conn,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
-    mark_admin_job_running,
     read_chat_username,
     resolve_chat_entity,
     start_admin_job_heartbeat,
@@ -82,23 +81,56 @@ def _close_write_coordinator(
         logging.exception("写入队列关闭失败，保留原始采集异常")
 
 
+def _persist_admin_job_status(
+    job_id: str,
+    status: str,
+    *,
+    admin_job_set_status_fn: Callable[[str, str], bool],
+) -> None:
+    """A terminal success is valid only after its durable status update."""
+    if not admin_job_set_status_fn(job_id, status):
+        raise RuntimeError(f"任务状态持久化失败: job_id={job_id} status={status}")
+
+
+def _mark_admin_job_error_best_effort(
+    job_id: str,
+    *,
+    admin_job_set_status_fn: Callable[[str, str], bool],
+) -> None:
+    try:
+        if not admin_job_set_status_fn(job_id, "error"):
+            logging.error("无法持久化任务失败状态: job_id=%s", job_id)
+    except Exception:
+        # The database may be unavailable exactly when this fallback is needed.
+        logging.exception("持久化任务失败状态时发生未知错误: job_id=%s", job_id)
+
+
 def _start_simple_admin_job(
     job_id: str,
     *,
     admin_job_set_status_fn: Callable[[str, str], bool],
 ) -> tuple[Any, Any]:
     heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
-    mark_admin_job_running(
-        job_id,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-    )
+    try:
+        _persist_admin_job_status(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+            status="running",
+        )
+    except Exception:
+        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
+        raise
     return heartbeat_stop, heartbeat_thread
 
 
 def _cleanup_worker_client(worker_cfg: Any, worker_id: str, worker_client: Any) -> None:
     if worker_client:
-        with suppress(Exception):
+        try:
             _disconnect_worker_client(worker_client)
+        except Exception:
+            # Cleanup cannot replace the primary job result, but leaked worker
+            # connections must be attributable to a concrete worker.
+            logging.exception("关闭 worker Telegram 客户端失败: worker_id=%s", worker_id)
     _cleanup_isolated_worker_session(worker_cfg, worker_id)
 
 
@@ -112,23 +144,42 @@ def _run_simple_admin_job_with_conn(
     error_prefix: str,
     log_exception_fn: Callable[[], None] | None = None,
 ) -> None:
-    heartbeat_stop, heartbeat_thread = _start_simple_admin_job(
-        job_id,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-    )
+    try:
+        heartbeat_stop, heartbeat_thread = _start_simple_admin_job(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+    except Exception:
+        logging.exception("启动后台任务失败: job_id=%s", job_id)
+        _mark_admin_job_error_best_effort(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
+        return
     conn = None
     try:
         conn = get_conn_fn()
         run_fn(conn)
-        admin_job_set_status_fn(job_id, "done")
+        _persist_admin_job_status(
+            job_id,
+            status="done",
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     except Exception as exc:
         if conn:
-            with suppress(Exception):
+            try:
                 conn.rollback()
+            except (sqlite3.Error, AttributeError):
+                logging.exception("后台任务回滚失败: job_id=%s", job_id)
         if log_exception_fn is not None:
             log_exception_fn()
+        else:
+            logging.exception("后台任务执行失败: job_id=%s", job_id)
         admin_job_append_log_fn(job_id, f"{error_prefix}{exc}")
-        admin_job_set_status_fn(job_id, "error")
+        _mark_admin_job_error_best_effort(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if conn:
@@ -157,13 +208,13 @@ def _row_value(row: Any, key: str, default: Any = None) -> Any:
         return row.get(key, default)
     try:
         keys = row.keys()
-    except Exception:
+    except AttributeError:
         keys = None
     if keys is not None and key not in keys:
         return default
     try:
         value = row[key]
-    except Exception:
+    except (KeyError, IndexError, TypeError):
         return default
     return default if value is None else value
 
@@ -2571,7 +2622,11 @@ def _admin_harvest_job_runner(
     worker_id = f"{job_id}_main"
     try:
         job_context.set(str(job_id))
-        admin_job_set_status_fn(job_id, "running")
+        _persist_admin_job_status(
+            job_id,
+            status="running",
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
         admin_job_append_log_fn(job_id, f"开始新增数据采集：目标={target}")
         if isinstance(harvest_hint, dict) and harvest_hint:
             admin_job_append_log_fn(
@@ -2581,7 +2636,10 @@ def _admin_harvest_job_runner(
         admin_job_append_log_fn(job_id, "正在验证 Telegram 会话...")
 
         if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
-            admin_job_set_status_fn(job_id, "error")
+            _mark_admin_job_error_best_effort(
+                job_id,
+                admin_job_set_status_fn=admin_job_set_status_fn,
+            )
             return
 
         admin_job_append_log_fn(job_id, "会话验证通过，正在建立 Telegram 连接...")
@@ -2602,7 +2660,10 @@ def _admin_harvest_job_runner(
                 job_id,
                 f"找不到对应目标：{target}。如果你输入的是标题，它可能不在已配置账号已有的群列表中，或另一账号无法通过公开标识确认同一会话。",
             )
-            admin_job_set_status_fn(job_id, "error")
+            _mark_admin_job_error_best_effort(
+                job_id,
+                admin_job_set_status_fn=admin_job_set_status_fn,
+            )
             return
 
         total = len(harvest_targets)
@@ -2729,11 +2790,19 @@ def _admin_harvest_job_runner(
             total=total,
             stage="done",
         )
-        admin_job_set_status_fn(job_id, "done")
+        _persist_admin_job_status(
+            job_id,
+            status="done",
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     except Exception as exc:
+        logging.exception("新增数据采集任务失败: job_id=%s", job_id)
         user_msg = admin_error_message(exc)
         admin_job_append_log_fn(job_id, f"新增数据采集失败：{user_msg}")
-        admin_job_set_status_fn(job_id, "error")
+        _mark_admin_job_error_best_effort(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if target_resolution is not None:
@@ -2763,12 +2832,19 @@ def _admin_update_job_runner(
     worker_id = f"{job_id}_main"
     try:
         job_context.set(str(job_id))
-        admin_job_set_status_fn(job_id, "running")
+        _persist_admin_job_status(
+            job_id,
+            status="running",
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
         admin_job_append_log_fn(job_id, "正在验证 Telegram 会话...")
 
         is_all_scope = isinstance(chat_id, str) and chat_id.strip().lower() == "all"
         if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
-            admin_job_set_status_fn(job_id, "error")
+            _mark_admin_job_error_best_effort(
+                job_id,
+                admin_job_set_status_fn=admin_job_set_status_fn,
+            )
             return
 
         admin_job_append_log_fn(job_id, "会话验证通过，正在建立 Telegram 连接...")
@@ -2777,7 +2853,10 @@ def _admin_update_job_runner(
                 job_id, None, get_conn_fn, admin_job_append_log_fn, cfg
             )
             if not all_ok:
-                admin_job_set_status_fn(job_id, "error")
+                _mark_admin_job_error_best_effort(
+                    job_id,
+                    admin_job_set_status_fn=admin_job_set_status_fn,
+                )
                 return
         else:
             chat_username = read_chat_username(get_conn_fn, int(chat_id))
@@ -2797,11 +2876,19 @@ def _admin_update_job_runner(
                 chat_title=chat_title,
                 chat_username=chat_username,
             )
-        admin_job_set_status_fn(job_id, "done")
+        _persist_admin_job_status(
+            job_id,
+            status="done",
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     except Exception as exc:
+        logging.exception("后台增量采集任务失败: job_id=%s", job_id)
         user_msg = admin_error_message(exc)
         admin_job_append_log_fn(job_id, f"采集失败：{user_msg}")
-        admin_job_set_status_fn(job_id, "error")
+        _mark_admin_job_error_best_effort(
+            job_id,
+            admin_job_set_status_fn=admin_job_set_status_fn,
+        )
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         _cleanup_worker_client(cfg, worker_id, local_client)

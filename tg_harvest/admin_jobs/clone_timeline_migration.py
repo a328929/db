@@ -557,19 +557,6 @@ def _admin_clone_timeline_migration_job_runner(
                                 text_target_entity,
                                 chunk,
                             )
-                            record_text_mapping(
-                                get_conn_fn=get_conn_fn,
-                                migration_id=migration_id,
-                                run_id=run_id,
-                                plan_id=plan_id,
-                                source_message=source_message,
-                                target_chat_id=target_chat_id,
-                                target_message_id=target_message_id,
-                                chunk_index=chunk_index,
-                                chunk_count=chunk_count,
-                                status="done",
-                            )
-                            _sleep_after_send(normalized_send_delay_ms)
                         except Exception as exc:
                             message_failed = True
                             message = admin_error_message(exc)
@@ -591,6 +578,19 @@ def _admin_clone_timeline_migration_job_runner(
                                 f"时间线文本发送失败：source_message_id={source_message_id}，{message}",
                             )
                             break
+                        record_text_mapping(
+                            get_conn_fn=get_conn_fn,
+                            migration_id=migration_id,
+                            run_id=run_id,
+                            plan_id=plan_id,
+                            source_message=source_message,
+                            target_chat_id=target_chat_id,
+                            target_message_id=target_message_id,
+                            chunk_index=chunk_index,
+                            chunk_count=chunk_count,
+                            status="done",
+                        )
+                        _sleep_after_send(normalized_send_delay_ms)
                     state.counters.processed += 1
                     if message_failed:
                         state.counters.text_failed += 1
@@ -628,20 +628,6 @@ def _admin_clone_timeline_migration_job_runner(
                             result,
                             "时间线单条媒体复制",
                         )
-                        record_clone_media_mapping(
-                            get_conn_fn=get_conn_fn,
-                            migration_id=migration_id,
-                            run_id=run_id,
-                            plan_id=plan_id,
-                            source_message=source_message,
-                            target_chat_id=target_chat_id,
-                            target_message_id=target_message_id,
-                            mode="media_copy",
-                            status="done",
-                        )
-                        state.counters.media_sent += 1
-                        state.counters.processed += 1
-                        _sleep_after_send(normalized_send_delay_ms)
                     except Exception as exc:
                         state.counters.media_failed += 1
                         state.counters.processed += 1
@@ -662,6 +648,21 @@ def _admin_clone_timeline_migration_job_runner(
                             job_id,
                             f"时间线单条媒体复制失败：source_message_id={source_message_id}，{message}",
                         )
+                    else:
+                        record_clone_media_mapping(
+                            get_conn_fn=get_conn_fn,
+                            migration_id=migration_id,
+                            run_id=run_id,
+                            plan_id=plan_id,
+                            source_message=source_message,
+                            target_chat_id=target_chat_id,
+                            target_message_id=target_message_id,
+                            mode="media_copy",
+                            status="done",
+                        )
+                        state.counters.media_sent += 1
+                        state.counters.processed += 1
+                        _sleep_after_send(normalized_send_delay_ms)
 
                 elif item_type == "media_group":
                     handle_media_group_item(

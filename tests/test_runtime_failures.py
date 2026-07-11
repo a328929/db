@@ -59,6 +59,7 @@ from tg_harvest.admin_jobs.runners import (
     _load_admin_update_rows,
     _resolve_harvest_target_entities,
     _resolve_target_entities_for_account,
+    _run_simple_admin_job_with_conn,
     _try_stream_new_chat_multi_account_ranges,
 )
 from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
@@ -3871,6 +3872,45 @@ class SearchableMediaCleanupTests(unittest.TestCase):
 
 
 class AdminRunnerHelperTests(unittest.TestCase):
+    def test_job_is_marked_error_when_done_status_cannot_be_persisted(self) -> None:
+        statuses = []
+        logs = []
+
+        class _Conn:
+            def rollback(self):
+                return None
+
+            def close(self):
+                return None
+
+        class _HeartbeatStop:
+            def set(self):
+                return None
+
+        class _HeartbeatThread:
+            def join(self, timeout=None):
+                return None
+
+        def set_status(_job_id, status):
+            statuses.append(status)
+            return status != "done"
+
+        with patch(
+            "tg_harvest.admin_jobs.runners.start_admin_job_heartbeat",
+            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        ):
+            _run_simple_admin_job_with_conn(
+                "job-status-write",
+                get_conn_fn=_Conn,
+                admin_job_set_status_fn=set_status,
+                admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+                run_fn=lambda _conn: None,
+                error_prefix="执行失败：",
+            )
+
+        self.assertEqual(["running", "done", "error"], statuses)
+        self.assertTrue(any("任务状态持久化失败" in message for message in logs))
+
     def test_admin_error_message_maps_known_telegram_errors(self) -> None:
         self.assertEqual(
             "触发 Telegram 频控限制，请稍后再试",
@@ -4505,6 +4545,40 @@ class WriteConsistencyTests(unittest.TestCase):
             "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id = 900"
         )
         self.assertEqual(0, int(cur.fetchone()["c"]))
+
+    def test_batch_upsert_rolls_back_message_rows_when_later_media_write_fails(self) -> None:
+        message_row = (
+            1,
+            905,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "atomic message",
+            "atomic message",
+            "pure-atomic",
+            "dedupe-atomic",
+            "TEXT",
+            None,
+            0,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            14,
+        )
+
+        with patch(
+            "tg_harvest.ingest.store._batch_upsert_media",
+            side_effect=sqlite3.OperationalError("media write failed"),
+        ), self.assertRaises(sqlite3.OperationalError):
+            batch_upsert(self.conn, [message_row], [])
+
+        row = self.conn.execute(
+            "SELECT 1 FROM messages WHERE chat_id = ? AND message_id = ?",
+            (1, 905),
+        ).fetchone()
+        self.assertIsNone(row)
 
     def test_batch_upsert_refreshes_chat_message_summary(self) -> None:
         refresh_chat_message_counts(self.conn, [1])

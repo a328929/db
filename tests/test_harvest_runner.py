@@ -287,6 +287,30 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
         self.assertEqual([([11, 12], [])], delegated_batches)
         batch_upsert_mock.assert_not_called()
 
+    def test_sqlite_batch_write_failure_stops_without_telegram_retry(self) -> None:
+        client = _FakeClient([_message_stream(_FakeMessage(11))])
+
+        def failing_writer(_msg_rows, _media_rows) -> None:
+            raise sqlite3.OperationalError("disk I/O error")
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch("tg_harvest.ingest.runner.CFG.batch_size", 1), patch(
+            "tg_harvest.ingest.runner.CFG.log_every", 1000
+        ), self.assertLogs(level="ERROR") as captured, self.assertRaisesRegex(
+            RuntimeError, "消息写入失败，采集中止"
+        ):
+            _harvest_messages_for_entity(
+                self.conn,
+                client,
+                object(),
+                42,
+                write_batch_fn=failing_writer,
+            )
+
+        self.assertEqual(1, len(client.iter_calls))
+        self.assertTrue(any("消息写入失败" in line for line in captured.output))
+
     def test_parse_failure_aborts_chat_harvest_instead_of_silently_skipping(self) -> None:
         client = _FakeClient([_message_stream(_BadMediaMessage(11))])
 

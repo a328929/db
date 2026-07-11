@@ -1,6 +1,7 @@
 import logging
 import os
 import socket
+import sqlite3
 import threading
 import time
 import uuid
@@ -1463,8 +1464,18 @@ class DatabaseChatListenerRuntime:
                     task=task,
                     result=effective_result,
                 )
+        except sqlite3.Error:
+            # The storage transaction rolls back. Do not synthesize a success
+            # or release this lease; startup recovery can safely reclaim it.
+            logging.exception(
+                "写入同步调度任务结果失败，任务保持 in-flight: chat_id=%s",
+                task.chat_id,
+            )
         except Exception:
-            logging.exception("写入同步调度任务结果失败: chat_id=%s", task.chat_id)
+            logging.exception(
+                "写入同步调度任务结果发生未知错误，任务保持 in-flight: chat_id=%s",
+                task.chat_id,
+            )
         finally:
             if conn is not None:
                 with suppress(Exception):
@@ -1530,6 +1541,7 @@ class DatabaseChatListenerRuntime:
             try:
                 result = future.result()
             except Exception:
+                logging.exception("服务停止时同步调度任务执行异常: chat_id=%s", task.chat_id)
                 result = SyncUpdateResult(
                     chat_id=int(task.chat_id),
                     chat_title=task.chat_title,

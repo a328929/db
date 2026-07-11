@@ -120,6 +120,37 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
         with self.assertRaises(queue.Empty):
             runtime._queue.get_nowait()
 
+    def test_scheduler_completion_write_failure_does_not_convert_result_to_success(self) -> None:
+        class _Conn:
+            def close(self):
+                return None
+
+        runtime = DatabaseChatListenerRuntime(
+            cfg=SimpleNamespace(),
+            get_conn_fn=_Conn,
+        )
+        task = SimpleNamespace(chat_id=1, chat_title="one", chat_username="one_name")
+        result = db_listener.SyncUpdateResult(
+            chat_id=1,
+            chat_title="one",
+            chat_username="one_name",
+            source_account="primary",
+        )
+
+        with patch.object(
+            db_listener.sync_scheduler,
+            "complete_pending_update",
+            side_effect=sqlite3.OperationalError("completion write failed"),
+        ) as complete_mock, patch.object(
+            db_listener.sync_scheduler,
+            "fail_pending_update",
+        ) as fail_mock, self.assertLogs(level="ERROR") as captured:
+            runtime._finish_scheduler_task(task=task, result=result)
+
+        complete_mock.assert_called_once()
+        fail_mock.assert_not_called()
+        self.assertTrue(any("保持 in-flight" in line for line in captured.output))
+
     def test_event_chat_id_maps_back_to_database_shape(self) -> None:
         runtime = DatabaseChatListenerRuntime(
             cfg=SimpleNamespace(),

@@ -1,6 +1,6 @@
+import logging
 import sqlite3
 from collections import defaultdict
-from contextlib import suppress
 
 from tg_harvest.storage.connection import synchronized_write
 
@@ -257,9 +257,29 @@ def batch_upsert(
             _delete_stale_media_for_non_media_messages(cur, msg_rows, media_rows)
             _increment_chat_message_summaries(cur, new_counts_by_chat)
             conn.commit()
-        except Exception:
-            with suppress(Exception):
+        except sqlite3.Error:
+            try:
                 conn.rollback()
+            except sqlite3.Error:
+                logging.exception("消息批量写入失败后的数据库回滚也失败")
+            logging.exception(
+                "消息批量写入事务失败，已回滚: messages=%s media=%s",
+                len(msg_rows),
+                len(media_rows),
+            )
+            raise
+        except Exception:
+            # This covers a programming/invariant failure after BEGIN. It must
+            # receive the same rollback treatment but is never retried here.
+            try:
+                conn.rollback()
+            except sqlite3.Error:
+                logging.exception("消息批量写入未知错误后的数据库回滚也失败")
+            logging.exception(
+                "消息批量写入事务发生未知错误，已回滚: messages=%s media=%s",
+                len(msg_rows),
+                len(media_rows),
+            )
             raise
     finally:
         cur.close()

@@ -135,6 +135,32 @@ class WorkerSessionCleanupTests(unittest.TestCase):
             self.assertEqual("base-newer", entities[1][4])
             self.assertEqual(300, entities[1][5])
 
+    def test_cleanup_removes_all_worker_session_artifacts_after_merge(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            base_name = root / "primary_session"
+            base_path = root / "primary_session.session"
+            worker_path = root / "primary_session_worker_job-3.session"
+
+            _create_session_entities(base_path, [(1, 11, "base", None, "base", 1)])
+            _create_session_entities(worker_path, [(2, 22, "worker", None, "worker", 2)])
+            artifact_paths = [
+                worker_path,
+                Path(f"{worker_path}-journal"),
+                Path(f"{worker_path}-wal"),
+                Path(f"{worker_path}-shm"),
+            ]
+            for path in artifact_paths[1:]:
+                path.write_bytes(b"")
+
+            _cleanup_isolated_worker_session(
+                SimpleNamespace(session_name=str(base_name)),
+                "job-3",
+            )
+
+            self.assertTrue(all(not path.exists() for path in artifact_paths))
+            self.assertIn(2, _read_entities(base_path))
+
     def test_configure_telethon_session_sqlite_enables_wal_and_busy_timeout(self) -> None:
         statements = []
 
