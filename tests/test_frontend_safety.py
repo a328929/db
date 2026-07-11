@@ -317,20 +317,73 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-recovery-restore-all-btn", template)
         self.assertIn("admin-recovery-list", template)
 
-    def test_admin_clone_hub_template_is_navigation_only(self) -> None:
+    def test_admin_clone_hub_template_loads_workflow_overview(self) -> None:
         template = (ROOT / "templates" / "admin_clone.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_clone_hub.js").read_text(
             encoding="utf-8"
         )
         self.assertIn("admin_clone.css", template)
         self.assertIn("克隆工作台", template)
         self.assertIn("eyebrow", template)
-        self.assertIn("检查并创建克隆群组", template)
-        self.assertIn("继续克隆消息", template)
-        self.assertIn("已克隆群管理", template)
+        self.assertIn("当前工作", template)
+        self.assertIn("创建副本", template)
+        self.assertIn("迁移消息", template)
+        self.assertIn("管理记录", template)
         self.assertIn("clone-hub-card", template)
-        self.assertNotIn("admin_manage_shared.js", template)
+        self.assertIn("admin_manage_shared.js", template)
+        self.assertIn("admin_clone_hub.js", template)
         self.assertNotIn("admin_clone.js", template)
         self.assertNotIn("admin-clone-source-select", template)
+        self.assertIn("/api/admin/clone/workbench", source)
+        self.assertIn("function renderWorkflowSteps(elements, focus)", source)
+        self.assertNotIn("innerHTML", source)
+
+    def test_clone_management_deletion_is_target_only_and_uses_safe_dom_updates(self) -> None:
+        runs_template = (ROOT / "templates" / "admin_clone_runs.html").read_text(
+            encoding="utf-8"
+        )
+        detail_template = (
+            ROOT / "templates" / "admin_clone_run_detail.html"
+        ).read_text(encoding="utf-8")
+        runs_source = (ROOT / "static" / "admin_clone_runs.js").read_text(
+            encoding="utf-8"
+        )
+        detail_source = (
+            ROOT / "static" / "admin_clone_run_detail.js"
+        ).read_text(encoding="utf-8")
+
+        for template in (runs_template, detail_template):
+            self.assertIn("删除克隆副本", template)
+            self.assertIn("源群", template)
+            self.assertIn('id="admin-clone-run-delete-dialog"', template)
+            self.assertIn('id="admin-clone-run-delete-confirm-btn"', template)
+        for source in (runs_source, detail_source):
+            self.assertIn("/api/admin/clone/runs/", source)
+            self.assertIn("method: 'DELETE'", source)
+            self.assertIn("pollDeleteJob", source)
+            self.assertNotIn("innerHTML", source)
+
+    def test_clone_management_scripts_only_reference_existing_template_elements(self) -> None:
+        page_assets = (
+            ("admin_clone_runs.html", "admin_clone_runs.js"),
+            ("admin_clone_run_detail.html", "admin_clone_run_detail.js"),
+        )
+        for template_name, script_name in page_assets:
+            template = (ROOT / "templates" / template_name).read_text(
+                encoding="utf-8"
+            )
+            source = (ROOT / "static" / script_name).read_text(encoding="utf-8")
+            template_ids = set(re.findall(r'id="([^"]+)"', template))
+            referenced_ids = set(
+                re.findall(r"getElementById\('([^']+)'\)", source)
+            )
+            self.assertTrue(
+                referenced_ids.issubset(template_ids),
+                f"{script_name} references absent template IDs: "
+                f"{sorted(referenced_ids - template_ids)}",
+            )
 
     def test_admin_clone_create_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_clone_create.html").read_text(
@@ -346,7 +399,7 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-clone-start-btn", template)
         self.assertIn("admin-clone-runs-list", template)
         self.assertIn("/admin/clone/migrate", template)
-        self.assertIn("查看已克隆群管理", template)
+        self.assertIn("管理记录", template)
         self.assertNotIn("admin-clone-plan-summary", template)
         self.assertNotIn("admin-clone-message-limit-input", template)
         self.assertNotIn("下一步：迁移历史消息", template)
@@ -371,8 +424,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-clone-message-limit-input", template)
         self.assertIn("admin-clone-send-delay-input", template)
         self.assertNotIn("admin-clone-start-btn", template)
-        self.assertIn("继续克隆消息", template)
-        self.assertIn("克隆计划摘要", template)
+        self.assertIn("开始克隆消息", template)
+        self.assertIn("迁移方案摘要", template)
         self.assertIn("function isMigratePage(elements)", source)
         self.assertIn("function buildPlanStatusText(plan)", source)
         self.assertIn("function syncUrlRunId(elements, runId)", source)

@@ -25,6 +25,7 @@ REQUIRED_ROUTES = {
     "/api/admin/channels/absent/scan",
     "/api/admin/channels/restricted",
     "/api/admin/channels/restricted/scan",
+    "/api/admin/clone/workbench",
     "/api/admin/clone/chats",
     "/api/admin/clone/runs",
     "/api/admin/clone/preflight",

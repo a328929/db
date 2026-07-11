@@ -11,16 +11,29 @@
 <body>
   <main class="page" id="admin-clone-run-detail-page">
     <header class="page-header">
-      <p class="eyebrow">第 3 块</p>
+      <p class="eyebrow">第 3 步 / 共 3 步</p>
       <h1>已克隆群详情</h1>
-      <p class="subtle">查看单个克隆群，并执行管理操作。</p>
-      <nav class="clone-page-nav" aria-label="已克隆群详情页面导航">
-        <span class="clone-page-nav-badge">当前位置：已克隆群详情</span>
-        <div class="clone-page-nav-links">
-          <a href="/admin/clone/runs/manage">返回已克隆群管理</a>
-          <a href="/admin/clone/migrate" id="admin-clone-run-detail-migrate-nav-link">继续克隆消息</a>
-          <a href="/admin/clone">返回克隆工作台</a>
-        </div>
+      <nav class="clone-workflow-nav" aria-label="克隆流程">
+        <ol class="clone-workflow-nav-list">
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/create">
+              <span class="clone-workflow-nav-index">1</span>
+              <span>创建副本</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/migrate" id="admin-clone-run-detail-migrate-nav-link">
+              <span class="clone-workflow-nav-index">2</span>
+              <span>迁移消息</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item is-current">
+            <a href="/admin/clone/runs/manage" aria-current="step">
+              <span class="clone-workflow-nav-index">3</span>
+              <span>管理记录</span>
+            </a>
+          </li>
+        </ol>
       </nav>
     </header>
 
@@ -99,16 +112,16 @@
 
       <details class="clone-report-block clone-danger-block clone-expand-block" aria-labelledby="cloneRunDangerTitle">
         <summary class="clone-expand-summary">
-          <span id="cloneRunDangerTitle">危险操作</span>
+          <span id="cloneRunDangerTitle">删除克隆副本</span>
           <span class="clone-expand-meta">按需展开</span>
         </summary>
-        <p class="clone-subline">只有确认这条记录不再需要时，才删除本地数据库记录。</p>
+        <p class="clone-subline">目标副本与本地克隆链路会被清除；源群不会被读取、修改或删除。</p>
         <p id="admin-clone-runs-delete-help" class="clone-danger-copy">
-          不会删除 Telegram 上已经创建的克隆群；只会删除本地数据库中的运行记录、计划、统计和消息映射。
+          正在读取删除范围...
         </p>
         <div class="clone-actions clone-danger-actions">
-          <button id="admin-clone-runs-delete-btn" class="btn danger" type="button" aria-label="删除数据库中的克隆记录">
-            删除这条数据库记录
+          <button id="admin-clone-runs-delete-btn" class="btn danger" type="button" aria-label="删除克隆副本及本地记录">
+            删除克隆副本
           </button>
         </div>
       </details>
@@ -123,8 +136,8 @@
     aria-labelledby="adminCloneRunDeleteDialogTitle"
     hidden
   >
-    <h2 id="adminCloneRunDeleteDialogTitle">删除数据库记录</h2>
-    <p class="subtle">只删除本地数据库里的运行记录、计划、统计和消息映射，不会删除 Telegram 上已经创建的克隆群。</p>
+    <h2 id="adminCloneRunDeleteDialogTitle">确认删除克隆副本</h2>
+    <p class="subtle">系统会先处理目标副本，再清除本地克隆记录；源群不会受到影响。</p>
     <p id="admin-clone-run-delete-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-clone-run-delete-confirm-input">确认码</label>
@@ -133,13 +146,13 @@
         name="admin-clone-run-delete-confirm-input"
         type="text"
         autocomplete="off"
-        aria-label="删除数据库记录确认码"
+        aria-label="删除克隆副本确认码"
       />
     </div>
     <p id="admin-clone-run-delete-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
-    <div aria-label="删除数据库记录操作按钮组">
-      <button id="admin-clone-run-delete-cancel-btn" class="btn" type="button" aria-label="取消删除数据库记录">取消</button>
-      <button id="admin-clone-run-delete-confirm-btn" class="btn danger" type="button" aria-label="确认删除数据库记录">确认删除</button>
+    <div aria-label="删除克隆副本操作按钮组">
+      <button id="admin-clone-run-delete-cancel-btn" class="btn" type="button" aria-label="取消删除克隆副本">取消</button>
+      <button id="admin-clone-run-delete-confirm-btn" class="btn danger" type="button" aria-label="确认删除克隆副本">确认删除</button>
     </div>
   </section>
 

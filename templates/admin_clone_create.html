@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>创建空副本</title>
+  <title>创建副本</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -11,39 +11,37 @@
 <body>
   <main class="page" id="admin-clone-page" data-clone-mode="create">
     <header class="page-header">
-      <p class="eyebrow">步骤 1-2</p>
-      <h1>创建空副本</h1>
-      <p class="subtle">本页只负责检查源群和创建空副本，不处理历史消息迁移。</p>
-      <nav class="clone-page-nav" aria-label="创建空副本页面导航">
-        <span class="clone-page-nav-badge">当前位置：创建空副本</span>
-        <div class="clone-page-nav-links">
-          <a href="/admin/clone">克隆工作台</a>
-          <a href="/admin/clone/migrate">下一步进入继续克隆消息</a>
-          <a href="/admin/clone/runs/manage">查看已克隆群管理</a>
-        </div>
+      <p class="eyebrow">第 1 步 / 共 3 步</p>
+      <h1>创建副本</h1>
+      <nav class="clone-workflow-nav" aria-label="克隆流程">
+        <ol class="clone-workflow-nav-list">
+          <li class="clone-workflow-nav-item is-current">
+            <a href="/admin/clone/create" aria-current="step">
+              <span class="clone-workflow-nav-index">1</span>
+              <span>创建副本</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/migrate">
+              <span class="clone-workflow-nav-index">2</span>
+              <span>迁移消息</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/runs/manage">
+              <span class="clone-workflow-nav-index">3</span>
+              <span>管理记录</span>
+            </a>
+          </li>
+        </ol>
       </nav>
     </header>
 
-    <section class="panel clone-panel clone-flow-card" aria-labelledby="cloneCreateFlowTitle">
+    <section id="admin-clone-source-stage" class="panel clone-panel clone-stage-section" data-stage-state="current" aria-labelledby="cloneSourceTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneCreateFlowTitle" class="section-title">本页做什么</h2>
-          <p class="clone-subline">先确认源群适合克隆，再创建一个空副本。创建成功后，去“继续克隆消息”页面继续。</p>
-        </div>
-      </div>
-      <ol class="clone-flow-list" aria-label="创建空副本流程">
-        <li><strong>1. 选择源群</strong><span>按消息量或最后更新时间找到要克隆的群组。</span></li>
-        <li><strong>2. 开始检查</strong><span>读取数据库摘要，并确认第二账号是否能创建副本。</span></li>
-        <li><strong>3. 填写副本信息</strong><span>确认标题、类型与操作确认码。</span></li>
-        <li><strong>4. 创建空副本</strong><span>只创建结构，不迁移历史消息和媒体。</span></li>
-        <li><strong>5. 继续迁移或查看详情</strong><span>从下方“最近创建记录”继续到迁移页，或直接打开记录详情页排查。</span></li>
-      </ol>
-    </section>
-
-    <section class="panel clone-panel" aria-labelledby="cloneSourceTitle">
-      <div class="clone-panel-head">
-        <div>
-          <h2 id="cloneSourceTitle" class="section-title">步骤 1：选择源群并开始检查</h2>
+          <p class="clone-stage-kicker">本页 1 / 2</p>
+          <h2 id="cloneSourceTitle" class="section-title">选择源群并完成检查</h2>
           <p id="admin-clone-source-status" class="clone-subline" role="status" aria-live="polite">
             正在读取数据库群组...
           </p>
@@ -72,37 +70,38 @@
       </div>
 
       <dl id="admin-clone-source-summary" class="clone-summary-grid" aria-label="源群组摘要"></dl>
-    </section>
 
-    <section class="panel clone-panel" aria-labelledby="clonePreflightTitle">
-      <div class="clone-panel-head">
-        <div>
-          <h2 id="clonePreflightTitle" class="section-title">步骤 1 结果：本地检查</h2>
-          <p id="admin-clone-preflight-status" class="clone-subline" role="status" aria-live="polite">
-            请选择源群组后开始检查。
-          </p>
+      <section class="clone-stage-result" aria-labelledby="clonePreflightTitle">
+        <div class="clone-stage-result-head">
+          <div>
+            <h3 id="clonePreflightTitle">检查结果</h3>
+            <p id="admin-clone-preflight-status" class="clone-subline" role="status" aria-live="polite">
+              选择源群后开始检查。
+            </p>
+          </div>
         </div>
-      </div>
 
-      <ul id="admin-clone-metrics" class="admin-stats clone-stats" aria-label="克隆检查指标"></ul>
-      <div class="clone-report-grid">
-        <section class="clone-report-block" aria-labelledby="cloneCapabilitiesTitle">
-          <h3 id="cloneCapabilitiesTitle">检查结果</h3>
-          <div id="admin-clone-capabilities" class="clone-pill-list"></div>
-        </section>
-        <section class="clone-report-block" aria-labelledby="cloneWarningsTitle">
-          <h3 id="cloneWarningsTitle">风险提示</h3>
-          <ul id="admin-clone-warnings" class="clone-warning-list"></ul>
-        </section>
-      </div>
-      <p id="admin-clone-recommendation" class="clone-recommendation" aria-live="polite"></p>
+        <ul id="admin-clone-metrics" class="admin-stats clone-stats" aria-label="克隆检查指标"></ul>
+        <div class="clone-report-grid">
+          <section class="clone-report-block" aria-labelledby="cloneCapabilitiesTitle">
+            <h3 id="cloneCapabilitiesTitle">可执行项</h3>
+            <div id="admin-clone-capabilities" class="clone-pill-list"></div>
+          </section>
+          <section class="clone-report-block" aria-labelledby="cloneWarningsTitle">
+            <h3 id="cloneWarningsTitle">需要留意</h3>
+            <ul id="admin-clone-warnings" class="clone-warning-list"></ul>
+          </section>
+        </div>
+        <p id="admin-clone-recommendation" class="clone-recommendation" aria-live="polite"></p>
+      </section>
     </section>
 
-    <section class="panel clone-panel" aria-labelledby="cloneTargetTitle">
+    <section id="admin-clone-create-stage" class="panel clone-panel clone-stage-section" data-stage-state="pending" aria-labelledby="cloneTargetTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneTargetTitle" class="section-title">步骤 2：创建空副本</h2>
-          <p class="clone-subline">这里只创建目标频道或超级群及基础信息，不迁移历史消息和媒体。</p>
+          <p class="clone-stage-kicker">本页 2 / 2</p>
+          <h2 id="cloneTargetTitle" class="section-title">确认并创建副本</h2>
+          <p class="clone-subline">检查完成后可编辑副本信息。</p>
         </div>
       </div>
 
@@ -135,30 +134,28 @@
             name="admin-clone-confirm-input"
             type="text"
             autocomplete="off"
-            aria-label="输入创建空副本确认码"
+            aria-label="输入创建副本确认码"
           />
         </div>
         <p id="admin-clone-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
       </div>
 
       <div class="clone-actions">
-        <button id="admin-clone-start-btn" class="btn primary" type="button" disabled aria-label="创建空副本">
-          创建空副本
+        <button id="admin-clone-start-btn" class="btn primary" type="button" disabled aria-label="创建副本">
+          创建副本
         </button>
       </div>
     </section>
 
-    <section class="panel clone-panel" aria-labelledby="cloneRunsTitle">
+    <section class="panel clone-panel clone-secondary-panel" aria-labelledby="cloneRunsTitle">
       <div class="clone-panel-head">
         <div>
           <h2 id="cloneRunsTitle" class="section-title">最近创建记录</h2>
-          <p id="admin-clone-runs-status" class="clone-subline" role="status" aria-live="polite">
-            创建成功后，可从这里继续到迁移页，或直接查看记录详情。
-          </p>
+          <p id="admin-clone-runs-status" class="clone-subline" role="status" aria-live="polite">正在读取记录...</p>
         </div>
         <div class="clone-toolbar">
           <button id="admin-clone-runs-refresh-btn" class="btn" type="button" aria-label="刷新克隆运行记录">
-            刷新列表
+            刷新
           </button>
         </div>
       </div>
@@ -166,18 +163,16 @@
       <div id="admin-clone-runs-list" class="clone-run-list" aria-label="最近克隆运行记录列表"></div>
     </section>
 
-    <section class="panel clone-panel" aria-labelledby="cloneLogTitle" aria-describedby="cloneLogHelp">
+    <details id="admin-clone-log-panel" class="panel clone-panel clone-log-panel">
+      <summary class="clone-log-summary">执行日志</summary>
       <div class="admin-log-head clone-log-head">
-        <h2 id="cloneLogTitle" class="section-title">本页日志</h2>
+        <h2 class="sr-only">本页日志</h2>
         <button id="admin-clear-clone-logs-btn" class="btn" type="button" hidden aria-label="清空克隆日志">
           清空日志
         </button>
       </div>
-      <p id="cloneLogHelp" class="sr-only">
-        日志区域可滚动。聚焦后可使用方向键浏览已生成的日志内容。
-      </p>
-      <div id="admin-clone-log-container" class="admin-log-container"></div>
-    </section>
+      <div id="admin-clone-log-container" class="admin-log-container" aria-label="执行日志"></div>
+    </details>
   </main>
 
   <section
@@ -189,7 +184,7 @@
     hidden
   >
     <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
-    <p class="subtle">进入创建空副本页面，请先验证管理员密码。</p>
+    <p class="subtle">进入创建副本页面，请先验证管理员密码。</p>
     <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-password-input">登录密码</label>

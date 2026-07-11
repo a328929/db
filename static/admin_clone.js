@@ -66,6 +66,11 @@
   function getElements() {
     var elements = {
       page: document.getElementById('admin-clone-page'),
+      sourceStage: document.getElementById('admin-clone-source-stage'),
+      createStage: document.getElementById('admin-clone-create-stage'),
+      selectStage: document.getElementById('admin-clone-select-stage'),
+      planStage: document.getElementById('admin-clone-plan-stage'),
+      migrationStage: document.getElementById('admin-clone-migration-stage'),
       sourceStatus: document.getElementById('admin-clone-source-status'),
       sortSelect: document.getElementById('admin-clone-sort-select'),
       refreshBtn: document.getElementById('admin-clone-refresh-btn'),
@@ -97,6 +102,7 @@
       sendDelayInput: document.getElementById('admin-clone-send-delay-input'),
       timelineStatus: document.getElementById('admin-clone-timeline-status'),
       timelineSummary: document.getElementById('admin-clone-timeline-summary'),
+      logPanel: document.getElementById('admin-clone-log-panel'),
       logContainer: document.getElementById('admin-clone-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-clone-logs-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
@@ -117,7 +123,6 @@
       'sortSelect',
       'refreshBtn',
       'sourceSelect',
-      'sourceSummary',
       'runsStatus',
       'runsRefreshBtn',
       'runsList',
@@ -130,6 +135,9 @@
     ];
     var createRequiredKeys = [
       'preflightBtn',
+      'sourceSummary',
+      'sourceStage',
+      'createStage',
       'preflightStatus',
       'metricsList',
       'capabilities',
@@ -143,6 +151,9 @@
     ];
     var migrateRequiredKeys = [
       'planStatus',
+      'selectStage',
+      'planStage',
+      'migrationStage',
       'planRefreshBtn',
       'deepPreflightBtn',
       'timelineMigrationBtn',
@@ -192,6 +203,81 @@
 
   function setLoginStatus(elements, message) {
     shared.setLoginStatus(elements, message);
+  }
+
+  function setStageState(element, state) {
+    if (!element || typeof element.setAttribute !== 'function') {
+      return;
+    }
+    element.setAttribute('data-stage-state', String(state || 'pending'));
+  }
+
+  function syncWorkflowStages(elements) {
+    if (isCreatePage(elements)) {
+      var hasReport = !!cloneState.report;
+      setStageState(elements.sourceStage, hasReport ? 'complete' : 'current');
+      setStageState(
+        elements.createStage,
+        hasReport ? (cloneState.busy || jobPollState.isPolling ? 'active' : 'current') : 'pending'
+      );
+      return;
+    }
+
+    if (!isMigratePage(elements)) {
+      return;
+    }
+
+    var run = getSelectedCloneRun();
+    var plan = cloneState.plan;
+    var migration = cloneState.timelineMigration;
+    var planStatus = String((plan && plan.status) || '').trim().toLowerCase();
+    var migrationStatus = String((migration && migration.status) || '').trim().toLowerCase();
+    var hasBlockingIssues = Array.isArray(plan && plan.blocking_issues)
+      && plan.blocking_issues.length > 0;
+    var remaining = Number((cloneState.timelinePreview || {}).timeline_remaining || 0);
+
+    setStageState(elements.selectStage, run ? 'complete' : 'current');
+    if (!run) {
+      setStageState(elements.planStage, 'pending');
+      setStageState(elements.migrationStage, 'pending');
+      return;
+    }
+
+    if (!plan) {
+      setStageState(elements.planStage, 'current');
+      setStageState(elements.migrationStage, 'pending');
+      return;
+    }
+    if (planStatus === 'queued' || planStatus === 'running') {
+      setStageState(elements.planStage, 'active');
+      setStageState(elements.migrationStage, 'pending');
+      return;
+    }
+    if (planStatus === 'error' || hasBlockingIssues) {
+      setStageState(elements.planStage, 'attention');
+      setStageState(elements.migrationStage, 'attention');
+      return;
+    }
+
+    setStageState(elements.planStage, planStatus === 'done' ? 'complete' : 'current');
+    if (migrationStatus === 'queued' || migrationStatus === 'running') {
+      setStageState(elements.migrationStage, 'active');
+      return;
+    }
+    if (migrationStatus === 'error') {
+      setStageState(elements.migrationStage, 'attention');
+      return;
+    }
+    setStageState(
+      elements.migrationStage,
+      cloneState.timelinePreview && remaining <= 0 ? 'complete' : 'current'
+    );
+  }
+
+  function openLogPanel(elements) {
+    if (elements && elements.logPanel) {
+      elements.logPanel.open = true;
+    }
   }
 
   function initializeUI(elements) {
@@ -377,8 +463,8 @@
     }
 
     if (isMigratePage(elements)) {
-      elements.planStatus.textContent = '先选择一个已创建成功的克隆群，再生成克隆计划。';
-      elements.timelineStatus.textContent = '尚未开始继续克隆。';
+      elements.planStatus.textContent = '选择副本后生成迁移方案。';
+      elements.timelineStatus.textContent = '等待迁移方案完成。';
     }
 
     setBusy(elements, cloneState.busy);
@@ -477,6 +563,7 @@
     } catch (error) {
       elements.preflightStatus.textContent = '检查失败：' + error.message;
       appendLog(elements, '检查失败：' + error.message);
+      openLogPanel(elements);
     } finally {
       setBusy(elements, false);
     }
@@ -636,12 +723,14 @@
       });
       var jobId = getCreatedJobId(payload);
       appendLog(elements, '空副本创建任务已创建：' + jobId);
+      openLogPanel(elements);
       elements.runsStatus.textContent = '克隆群创建任务已提交，正在刷新创建记录...';
       await loadCloneRuns(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
       appendLog(elements, '创建空副本任务失败：' + error.message);
       elements.preflightStatus.textContent = '创建任务失败：' + error.message;
+      openLogPanel(elements);
     } finally {
       setBusy(elements, false);
     }
@@ -660,6 +749,7 @@
         return;
       }
       appendLog(elements, '检测到未完成的克隆任务，恢复日志轮询：' + String(job.job_id));
+      openLogPanel(elements);
       startJobPolling(elements, String(job.job_id));
     } catch (error) {
       appendLog(elements, '检查活跃克隆任务失败：' + error.message);
@@ -743,11 +833,11 @@
     if (isCreatePage(elements)) {
       if (selectedSource) {
         return count
-          ? '当前源群组已有 ' + total + ' 条创建记录。创建完成后可直接继续到迁移页，或查看记录详情。'
+          ? '当前源群组有 ' + total + ' 条创建记录。'
           : '当前源群组还没有创建记录。';
       }
       return count
-        ? '最近共有 ' + total + ' 条创建记录。创建成功后也会在这里出现。'
+        ? '最近 ' + total + ' 条创建记录。'
         : '暂无创建记录。';
     }
 
@@ -756,11 +846,11 @@
     }
     if (selectedSource) {
       return count
-        ? '当前源群组共有 ' + total + ' 条克隆群记录；只有已创建成功的克隆群可以继续克隆消息。'
+        ? '当前源群组有 ' + total + ' 条记录。'
         : '当前源群组暂无克隆群记录。';
     }
     return count
-      ? '最近共有 ' + total + ' 条克隆群记录；先选择一个已创建成功的克隆群继续。'
+      ? '最近 ' + total + ' 条克隆群记录。'
       : '暂无克隆群记录。';
   }
 
@@ -1101,21 +1191,21 @@
 
   function buildPlanStatusText(plan) {
     if (!plan) {
-      return '当前克隆群还没有克隆计划，请先点击“生成克隆计划”。';
+      return '尚未生成迁移方案。';
     }
     var status = String(plan.status || '').trim().toLowerCase();
     var blockingIssues = Array.isArray(plan.blocking_issues) ? plan.blocking_issues : [];
     if (status === 'done' && blockingIssues.length > 0) {
-      return '克隆计划已生成，但仍有阻断项，先处理阻断项。';
+      return '迁移方案有阻断项。';
     }
     if (status === 'done') {
-      return '克隆计划已生成，可以直接开始继续克隆。';
+      return '迁移方案已就绪。';
     }
     if (status === 'error') {
-      return '最近一次克隆计划生成失败，请重新生成并检查日志。';
+      return '迁移方案生成失败。';
     }
     if (status === 'running' || status === 'queued') {
-      return '克隆计划任务仍在执行中，请稍后刷新。';
+      return '迁移方案正在生成。';
     }
     return '已读取最新克隆计划。';
   }
@@ -1191,10 +1281,12 @@
       renderMigrationPlan(elements, cloneState.plan);
       elements.planStatus.textContent = '克隆计划任务已提交，稍后会自动刷新。';
       appendLog(elements, '克隆计划任务已创建：' + jobId);
+      openLogPanel(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
       appendLog(elements, '创建克隆计划任务失败：' + error.message);
       elements.planStatus.textContent = '创建克隆计划任务失败：' + error.message;
+      openLogPanel(elements);
     } finally {
       setBusy(elements, false);
     }
@@ -1230,10 +1322,12 @@
       }
       renderTimelineMigration(elements, cloneState.timelineMigration);
       appendLog(elements, '继续克隆任务已创建：' + jobId);
+      openLogPanel(elements);
       startJobPolling(elements, jobId);
     } catch (error) {
       appendLog(elements, '创建继续克隆任务失败：' + error.message);
       elements.timelineStatus.textContent = '创建继续克隆任务失败：' + error.message;
+      openLogPanel(elements);
     } finally {
       setBusy(elements, false);
     }
@@ -1301,7 +1395,7 @@
     elements.timelineSummary.textContent = '';
 
     if (!run) {
-      elements.timelineStatus.textContent = '请选择已创建成功的克隆群。';
+      elements.timelineStatus.textContent = '选择副本后继续。';
       appendSummaryPair(elements.timelineSummary, '克隆群', '未选择');
       appendSummaryPair(elements.timelineSummary, '状态', '未选择');
       appendSummaryPair(elements.timelineSummary, '时间线总数', '0');
@@ -1311,7 +1405,9 @@
 
     appendSummaryPair(elements.timelineSummary, '克隆群', getCloneRunTargetLabel(run));
     if (!timelineMigration) {
-      elements.timelineStatus.textContent = '尚未开始继续克隆。';
+      elements.timelineStatus.textContent = preview && preview.can_migrate_timeline
+        ? '可以开始克隆消息。'
+        : '等待迁移方案完成。';
       appendSummaryPair(elements.timelineSummary, '状态', '未执行');
       appendTimelinePreviewSummary(elements, preview);
       return;
@@ -1762,6 +1858,7 @@
     if (elements.logContainer && typeof elements.logContainer.setAttribute === 'function') {
       elements.logContainer.setAttribute('aria-busy', disabled ? 'true' : 'false');
     }
+    syncWorkflowStages(elements);
   }
 
   function updateStartButtonState(elements) {

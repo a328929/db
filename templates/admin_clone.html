@@ -9,41 +9,84 @@
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
 </head>
 <body>
-  <main class="page" id="admin-clone-hub-page">
-    <header class="page-header">
-      <p class="eyebrow">克隆系统</p>
+  <main class="page" id="admin-clone-hub-page" aria-busy="true">
+    <header class="page-header clone-workbench-header">
+      <p class="eyebrow">克隆流程</p>
       <h1>克隆工作台</h1>
-      <p class="subtle">3 个入口：创建克隆群、继续克隆消息、已克隆群管理。</p>
-      <p class="subtle">
+      <div class="clone-header-links">
         <a href="/admin/manage" class="admin-link">返回后台管理</a>
-      </p>
+      </div>
+      <nav class="clone-workflow-nav" aria-label="克隆流程">
+        <ol class="clone-workflow-nav-list">
+          <li class="clone-workflow-nav-item is-current">
+            <a href="/admin/clone/create" aria-current="step">
+              <span class="clone-workflow-nav-index">1</span>
+              <span>创建副本</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/migrate">
+              <span class="clone-workflow-nav-index">2</span>
+              <span>迁移消息</span>
+            </a>
+          </li>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/runs/manage">
+              <span class="clone-workflow-nav-index">3</span>
+              <span>管理记录</span>
+            </a>
+          </li>
+        </ol>
+      </nav>
     </header>
 
-    <section class="panel clone-panel" aria-labelledby="cloneHubTitle">
+    <section class="panel clone-panel clone-workbench-focus" aria-labelledby="cloneWorkbenchFocusTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneHubTitle" class="section-title">选择操作</h2>
+          <p class="clone-stage-kicker">当前工作</p>
+          <h2 id="cloneWorkbenchFocusTitle" class="section-title">正在读取克隆状态</h2>
+          <p id="admin-clone-hub-focus-description" class="clone-subline" role="status" aria-live="polite">
+            请稍候。
+          </p>
         </div>
+        <button id="admin-clone-hub-refresh-btn" class="btn" type="button" aria-label="刷新克隆工作台状态">
+          刷新
+        </button>
       </div>
+      <div id="admin-clone-hub-focus-context" class="clone-workbench-focus-context" hidden></div>
+      <div id="admin-clone-hub-focus-action" class="clone-actions"></div>
+      <dl id="admin-clone-hub-summary" class="clone-summary-grid clone-workbench-summary" aria-label="克隆记录概览"></dl>
+    </section>
 
-      <div class="clone-hub-grid" aria-label="克隆工作台入口">
-        <a class="clone-hub-card" href="/admin/clone/create">
-          <span class="clone-hub-step">第 1 块</span>
-          <strong>检查并创建克隆群组</strong>
-          <span>检查源群和账号状态，创建克隆群。</span>
-        </a>
-        <a class="clone-hub-card" href="/admin/clone/migrate">
-          <span class="clone-hub-step">第 2 块</span>
-          <strong>继续克隆消息</strong>
-          <span>对已创建的克隆群继续克隆消息。</span>
-        </a>
-        <a class="clone-hub-card" href="/admin/clone/runs/manage">
-          <span class="clone-hub-step">第 3 块</span>
-          <strong>已克隆群管理</strong>
-          <span>查看和管理已经创建好的克隆群。</span>
-        </a>
+    <section class="clone-workbench-flow" aria-labelledby="cloneHubFlowTitle">
+      <div class="clone-section-heading">
+        <p class="clone-stage-kicker">操作流程</p>
+        <h2 id="cloneHubFlowTitle" class="section-title">按步骤完成克隆</h2>
       </div>
+      <ol class="clone-hub-grid" aria-label="克隆工作台步骤">
+        <li id="admin-clone-hub-step-create" class="clone-hub-card" data-workflow-state="ready">
+          <span class="clone-hub-step">步骤 1</span>
+          <strong>创建副本</strong>
+          <span class="clone-hub-card-description">选择源群，完成检查并创建目标副本。</span>
+          <a href="/admin/clone/create" class="clone-hub-card-link">进入创建副本</a>
+        </li>
+        <li id="admin-clone-hub-step-migrate" class="clone-hub-card" data-workflow-state="pending">
+          <span class="clone-hub-step">步骤 2</span>
+          <strong>迁移消息</strong>
+          <span class="clone-hub-card-description">选择已创建副本，确认方案后继续克隆消息。</span>
+          <a href="/admin/clone/migrate" class="clone-hub-card-link">进入消息迁移</a>
+        </li>
+        <li id="admin-clone-hub-step-manage" class="clone-hub-card" data-workflow-state="available">
+          <span class="clone-hub-step">步骤 3</span>
+          <strong>管理记录</strong>
+          <span class="clone-hub-card-description">查看进度、失败样本和消息映射。</span>
+          <a href="/admin/clone/runs/manage" class="clone-hub-card-link">管理克隆记录</a>
+        </li>
+      </ol>
     </section>
   </main>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_clone_hub.js') }}"></script>
 </body>
 </html>

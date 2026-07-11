@@ -16,6 +16,9 @@ from tg_harvest.admin_jobs.clone import _admin_start_clone_structure_job_thread
 from tg_harvest.admin_jobs.clone_preflight import (
     _admin_start_clone_deep_preflight_job_thread,
 )
+from tg_harvest.admin_jobs.clone_target_delete import (
+    _admin_start_clone_target_delete_job_thread,
+)
 from tg_harvest.admin_jobs.clone_timeline_migration import (
     _admin_start_clone_timeline_migration_job_thread,
 )
@@ -423,6 +426,9 @@ def _build_route_services() -> RouteRegistryServices:
         ),
         admin_start_clone_timeline_migration_job_thread_fn=(
             _admin_start_clone_timeline_migration_job_thread
+        ),
+        admin_start_clone_target_delete_job_thread_fn=(
+            _admin_start_clone_target_delete_job_thread
         ),
     )
     channel_services = ChannelRouteServices(

@@ -4,7 +4,9 @@
   var shared = window.AdminManageShared;
   var sharedFetchJSON = shared.fetchJSON;
   var formatDateTime = shared.formatDateTime;
+  var setDialogOpenState = shared.setDialogOpenState;
   var setElementDisabled = shared.setElementDisabled;
+  var setPageInteractionState = shared.setPageInteractionState;
   var trapFocusWithin = shared.trapFocusWithin;
   var normalizeNonnegativeInteger = shared.normalizeNonnegativeInteger;
   var formatNumber = shared.formatNumber;
@@ -14,7 +16,9 @@
     offset: 0,
     limit: 20,
     total: 0,
-    busy: false
+    busy: false,
+    deleteJobId: '',
+    pendingDeleteRun: null
   };
 
   document.addEventListener('DOMContentLoaded', async function () {
@@ -37,6 +41,12 @@
       prevBtn: document.getElementById('admin-clone-runs-prev-btn'),
       nextBtn: document.getElementById('admin-clone-runs-next-btn'),
       list: document.getElementById('admin-clone-runs-manage-list'),
+      deleteDialog: document.getElementById('admin-clone-run-delete-dialog'),
+      deleteStatus: document.getElementById('admin-clone-run-delete-status'),
+      deleteConfirmInput: document.getElementById('admin-clone-run-delete-confirm-input'),
+      deleteConfirmHint: document.getElementById('admin-clone-run-delete-confirm-hint'),
+      deleteCancelBtn: document.getElementById('admin-clone-run-delete-cancel-btn'),
+      deleteConfirmBtn: document.getElementById('admin-clone-run-delete-confirm-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
       loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
@@ -53,6 +63,12 @@
       'prevBtn',
       'nextBtn',
       'list',
+      'deleteDialog',
+      'deleteStatus',
+      'deleteConfirmInput',
+      'deleteConfirmHint',
+      'deleteCancelBtn',
+      'deleteConfirmBtn',
       'loginDialog',
       'loginStatus',
       'passwordInput',
@@ -106,10 +122,29 @@
       state.offset += state.limit;
       loadRuns(elements, { resetOffset: false });
     });
+    elements.deleteCancelBtn.addEventListener('click', function () {
+      closeDeleteDialog(elements);
+    });
+    elements.deleteConfirmInput.addEventListener('input', function () {
+      syncDeleteConfirmButton(elements);
+    });
+    elements.deleteConfirmInput.addEventListener('keydown', function (event) {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        handleDeleteConfirm(elements);
+      }
+    });
+    elements.deleteConfirmBtn.addEventListener('click', function () {
+      handleDeleteConfirm(elements);
+    });
 
     document.addEventListener('keydown', function (event) {
       if (!elements.loginDialog.hidden && event.key === 'Tab') {
         trapFocusWithin(elements.loginDialog, event);
+        return;
+      }
+      if (!elements.deleteDialog.hidden && event.key === 'Tab') {
+        trapFocusWithin(elements.deleteDialog, event);
       }
     });
   }
@@ -166,12 +201,13 @@
       return;
     }
     state.items.forEach(function (run) {
-      elements.list.appendChild(createRunCard(run));
+      elements.list.appendChild(createRunCard(elements, run));
     });
     syncRunButtons(elements);
+    syncRunDeleteButtons(elements);
   }
 
-  function createRunCard(run) {
+  function createRunCard(elements, run) {
     var card = document.createElement('article');
     var head = document.createElement('div');
     var title = document.createElement('h3');
@@ -193,14 +229,17 @@
     head.appendChild(status);
     card.appendChild(head);
 
-    appendRunPill(meta, '目标副本', run && run.target_title ? String(run.target_title) : '未创建');
+    appendRunPill(meta, '源群（保留）', (run && run.source_title) || '未知源群');
+    appendRunPill(meta, '克隆副本', run && run.target_title ? String(run.target_title) : '未创建');
+    appendRunPill(meta, '创建状态', getRunStatusLabel(normalizedStatus));
     appendRunPill(meta, '更新时间', formatDateTime(run && run.updated_at));
     card.appendChild(meta);
 
-    appendRunLink(actions, '打开源群', run && run.source_telegram_app_link);
-    appendRunLink(actions, '打开目标', run && run.target_telegram_app_link);
+    appendRunLink(actions, '打开源群（只读）', run && run.source_telegram_app_link);
+    appendRunLink(actions, '打开克隆副本', run && run.target_telegram_app_link);
     appendRunResumeLink(actions, run);
     appendRunDetailLink(actions, run);
+    appendRunDeleteButton(elements, actions, run);
     if (actions.childNodes.length > 0) {
       card.appendChild(actions);
     }
@@ -246,12 +285,145 @@
     container.appendChild(link);
   }
 
+  function appendRunDeleteButton(elements, container, run) {
+    if (!canDeleteRun(run)) return;
+    var button = document.createElement('button');
+    var targetExists = !!(run && run.target_chat_id);
+    button.type = 'button';
+    button.className = 'btn danger clone-run-delete';
+    button.textContent = targetExists ? '删除克隆副本' : '清除失败记录';
+    button.setAttribute(
+      'aria-label',
+      targetExists
+        ? '删除 ' + buildRunTitle(run) + ' 的克隆副本和本地记录'
+        : '清除 ' + buildRunTitle(run) + ' 的失败克隆记录'
+    );
+    button.disabled = state.busy || !!state.deleteJobId;
+    button.addEventListener('click', function () {
+      openDeleteDialog(elements, run);
+    });
+    container.appendChild(button);
+  }
+
+  function canDeleteRun(run) {
+    var status = String((run && run.status) || '').trim().toLowerCase();
+    return !!String((run && run.run_id) || '').trim()
+      && status !== 'queued'
+      && status !== 'running';
+  }
+
+  function deleteConfirmText(run) {
+    return 'DELETE-CLONE-RUN:' + String((run && run.run_id) || '').trim();
+  }
+
+  function openDeleteDialog(elements, run) {
+    if (!canDeleteRun(run) || state.busy || state.deleteJobId) return;
+    state.pendingDeleteRun = run;
+    elements.deleteStatus.textContent = '';
+    elements.deleteConfirmInput.value = '';
+    elements.deleteConfirmHint.textContent = run.target_chat_id
+      ? '将删除 “' + buildRunTitle(run) + '” 的克隆副本和本地记录。源群不会受到影响。请输入确认码：' + deleteConfirmText(run)
+      : '这条记录没有可删除的目标副本，将只清除失败记录及其本地链路。源群不会受到影响。请输入确认码：' + deleteConfirmText(run);
+    syncDeleteConfirmButton(elements);
+    setDialogOpenState(elements.deleteDialog, true, {
+      focusElement: elements.deleteConfirmInput
+    });
+    setPageInteractionState(elements.page, false);
+  }
+
+  function closeDeleteDialog(elements, options) {
+    setDialogOpenState(elements.deleteDialog, false, options || {});
+    setPageInteractionState(elements.page, true);
+  }
+
+  async function handleDeleteConfirm(elements) {
+    var run = state.pendingDeleteRun;
+    if (!run) return;
+    var confirm = String(elements.deleteConfirmInput.value || '').trim();
+    if (confirm !== deleteConfirmText(run)) {
+      elements.deleteStatus.textContent = '确认码不匹配。';
+      elements.deleteConfirmInput.focus();
+      return;
+    }
+
+    setElementDisabled(elements.deleteConfirmBtn, true);
+    elements.deleteStatus.textContent = '正在提交删除任务...';
+    try {
+      var payload = await fetchJSON(
+        '/api/admin/clone/runs/' + encodeURIComponent(String(run.run_id)),
+        {
+          method: 'DELETE',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ confirm: confirm })
+        }
+      );
+      var jobId = String((payload && payload.job && payload.job.job_id) || '').trim();
+      if (!jobId) throw new Error('删除任务响应缺少 job_id');
+      state.pendingDeleteRun = null;
+      closeDeleteDialog(elements);
+      state.deleteJobId = jobId;
+      setBusy(elements, true);
+      elements.status.textContent = '正在删除克隆副本及本地记录...';
+      pollDeleteJob(elements, jobId);
+    } catch (error) {
+      elements.deleteStatus.textContent = '删除任务创建失败：' + error.message;
+      syncDeleteConfirmButton(elements);
+    }
+  }
+
+  async function pollDeleteJob(elements, jobId) {
+    if (state.deleteJobId !== jobId) return;
+    try {
+      var payload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
+      var job = payload && payload.job ? payload.job : null;
+      var status = String((job && job.status) || '').trim().toLowerCase();
+      if (status === 'done') {
+        state.deleteJobId = '';
+        setBusy(elements, false);
+        await loadRuns(elements, { resetOffset: false });
+        elements.status.textContent = '克隆副本及本地记录已删除。';
+        return;
+      }
+      if (status === 'error') {
+        state.deleteJobId = '';
+        setBusy(elements, false);
+        elements.status.textContent = '删除任务未完成，请刷新后查看记录。';
+        return;
+      }
+      if (status !== 'queued' && status !== 'running') {
+        throw new Error('删除任务状态异常');
+      }
+    } catch (error) {
+      state.deleteJobId = '';
+      setBusy(elements, false);
+      elements.status.textContent = '删除任务状态读取失败：' + error.message;
+      return;
+    }
+    window.setTimeout(function () {
+      pollDeleteJob(elements, jobId);
+    }, 1200);
+  }
+
+  function syncDeleteConfirmButton(elements) {
+    var expected = deleteConfirmText(state.pendingDeleteRun);
+    var supplied = String(elements.deleteConfirmInput.value || '').trim();
+    setElementDisabled(elements.deleteConfirmBtn, !expected || supplied !== expected);
+  }
+
   function syncRunButtons(elements) {
     setElementDisabled(elements.prevBtn, state.busy || state.offset <= 0);
     setElementDisabled(
       elements.nextBtn,
       state.busy || state.offset + state.limit >= state.total
     );
+  }
+
+  function syncRunDeleteButtons(elements) {
+    var disabled = state.busy || !!state.deleteJobId;
+    var buttons = elements.list.querySelectorAll('.clone-run-delete');
+    Array.prototype.forEach.call(buttons, function (button) {
+      setElementDisabled(button, disabled);
+    });
   }
 
   function setBusy(elements, busy) {
@@ -265,6 +437,7 @@
       setElementDisabled(element, state.busy);
     });
     syncRunButtons(elements);
+    syncRunDeleteButtons(elements);
   }
 
   function initializeFilters(elements) {

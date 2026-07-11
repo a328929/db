@@ -4,6 +4,7 @@ from collections.abc import Callable
 from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import quote
 
 from flask import jsonify, render_template, request
 
@@ -31,6 +32,7 @@ from tg_harvest.web.responses import (
 from tg_harvest.web.routes.chat_links import with_chat_links, with_prefixed_chat_links
 
 _ALLOWED_TARGET_KINDS = {"channel", "megagroup"}
+_CLONE_WORKBENCH_RECENT_RUN_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -61,6 +63,7 @@ class _CloneRouteDeps:
     admin_start_clone_structure_job_thread_fn: Any
     admin_start_clone_deep_preflight_job_thread_fn: Any
     admin_start_clone_timeline_migration_job_thread_fn: Any
+    admin_start_clone_target_delete_job_thread_fn: Any
 
 
 def _with_clone_run_links(rows, build_telegram_chat_link_bundle_fn):
@@ -432,6 +435,224 @@ def _timeline_migration_readiness(
     }
 
 
+def _clone_workbench_run_label(run: dict) -> str:
+    source_title = str(run.get("source_title") or run.get("source_chat_id") or "源群")
+    target_title = str(run.get("target_title") or run.get("target_chat_id") or "副本")
+    return f"{source_title} -> {target_title}"
+
+
+def _clone_workbench_run_payload(run: dict) -> dict[str, Any]:
+    return {
+        "run_id": str(run.get("run_id") or ""),
+        "label": _clone_workbench_run_label(run),
+        "status": str(run.get("status") or ""),
+        "updated_at": str(run.get("updated_at") or ""),
+    }
+
+
+def _clone_workbench_href(path: str, run: dict) -> str:
+    run_id = quote(str(run.get("run_id") or ""), safe="")
+    return f"{path}?run_id={run_id}" if run_id else path
+
+
+def _clone_workbench_focus(
+    deps: _CloneRouteDeps,
+    conn,
+    recent_runs: list[dict],
+) -> dict[str, Any]:
+    """Choose one recent record that tells the operator what to do next."""
+
+    candidates = []
+    for run in recent_runs:
+        status = str(run.get("status") or "").strip().lower()
+        plan = None
+        migration = None
+        if status == "done" and run.get("target_chat_id"):
+            run_id = str(run.get("run_id") or "")
+            plan = deps.load_latest_clone_plan_fn(conn, run_id)
+            migration = deps.load_latest_clone_migration_fn(
+                conn,
+                run_id,
+                mode="timeline_replay",
+            )
+        candidates.append(
+            {
+                "run": run,
+                "run_status": status,
+                "plan": plan,
+                "migration": migration,
+            }
+        )
+
+    def focus(
+        state: str,
+        step: str,
+        title: str,
+        description: str,
+        run: dict,
+        action_label: str,
+        action_href: str,
+    ) -> dict[str, Any]:
+        return {
+            "state": state,
+            "step": step,
+            "title": title,
+            "description": description,
+            "run": _clone_workbench_run_payload(run),
+            "action": {"label": action_label, "href": action_href},
+        }
+
+    for item in candidates:
+        migration_status = str(
+            (item["migration"] or {}).get("status") or ""
+        ).strip().lower()
+        if migration_status in {"queued", "running"}:
+            return focus(
+                "active",
+                "migrate",
+                "消息正在克隆",
+                "迁移任务仍在执行，可查看实时状态与最近进度。",
+                item["run"],
+                "查看迁移进度",
+                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+            )
+
+    for item in candidates:
+        plan_status = str((item["plan"] or {}).get("status") or "").strip().lower()
+        if plan_status in {"queued", "running"}:
+            return focus(
+                "active",
+                "migrate",
+                "迁移方案正在检查",
+                "正在验证源群、目标副本和可执行的消息迁移路径。",
+                item["run"],
+                "查看迁移方案",
+                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+            )
+
+    for item in candidates:
+        if item["run_status"] in {"queued", "running"}:
+            return focus(
+                "active",
+                "create",
+                "副本正在创建",
+                "目标副本结构仍在创建，完成后才能进入消息迁移。",
+                item["run"],
+                "查看创建记录",
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
+            )
+
+    for item in candidates:
+        if item["run_status"] == "error":
+            return focus(
+                "attention",
+                "create",
+                "有副本创建失败",
+                "先查看失败记录，确认是否需要重新创建目标副本。",
+                item["run"],
+                "处理失败记录",
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
+            )
+
+    for item in candidates:
+        plan = item["plan"]
+        if item["run_status"] != "done" or not item["run"].get("target_chat_id"):
+            continue
+        if plan is None:
+            return focus(
+                "ready",
+                "migrate",
+                "副本已创建，等待迁移方案",
+                "先生成迁移方案，再开始克隆历史消息和媒体。",
+                item["run"],
+                "生成迁移方案",
+                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+            )
+        plan_status = str(plan.get("status") or "").strip().lower()
+        if plan_status == "error" or plan.get("blocking_issues"):
+            return focus(
+                "attention",
+                "migrate",
+                "迁移方案需要处理",
+                "检查方案中的阻断项或重新生成方案后再继续。",
+                item["run"],
+                "处理迁移方案",
+                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+            )
+
+    for item in candidates:
+        migration_status = str(
+            (item["migration"] or {}).get("status") or ""
+        ).strip().lower()
+        if migration_status == "error":
+            return focus(
+                "attention",
+                "migrate",
+                "消息克隆需要重试",
+                "最近一次迁移未完成，可查看状态后继续执行。",
+                item["run"],
+                "继续克隆消息",
+                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+            )
+
+    for item in candidates:
+        run = item["run"]
+        plan = item["plan"]
+        if (
+            item["run_status"] != "done"
+            or not run.get("target_chat_id")
+            or str((plan or {}).get("status") or "").strip().lower() != "done"
+        ):
+            continue
+        preview = deps.build_clone_timeline_replay_preview_fn(
+            conn,
+            run_id=str(run.get("run_id") or ""),
+            source_chat_id=int(run.get("source_chat_id") or 0),
+        )
+        readiness = _timeline_migration_readiness(run, plan, preview)
+        if readiness["can_migrate_timeline"]:
+            return focus(
+                "ready",
+                "migrate",
+                "可以继续克隆消息",
+                "迁移方案已通过，剩余消息可按当前方案继续处理。",
+                run,
+                "继续克隆消息",
+                _clone_workbench_href("/admin/clone/migrate", run),
+            )
+        if int(preview.get("timeline_remaining") or 0) <= 0:
+            return focus(
+                "complete",
+                "manage",
+                "最近记录已完成",
+                "当前记录没有待处理的时间线消息，可在管理页核对详情。",
+                run,
+                "查看克隆记录",
+                _clone_workbench_href("/admin/clone/runs/detail", run),
+            )
+
+    return {
+        "state": "ready",
+        "step": "create",
+        "title": "从创建副本开始",
+        "description": "选择数据库中的源群，完成检查后创建目标副本。",
+        "run": None,
+        "action": {"label": "创建副本", "href": "/admin/clone/create"},
+    }
+
+
+def _clone_workbench_summary(deps: _CloneRouteDeps, conn) -> dict[str, int]:
+    return {
+        "total": int(deps.count_clone_runs_fn(conn)),
+        "creating": sum(
+            int(deps.count_clone_runs_fn(conn, status=status))
+            for status in ("queued", "running")
+        ),
+        "created": int(deps.count_clone_runs_fn(conn, status="done")),
+        "failed": int(deps.count_clone_runs_fn(conn, status="error")),
+    }
+
+
 def _register_clone_page_routes(app) -> None:
     @app.get("/admin/clone")
     @admin_page_login_required
@@ -460,6 +681,34 @@ def _register_clone_page_routes(app) -> None:
 
 
 def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:
+    @app.get("/api/admin/clone/workbench")
+    @admin_login_required
+    def api_admin_clone_workbench():
+        try:
+            with closing(deps.get_conn_fn()) as conn:
+                recent_runs = deps.list_clone_runs_fn(
+                    conn,
+                    limit=_CLONE_WORKBENCH_RECENT_RUN_LIMIT,
+                    sort="updated_desc",
+                )
+                summary = _clone_workbench_summary(deps, conn)
+                focus = _clone_workbench_focus(deps, conn, recent_runs)
+            return jsonify(
+                {
+                    "ok": True,
+                    "summary": summary,
+                    "focus": focus,
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                deps.logger,
+                "读取克隆工作台状态失败",
+                "读取克隆工作台状态失败",
+            )
+        except Exception:
+            return logged_json_error(deps.logger, "系统异常", "系统异常")
+
     @app.get("/api/admin/clone/chats")
     @admin_login_required
     def api_admin_clone_chats():
@@ -709,16 +958,38 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                         409,
                         active_job=active_job,
                     )
-                deleted = deps.delete_clone_run_fn(conn, run_id=normalized_run_id)
-            if not deleted:
-                return json_error("克隆运行记录不存在", 404)
-            return jsonify(
-                {
-                    "ok": True,
-                    "deleted": True,
-                    "run_id": normalized_run_id,
-                    "telegram_target_deleted": False,
-                }
+            job_id, error_response = _create_clone_job_or_response(
+                deps,
+                "clone_target_delete",
+                target_label="删除克隆副本",
+            )
+            if error_response is not None:
+                return error_response
+            return _start_clone_job_response(
+                deps,
+                job_id=job_id,
+                initial_logs=[
+                    "已接收删除克隆副本请求",
+                    "仅处理目标副本和本地克隆链路；不会读取或删除源群",
+                ],
+                start_job_fn=lambda current_job_id: (
+                    deps.admin_start_clone_target_delete_job_thread_fn(
+                        current_job_id,
+                        clone_run=clone_run,
+                        cfg=deps.cfg,
+                        get_conn_fn=deps.get_conn_fn,
+                        admin_job_set_status_fn=deps.admin_job_set_status_fn,
+                        admin_job_append_log_fn=deps.admin_job_append_log_fn,
+                    )
+                ),
+                response_extra={
+                    "deletion": {
+                        "run_id": normalized_run_id,
+                        "target_delete_requested": bool(
+                            clone_run.get("target_chat_id")
+                        ),
+                    }
+                },
             )
         except sqlite3.Error:
             return logged_json_error(
@@ -1169,6 +1440,9 @@ def _clone_deps_from_services(services: CloneRouteServices) -> _CloneRouteDeps:
         admin_start_clone_timeline_migration_job_thread_fn=(
             services.admin_start_clone_timeline_migration_job_thread_fn
         ),
+        admin_start_clone_target_delete_job_thread_fn=(
+            services.admin_start_clone_target_delete_job_thread_fn
+        ),
     )
 
 
@@ -1200,6 +1474,7 @@ def _clone_deps_from_legacy_kwargs(
     admin_start_clone_structure_job_thread_fn=None,
     admin_start_clone_deep_preflight_job_thread_fn=None,
     admin_start_clone_timeline_migration_job_thread_fn=None,
+    admin_start_clone_target_delete_job_thread_fn=None,
 ) -> _CloneRouteDeps:
     return _CloneRouteDeps(
         logger=logger,
@@ -1234,6 +1509,9 @@ def _clone_deps_from_legacy_kwargs(
         admin_start_clone_timeline_migration_job_thread_fn=(
             admin_start_clone_timeline_migration_job_thread_fn
         ),
+        admin_start_clone_target_delete_job_thread_fn=(
+            admin_start_clone_target_delete_job_thread_fn
+        ),
     )
 
 
@@ -1267,6 +1545,7 @@ def register_clone_routes(
     admin_start_clone_structure_job_thread_fn=None,
     admin_start_clone_deep_preflight_job_thread_fn=None,
     admin_start_clone_timeline_migration_job_thread_fn=None,
+    admin_start_clone_target_delete_job_thread_fn=None,
 ) -> None:
     deps = (
         _clone_deps_from_services(services)
@@ -1305,6 +1584,9 @@ def register_clone_routes(
             ),
             admin_start_clone_timeline_migration_job_thread_fn=(
                 admin_start_clone_timeline_migration_job_thread_fn
+            ),
+            admin_start_clone_target_delete_job_thread_fn=(
+                admin_start_clone_target_delete_job_thread_fn
             ),
         )
     )

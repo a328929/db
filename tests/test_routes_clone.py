@@ -38,6 +38,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.deleted_clone_run_ids = []
         self.started_deep_preflight_jobs = []
         self.started_timeline_migration_jobs = []
+        self.started_target_delete_jobs = []
         self.clone_timeline_preview_override = None
         self.clone_run_create_error = None
         self.clone_plan_create_error = None
@@ -141,6 +142,11 @@ class CloneRoutesTests(unittest.TestCase):
             ),
             admin_start_clone_timeline_migration_job_thread_fn=(
                 lambda *args, **kwargs: self.started_timeline_migration_jobs.append(
+                    (args, kwargs)
+                )
+            ),
+            admin_start_clone_target_delete_job_thread_fn=(
+                lambda *args, **kwargs: self.started_target_delete_jobs.append(
                     (args, kwargs)
                 )
             ),
@@ -609,9 +615,9 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
         self.assertIn("克隆工作台", body)
-        self.assertIn("检查并创建克隆群组", body)
-        self.assertIn("继续克隆消息", body)
-        self.assertIn("已克隆群管理", body)
+        self.assertIn("创建副本", body)
+        self.assertIn("迁移消息", body)
+        self.assertIn("管理克隆记录", body)
 
     def test_clone_create_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -620,10 +626,10 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("创建空副本", body)
+        self.assertIn("创建副本", body)
         self.assertIn('data-clone-mode="create"', body)
         self.assertIn("最近创建记录", body)
-        self.assertIn("当前位置：创建空副本", body)
+        self.assertIn("第 1 步 / 共 3 步", body)
 
     def test_clone_migrate_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -632,10 +638,10 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("继续克隆消息", body)
+        self.assertIn("迁移消息", body)
         self.assertIn('data-clone-mode="migrate"', body)
-        self.assertIn("生成克隆计划", body)
-        self.assertIn("当前位置：继续克隆消息", body)
+        self.assertIn("生成迁移方案", body)
+        self.assertIn("第 2 步 / 共 3 步", body)
 
     def test_clone_runs_manage_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -645,7 +651,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
         self.assertIn("已克隆群管理", body)
-        self.assertIn("当前位置：已克隆群管理", body)
+        self.assertIn("第 3 步 / 共 3 步", body)
 
     def test_clone_run_detail_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -656,7 +662,50 @@ class CloneRoutesTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("已克隆群详情", body)
         self.assertIn("消息映射与排错", body)
-        self.assertIn("当前位置：已克隆群详情", body)
+        self.assertIn("第 3 步 / 共 3 步", body)
+
+    def test_clone_workbench_api_returns_next_action_and_summary(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/workbench")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual(
+            {"total": 1, "creating": 0, "created": 1, "failed": 0},
+            payload["summary"],
+        )
+        self.assertEqual("migrate", payload["focus"]["step"])
+        self.assertEqual("ready", payload["focus"]["state"])
+        self.assertEqual("run-existing", payload["focus"]["run"]["run_id"])
+        self.assertEqual(
+            "/admin/clone/migrate?run_id=run-existing",
+            payload["focus"]["action"]["href"],
+        )
+
+    def test_clone_workbench_api_prioritizes_running_message_migration(self) -> None:
+        self._create_done_plan()
+        self.created_clone_migrations.append(
+            {
+                "migration_id": "migration-active",
+                "run_id": "run-existing",
+                "job_id": "job-migration-active",
+                "mode": "timeline_replay",
+                "status": "running",
+                "phase": "replaying_timeline",
+            }
+        )
+
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/workbench")
+
+        self.assertEqual(200, response.status_code)
+        focus = response.get_json()["focus"]
+        self.assertEqual("migrate", focus["step"])
+        self.assertEqual("active", focus["state"])
+        self.assertEqual("查看迁移进度", focus["action"]["label"])
 
     def test_clone_chats_api_includes_telegram_links(self) -> None:
         with self._auth_config_patch():
@@ -806,7 +855,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
         self.assertEqual([], self.deleted_clone_run_ids)
 
-    def test_clone_run_delete_removes_local_record_only(self) -> None:
+    def test_clone_run_delete_starts_target_and_local_cleanup_job(self) -> None:
         with self._auth_config_patch():
             csrf_token = self._login_admin()
             response = self.client.delete(
@@ -817,9 +866,15 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertTrue(payload["deleted"])
-        self.assertFalse(payload["telegram_target_deleted"])
-        self.assertEqual(["run-existing"], self.deleted_clone_run_ids)
+        self.assertEqual("clone_target_delete", payload["job"]["job_type"])
+        self.assertTrue(payload["deletion"]["target_delete_requested"])
+        self.assertEqual("run-existing", payload["deletion"]["run_id"])
+        self.assertEqual([], self.deleted_clone_run_ids)
+        self.assertEqual(1, len(self.started_target_delete_jobs))
+        args, kwargs = self.started_target_delete_jobs[0]
+        self.assertEqual(("job-clone-1",), args)
+        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
+        self.assertEqual(777, kwargs["clone_run"]["target_chat_id"])
 
     def test_clone_run_delete_rejects_related_active_migration(self) -> None:
         self.created_clone_migrations.append(
@@ -846,6 +901,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("关联克隆任务仍在执行，不能删除本地记录", payload["error"])
         self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
         self.assertEqual([], self.deleted_clone_run_ids)
+        self.assertEqual([], self.started_target_delete_jobs)
 
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():
