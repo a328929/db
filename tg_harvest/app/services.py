@@ -102,6 +102,7 @@ class AdminRouteServices:
     admin_job_set_status_fn: Any
     admin_harvest_target_max_len: int
     admin_cleanup_keyword_max_len: int
+    build_admin_storage_health_payload_fn: Any = None
 
 
 @dataclass(frozen=True)

@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import shutil
 import sqlite3
 import sys
 from pathlib import Path
@@ -32,12 +33,27 @@ def _print_db_overview(cur: sqlite3.Cursor, db_path: Path) -> None:
     page_size = _fetch_one_int(cur, "PRAGMA page_size")
     page_count = _fetch_one_int(cur, "PRAGMA page_count")
     freelist_count = _fetch_one_int(cur, "PRAGMA freelist_count")
+    cur.execute("PRAGMA journal_mode")
+    journal_mode_row = cur.fetchone()
+    journal_mode = str(
+        (journal_mode_row[0] if journal_mode_row else "") or ""
+    ).lower()
+    wal_path = Path(f"{db_path}-wal")
+    shm_path = Path(f"{db_path}-shm")
+    try:
+        disk_free = shutil.disk_usage(db_path.parent).free
+    except OSError:
+        disk_free = None
     _print_kv("database", db_path)
     _print_kv("file_size", _format_bytes(db_path.stat().st_size if db_path.exists() else 0))
+    _print_kv("wal_file_size", _format_bytes(wal_path.stat().st_size if wal_path.exists() else 0))
+    _print_kv("shm_file_size", _format_bytes(shm_path.stat().st_size if shm_path.exists() else 0))
+    _print_kv("disk_free", _format_bytes(disk_free) if disk_free is not None else "unavailable")
     _print_kv("page_size", page_size)
     _print_kv("page_count", page_count)
     _print_kv("freelist_pages", freelist_count)
     _print_kv("freelist_bytes", _format_bytes(page_size * freelist_count))
+    _print_kv("journal_mode", journal_mode)
 
 
 def _print_row_counts(cur: sqlite3.Cursor) -> None:

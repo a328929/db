@@ -1,11 +1,17 @@
 import sqlite3
+import tempfile
 import unittest
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 from tg_harvest.app.admin_payloads import (
     build_admin_stats_payload,
+    build_admin_storage_health_payload,
     build_admin_sync_live_messages_payload,
     build_admin_sync_stats_payload,
 )
+from tg_harvest.config import _load_raw_config_values, _normalize_config_values
 
 
 class AdminPayloadPerformanceTests(unittest.TestCase):
@@ -289,6 +295,252 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         self.assertEqual(2, payload["items"][0]["chat_id"])
         self.assertEqual(201, payload["items"][0]["message_id"])
         self.assertEqual("second message", payload["items"][0]["content_preview"])
+
+
+class AdminStorageHealthPayloadTests(unittest.TestCase):
+    def _cfg(self, db_name: str, **overrides) -> SimpleNamespace:
+        values = {
+            "db_name": db_name,
+            "db_health_size_warning_bytes": 20 * 1024 * 1024 * 1024,
+            "db_health_size_critical_bytes": 50 * 1024 * 1024 * 1024,
+            "db_health_wal_warning_bytes": 512 * 1024 * 1024,
+            "db_health_wal_critical_bytes": 2 * 1024 * 1024 * 1024,
+            "db_health_disk_free_warning_bytes": 10 * 1024 * 1024 * 1024,
+            "db_health_disk_free_critical_bytes": 3 * 1024 * 1024 * 1024,
+            "db_health_cjk_queue_warning": 10,
+            "db_health_cjk_queue_critical": 100,
+        }
+        values.update(overrides)
+        return SimpleNamespace(**values)
+
+    def _open_health_db(self, db_path: Path, *, fts_status: str = "ready"):
+        conn = sqlite3.connect(db_path)
+        conn.row_factory = sqlite3.Row
+        conn.executescript(
+            """
+            CREATE TABLE chats(
+                chat_id INTEGER PRIMARY KEY,
+                message_count INTEGER NOT NULL DEFAULT 0
+            );
+            CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT);
+            CREATE TABLE media_groups(id INTEGER PRIMARY KEY);
+            CREATE TABLE message_search_terms(pk INTEGER, term TEXT);
+            CREATE TABLE message_search_terms_rebuild_queue(pk INTEGER PRIMARY KEY);
+            CREATE INDEX idx_health_media_groups ON media_groups(id);
+            CREATE INDEX idx_health_search_terms ON message_search_terms(term);
+            CREATE TABLE message_search_terms_meta(key TEXT PRIMARY KEY, value TEXT);
+            CREATE TABLE admin_jobs(
+                job_type TEXT,
+                status TEXT,
+                created_at TEXT,
+                updated_at TEXT
+            );
+            """
+        )
+        conn.executemany(
+            "INSERT INTO chats(chat_id, message_count) VALUES (?, ?)",
+            [(1, 21), (2, 21)],
+        )
+        conn.executemany("INSERT INTO media_groups(id) VALUES (?)", [(1,), (2,)])
+        conn.executemany(
+            "INSERT INTO message_search_terms(pk, term) VALUES (?, ?)",
+            [(1, "中文"), (2, "短词")],
+        )
+        conn.execute(
+            "INSERT INTO message_search_terms_rebuild_queue(pk) VALUES (1)"
+        )
+        conn.executemany(
+            "INSERT INTO message_search_terms_meta(key, value) VALUES (?, ?)",
+            [
+                ("fts_index_status", fts_status),
+                ("cjk_terms_version", "3"),
+                ("cjk_terms_last_maintenance_at", "2026-07-11 10:00:00"),
+                ("cjk_terms_last_maintenance_result", "drained:500"),
+                ("cjk_terms_queue_length", "1"),
+            ],
+        )
+        conn.execute(
+            """
+            INSERT INTO admin_jobs(job_type, status, created_at, updated_at)
+            VALUES ('cleanup', 'done', '2026-07-10 10:00:00', '2026-07-10 11:00:00')
+            """
+        )
+        conn.commit()
+        conn.execute("ANALYZE")
+        conn.commit()
+        return conn
+
+    def test_storage_health_reports_lightweight_capacity_and_index_metrics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "health.db"
+            conn = self._open_health_db(db_path)
+            try:
+                payload = build_admin_storage_health_payload(
+                    conn,
+                    cfg=self._cfg(str(db_path)),
+                )
+            finally:
+                conn.close()
+
+        self.assertTrue(payload["ok"])
+        self.assertTrue(payload["checked_at"])
+        self.assertTrue(payload["database"]["path_configured"])
+        self.assertGreater(payload["database"]["main_bytes"], 0)
+        self.assertIn(payload["database"]["journal_mode"], {"delete", "wal"})
+        self.assertEqual(42, payload["counts"]["message_count"])
+        self.assertEqual(2, payload["counts"]["media_group_count"])
+        self.assertEqual(2, payload["counts"]["cjk_term_count"])
+        self.assertEqual(1, payload["counts"]["cjk_queue_length"])
+        self.assertTrue(payload["indexes"]["fts_ready"])
+        self.assertEqual(
+            "drained:500",
+            payload["maintenance"]["cjk"]["last_maintenance_result"],
+        )
+        self.assertEqual(
+            "cleanup",
+            payload["maintenance"]["last_recorded_job"]["job_type"],
+        )
+
+    def test_storage_health_handles_unconfigured_path_and_missing_wal(self) -> None:
+        memory_conn = sqlite3.connect(":memory:")
+        memory_conn.row_factory = sqlite3.Row
+        try:
+            payload = build_admin_storage_health_payload(
+                memory_conn,
+                cfg=self._cfg(""),
+            )
+        finally:
+            memory_conn.close()
+        self.assertFalse(payload["database"]["path_configured"])
+        self.assertIn(
+            "database_path_unconfigured",
+            {item["code"] for item in payload["reasons"]},
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "without-wal.db"
+            conn = self._open_health_db(db_path)
+            try:
+                self.assertFalse(Path(f"{db_path}-wal").exists())
+                payload = build_admin_storage_health_payload(
+                    conn,
+                    cfg=self._cfg(str(db_path)),
+                )
+            finally:
+                conn.close()
+        self.assertEqual(0, payload["database"]["wal_bytes"])
+        self.assertEqual(0, payload["database"]["shm_bytes"])
+
+    def test_storage_health_applies_threshold_boundaries_and_low_disk_actions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "thresholds.db"
+            conn = self._open_health_db(db_path)
+            try:
+                db_size = db_path.stat().st_size
+                warning_cfg = self._cfg(
+                    str(db_path),
+                    db_health_size_warning_bytes=db_size,
+                    db_health_size_critical_bytes=db_size + 1,
+                )
+                payload = build_admin_storage_health_payload(conn, cfg=warning_cfg)
+                codes = {item["code"] for item in payload["reasons"]}
+                self.assertIn("database_size_warning", codes)
+                self.assertNotIn("database_size_critical", codes)
+
+                queue_cfg = self._cfg(
+                    str(db_path),
+                    db_health_cjk_queue_warning=1,
+                    db_health_cjk_queue_critical=2,
+                )
+                payload = build_admin_storage_health_payload(conn, cfg=queue_cfg)
+                self.assertIn(
+                    "cjk_queue_warning",
+                    {item["code"] for item in payload["reasons"]},
+                )
+
+                low_disk_cfg = self._cfg(
+                    str(db_path),
+                    db_health_disk_free_warning_bytes=1000,
+                    db_health_disk_free_critical_bytes=500,
+                )
+                disk_usage = __import__("shutil").disk_usage(tmpdir)._replace(free=500)
+                with patch(
+                    "tg_harvest.storage.db_health.shutil.disk_usage",
+                    return_value=disk_usage,
+                ):
+                    payload = build_admin_storage_health_payload(conn, cfg=low_disk_cfg)
+            finally:
+                conn.close()
+
+        self.assertIn(
+            "disk_free_critical",
+            {item["code"] for item in payload["reasons"]},
+        )
+        self.assertIn("磁盘余量不足以安全压缩；先扩容或清理非数据库文件。", payload["actions"])
+
+    def test_storage_health_flags_fts_not_ready_and_avoids_heavy_queries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "fts.db"
+            conn = self._open_health_db(db_path, fts_status="incomplete")
+            statements = []
+            conn.set_trace_callback(lambda sql: statements.append(str(sql).lower()))
+            try:
+                payload = build_admin_storage_health_payload(
+                    conn,
+                    cfg=self._cfg(str(db_path)),
+                )
+            finally:
+                conn.set_trace_callback(None)
+                conn.close()
+
+        self.assertIn("fts_not_ready", {item["code"] for item in payload["reasons"]})
+        self.assertFalse(any("dbstat" in statement for statement in statements))
+        self.assertFalse(any("integrity_check" in statement for statement in statements))
+        self.assertFalse(
+            any("count(*) from messages" in statement for statement in statements)
+        )
+
+    def test_storage_health_flags_a_wal_that_keeps_growing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            db_path = Path(tmpdir) / "wal-growth.db"
+            conn = self._open_health_db(db_path)
+            wal_path = Path(f"{db_path}-wal")
+            cfg = self._cfg(
+                str(db_path),
+                db_health_wal_warning_bytes=1024 * 1024,
+                db_health_wal_critical_bytes=32 * 1024 * 1024,
+            )
+            try:
+                wal_path.write_bytes(b"x" * (8 * 1024 * 1024))
+                build_admin_storage_health_payload(conn, cfg=cfg)
+                wal_path.write_bytes(b"x" * (16 * 1024 * 1024))
+                payload = build_admin_storage_health_payload(conn, cfg=cfg)
+            finally:
+                conn.close()
+
+        self.assertIn("wal_growing", {item["code"] for item in payload["reasons"]})
+
+    def test_config_normalizes_database_health_threshold_pairs(self) -> None:
+        raw = _load_raw_config_values()
+        raw.update(
+            {
+                "db_health_size_warning_bytes": 100,
+                "db_health_size_critical_bytes": 10,
+                "db_health_wal_warning_bytes": -1,
+                "db_health_wal_critical_bytes": 0,
+                "db_health_disk_free_warning_bytes": 100,
+                "db_health_disk_free_critical_bytes": 1000,
+                "db_health_cjk_queue_warning": 50,
+                "db_health_cjk_queue_critical": 1,
+            }
+        )
+        normalized = _normalize_config_values(raw)
+
+        self.assertEqual(100, normalized["db_health_size_critical_bytes"])
+        self.assertEqual(1, normalized["db_health_wal_warning_bytes"])
+        self.assertEqual(1, normalized["db_health_wal_critical_bytes"])
+        self.assertEqual(100, normalized["db_health_disk_free_critical_bytes"])
+        self.assertEqual(50, normalized["db_health_cjk_queue_critical"])
 
 
 if __name__ == "__main__":

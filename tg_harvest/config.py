@@ -120,6 +120,32 @@ def _load_raw_config_values() -> dict:
         "sqlite_cache_mb": _env_int("TG_SQLITE_CACHE_MB", 512),
         # 数据库内存映射大小，单位为兆。数值零表示关闭。
         "sqlite_mmap_mb": _env_int("TG_SQLITE_MMAP_MB", 1024),
+        # 管理页数据库容量健康阈值，单位均为字节。阈值只影响只读告警，不会触发维护操作。
+        "db_health_size_warning_bytes": _env_int(
+            "TG_DB_HEALTH_SIZE_WARNING_BYTES", 20 * 1024 * 1024 * 1024
+        ),
+        "db_health_size_critical_bytes": _env_int(
+            "TG_DB_HEALTH_SIZE_CRITICAL_BYTES", 50 * 1024 * 1024 * 1024
+        ),
+        "db_health_wal_warning_bytes": _env_int(
+            "TG_DB_HEALTH_WAL_WARNING_BYTES", 512 * 1024 * 1024
+        ),
+        "db_health_wal_critical_bytes": _env_int(
+            "TG_DB_HEALTH_WAL_CRITICAL_BYTES", 2 * 1024 * 1024 * 1024
+        ),
+        # 磁盘余量的严重阈值必须小于等于预警阈值。
+        "db_health_disk_free_warning_bytes": _env_int(
+            "TG_DB_HEALTH_DISK_FREE_WARNING_BYTES", 10 * 1024 * 1024 * 1024
+        ),
+        "db_health_disk_free_critical_bytes": _env_int(
+            "TG_DB_HEALTH_DISK_FREE_CRITICAL_BYTES", 3 * 1024 * 1024 * 1024
+        ),
+        "db_health_cjk_queue_warning": _env_int(
+            "TG_DB_HEALTH_CJK_QUEUE_WARNING", 10000
+        ),
+        "db_health_cjk_queue_critical": _env_int(
+            "TG_DB_HEALTH_CJK_QUEUE_CRITICAL", 100000
+        ),
         # 后台任务最大保留数量。
         "admin_job_max_count": _env_int("TG_ADMIN_JOB_MAX_COUNT", 100),
         # 单个后台任务最大日志行数。
@@ -288,6 +314,34 @@ def _normalize_config_values(raw: dict) -> dict:
     )
     normalized["sqlite_cache_mb"] = max(16, int(normalized["sqlite_cache_mb"]))
     normalized["sqlite_mmap_mb"] = max(0, int(normalized["sqlite_mmap_mb"]))
+    normalized["db_health_size_warning_bytes"] = max(
+        1, int(normalized["db_health_size_warning_bytes"])
+    )
+    normalized["db_health_size_critical_bytes"] = max(
+        int(normalized["db_health_size_warning_bytes"]),
+        int(normalized["db_health_size_critical_bytes"]),
+    )
+    normalized["db_health_wal_warning_bytes"] = max(
+        1, int(normalized["db_health_wal_warning_bytes"])
+    )
+    normalized["db_health_wal_critical_bytes"] = max(
+        int(normalized["db_health_wal_warning_bytes"]),
+        int(normalized["db_health_wal_critical_bytes"]),
+    )
+    normalized["db_health_disk_free_warning_bytes"] = max(
+        1, int(normalized["db_health_disk_free_warning_bytes"])
+    )
+    normalized["db_health_disk_free_critical_bytes"] = min(
+        int(normalized["db_health_disk_free_warning_bytes"]),
+        max(1, int(normalized["db_health_disk_free_critical_bytes"])),
+    )
+    normalized["db_health_cjk_queue_warning"] = max(
+        1, int(normalized["db_health_cjk_queue_warning"])
+    )
+    normalized["db_health_cjk_queue_critical"] = max(
+        int(normalized["db_health_cjk_queue_warning"]),
+        int(normalized["db_health_cjk_queue_critical"]),
+    )
     normalized["admin_job_max_count"] = max(10, int(normalized["admin_job_max_count"]))
     normalized["admin_job_log_max_lines"] = max(
         500, int(normalized["admin_job_log_max_lines"])
@@ -444,6 +498,18 @@ def _build_app_config(values: dict) -> "AppConfig":
         multi_account_range_chunk_size=values["multi_account_range_chunk_size"],
         sqlite_cache_mb=values["sqlite_cache_mb"],
         sqlite_mmap_mb=values["sqlite_mmap_mb"],
+        db_health_size_warning_bytes=values["db_health_size_warning_bytes"],
+        db_health_size_critical_bytes=values["db_health_size_critical_bytes"],
+        db_health_wal_warning_bytes=values["db_health_wal_warning_bytes"],
+        db_health_wal_critical_bytes=values["db_health_wal_critical_bytes"],
+        db_health_disk_free_warning_bytes=values[
+            "db_health_disk_free_warning_bytes"
+        ],
+        db_health_disk_free_critical_bytes=values[
+            "db_health_disk_free_critical_bytes"
+        ],
+        db_health_cjk_queue_warning=values["db_health_cjk_queue_warning"],
+        db_health_cjk_queue_critical=values["db_health_cjk_queue_critical"],
         admin_job_max_count=values["admin_job_max_count"],
         admin_job_log_max_lines=values["admin_job_log_max_lines"],
         admin_update_concurrency=values["admin_update_concurrency"],
@@ -611,6 +677,16 @@ class AppConfig:
     # 后台验证
     admin_password: str
     admin_session_expiry: int
+
+    # 数据库容量健康阈值。默认值放在字段上，方便旧测试和嵌入调用逐步迁移。
+    db_health_size_warning_bytes: int = 20 * 1024 * 1024 * 1024
+    db_health_size_critical_bytes: int = 50 * 1024 * 1024 * 1024
+    db_health_wal_warning_bytes: int = 512 * 1024 * 1024
+    db_health_wal_critical_bytes: int = 2 * 1024 * 1024 * 1024
+    db_health_disk_free_warning_bytes: int = 10 * 1024 * 1024 * 1024
+    db_health_disk_free_critical_bytes: int = 3 * 1024 * 1024 * 1024
+    db_health_cjk_queue_warning: int = 10000
+    db_health_cjk_queue_critical: int = 100000
 
     @classmethod
     def load(cls) -> "AppConfig":

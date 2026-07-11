@@ -49,6 +49,7 @@ from tg_harvest.admin_jobs.runtime import configure_admin_job_runtime
 from tg_harvest.app.admin_payloads import (
     build_admin_chats_payload,
     build_admin_stats_payload,
+    build_admin_storage_health_payload,
     build_admin_sync_live_messages_payload,
     build_admin_sync_stats_payload,
     get_admin_chat_brief,
@@ -334,6 +335,7 @@ def _build_admin_route_services() -> AdminRouteServices:
         build_admin_stats_payload_fn=build_admin_stats_payload,
         build_admin_sync_stats_payload_fn=build_admin_sync_stats_payload,
         build_admin_sync_live_messages_payload_fn=build_admin_sync_live_messages_payload,
+        build_admin_storage_health_payload_fn=build_admin_storage_health_payload,
         get_sync_health_snapshot_fn=_sync_health_snapshot,
         trigger_sync_remediation_fn=_trigger_sync_remediation,
         admin_get_chat_brief_fn=get_admin_chat_brief,

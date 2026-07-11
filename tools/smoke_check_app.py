@@ -17,6 +17,7 @@ REQUIRED_ROUTES = {
     "/api/meta",
     "/api/search",
     "/api/admin/chats",
+    "/api/admin/storage-health",
     "/api/admin/channels",
     "/api/admin/channels/missing",
     "/api/admin/channels/missing/scan",

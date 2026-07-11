@@ -174,6 +174,108 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("/api/admin/sync/diagnose", source)
         self.assertIn("sync-health-banner", styles)
 
+    def test_sync_dashboard_exposes_database_capacity_health_with_safe_dom_rendering(self) -> None:
+        template = (ROOT / "templates" / "admin_sync.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_sync.js").read_text(encoding="utf-8")
+        styles = (ROOT / "static" / "admin_sync.css").read_text(encoding="utf-8")
+        self.assertIn('id="admin-storage-health-panel"', template)
+        self.assertIn('id="admin-storage-health-metrics"', template)
+        self.assertIn('id="admin-storage-health-reasons"', template)
+        self.assertIn("/api/admin/storage-health", source)
+        self.assertIn("function formatByteSize(value)", source)
+        self.assertIn("function renderStorageHealth(elements)", source)
+        self.assertIn("sync-storage-grid", styles)
+
+    def test_sync_storage_health_formats_large_values_and_keeps_reason_text_literal(self) -> None:
+        script = r"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync('static/admin_sync.js', 'utf8');
+        const closingMarker = '\n})();';
+        const closingIndex = source.lastIndexOf(closingMarker);
+        if (closingIndex < 0) throw new Error('sync script closing marker not found');
+        const instrumented = source.slice(0, closingIndex)
+          + '\nwindow.__syncHealthTestHooks = {'
+          + ' syncState: syncState,'
+          + ' normalizeStorageHealth: normalizeStorageHealth,'
+          + ' renderStorageHealth: renderStorageHealth,'
+          + ' formatByteSize: formatByteSize'
+          + ' };'
+          + source.slice(closingIndex);
+        function makeElement() {
+          return {
+            className: '',
+            textContent: '',
+            children: [],
+            appendChild(child) { this.children.push(child); return child; }
+          };
+        }
+        const shared = {
+          fetchJSON() { return Promise.resolve({}); },
+          formatDateTime(value) { return String(value || ''); },
+          formatNumber(value) { return String(value || 0); },
+          setElementDisabled() {},
+          trapFocusWithin() {},
+          createAdminSessionController() {
+            return { checkAuth() {}, handleLogin() {}, handleUnauthorizedResponse() {} };
+          }
+        };
+        const sandbox = {
+          console,
+          Number,
+          URLSearchParams,
+          setTimeout,
+          clearTimeout,
+          document: {
+            addEventListener() {},
+            getElementById() { return null; },
+            createElement() { return makeElement(); }
+          }
+        };
+        sandbox.window = sandbox;
+        sandbox.AdminManageShared = shared;
+        vm.runInNewContext(instrumented, sandbox);
+        const hooks = sandbox.__syncHealthTestHooks;
+        const formatted = hooks.formatByteSize(Number.MAX_SAFE_INTEGER);
+        if (!formatted.endsWith('TiB') || formatted === '未知') {
+          throw new Error('unexpected large size: ' + formatted);
+        }
+        const elements = {
+          storageHealthStatus: makeElement(),
+          storageHealthBanner: makeElement(),
+          storageHealthMetrics: makeElement(),
+          storageHealthReasons: makeElement(),
+          storageHealthActions: makeElement()
+        };
+        hooks.syncState.storageHealth = hooks.normalizeStorageHealth({
+          status: 'warning',
+          database: { main_bytes: 1024, wal_bytes: 0, shm_bytes: 0 },
+          counts: { message_count: 1, media_group_count: 0, cjk_term_count: 0, cjk_queue_length: 0 },
+          indexes: { fts_ready: true, cjk_terms_current: true },
+          reasons: [{ severity: 'warning', message: '<img src=x onerror=alert(1)>' }],
+          actions: ['<script>alert(1)</script>']
+        });
+        hooks.renderStorageHealth(elements);
+        if (elements.storageHealthReasons.children[0].textContent !== '<img src=x onerror=alert(1)>') {
+          throw new Error('reason text was not rendered literally');
+        }
+        if (elements.storageHealthActions.children[0].textContent !== '<script>alert(1)</script>') {
+          throw new Error('action text was not rendered literally');
+        }
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
         for template_name in (
             "admin_manage.html",

@@ -13,6 +13,7 @@
   var LIVE_POLL_INTERVAL_MS = 15000;
   var SYNC_STATS_TIMEOUT_MS = 15000;
   var LIVE_MESSAGES_TIMEOUT_MS = 10000;
+  var STORAGE_HEALTH_TIMEOUT_MS = 8000;
   var SYNC_STATS_SLOW_MS = 4000;
   var LIVE_MESSAGES_SLOW_MS = 3000;
 
@@ -27,6 +28,7 @@
     chatItems: [],
     chatListBusy: false,
     health: null,
+    storageHealth: null,
     scheduler: null,
     apiSignals: {
       stats: {
@@ -78,6 +80,11 @@
       healthActions: document.getElementById('admin-sync-health-actions'),
       diagnoseBtn: document.getElementById('admin-sync-diagnose-btn'),
       diagnoseResult: document.getElementById('admin-sync-diagnose-result'),
+      storageHealthStatus: document.getElementById('admin-storage-health-status'),
+      storageHealthBanner: document.getElementById('admin-storage-health-banner'),
+      storageHealthMetrics: document.getElementById('admin-storage-health-metrics'),
+      storageHealthReasons: document.getElementById('admin-storage-health-reasons'),
+      storageHealthActions: document.getElementById('admin-storage-health-actions'),
       schedulerStatus: document.getElementById('admin-sync-scheduler-status'),
       schedulerGrid: document.getElementById('admin-sync-scheduler-grid'),
       accountGrid: document.getElementById('admin-sync-account-grid'),
@@ -114,6 +121,11 @@
       'healthActions',
       'diagnoseBtn',
       'diagnoseResult',
+      'storageHealthStatus',
+      'storageHealthBanner',
+      'storageHealthMetrics',
+      'storageHealthReasons',
+      'storageHealthActions',
       'schedulerStatus',
       'schedulerGrid',
       'accountGrid',
@@ -149,6 +161,12 @@
     elements.healthReasons.textContent = '';
     elements.healthActions.textContent = '';
     elements.diagnoseResult.textContent = '';
+    elements.storageHealthStatus.textContent = '正在读取数据库容量状态...';
+    elements.storageHealthBanner.textContent = '等待容量健康检查结果...';
+    elements.storageHealthBanner.className = 'sync-health-banner is-neutral';
+    elements.storageHealthMetrics.textContent = '';
+    elements.storageHealthReasons.textContent = '';
+    elements.storageHealthActions.textContent = '';
     elements.schedulerStatus.textContent = '正在读取调度状态...';
     elements.schedulerGrid.textContent = '';
     elements.accountGrid.textContent = '';
@@ -515,6 +533,216 @@
         createTextElement('div', 'sync-health-action', String(item))
       );
     });
+  }
+
+  function normalizeHealthStatus(value) {
+    var status = String(value || '').toLowerCase();
+    return ['healthy', 'warning', 'critical'].indexOf(status) >= 0 ? status : 'healthy';
+  }
+
+  function nullableNumber(value) {
+    if (value === null || typeof value === 'undefined' || value === '') {
+      return null;
+    }
+    var number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? number : null;
+  }
+
+  function formatByteSize(value) {
+    var bytes = nullableNumber(value);
+    if (bytes === null) return '未知';
+    var units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+    var unitIndex = 0;
+    while (bytes >= 1024 && unitIndex < units.length - 1) {
+      bytes /= 1024;
+      unitIndex += 1;
+    }
+    var precision = unitIndex === 0 || bytes >= 100 ? 0 : 1;
+    return bytes.toFixed(precision) + ' ' + units[unitIndex];
+  }
+
+  function formatMetricCount(value, source) {
+    var count = nullableNumber(value);
+    if (count === null) return '未知';
+    var prefix = String(source || '') === 'sqlite_stat1' ? '约 ' : '';
+    return prefix + formatNumber(count);
+  }
+
+  function normalizeStorageHealth(payload) {
+    var database = payload && payload.database && typeof payload.database === 'object'
+      ? payload.database
+      : {};
+    var counts = payload && payload.counts && typeof payload.counts === 'object'
+      ? payload.counts
+      : {};
+    var sources = counts.sources && typeof counts.sources === 'object' ? counts.sources : {};
+    var indexes = payload && payload.indexes && typeof payload.indexes === 'object'
+      ? payload.indexes
+      : {};
+    var maintenance = payload && payload.maintenance && typeof payload.maintenance === 'object'
+      ? payload.maintenance
+      : {};
+    var cjkMaintenance = maintenance.cjk && typeof maintenance.cjk === 'object'
+      ? maintenance.cjk
+      : {};
+    var lastRecordedJob = maintenance.last_recorded_job
+      && typeof maintenance.last_recorded_job === 'object'
+      ? maintenance.last_recorded_job
+      : null;
+    var reasons = Array.isArray(payload && payload.reasons) ? payload.reasons : [];
+    var actions = Array.isArray(payload && payload.actions) ? payload.actions : [];
+    return {
+      status: normalizeHealthStatus(payload && payload.status),
+      checkedAt: String(payload && payload.checked_at || ''),
+      database: {
+        mainBytes: nullableNumber(database.main_bytes),
+        walBytes: nullableNumber(database.wal_bytes),
+        shmBytes: nullableNumber(database.shm_bytes),
+        pageCount: nullableNumber(database.page_count),
+        freelistCount: nullableNumber(database.freelist_count),
+        freelistBytes: nullableNumber(database.freelist_bytes),
+        journalMode: String(database.journal_mode || ''),
+        diskFreeBytes: nullableNumber(database.disk_free_bytes),
+        compactionRequiredBytes: nullableNumber(database.compaction_required_bytes),
+        canCompactSafely: database.can_compact_safely === true
+          ? true
+          : (database.can_compact_safely === false ? false : null)
+      },
+      counts: {
+        messageCount: nullableNumber(counts.message_count),
+        mediaGroupCount: nullableNumber(counts.media_group_count),
+        cjkTermCount: nullableNumber(counts.cjk_term_count),
+        cjkQueueLength: nullableNumber(counts.cjk_queue_length),
+        sources: {
+          mediaGroupCount: String(sources.media_group_count || ''),
+          cjkTermCount: String(sources.cjk_term_count || ''),
+          cjkQueueLength: String(sources.cjk_queue_length || '')
+        }
+      },
+      indexes: {
+        ftsReady: indexes.fts_ready === true,
+        cjkTermsCurrent: indexes.cjk_terms_current === true
+      },
+      maintenance: {
+        cjkRebuildState: String(cjkMaintenance.rebuild_state || ''),
+        lastCjkMaintenanceAt: String(cjkMaintenance.last_maintenance_at || ''),
+        lastCjkMaintenanceResult: String(cjkMaintenance.last_maintenance_result || ''),
+        lastCjkRebuildAt: String(cjkMaintenance.last_rebuild_at || ''),
+        lastRecordedJob: lastRecordedJob ? {
+          jobType: String(lastRecordedJob.job_type || ''),
+          status: String(lastRecordedJob.status || ''),
+          updatedAt: String(lastRecordedJob.updated_at || '')
+        } : null
+      },
+      reasons: reasons.map(function (item) {
+        return {
+          severity: normalizeHealthStatus(item && item.severity),
+          message: String(item && item.message || '')
+        };
+      }).filter(function (item) {
+        return !!item.message;
+      }),
+      actions: actions.map(function (item) {
+        return String(item || '');
+      }).filter(Boolean)
+    };
+  }
+
+  function createStorageMetric(label, value, note) {
+    var item = document.createElement('div');
+    item.className = 'sync-storage-metric';
+    item.appendChild(createTextElement('span', 'sync-storage-metric-label', label));
+    item.appendChild(createTextElement('strong', 'sync-storage-metric-value', value));
+    if (note) {
+      item.appendChild(createTextElement('span', 'sync-storage-metric-note', note));
+    }
+    return item;
+  }
+
+  function renderStorageHealth(elements) {
+    var health = syncState.storageHealth;
+    if (!health) return;
+
+    var database = health.database;
+    var counts = health.counts;
+    elements.storageHealthMetrics.textContent = '';
+    elements.storageHealthReasons.textContent = '';
+    elements.storageHealthActions.textContent = '';
+    elements.storageHealthBanner.className = 'sync-health-banner is-' + health.status;
+
+    if (health.status === 'critical') {
+      elements.storageHealthBanner.textContent = '数据库容量或检索维护存在严重风险，应优先处理。';
+    } else if (health.status === 'warning') {
+      elements.storageHealthBanner.textContent = '数据库容量或检索维护出现预警信号，需要安排观察或维护。';
+    } else {
+      elements.storageHealthBanner.textContent = '数据库容量、WAL 和搜索索引当前未发现明确风险。';
+    }
+
+    [
+      ['主库', formatByteSize(database.mainBytes), '页数 ' + formatMetricCount(database.pageCount)],
+      ['WAL', formatByteSize(database.walBytes), database.journalMode || '未知日志模式'],
+      ['SHM', formatByteSize(database.shmBytes), '共享内存 sidecar'],
+      ['空闲页', formatByteSize(database.freelistBytes), formatMetricCount(database.freelistCount) + ' 页'],
+      ['磁盘余量', formatByteSize(database.diskFreeBytes), database.canCompactSafely === false ? '不足以安全压缩' : '数据库所在磁盘'],
+      ['消息', formatMetricCount(counts.messageCount), '来自群组消息汇总'],
+      ['媒体组', formatMetricCount(counts.mediaGroupCount, counts.sources.mediaGroupCount), '媒体组索引'],
+      ['CJK 词条', formatMetricCount(counts.cjkTermCount, counts.sources.cjkTermCount), '短词辅助索引'],
+      ['CJK 队列', formatMetricCount(counts.cjkQueueLength, counts.sources.cjkQueueLength), '等待后台维护'],
+      ['FTS', health.indexes.ftsReady ? '就绪' : '未就绪', health.indexes.cjkTermsCurrent ? 'CJK 索引当前' : 'CJK 索引维护中']
+    ].forEach(function (metric) {
+      elements.storageHealthMetrics.appendChild(
+        createStorageMetric(metric[0], metric[1], metric[2])
+      );
+    });
+
+    if (!health.reasons.length) {
+      elements.storageHealthReasons.appendChild(
+        createTextElement('div', 'sync-health-item', '当前没有容量或索引维护异常。')
+      );
+    } else {
+      health.reasons.forEach(function (item) {
+        elements.storageHealthReasons.appendChild(
+          createTextElement(
+            'div',
+            'sync-health-item is-' + item.severity,
+            item.message
+          )
+        );
+      });
+    }
+
+    health.actions.forEach(function (item) {
+      elements.storageHealthActions.appendChild(
+        createTextElement('div', 'sync-health-action', item)
+      );
+    });
+
+    var maintenanceParts = [];
+    if (health.maintenance.lastCjkMaintenanceAt) {
+      maintenanceParts.push(
+        '最近短词维护 ' + formatDateTime(health.maintenance.lastCjkMaintenanceAt)
+        + (health.maintenance.lastCjkMaintenanceResult
+          ? '（' + health.maintenance.lastCjkMaintenanceResult + '）'
+          : '')
+      );
+    }
+    if (health.maintenance.lastCjkRebuildAt) {
+      maintenanceParts.push('最近短词重建 ' + formatDateTime(health.maintenance.lastCjkRebuildAt));
+    }
+    if (health.maintenance.lastRecordedJob) {
+      maintenanceParts.push(
+        '最近维护任务 ' + health.maintenance.lastRecordedJob.jobType
+        + ' / ' + health.maintenance.lastRecordedJob.status
+        + (health.maintenance.lastRecordedJob.updatedAt
+          ? ' / ' + formatDateTime(health.maintenance.lastRecordedJob.updatedAt)
+          : '')
+      );
+    }
+    var statusText = maintenanceParts.length
+      ? maintenanceParts.join('；')
+      : '轻量状态：文件大小、SQLite 元数据和缓存/统计计数；不执行完整性校验。';
+    elements.storageHealthStatus.textContent = statusText
+      + (health.checkedAt ? '；状态读取 ' + formatDateTime(health.checkedAt) : '');
   }
 
   function formatDurationSeconds(value) {
@@ -1124,11 +1352,31 @@
     }
   }
 
+  async function loadStorageHealth(elements) {
+    elements.storageHealthStatus.textContent = '正在读取数据库容量状态...';
+    try {
+      syncState.storageHealth = normalizeStorageHealth(
+        await fetchJSON('/api/admin/storage-health', {
+          timeoutMs: STORAGE_HEALTH_TIMEOUT_MS
+        })
+      );
+      renderStorageHealth(elements);
+    } catch (error) {
+      elements.storageHealthBanner.className = 'sync-health-banner is-warning';
+      elements.storageHealthBanner.textContent = '读取数据库容量状态失败。';
+      elements.storageHealthStatus.textContent = '读取数据库容量状态失败：' + error.message;
+      elements.storageHealthMetrics.textContent = '';
+      elements.storageHealthReasons.textContent = '';
+      elements.storageHealthActions.textContent = '';
+    }
+  }
+
   async function loadSyncDashboard(elements) {
     var statsLoaded = await loadSyncStats(elements);
     if (!statsLoaded) {
       return;
     }
+    loadStorageHealth(elements);
     if (!syncState.liveItems.length || isLiveWindowSelected()) {
       loadLiveMessages(elements, {
         silent: false,

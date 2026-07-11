@@ -77,6 +77,23 @@
       </section>
 
       <section
+        id="admin-storage-health-panel"
+        class="sync-storage-panel"
+        aria-labelledby="storageHealthTitle"
+      >
+        <div class="sync-health-head">
+          <div>
+            <h3 id="storageHealthTitle" class="section-title">数据库容量与维护</h3>
+            <p id="admin-storage-health-status" class="sync-subline" role="status" aria-live="polite">正在读取数据库容量状态...</p>
+          </div>
+        </div>
+        <div id="admin-storage-health-banner" class="sync-health-banner is-neutral">等待容量健康检查结果...</div>
+        <div id="admin-storage-health-metrics" class="sync-storage-grid" aria-label="数据库容量和索引指标"></div>
+        <div id="admin-storage-health-reasons" class="sync-health-list" aria-label="数据库容量风险列表"></div>
+        <div id="admin-storage-health-actions" class="sync-health-actions" aria-label="数据库维护处理建议"></div>
+      </section>
+
+      <section
         id="admin-sync-scheduler-panel"
         class="sync-scheduler-panel"
         aria-labelledby="syncSchedulerTitle"

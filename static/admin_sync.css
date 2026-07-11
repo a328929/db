@@ -117,6 +117,51 @@
   display: none;
 }
 
+.sync-storage-panel {
+  margin-top: 16px;
+  border: 1px solid rgba(86, 134, 112, 0.28);
+  border-radius: 8px;
+  padding: 16px;
+  background: rgba(248, 253, 249, 0.96);
+}
+
+.sync-storage-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.sync-storage-metric {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: rgba(255, 255, 255, 0.9);
+}
+
+.sync-storage-metric-label,
+.sync-storage-metric-value,
+.sync-storage-metric-note {
+  display: block;
+  overflow-wrap: anywhere;
+}
+
+.sync-storage-metric-label,
+.sync-storage-metric-note {
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.35;
+}
+
+.sync-storage-metric-value {
+  margin: 3px 0;
+  color: #254d3a;
+  font-size: 1rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.35;
+}
+
 .sync-scheduler-panel {
   margin-top: 16px;
   border: 1px solid rgba(99, 125, 171, 0.2);

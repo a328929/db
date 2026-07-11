@@ -831,6 +831,31 @@ class DbSchemaMigrationTests(unittest.TestCase):
         trigger_sql = str(cur.fetchone()["sql"])
         self.assertIn("ON CONFLICT(pk) DO UPDATE", trigger_sql)
 
+    def test_cjk_queue_length_meta_tracks_enqueue_and_maintenance_drain(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+        cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+        cur.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media
+            ) VALUES (1, 1, '2026-01-01 00:00:00', 1, 'TEXT', '福利姬', '福利姬', 0)
+            """
+        )
+        self.conn.commit()
+
+        cur.execute(
+            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_queue_length'"
+        )
+        self.assertEqual("1", str(cur.fetchone()["value"]))
+
+        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+        cur.execute(
+            "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_queue_length'"
+        )
+        self.assertEqual("0", str(cur.fetchone()["value"]))
+
     def test_ensure_configured_db_uses_cfg_for_connection_and_schema(self) -> None:
         cfg = SimpleNamespace(
             db_name="/tmp/test.db",

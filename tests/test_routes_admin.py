@@ -5,7 +5,7 @@ from unittest.mock import patch
 from flask import Flask
 
 from tg_harvest.app.services import AdminRouteServices
-from tg_harvest.web.routes.admin import AdminRoutesHandler
+from tg_harvest.web.routes.admin import AdminRoutesHandler, register_admin_routes
 
 
 class _ConnStub:
@@ -357,6 +357,36 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertTrue(payload["ok"])
         self.assertEqual(1, payload["items"][0]["chat_id"])
         self.assertEqual(101, payload["items"][0]["message_id"])
+
+    def test_storage_health_reads_readonly_payload_from_service(self) -> None:
+        calls = []
+
+        def build_payload(_conn, **kwargs):
+            calls.append(kwargs)
+            return {
+                "ok": True,
+                "status": "warning",
+                "database": {"main_bytes": 1024},
+                "indexes": {"fts_ready": True},
+            }
+
+        self.handler.build_admin_storage_health_payload_fn = build_payload
+        with self.app.test_request_context("/api/admin/storage-health", method="GET"):
+            response = self.handler.api_admin_storage_health.__wrapped__(self.handler)
+
+        payload = response.get_json()
+        self.assertTrue(payload["ok"])
+        self.assertEqual("warning", payload["status"])
+        self.assertEqual(1024, payload["database"]["main_bytes"])
+        self.assertEqual(self.handler.cfg, calls[0]["cfg"])
+
+    def test_storage_health_route_keeps_admin_authentication_boundary(self) -> None:
+        register_admin_routes(self.app, services=self.services)
+
+        response = self.app.test_client().get("/api/admin/storage-health")
+
+        self.assertEqual(401, response.status_code)
+        self.assertTrue(response.get_json()["auth_required"])
 
     def test_sync_diagnose_returns_payload_from_service(self) -> None:
         self.handler.trigger_sync_remediation_fn = lambda: {

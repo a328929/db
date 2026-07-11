@@ -109,4 +109,27 @@ python3 tools/check_static_js.py
 python3 scripts/diagnose_telegram.py
 ```
 
+## 容量规划与维护窗口
+
+`/admin/sync` 会展示数据库容量、WAL/SHM、空闲页、消息与媒体组摘要、CJK
+短词索引队列、FTS 就绪状态，以及最近记录的维护活动。该状态只读取文件属性、
+SQLite PRAGMA、少量元数据和已缓存或统计的计数；它不会在 Web 请求中运行
+`dbstat`、`integrity_check` 或全库扫描。因此，页面中的“健康”只表示容量和维护
+风险信号，不等同于完整性校验。
+
+可通过以下环境变量调整告警边界；配置加载时会校正 warning/critical 的顺序：
+
+| 环境变量 | 默认值 | 含义 |
+| --- | ---: | --- |
+| `TG_DB_HEALTH_SIZE_WARNING_BYTES` / `TG_DB_HEALTH_SIZE_CRITICAL_BYTES` | 20 GiB / 50 GiB | 主库大小预警与严重阈值 |
+| `TG_DB_HEALTH_WAL_WARNING_BYTES` / `TG_DB_HEALTH_WAL_CRITICAL_BYTES` | 512 MiB / 2 GiB | WAL 文件大小预警与严重阈值 |
+| `TG_DB_HEALTH_DISK_FREE_WARNING_BYTES` / `TG_DB_HEALTH_DISK_FREE_CRITICAL_BYTES` | 10 GiB / 3 GiB | 数据库所在磁盘剩余空间阈值 |
+| `TG_DB_HEALTH_CJK_QUEUE_WARNING` / `TG_DB_HEALTH_CJK_QUEUE_CRITICAL` | 10,000 / 100,000 | 中文短词索引待维护队列阈值 |
+
+容量预警不执行自动压缩、checkpoint 或索引重建。看到 WAL 持续增长时，先排查
+长时间读取连接和后台大任务；看到 CJK 队列积压或 FTS 未就绪时，先确认维护线程
+和磁盘空间。进行 `compact_sqlite_db.py` 前，应安排低峰维护窗口并预留至少两份
+当前主库与 sidecar 文件的空间，再加 64 MiB 构建余量。紧凑构建工具会做其自身的
+离线校验，完成后再按部署流程切换数据库文件。
+
 较大改动的拆分、评审和提交顺序见 `docs/change_management.md`。

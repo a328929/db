@@ -5,6 +5,7 @@ from typing import Any
 from tg_harvest.domain.chat_titles import chat_sort_key, chat_title_or_fallback
 from tg_harvest.domain.coerce import safe_int
 from tg_harvest.storage import sync_scheduler
+from tg_harvest.storage.db_health import build_database_health_payload
 from tg_harvest.storage.row_access import row_int as _row_int
 
 _ADMIN_SYNC_WINDOWS: tuple[dict[str, Any], ...] = (
@@ -621,6 +622,15 @@ def build_admin_sync_stats_payload(
             health_snapshot=health_snapshot,
         ),
     }
+
+
+def build_admin_storage_health_payload(
+    conn: sqlite3.Connection,
+    *,
+    cfg: Any | None = None,
+) -> dict[str, Any]:
+    """Return the lightweight, read-only database capacity health snapshot."""
+    return build_database_health_payload(conn, cfg=cfg)
 
 
 def build_admin_chats_payload(conn: sqlite3.Connection) -> dict[str, Any]:

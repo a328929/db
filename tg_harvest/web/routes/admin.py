@@ -36,6 +36,9 @@ class AdminRoutesHandler:
         self.build_admin_sync_live_messages_payload_fn = (
             services.build_admin_sync_live_messages_payload_fn
         )
+        self.build_admin_storage_health_payload_fn = (
+            services.build_admin_storage_health_payload_fn
+        )
         self.get_sync_health_snapshot_fn = services.get_sync_health_snapshot_fn
         self.trigger_sync_remediation_fn = services.trigger_sync_remediation_fn
         self.admin_get_chat_brief_fn = services.admin_get_chat_brief_fn
@@ -250,6 +253,24 @@ class AdminRoutesHandler:
         except sqlite3.Error:
             self.logger.exception("读取实时同步消息失败")
             return self._json_error("读取实时同步消息失败", 500)
+        except Exception:
+            self.logger.exception("系统异常")
+            return self._json_error("系统异常", 500)
+
+    @admin_login_required
+    def api_admin_storage_health(self):
+        if self.build_admin_storage_health_payload_fn is None:
+            return self._json_error("数据库健康状态未配置", 503)
+        try:
+            with closing(self.get_conn_fn()) as conn:
+                payload = self.build_admin_storage_health_payload_fn(
+                    conn,
+                    cfg=self.cfg,
+                )
+            return jsonify(payload)
+        except sqlite3.Error:
+            self.logger.exception("读取数据库容量健康状态失败")
+            return self._json_error("读取数据库容量健康状态失败", 500)
         except Exception:
             self.logger.exception("系统异常")
             return self._json_error("系统异常", 500)
@@ -681,6 +702,7 @@ def register_admin_routes(app, *, services: AdminRouteServices) -> None:
     app.get("/api/admin/stats")(handler.api_admin_stats)
     app.get("/api/admin/sync/stats")(handler.api_admin_sync_stats)
     app.get("/api/admin/sync/messages")(handler.api_admin_sync_live_messages)
+    app.get("/api/admin/storage-health")(handler.api_admin_storage_health)
     app.post("/api/admin/sync/diagnose")(handler.api_admin_sync_diagnose)
     app.get("/api/admin/sync/scheduler")(handler.api_admin_sync_scheduler)
     app.get("/api/admin/sync/chats")(handler.api_admin_sync_chats)

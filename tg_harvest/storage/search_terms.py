@@ -2,6 +2,7 @@ import logging
 import re
 import sqlite3
 from contextlib import suppress
+from datetime import UTC, datetime
 
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.search_text_state import search_text_expression
@@ -74,6 +75,10 @@ _MESSAGE_SEARCH_TERMS_REBUILD_STATE_KEY = "cjk_terms_rebuild_state"
 _MESSAGE_SEARCH_TERMS_LEGACY_BACKFILL_MODE_KEY = "cjk_terms_backfill_mode"
 _MESSAGE_SEARCH_TERMS_LEGACY_BACKFILL_LAST_PK_KEY = "cjk_terms_backfill_last_pk"
 _MESSAGE_SEARCH_TERMS_HAS_TERMS_KEY = "cjk_terms_has_terms"
+_MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_AT_KEY = "cjk_terms_last_maintenance_at"
+_MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_RESULT_KEY = "cjk_terms_last_maintenance_result"
+_MESSAGE_SEARCH_TERMS_LAST_REBUILD_AT_KEY = "cjk_terms_last_rebuild_at"
+_MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY = "cjk_terms_queue_length"
 _MESSAGE_SEARCH_TEXT_SQL = search_text_expression()
 
 
@@ -164,6 +169,18 @@ def _message_search_terms_are_known_empty(cur: sqlite3.Cursor) -> bool:
 def _finish_message_search_terms_rebuild(cur: sqlite3.Cursor) -> None:
     _write_message_search_terms_version(cur)
     _write_message_search_terms_presence(cur)
+    finished_at = datetime.now(UTC).replace(microsecond=0).strftime(
+        "%Y-%m-%d %H:%M:%S"
+    )
+    _write_message_search_terms_meta(
+        cur, _MESSAGE_SEARCH_TERMS_LAST_REBUILD_AT_KEY, finished_at
+    )
+    _write_message_search_terms_meta(
+        cur, _MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_AT_KEY, finished_at
+    )
+    _write_message_search_terms_meta(
+        cur, _MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_RESULT_KEY, "rebuilt"
+    )
     for key in (
         _MESSAGE_SEARCH_TERMS_REBUILD_STATE_KEY,
         _MESSAGE_SEARCH_TERMS_LEGACY_BACKFILL_MODE_KEY,
@@ -426,6 +443,11 @@ def drain_message_search_terms_rebuild_queue(
         )
         queued_rows = cur.fetchall()
         if not queued_rows:
+            if _table_exists(cur, "message_search_terms_meta"):
+                _write_message_search_terms_meta(
+                    cur, _MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY, "0"
+                )
+                conn.commit()
             return 0
 
         pks = [int(row["pk"]) for row in queued_rows]
@@ -462,7 +484,25 @@ def drain_message_search_terms_rebuild_queue(
             f"DELETE FROM message_search_terms_rebuild_queue WHERE pk IN ({placeholders})",
             pks,
         )
+        cur.execute("SELECT 1 FROM message_search_terms_rebuild_queue LIMIT 1")
+        if cur.fetchone() is None:
+            _write_message_search_terms_meta(
+                cur, _MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY, "0"
+            )
         _write_message_search_terms_presence(cur)
+        maintained_at = datetime.now(UTC).replace(microsecond=0).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        _write_message_search_terms_meta(
+            cur,
+            _MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_AT_KEY,
+            maintained_at,
+        )
+        _write_message_search_terms_meta(
+            cur,
+            _MESSAGE_SEARCH_TERMS_LAST_MAINTENANCE_RESULT_KEY,
+            f"drained:{len(pks)}",
+        )
         conn.commit()
         return len(pks)
     except Exception:
@@ -478,6 +518,8 @@ def _create_message_search_terms_queue_triggers(cur: sqlite3.Cursor) -> None:
         "trg_message_terms_queue_insert",
         "trg_message_terms_queue_update",
         "trg_message_terms_delete",
+        "trg_message_terms_queue_count_insert",
+        "trg_message_terms_queue_count_delete",
     ):
         cur.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
 
@@ -516,3 +558,41 @@ def _create_message_search_terms_queue_triggers(cur: sqlite3.Cursor) -> None:
         DELETE FROM message_search_terms_rebuild_queue WHERE pk = old.pk;
     END;
     """)
+
+    cur.execute("""
+    CREATE TRIGGER trg_message_terms_queue_count_insert
+    AFTER INSERT ON message_search_terms_rebuild_queue BEGIN
+        INSERT INTO message_search_terms_meta(key, value)
+        VALUES ('cjk_terms_queue_length', '1')
+        ON CONFLICT(key) DO UPDATE SET
+            value = CASE
+                WHEN message_search_terms_meta.value = 'unknown' THEN 'unknown'
+                ELSE CAST(CAST(message_search_terms_meta.value AS INTEGER) + 1 AS TEXT)
+            END;
+    END;
+    """)
+
+    cur.execute("""
+    CREATE TRIGGER trg_message_terms_queue_count_delete
+    AFTER DELETE ON message_search_terms_rebuild_queue BEGIN
+        INSERT INTO message_search_terms_meta(key, value)
+        VALUES ('cjk_terms_queue_length', '0')
+        ON CONFLICT(key) DO UPDATE SET
+            value = CASE
+                WHEN message_search_terms_meta.value = 'unknown' THEN 'unknown'
+                ELSE CAST(MAX(0, CAST(message_search_terms_meta.value AS INTEGER) - 1) AS TEXT)
+            END;
+    END;
+    """)
+
+    cur.execute("SELECT 1 FROM message_search_terms_rebuild_queue LIMIT 1")
+    if cur.fetchone() is None:
+        _write_message_search_terms_meta(
+            cur, _MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY, "0"
+        )
+    elif not _read_message_search_terms_meta(
+        cur, _MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY
+    ):
+        _write_message_search_terms_meta(
+            cur, _MESSAGE_SEARCH_TERMS_QUEUE_LENGTH_KEY, "unknown"
+        )
