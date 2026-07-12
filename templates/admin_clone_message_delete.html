@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+  <title>删除局部克隆消息</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
+</head>
+<body>
+  <main class="page" id="admin-clone-message-delete-page">
+    <header class="page-header">
+      <p class="eyebrow">克隆工作台 / 管理记录</p>
+      <h1>删除局部克隆消息</h1>
+      <p class="subtle">只删除当前克隆副本的 Telegram 消息，不会处理源群、本地克隆记录或本地消息映射。</p>
+      <a class="clone-back-link" href="/admin/clone/runs/manage">返回克隆记录</a>
+    </header>
+
+    <section class="panel clone-panel clone-message-delete-context" aria-labelledby="cloneMessageDeleteTargetTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneMessageDeleteTargetTitle" class="section-title">当前目标副本</h2>
+          <p id="admin-clone-message-delete-status" class="clone-subline" role="status" aria-live="polite">正在读取克隆记录...</p>
+        </div>
+      </div>
+      <dl id="admin-clone-message-delete-target" class="clone-summary-grid" aria-label="当前克隆副本信息"></dl>
+    </section>
+
+    <section class="panel clone-panel" aria-labelledby="cloneMessageDeleteFormTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneMessageDeleteFormTitle" class="section-title">删除规则</h2>
+          <p class="clone-subline">单个整数从最新消息开始倒序选择；消息 ID 区间则按从小到大的顺序提交删除。</p>
+        </div>
+      </div>
+      <form id="admin-clone-message-delete-form" class="clone-message-delete-form" novalidate>
+        <div class="field">
+          <label for="admin-clone-message-delete-selection">消息数量或消息 ID 区间</label>
+          <input
+            id="admin-clone-message-delete-selection"
+            name="selection"
+            type="text"
+            autocomplete="off"
+            placeholder="例如 1000 或 200-1000"
+            aria-describedby="admin-clone-message-delete-preview"
+            required
+          />
+          <p id="admin-clone-message-delete-preview" class="clone-message-delete-preview" aria-live="polite"></p>
+        </div>
+        <div class="field">
+          <label for="admin-clone-message-delete-delay">批次间隔（毫秒）</label>
+          <input
+            id="admin-clone-message-delete-delay"
+            name="delete_delay_ms"
+            type="number"
+            min="0"
+            max="10000"
+            step="50"
+            value="0"
+            inputmode="numeric"
+            aria-describedby="admin-clone-message-delete-delay-help"
+          />
+          <p id="admin-clone-message-delete-delay-help" class="clone-message-delete-help">每批最多 100 条。0 表示不主动等待，以 Telegram 的实际频控为准。</p>
+        </div>
+        <p id="admin-clone-message-delete-form-status" class="clone-message-delete-form-status" role="status" aria-live="polite"></p>
+        <div class="clone-actions">
+          <button id="admin-clone-message-delete-submit" class="btn danger" type="submit" disabled>开始删除局部消息</button>
+        </div>
+      </form>
+    </section>
+
+    <details id="admin-clone-message-delete-log-panel" class="panel clone-panel clone-log-panel" open>
+      <summary class="clone-log-summary">执行日志</summary>
+      <div class="admin-log-head clone-log-head">
+        <h2 class="sr-only">局部消息删除日志</h2>
+        <button id="admin-clear-clone-message-delete-logs-btn" class="btn" type="button" hidden aria-label="清空局部消息删除日志">清空日志</button>
+      </div>
+      <div id="admin-clone-message-delete-log-container" class="admin-log-container" aria-label="局部消息删除日志"></div>
+    </details>
+  </main>
+
+  <section
+    id="admin-login-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCloneMessageDeleteLoginTitle"
+    hidden
+  >
+    <h2 id="adminCloneMessageDeleteLoginTitle">管理员身份验证</h2>
+    <p class="subtle">进入局部消息删除页面，请先验证管理员密码。</p>
+    <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-password-input">登录密码</label>
+      <input id="admin-password-input" name="admin-password-input" type="password" autocomplete="current-password" aria-label="管理员密码" />
+    </div>
+    <div aria-label="登录弹层操作按钮组">
+      <button id="admin-login-confirm-btn" class="btn primary" type="button" aria-label="确定登录">确定登录</button>
+    </div>
+  </section>
+
+  <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_clone_message_delete.js') }}"></script>
+</body>
+</html>

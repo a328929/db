@@ -14,6 +14,26 @@
   max-width: 1080px;
 }
 
+#admin-clone-message-delete-page {
+  max-width: 960px;
+}
+
+.clone-back-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 34px;
+  margin-top: 12px;
+  color: #325e9b;
+  font-size: 0.88rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.clone-back-link:hover {
+  color: #244f82;
+  text-decoration: underline;
+}
+
 .clone-panel {
   padding: 20px;
 }
@@ -271,7 +291,8 @@
 .clone-runs-filter-grid select,
 .clone-runs-filter-grid input,
 .clone-mapping-toolbar select,
-.clone-confirm-grid input {
+.clone-confirm-grid input,
+.clone-message-delete-form input {
   width: 100%;
   min-height: 42px;
   border: 1px solid var(--border);
@@ -648,6 +669,40 @@
   border-color: #c7ead9;
 }
 
+.clone-message-delete-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(180px, 0.38fr);
+  gap: 14px;
+  align-items: end;
+}
+
+.clone-message-delete-form .clone-message-delete-form-status,
+.clone-message-delete-form .clone-actions {
+  grid-column: 1 / -1;
+}
+
+.clone-message-delete-preview,
+.clone-message-delete-help,
+.clone-message-delete-form-status {
+  min-height: 1.35em;
+  margin: 7px 0 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.clone-message-delete-preview {
+  color: #315f93;
+}
+
+.clone-message-delete-preview.is-error {
+  color: #9a3d30;
+}
+
+.clone-message-delete-form-status:empty {
+  display: none;
+}
+
 .clone-run-actions a:hover {
   background: #f4f9fe;
   border-color: var(--border-strong);
@@ -924,6 +979,10 @@
   .clone-runs-filter-grid,
   .clone-mini-summary,
   .clone-stats {
+    grid-template-columns: 1fr;
+  }
+
+  .clone-message-delete-form {
     grid-template-columns: 1fr;
   }
 

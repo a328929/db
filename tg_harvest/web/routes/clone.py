@@ -13,7 +13,13 @@ from tg_harvest.admin_jobs.clone import (
     normalize_clone_target_kind,
     normalize_clone_target_title,
 )
+from tg_harvest.admin_jobs.clone_message_delete import (
+    CLONE_MESSAGE_DELETE_MAX_DELAY_MS,
+)
 from tg_harvest.app.services import CloneRouteServices
+from tg_harvest.domain.clone_message_delete import (
+    parse_clone_message_delete_selection,
+)
 from tg_harvest.domain.clone_plan import (
     CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS,
     CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
@@ -64,6 +70,7 @@ class _CloneRouteDeps:
     admin_start_clone_deep_preflight_job_thread_fn: Any
     admin_start_clone_timeline_migration_job_thread_fn: Any
     admin_start_clone_target_delete_job_thread_fn: Any
+    admin_start_clone_message_delete_job_thread_fn: Any
 
 
 def _with_clone_run_links(rows, build_telegram_chat_link_bundle_fn):
@@ -214,6 +221,27 @@ def _parse_timeline_migration_options():
     return {
         "message_limit": int(message_limit or 0),
         "send_delay_ms": int(send_delay_ms or 0),
+    }, None
+
+
+def _parse_clone_message_delete_options(data: dict):
+    try:
+        selection = parse_clone_message_delete_selection(data.get("selection"))
+    except ValueError as exc:
+        return None, json_error(str(exc), 400)
+
+    delete_delay_ms, error_response = _parse_optional_nonnegative_int(
+        data.get("delete_delay_ms"),
+        field_name="delete_delay_ms",
+        default=0,
+        max_value=CLONE_MESSAGE_DELETE_MAX_DELAY_MS,
+    )
+    if error_response is not None:
+        return None, error_response
+
+    return {
+        "selection": selection,
+        "delete_delay_ms": int(delete_delay_ms or 0),
     }, None
 
 
@@ -747,6 +775,11 @@ def _register_clone_page_routes(app) -> None:
     def admin_clone_runs_manage_page():
         return render_template("admin_clone_runs.html")
 
+    @app.get("/admin/clone/runs/messages/delete")
+    @admin_page_login_required
+    def admin_clone_run_message_delete_page():
+        return render_template("admin_clone_message_delete.html")
+
     @app.get("/admin/clone/runs/detail")
     @admin_page_login_required
     def admin_clone_run_detail_page():
@@ -1124,6 +1157,101 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
             )
         except Exception:
             return logged_json_error(deps.logger, "系统异常", "系统异常")
+
+    @app.post("/api/admin/clone/runs/<run_id>/delete-messages")
+    @admin_login_required
+    def api_admin_clone_run_message_delete(run_id):
+        normalized_run_id, error_response = _parse_run_id(run_id)
+        if error_response is not None:
+            return error_response
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+        options, error_response = _parse_clone_message_delete_options(data)
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(deps.get_conn_fn()) as conn:
+                clone_run, error_response = _load_clone_run_or_response(
+                    conn,
+                    deps.load_clone_run_fn,
+                    normalized_run_id,
+                )
+                if error_response is not None:
+                    return error_response
+                target_chat_id = int(clone_run.get("target_chat_id") or 0)
+                if target_chat_id <= 0:
+                    return json_error("目标副本尚未创建，不能删除局部消息", 400)
+                latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
+                latest_migration = deps.load_latest_clone_migration_fn(
+                    conn,
+                    normalized_run_id,
+                )
+                active_job = _active_clone_job_snapshot(
+                    deps,
+                    clone_run=clone_run,
+                    latest_plan=latest_plan,
+                    latest_migration=latest_migration,
+                )
+                if active_job is not None:
+                    return json_error(
+                        "关联克隆任务仍在执行，不能删除局部消息",
+                        409,
+                        active_job=active_job,
+                    )
+        except sqlite3.Error:
+            return logged_json_error(
+                deps.logger,
+                "读取克隆局部删除上下文失败",
+                "读取克隆局部删除上下文失败",
+            )
+        except Exception:
+            return logged_json_error(deps.logger, "系统异常", "系统异常")
+
+        selection = options["selection"]
+        target_title = str(clone_run.get("target_title") or target_chat_id)
+        job_id, error_response = _create_clone_job_or_response(
+            deps,
+            "clone_message_delete",
+            target_chat_id=target_chat_id,
+            target_label=f"局部删除克隆消息：{target_title}",
+        )
+        if error_response is not None:
+            return error_response
+        return _start_clone_job_response(
+            deps,
+            job_id=job_id,
+            initial_logs=[
+                "已接收局部删除克隆消息请求",
+                f"运行记录：{normalized_run_id}",
+                f"删除规则：{selection.description}",
+                f"批次间隔：{options['delete_delay_ms']}ms",
+                "只处理目标副本消息；不会删除源群、本地克隆记录或本地消息映射",
+            ],
+            start_job_fn=lambda current_job_id: (
+                deps.admin_start_clone_message_delete_job_thread_fn(
+                    current_job_id,
+                    clone_run=clone_run,
+                    selection=selection,
+                    delete_delay_ms=options["delete_delay_ms"],
+                    cfg=deps.cfg,
+                    admin_job_set_status_fn=deps.admin_job_set_status_fn,
+                    admin_job_append_log_fn=deps.admin_job_append_log_fn,
+                )
+            ),
+            response_extra={
+                "deletion": {
+                    "run_id": normalized_run_id,
+                    "target_chat_id": target_chat_id,
+                    "mode": selection.mode,
+                    "requested_count": selection.requested_count,
+                    "first_message_id": selection.first_message_id,
+                    "last_message_id": selection.last_message_id,
+                    "delete_delay_ms": options["delete_delay_ms"],
+                }
+            },
+        )
 
     @app.get("/api/admin/clone/runs/<run_id>/migration")
     @admin_login_required
@@ -1545,6 +1673,9 @@ def _clone_deps_from_services(services: CloneRouteServices) -> _CloneRouteDeps:
         admin_start_clone_target_delete_job_thread_fn=(
             services.admin_start_clone_target_delete_job_thread_fn
         ),
+        admin_start_clone_message_delete_job_thread_fn=(
+            services.admin_start_clone_message_delete_job_thread_fn
+        ),
     )
 
 
@@ -1577,6 +1708,7 @@ def _clone_deps_from_legacy_kwargs(
     admin_start_clone_deep_preflight_job_thread_fn=None,
     admin_start_clone_timeline_migration_job_thread_fn=None,
     admin_start_clone_target_delete_job_thread_fn=None,
+    admin_start_clone_message_delete_job_thread_fn=None,
 ) -> _CloneRouteDeps:
     return _CloneRouteDeps(
         logger=logger,
@@ -1614,6 +1746,9 @@ def _clone_deps_from_legacy_kwargs(
         admin_start_clone_target_delete_job_thread_fn=(
             admin_start_clone_target_delete_job_thread_fn
         ),
+        admin_start_clone_message_delete_job_thread_fn=(
+            admin_start_clone_message_delete_job_thread_fn
+        ),
     )
 
 
@@ -1648,6 +1783,7 @@ def register_clone_routes(
     admin_start_clone_deep_preflight_job_thread_fn=None,
     admin_start_clone_timeline_migration_job_thread_fn=None,
     admin_start_clone_target_delete_job_thread_fn=None,
+    admin_start_clone_message_delete_job_thread_fn=None,
 ) -> None:
     deps = (
         _clone_deps_from_services(services)
@@ -1687,6 +1823,9 @@ def register_clone_routes(
             ),
             admin_start_clone_target_delete_job_thread_fn=(
                 admin_start_clone_target_delete_job_thread_fn
+            ),
+            admin_start_clone_message_delete_job_thread_fn=(
+                admin_start_clone_message_delete_job_thread_fn
             ),
         )
     )

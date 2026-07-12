@@ -4,9 +4,9 @@ from contextlib import closing, suppress
 from typing import Any
 
 from telethon.tl.functions.channels import DeleteChannelRequest
-from telethon.tl.types import InputChannel, InputPeerChannel
 
 from tg_harvest.admin_jobs.clone import _cfg_with_session_name
+from tg_harvest.admin_jobs.clone_target_access import clone_run_target_input_channel
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     finish_job_heartbeat,
@@ -40,30 +40,6 @@ def _target_owner_cfg(cfg: Any, target_owner_session: Any) -> Any | None:
         return _cfg_with_session_name(cfg, primary_session)
     if owner_session and owner_session == secondary_session:
         return _cfg_with_session_name(cfg, secondary_session)
-    return None
-
-
-def _target_input_channel(client: Any, clone_run: dict) -> InputChannel | None:
-    try:
-        target_chat_id = int(clone_run.get("target_chat_id") or 0)
-    except (TypeError, ValueError):
-        return None
-    if target_chat_id <= 0:
-        return None
-
-    try:
-        access_hash = int(clone_run.get("target_access_hash") or 0)
-    except (TypeError, ValueError):
-        access_hash = 0
-    if access_hash:
-        return InputChannel(target_chat_id, access_hash)
-
-    with bind_client_event_loop(client):
-        cached_entity = client.get_input_entity(target_chat_id)
-    if isinstance(cached_entity, InputChannel):
-        return cached_entity
-    if isinstance(cached_entity, InputPeerChannel):
-        return InputChannel(cached_entity.channel_id, cached_entity.access_hash)
     return None
 
 
@@ -115,7 +91,7 @@ def _delete_remote_clone_target(
     worker_id = f"{job_id}_clone_target_delete"
     try:
         client = _create_isolated_worker_client(owner_cfg, worker_id)
-        channel = _target_input_channel(client, clone_run)
+        channel = clone_run_target_input_channel(client, clone_run)
         if channel is None:
             return "not_accessible", "目标副本实体已失效，无法向 Telegram 确认删除"
         with bind_client_event_loop(client):

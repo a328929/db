@@ -31,6 +31,7 @@ class CloneRouteServices:
     admin_start_clone_deep_preflight_job_thread_fn: Any
     admin_start_clone_timeline_migration_job_thread_fn: Any
     admin_start_clone_target_delete_job_thread_fn: Any
+    admin_start_clone_message_delete_job_thread_fn: Any
 
 
 @dataclass(frozen=True)

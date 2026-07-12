@@ -25,6 +25,7 @@ ALLOWED_ADMIN_PAGE_PATHS = frozenset(
         "/admin/clone/migrate",
         "/admin/clone/runs/manage",
         "/admin/clone/runs/detail",
+        "/admin/clone/runs/messages/delete",
         "/admin/recovery",
     }
 )

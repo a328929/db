@@ -39,6 +39,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.started_deep_preflight_jobs = []
         self.started_timeline_migration_jobs = []
         self.started_target_delete_jobs = []
+        self.started_message_delete_jobs = []
         self.clone_timeline_preview_override = None
         self.clone_run_create_error = None
         self.clone_plan_create_error = None
@@ -145,6 +146,11 @@ class CloneRoutesTests(unittest.TestCase):
             ),
             admin_start_clone_target_delete_job_thread_fn=(
                 lambda *args, **kwargs: self.started_target_delete_jobs.append(
+                    (args, kwargs)
+                )
+            ),
+            admin_start_clone_message_delete_job_thread_fn=(
+                lambda *args, **kwargs: self.started_message_delete_jobs.append(
                     (args, kwargs)
                 )
             ),
@@ -984,6 +990,53 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
         self.assertEqual([], self.deleted_clone_run_ids)
         self.assertEqual([], self.started_target_delete_jobs)
+
+    def test_clone_run_message_delete_starts_second_account_job(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/delete-messages",
+                json={"selection": "200-1000", "delete_delay_ms": 50},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("clone_message_delete", payload["job"]["job_type"])
+        self.assertEqual("range", payload["deletion"]["mode"])
+        self.assertEqual(801, payload["deletion"]["requested_count"])
+        self.assertEqual(50, payload["deletion"]["delete_delay_ms"])
+        self.assertEqual(1, len(self.started_message_delete_jobs))
+        args, kwargs = self.started_message_delete_jobs[0]
+        self.assertEqual(("job-clone-1",), args)
+        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
+        self.assertEqual("range", kwargs["selection"].mode)
+        self.assertEqual(200, kwargs["selection"].first_message_id)
+        self.assertEqual(1000, kwargs["selection"].last_message_id)
+        self.assertEqual(50, kwargs["delete_delay_ms"])
+
+    def test_clone_run_message_delete_rejects_invalid_selection_before_job_creation(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/delete-messages",
+                json={"selection": "1000-200", "delete_delay_ms": 0},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertIn("起始消息 ID", response.get_json()["error"])
+        self.assertEqual([], self.started_message_delete_jobs)
+
+    def test_clone_message_delete_page_accepts_authenticated_record_link(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get(
+                "/admin/clone/runs/messages/delete?run_id=run-existing"
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertIn("删除局部克隆消息", response.get_data(as_text=True))
 
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():

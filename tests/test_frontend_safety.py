@@ -286,6 +286,7 @@ class FrontendSafetyTests(unittest.TestCase):
             "admin_clone_migrate.html",
             "admin_clone_runs.html",
             "admin_clone_run_detail.html",
+            "admin_clone_message_delete.html",
         ):
             template = (ROOT / "templates" / template_name).read_text(
                 encoding="utf-8"

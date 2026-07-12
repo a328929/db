@@ -240,6 +240,7 @@
     appendRunLink(actions, '打开克隆副本', run && run.target_telegram_app_link);
     appendRunResumeLink(actions, run);
     appendRunDetailLink(actions, run);
+    appendRunMessageDeleteButton(elements, actions, run);
     appendRunDeleteButton(elements, actions, run);
     if (actions.childNodes.length > 0) {
       card.appendChild(actions);
@@ -284,6 +285,23 @@
     link.href = buildRunDetailHref(runId);
     link.textContent = '进入群详情';
     container.appendChild(link);
+  }
+
+  function appendRunMessageDeleteButton(elements, container, run) {
+    if (!canDeleteRun(run) || !(run && run.target_chat_id)) return;
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'btn danger clone-run-message-delete';
+    button.textContent = '删除局部克隆消息';
+    button.setAttribute(
+      'aria-label',
+      '删除 ' + buildRunTitle(run) + ' 的局部克隆消息'
+    );
+    button.disabled = state.busy || !!state.deleteJobId;
+    button.addEventListener('click', function () {
+      window.location.assign(buildRunMessageDeleteHref(run));
+    });
+    container.appendChild(button);
   }
 
   function appendRunDeleteButton(elements, container, run) {
@@ -421,7 +439,9 @@
 
   function syncRunDeleteButtons(elements) {
     var disabled = state.busy || !!state.deleteJobId;
-    var buttons = elements.list.querySelectorAll('.clone-run-delete');
+    var buttons = elements.list.querySelectorAll(
+      '.clone-run-delete, .clone-run-message-delete'
+    );
     Array.prototype.forEach.call(buttons, function (button) {
       setElementDisabled(button, disabled);
     });
@@ -466,6 +486,11 @@
 
   function buildRunDetailHref(runId) {
     return '/admin/clone/runs/detail?run_id=' + encodeURIComponent(String(runId || ''));
+  }
+
+  function buildRunMessageDeleteHref(run) {
+    return '/admin/clone/runs/messages/delete?run_id='
+      + encodeURIComponent(String((run && run.run_id) || ''));
   }
 
   function updatePageStatus(elements) {
