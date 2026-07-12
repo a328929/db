@@ -8,6 +8,7 @@ from tg_harvest.admin_jobs.clone_execution import clone_cfg_for_account
 from tg_harvest.admin_jobs.clone_target_access import clone_run_target_input_channel
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    call_with_conn,
     finish_job_heartbeat,
     mark_admin_job_running,
     start_admin_job_heartbeat,
@@ -24,6 +25,9 @@ from tg_harvest.admin_jobs.sessions import (
 )
 from tg_harvest.domain.clone_message_delete import CloneMessageDeleteSelection
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry
+from tg_harvest.storage.clone import (
+    rewind_clone_mappings_for_deleted_target_messages,
+)
 
 CLONE_MESSAGE_DELETE_BATCH_SIZE = 100
 CLONE_MESSAGE_DELETE_MAX_DELAY_MS = 10_000
@@ -142,6 +146,7 @@ def _admin_clone_message_delete_job_runner(
     selection: CloneMessageDeleteSelection,
     delete_delay_ms: Any,
     cfg: Any,
+    get_conn_fn: Callable[[], Any],
     admin_job_set_status_fn: Callable[[str, str], bool],
     admin_job_append_log_fn: Callable[[str, str], Any],
 ) -> None:
@@ -151,6 +156,11 @@ def _admin_clone_message_delete_job_runner(
     worker_id = f"{job_id}_clone_message_delete"
     processed = 0
     total = int(selection.requested_count)
+    rewound_mapping_count = 0
+    rewound_done_mapping_count = 0
+    rewound_media_transfer_count = 0
+    unmapped_target_message_count = 0
+    first_rewound_source_message_id = 0
     try:
         mark_admin_job_running(
             job_id,
@@ -250,6 +260,42 @@ def _admin_clone_message_delete_job_runner(
                 cfg=secondary_cfg,
             )
             processed += len(batch)
+            try:
+                rewind = call_with_conn(
+                    get_conn_fn,
+                    rewind_clone_mappings_for_deleted_target_messages,
+                    run_id=_clean_text(clone_run.get("run_id")),
+                    target_chat_id=target_chat_id,
+                    target_message_ids=batch,
+                )
+            except Exception as exc:
+                admin_job_append_log_fn(
+                    job_id,
+                    "当前批次已获 Telegram 删除确认，但本地续克隆状态回退失败；"
+                    "任务已停止，暂不能继续完整时间线迁移："
+                    f"{admin_error_message(exc)}",
+                )
+                raise RuntimeError(
+                    "Telegram 已删除当前批次，但本地续克隆状态回退失败"
+                ) from exc
+
+            rewound_mapping_count += int(rewind["rewound_mapping_count"])
+            rewound_done_mapping_count += int(rewind["rewound_done_mapping_count"])
+            rewound_media_transfer_count += int(
+                rewind["rewound_media_transfer_count"]
+            )
+            unmapped_target_message_count += int(
+                rewind["unmapped_target_message_count"]
+            )
+            batch_first_source_message_id = int(
+                rewind["first_rewound_source_message_id"]
+            )
+            if batch_first_source_message_id > 0 and (
+                first_rewound_source_message_id <= 0
+                or batch_first_source_message_id < first_rewound_source_message_id
+            ):
+                first_rewound_source_message_id = batch_first_source_message_id
+
             is_final_batch = processed >= total
             if (
                 batch_index == 1
@@ -264,7 +310,12 @@ def _admin_clone_message_delete_job_runner(
                 )
                 admin_job_append_log_fn(
                     job_id,
-                    f"已向 Telegram 提交删除 {processed}/{total} 条消息",
+                    "Telegram 已确认删除 "
+                    f"{processed}/{total} 条消息；"
+                    f"已回退 {rewound_mapping_count} 条本地映射"
+                    f"（其中完成映射 {rewound_done_mapping_count} 条），"
+                    f"已重置 {rewound_media_transfer_count} 条媒体传输状态，"
+                    f"未匹配映射 {unmapped_target_message_count} 条",
                 )
             if delay_ms > 0 and not is_final_batch:
                 time.sleep(float(delay_ms) / 1000.0)
@@ -272,9 +323,19 @@ def _admin_clone_message_delete_job_runner(
         update_admin_job_progress(job_id, processed, total=total, stage="done")
         admin_job_append_log_fn(
             job_id,
-            f"局部删除完成：已向 Telegram 提交 {processed} 条消息的删除请求；"
-            "本地克隆映射保持不变",
+            "局部删除完成：Telegram 已确认删除 "
+            f"{processed} 条消息；已回退 {rewound_mapping_count} 条本地映射"
+            f"（完成映射 {rewound_done_mapping_count} 条），"
+            f"已重置 {rewound_media_transfer_count} 条媒体传输状态，"
+            f"未匹配映射 {unmapped_target_message_count} 条。",
         )
+        if first_rewound_source_message_id > 0:
+            admin_job_append_log_fn(
+                job_id,
+                "下次完整时间线迁移会按源群时间线寻找最早未完成项补齐；"
+                "本次回退映射中最早的源消息 ID="
+                f"{first_rewound_source_message_id}。",
+            )
         admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
         message = admin_error_message(exc)

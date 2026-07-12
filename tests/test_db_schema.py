@@ -276,6 +276,17 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 """,
                 "idx_admin_clone_message_map_run_mode_source",
             ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT source_chat_id, source_message_id, mode, status
+                FROM admin_clone_message_map
+                WHERE run_id = 'run-1'
+                  AND target_chat_id = 777
+                  AND target_message_id IN (9001, 9002)
+                """,
+                "idx_admin_clone_message_map_run_target_message",
+            ),
         ]
 
         for sql, expected_index in cases:

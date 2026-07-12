@@ -1014,6 +1014,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(200, kwargs["selection"].first_message_id)
         self.assertEqual(1000, kwargs["selection"].last_message_id)
         self.assertEqual(50, kwargs["delete_delay_ms"])
+        self.assertTrue(callable(kwargs["get_conn_fn"]))
 
     def test_clone_run_message_delete_rejects_invalid_selection_before_job_creation(self) -> None:
         with self._auth_config_patch():

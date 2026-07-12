@@ -1,6 +1,7 @@
 import logging
 import secrets
 import sqlite3
+from collections.abc import Iterable
 from typing import Any
 
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
@@ -17,6 +18,7 @@ from tg_harvest.storage.clone_state_common import (
 from tg_harvest.storage.row_access import row_int as _row_int
 
 _MAX_TELEGRAM_RANDOM_ID = (1 << 63) - 1
+_TARGET_MESSAGE_ID_BATCH_SIZE = 500
 
 
 def _new_delivery_random_id() -> int:
@@ -28,6 +30,211 @@ def _valid_delivery_random_id(value: Any) -> int | None:
     if normalized is None or normalized <= 0 or normalized > _MAX_TELEGRAM_RANDOM_ID:
         return None
     return normalized
+
+
+def _normalized_target_message_ids(message_ids: Iterable[Any]) -> list[int]:
+    normalized_ids: list[int] = []
+    seen: set[int] = set()
+    for value in message_ids:
+        message_id = _optional_int(value)
+        if message_id is None or message_id <= 0 or message_id in seen:
+            continue
+        seen.add(message_id)
+        normalized_ids.append(message_id)
+    return normalized_ids
+
+
+def _message_id_chunks(message_ids: list[int]) -> Iterable[list[int]]:
+    for offset in range(0, len(message_ids), _TARGET_MESSAGE_ID_BATCH_SIZE):
+        yield message_ids[offset : offset + _TARGET_MESSAGE_ID_BATCH_SIZE]
+
+
+def rewind_clone_mappings_for_deleted_target_messages(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    target_chat_id: int,
+    target_message_ids: Iterable[Any],
+) -> dict[str, int]:
+    """Make successfully deleted target messages eligible for replay again.
+
+    Telegram does not renumber messages after a deletion.  Replay state must
+    therefore be rewound through the durable source-to-target mappings, never
+    by treating a gap in target message IDs as a migration cursor.  Media
+    transfer intents are reset together with their mappings so the next replay
+    reserves fresh MTProto random IDs and actually sends replacement media
+    instead of reusing an already deleted target message ID.  A relay item
+    whose temporary relay message has not been cleaned up keeps that first hop
+    so a retry can forward it with a new target-side random ID and then clean
+    it up.
+    """
+
+    normalized_run_id = _clean_text(run_id)
+    normalized_target_chat_id = int(target_chat_id)
+    normalized_target_ids = _normalized_target_message_ids(target_message_ids)
+    empty_result = {
+        "selected_target_message_count": len(normalized_target_ids),
+        "rewound_mapping_count": 0,
+        "rewound_done_mapping_count": 0,
+        "rewound_text_mapping_count": 0,
+        "rewound_media_mapping_count": 0,
+        "rewound_media_transfer_count": 0,
+        "unmapped_target_message_count": len(normalized_target_ids),
+        "first_rewound_source_message_id": 0,
+    }
+    if not normalized_run_id:
+        raise ValueError("run_id 不能为空")
+    if normalized_target_chat_id <= 0:
+        raise ValueError("target_chat_id 参数非法")
+    if not normalized_target_ids:
+        return empty_result
+
+    rewound_rows: list[sqlite3.Row] = []
+    matched_target_ids: set[int] = set()
+    cur = conn.cursor()
+    try:
+        cur.execute("BEGIN IMMEDIATE")
+        for target_id_chunk in _message_id_chunks(normalized_target_ids):
+            placeholders = ",".join("?" for _ in target_id_chunk)
+            cur.execute(
+                f"""
+                SELECT
+                    source_chat_id,
+                    source_message_id,
+                    target_message_id,
+                    mode,
+                    status
+                FROM admin_clone_message_map
+                WHERE run_id = ?
+                  AND target_chat_id = ?
+                  AND target_message_id IN ({placeholders})
+                """,
+                [
+                    normalized_run_id,
+                    normalized_target_chat_id,
+                    *target_id_chunk,
+                ],
+            )
+            rows = cur.fetchall()
+            rewound_rows.extend(rows)
+            matched_target_ids.update(
+                int(row["target_message_id"])
+                for row in rows
+                if _optional_int(row["target_message_id"]) is not None
+            )
+            cur.execute(
+                f"""
+                DELETE FROM admin_clone_message_map
+                WHERE run_id = ?
+                  AND target_chat_id = ?
+                  AND target_message_id IN ({placeholders})
+                """,
+                [
+                    normalized_run_id,
+                    normalized_target_chat_id,
+                    *target_id_chunk,
+                ],
+            )
+
+        media_sources_by_chat: dict[int, set[int]] = {}
+        for row in rewound_rows:
+            if str(row["mode"] or "") not in {
+                "media_copy",
+                "media_group_copy",
+            }:
+                continue
+            source_chat_id = int(row["source_chat_id"])
+            source_message_id = int(row["source_message_id"])
+            media_sources_by_chat.setdefault(source_chat_id, set()).add(
+                source_message_id
+            )
+
+        rewound_media_transfer_count = 0
+        now = _now_iso()
+        for source_chat_id, source_message_ids in media_sources_by_chat.items():
+            for source_id_chunk in _message_id_chunks(sorted(source_message_ids)):
+                placeholders = ",".join("?" for _ in source_id_chunk)
+                cur.execute(
+                    f"""
+                    SELECT
+                        id,
+                        transfer_strategy,
+                        source_hop_status,
+                        cleanup_status,
+                        relay_message_id
+                    FROM admin_clone_media_transfers
+                    WHERE run_id = ?
+                      AND target_chat_id = ?
+                      AND source_chat_id = ?
+                      AND source_message_id IN ({placeholders})
+                    """,
+                    [
+                        normalized_run_id,
+                        normalized_target_chat_id,
+                        source_chat_id,
+                        *source_id_chunk,
+                    ],
+                )
+                transfers = cur.fetchall()
+                for transfer in transfers:
+                    should_reuse_relay_message = (
+                        str(transfer["transfer_strategy"] or "") == "relay"
+                        and str(transfer["source_hop_status"] or "") == "sent"
+                        and _optional_int(transfer["relay_message_id"]) is not None
+                        and str(transfer["cleanup_status"] or "") != "done"
+                    )
+                    if should_reuse_relay_message:
+                        cur.execute(
+                            """
+                            UPDATE admin_clone_media_transfers
+                            SET target_random_id = ?, target_message_id = NULL,
+                                target_hop_status = 'pending', error_message = '',
+                                updated_at = ?
+                            WHERE id = ?
+                            """,
+                            (_new_delivery_random_id(), now, int(transfer["id"])),
+                        )
+                    else:
+                        cur.execute(
+                            "DELETE FROM admin_clone_media_transfers WHERE id = ?",
+                            (int(transfer["id"]),),
+                        )
+                    rewound_media_transfer_count += 1
+
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+    done_rows = [row for row in rewound_rows if row["status"] == "done"]
+    text_count = sum(
+        1 for row in rewound_rows if str(row["mode"] or "") == "text_replay"
+    )
+    media_count = sum(
+        1
+        for row in rewound_rows
+        if str(row["mode"] or "") in {"media_copy", "media_group_copy"}
+    )
+    source_message_ids = [
+        int(row["source_message_id"])
+        for row in done_rows
+        if int(row["source_message_id"] or 0) > 0
+    ]
+    return {
+        "selected_target_message_count": len(normalized_target_ids),
+        "rewound_mapping_count": len(rewound_rows),
+        "rewound_done_mapping_count": len(done_rows),
+        "rewound_text_mapping_count": text_count,
+        "rewound_media_mapping_count": media_count,
+        "rewound_media_transfer_count": rewound_media_transfer_count,
+        "unmapped_target_message_count": max(
+            0,
+            len(normalized_target_ids) - len(matched_target_ids),
+        ),
+        "first_rewound_source_message_id": min(source_message_ids, default=0),
+    }
 
 
 def record_clone_message_mapping(

@@ -24,6 +24,7 @@ from tg_harvest.storage.clone_state_mappings import (
     load_clone_message_mapping_summary,
     load_clone_run_progress,
     record_clone_message_mapping,
+    rewind_clone_mappings_for_deleted_target_messages,
 )
 from tg_harvest.storage.clone_state_migrations import (
     create_clone_migration,
@@ -85,6 +86,7 @@ __all__ = [
     "load_latest_clone_migration",
     "load_latest_clone_plan",
     "record_clone_message_mapping",
+    "rewind_clone_mappings_for_deleted_target_messages",
     "update_clone_migration",
     "update_clone_plan",
     "update_clone_run",

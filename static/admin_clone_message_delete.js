@@ -249,8 +249,8 @@
       return;
     }
     var message = selection.mode === 'latest'
-      ? '将从当前最新消息开始倒序选择最后 ' + shared.formatNumber(selection.count) + ' 条，随后按批删除。'
-      : '将按消息 ID 正序提交删除 ' + selection.first + ' 到 ' + selection.last + '，共 ' + shared.formatNumber(selection.count) + ' 个 ID。';
+      ? '将从当前最新消息开始倒序选择最后 ' + shared.formatNumber(selection.count) + ' 条，随后按批删除并回退匹配的续传映射。'
+      : '将按消息 ID 正序提交删除 ' + selection.first + ' 到 ' + selection.last + '，共 ' + shared.formatNumber(selection.count) + ' 个 ID；匹配映射会在删除确认后回退。';
     elements.selectionPreview.textContent = message;
     elements.selectionPreview.className = 'clone-message-delete-preview';
   }
@@ -386,12 +386,14 @@
       var stage = String((((snapshot || {}).progress || {}).stage) || '');
       elements.formStatus.textContent = stage === 'stopped'
         ? '删除已停止，未提交的消息不会被处理。'
-        : '局部消息删除已完成。';
+        : '局部消息删除已完成；可重新执行完整时间线迁移补齐缺失消息。';
       await loadTargetMessageCount(elements, { force: true });
     },
     onError: async function () {
       var elements = getElements();
-      if (elements) elements.formStatus.textContent = '局部消息删除失败，请查看执行日志。';
+      if (!elements) return;
+      elements.formStatus.textContent = '局部消息删除失败，远端可能已部分删除；请查看执行日志后再继续迁移。';
+      await loadTargetMessageCount(elements, { force: true });
     }
   });
 

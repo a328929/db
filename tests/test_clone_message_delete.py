@@ -35,9 +35,27 @@ def _clone_run():
     }
 
 
-def _run_job(client, selection):
+def _rewind_result(*_args, **kwargs):
+    return {
+        "selected_target_message_count": len(kwargs["target_message_ids"]),
+        "rewound_mapping_count": 0,
+        "rewound_done_mapping_count": 0,
+        "rewound_text_mapping_count": 0,
+        "rewound_media_mapping_count": 0,
+        "rewound_media_transfer_count": 0,
+        "unmapped_target_message_count": len(kwargs["target_message_ids"]),
+        "first_rewound_source_message_id": 0,
+    }
+
+
+def _run_job(client, selection, *, rewind_side_effect=None):
     statuses = []
     logs = []
+
+    class Connection:
+        def close(self):
+            pass
+
     with (
         patch(
             "tg_harvest.admin_jobs.clone_message_delete.start_admin_job_heartbeat",
@@ -54,6 +72,11 @@ def _run_job(client, selection):
             "tg_harvest.admin_jobs.clone_message_delete._create_isolated_worker_client",
             return_value=client,
         ) as create_client,
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete."
+            "rewind_clone_mappings_for_deleted_target_messages",
+            side_effect=rewind_side_effect or _rewind_result,
+        ),
         patch("tg_harvest.admin_jobs.clone_message_delete._disconnect_worker_client"),
         patch("tg_harvest.admin_jobs.clone_message_delete._cleanup_isolated_worker_session"),
     ):
@@ -63,6 +86,7 @@ def _run_job(client, selection):
             selection=selection,
             delete_delay_ms=0,
             cfg=_cfg(),
+            get_conn_fn=Connection,
             admin_job_set_status_fn=lambda _job_id, status: statuses.append(status),
             admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
         )
@@ -136,7 +160,7 @@ def test_latest_message_delete_uses_secondary_account_and_latest_message_ids():
     assert wait_time == 0
     assert client.delete_calls == [(target, [905, 901, 899], True)]
     assert any("最新到最早顺序锁定 3 条" in message for message in logs)
-    assert any("本地克隆映射保持不变" in message for message in logs)
+    assert any("已回退 0 条本地映射" in message for message in logs)
     assert any(
         call.kwargs.get("total") == 3 for call in update_progress.call_args_list
     )
@@ -191,3 +215,27 @@ def test_latest_message_delete_marks_empty_target_as_completed():
         "total": 0,
         "stage": "done",
     }
+
+
+def test_mapping_rewind_failure_stops_after_the_confirmed_remote_batch():
+    class Client:
+        def __init__(self):
+            self.delete_calls = []
+
+        def delete_messages(self, target, message_ids, *, revoke):
+            self.delete_calls.append((target, list(message_ids), revoke))
+            return []
+
+    def fail_rewind(*_args, **_kwargs):
+        raise RuntimeError("database unavailable")
+
+    client = Client()
+    statuses, logs, _create_client, _update_progress = _run_job(
+        client,
+        parse_clone_message_delete_selection("200-399"),
+        rewind_side_effect=fail_rewind,
+    )
+
+    assert statuses == ["running", "error"]
+    assert [call[1] for call in client.delete_calls] == [list(range(200, 300))]
+    assert any("本地续克隆状态回退失败" in message for message in logs)
