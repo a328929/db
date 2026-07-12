@@ -455,6 +455,112 @@ class FrontendSafetyTests(unittest.TestCase):
                 f"{sorted(referenced_ids - template_ids)}",
             )
 
+    def test_page_scripts_only_reference_existing_template_elements(self) -> None:
+        page_assets = (
+            (("index.html",), "app.js"),
+            (("context.html",), "context.js"),
+            (("open_telegram.html",), "open_telegram.js"),
+            (("admin_login.html",), "admin_login.js"),
+            (("admin_manage.html",), "admin_manage.js"),
+            (("admin_sync.html",), "admin_sync.js"),
+            (("admin_channels.html",), "admin_channels.js"),
+            (("admin_clone.html",), "admin_clone_hub.js"),
+            (
+                ("admin_clone_create.html", "admin_clone_migrate.html"),
+                "admin_clone.js",
+            ),
+            (("admin_clone_runs.html",), "admin_clone_runs.js"),
+            (("admin_clone_run_detail.html",), "admin_clone_run_detail.js"),
+            (("admin_recovery.html",), "admin_recovery.js"),
+        )
+        for template_names, script_name in page_assets:
+            template_ids = set()
+            for template_name in template_names:
+                template = (ROOT / "templates" / template_name).read_text(
+                    encoding="utf-8"
+                )
+                template_ids.update(re.findall(r'\bid="([^"]+)"', template))
+            source = (ROOT / "static" / script_name).read_text(encoding="utf-8")
+            referenced_ids = set(
+                re.findall(
+                    r"getElementById\(\s*['\"]([^'\"]+)['\"]\s*\)", source
+                )
+            )
+            self.assertTrue(
+                referenced_ids.issubset(template_ids),
+                f"{script_name} references absent template IDs: "
+                f"{sorted(referenced_ids - template_ids)}",
+            )
+
+    def test_page_templates_load_dependencies_before_consumers(self) -> None:
+        page_assets = (
+            ("index.html", "display_helpers.js", "app.js"),
+            ("context.html", "display_helpers.js", "context.js"),
+            ("admin_channels.html", "admin_manage_shared.js", "admin_channels.js"),
+            ("admin_clone.html", "admin_manage_shared.js", "admin_clone_hub.js"),
+            ("admin_clone_create.html", "admin_manage_shared.js", "admin_clone.js"),
+            ("admin_clone_migrate.html", "admin_manage_shared.js", "admin_clone.js"),
+            (
+                "admin_clone_run_detail.html",
+                "admin_manage_shared.js",
+                "admin_clone_run_detail.js",
+            ),
+            ("admin_clone_runs.html", "admin_manage_shared.js", "admin_clone_runs.js"),
+            ("admin_manage.html", "admin_manage_shared.js", "admin_manage.js"),
+            ("admin_recovery.html", "admin_manage_shared.js", "admin_recovery.js"),
+            ("admin_sync.html", "admin_manage_shared.js", "admin_sync.js"),
+        )
+        for template_name, dependency_name, consumer_name in page_assets:
+            template = (ROOT / "templates" / template_name).read_text(encoding="utf-8")
+            dependency_marker = f"filename='{dependency_name}'"
+            consumer_marker = f"filename='{consumer_name}'"
+            dependency_position = template.find(dependency_marker)
+            consumer_position = template.find(consumer_marker)
+            self.assertGreaterEqual(dependency_position, 0, template_name)
+            self.assertGreaterEqual(consumer_position, 0, template_name)
+            self.assertLess(dependency_position, consumer_position, template_name)
+
+    def test_admin_scripts_bind_shared_helpers_before_bare_calls(self) -> None:
+        shared_source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        export_block = re.search(
+            r"window\.AdminManageShared\s*=\s*\{(?P<exports>.*?)\n\s*\};",
+            shared_source,
+            flags=re.DOTALL,
+        )
+        self.assertIsNotNone(export_block)
+        exported_helpers = set(
+            re.findall(
+                r"^\s*([A-Za-z_$][A-Za-z0-9_$]*)\s*:",
+                export_block.group("exports"),
+                flags=re.MULTILINE,
+            )
+        )
+
+        for script_path in (ROOT / "static").glob("admin_*.js"):
+            if script_path.name == "admin_manage_shared.js":
+                continue
+            source = script_path.read_text(encoding="utf-8")
+            for helper_name in exported_helpers:
+                bare_call = re.compile(
+                    rf"(?<![.A-Za-z0-9_$]){re.escape(helper_name)}\s*\("
+                )
+                if not bare_call.search(source):
+                    continue
+                local_definition = re.compile(
+                    rf"function\s+{re.escape(helper_name)}\s*\("
+                )
+                shared_binding = re.compile(
+                    rf"\b(?:var|let|const)\s+{re.escape(helper_name)}\s*="
+                    rf"\s*shared\.{re.escape(helper_name)}\s*;"
+                )
+                self.assertTrue(
+                    local_definition.search(source) or shared_binding.search(source),
+                    f"{script_path.name} calls {helper_name} without a local definition "
+                    "or AdminManageShared binding",
+                )
+
     def test_admin_clone_create_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_clone_create.html").read_text(
             encoding="utf-8"
@@ -690,6 +796,7 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-clone-runs-delete-help", template)
         self.assertIn("admin-clone-runs-failure-summary-text", template)
         self.assertIn("admin-clone-runs-mapping-summary-text", template)
+        self.assertIn("var formatDateTime = shared.formatDateTime;", source)
         self.assertIn("admin-clone-run-delete-dialog", template)
         self.assertIn("已克隆群详情", template)
         self.assertIn("已克隆群详情摘要", template)

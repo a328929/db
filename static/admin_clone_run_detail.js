@@ -7,6 +7,7 @@
   var setElementDisabled = shared.setElementDisabled;
   var setPageInteractionState = shared.setPageInteractionState;
   var trapFocusWithin = shared.trapFocusWithin;
+  var formatDateTime = shared.formatDateTime;
   var formatNumber = shared.formatNumber;
 
   var MAPPING_PAGE_SIZE = 25;
