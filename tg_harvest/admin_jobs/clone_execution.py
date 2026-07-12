@@ -26,7 +26,9 @@ def normalize_clone_nonnegative_int(
 def clone_cfg_for_account(cfg: Any, account: str) -> Any:
     normalized = clean_clone_text(account).lower()
     primary_session_name = clean_clone_text(getattr(cfg, "session_name", ""))
-    secondary_session_name = clean_clone_text(getattr(cfg, "secondary_session_name", ""))
+    secondary_session_name = clean_clone_text(
+        getattr(cfg, "secondary_session_name", "")
+    )
     if normalized == "secondary":
         if not secondary_session_name:
             raise RuntimeError("计划要求第二账号执行迁移，但未配置第二账号 session")
@@ -54,7 +56,54 @@ def clone_sent_message_id(result: Any) -> int | None:
     return optional_int(getattr(result, "id", None))
 
 
-def send_clone_text_chunk(client: Any, target_entity: Any, text: str) -> int | None:
+def _send_clone_text_with_random_id(
+    client: Any,
+    target_entity: Any,
+    text: str,
+    *,
+    random_id: int,
+) -> Any:
+    from telethon.tl.functions.messages import SendMessageRequest
+
     with bind_client_event_loop(client):
-        result = client.send_message(target_entity, text)
+        target_peer = client.get_input_entity(target_entity)
+        request = SendMessageRequest(
+            peer=target_peer,
+            message=str(text),
+            silent=True,
+            random_id=int(random_id),
+        )
+        result = client(request)
+        resolve_message = getattr(client, "_get_response_message", None)
+        if not callable(resolve_message):
+            raise RuntimeError("当前 Telegram 客户端不支持可恢复文本发送")
+        return resolve_message(request, result, target_peer)
+
+
+def send_clone_text_chunk(
+    client: Any,
+    target_entity: Any,
+    text: str,
+    *,
+    random_id: int | None = None,
+) -> int | None:
+    if (
+        random_id is not None
+        and callable(getattr(client, "get_input_entity", None))
+        and callable(client)
+    ):
+        return clone_sent_message_id(
+            _send_clone_text_with_random_id(
+                client,
+                target_entity,
+                text,
+                random_id=int(random_id),
+            )
+        )
+
+    with bind_client_event_loop(client):
+        # The database stores literal text rather than Telegram entity spans.
+        # Disabling Telethon's default Markdown parser prevents accidental
+        # reinterpretation of source text during replay.
+        result = client.send_message(target_entity, text, parse_mode=None, silent=True)
     return clone_sent_message_id(result)

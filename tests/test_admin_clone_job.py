@@ -1,4 +1,5 @@
 import sqlite3
+from contextlib import ExitStack
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -26,6 +27,7 @@ from tg_harvest.storage.clone import (
     load_latest_clone_migration,
     load_latest_clone_plan,
     record_clone_message_mapping,
+    update_clone_plan,
     update_clone_run,
 )
 from tg_harvest.storage.connection import detect_sqlite_features
@@ -257,17 +259,27 @@ def _create_deep_plan(path, *, with_target=True):
 
 
 class _DeepPreflightClient:
-    def __init__(self, *, source_ok=True, target_ok=True, relay_ok=True):
+    def __init__(
+        self,
+        *,
+        source_ok=True,
+        target_ok=True,
+        relay_ok=True,
+        latest_message_id=1,
+        relay_public=False,
+    ):
         self.source_ok = source_ok
         self.target_ok = target_ok
         self.relay_ok = relay_ok
+        self.latest_message_id = int(latest_message_id)
+        self.relay_public = bool(relay_public)
 
     def get_entity(self, value):
         normalized = int(value) if isinstance(value, int) or str(value).lstrip("-").isdigit() else value
         if normalized in {100, -100100, -100}:
             if not self.source_ok:
                 raise ValueError("Could not find the input entity")
-            return SimpleNamespace(id=100, title="Source Group")
+            return SimpleNamespace(id=100, title="Source Group", noforwards=False)
         if normalized in {777, -100777, -777}:
             if not self.target_ok:
                 raise ValueError("Could not find the input entity")
@@ -284,12 +296,20 @@ class _DeepPreflightClient:
                 id=999,
                 title="Relay Channel",
                 creator=True,
+                broadcast=True,
+                megagroup=False,
+                username="public_relay" if self.relay_public else "",
                 default_banned_rights=SimpleNamespace(send_messages=False),
             )
         raise ValueError("Could not find the input entity")
 
     def get_messages(self, _entity, **_kwargs):
-        return [SimpleNamespace(id=1, date="2026-01-01 00:00:00+00:00")]
+        return [
+            SimpleNamespace(
+                id=self.latest_message_id,
+                date="2026-01-01 00:00:00+00:00",
+            )
+        ]
 
 
 def test_clone_deep_preflight_job_persists_online_plan(tmp_path):
@@ -389,6 +409,48 @@ def test_clone_deep_preflight_reads_latest_source_via_bounded_retry(tmp_path):
         call.kwargs.get("scope") == "clone-preflight-latest-source"
         for call in retry_mock.call_args_list
     )
+
+
+def test_clone_deep_preflight_blocks_when_local_snapshot_lags_source(tmp_path):
+    db_path = tmp_path / "clone-deep-stale-snapshot.db"
+    _create_job_db(db_path)
+    _create_deep_plan(db_path, with_target=True)
+
+    with (
+        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
+        patch(
+            "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
+            side_effect=[
+                _DeepPreflightClient(latest_message_id=2),
+                _DeepPreflightClient(source_ok=False, target_ok=True),
+            ],
+        ),
+        patch("tg_harvest.admin_jobs.clone_preflight._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_preflight._cleanup_isolated_worker_session"),
+    ):
+        _admin_clone_deep_preflight_job_runner(
+            "job-deep",
+            run_id="job-clone",
+            plan_id="job-deep",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda *_args: True,
+            admin_job_append_log_fn=lambda *_args: None,
+        )
+
+    conn = _connect(db_path)
+    try:
+        plan = load_latest_clone_plan(conn, "job-clone")
+    finally:
+        conn.close()
+
+    assert plan is not None
+    assert any("本地数据库尚未采集" in item for item in plan["blocking_issues"])
+    assert plan["capabilities"]["source_snapshot"]["message_id"] == 2
+    assert plan["capabilities"]["source_snapshot"]["local_message_id"] == 1
 
 
 def test_clone_deep_preflight_job_blocks_when_target_missing(tmp_path):
@@ -531,6 +593,49 @@ def test_clone_deep_preflight_job_enables_relay_when_accounts_split_access(tmp_p
     assert any("固定中转频道桥接" in item for item in plan["warnings"])
 
 
+def test_clone_deep_preflight_blocks_public_relay_channel(tmp_path):
+    db_path = tmp_path / "clone-deep-public-relay.db"
+    _create_job_db(db_path)
+    _create_deep_plan(db_path, with_target=True)
+    cfg = _runner_cfg()
+    cfg.clone_relay_chat_id = 999
+
+    with (
+        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
+        patch(
+            "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
+            side_effect=[
+                _DeepPreflightClient(source_ok=True, target_ok=False, relay_public=True),
+                _DeepPreflightClient(source_ok=False, target_ok=True, relay_public=True),
+            ],
+        ),
+        patch("tg_harvest.admin_jobs.clone_preflight._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_preflight._cleanup_isolated_worker_session"),
+    ):
+        _admin_clone_deep_preflight_job_runner(
+            "job-deep",
+            run_id="job-clone",
+            plan_id="job-deep",
+            cfg=cfg,
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda *_args: True,
+            admin_job_append_log_fn=lambda *_args: None,
+        )
+
+    conn = _connect(db_path)
+    try:
+        plan = load_latest_clone_plan(conn, "job-clone")
+    finally:
+        conn.close()
+
+    assert plan is not None
+    assert plan["capabilities"]["media_relay"]["enabled"] is False
+    assert any("不是私有广播频道" in item for item in plan["blocking_issues"])
+
+
 def test_clone_deep_preflight_explains_incomplete_relay_access(tmp_path):
     db_path = tmp_path / "clone-deep-relay-incomplete.db"
     _create_job_db(db_path)
@@ -618,11 +723,17 @@ def _create_ready_clone_state(path):
             text_strategy="database_replay",
             media_strategy="source_copy_without_attribution",
             media_group_strategy="strict_skip_incomplete",
-            avatar_strategy="copy_if_accessible",
+            avatar_strategy="skip_not_implemented",
             blocking_issues=[],
             warnings=[],
-            capabilities={"target_write_account": "primary"},
-            plan={"target_write_account": "primary"},
+            capabilities={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 100_000},
+            },
+            plan={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 100_000},
+            },
             completed_at="2026-06-18T00:00:00+00:00",
         )
         conn.commit()
@@ -707,6 +818,9 @@ class _MediaMigrationClient:
                 ]
             return self.source_messages.get(int(ids)) or self.add_source_message(int(ids))
 
+        if kwargs.get("limit") == 1 and not self.source_messages:
+            return [SimpleNamespace(id=100_000)]
+
         min_id = int(kwargs.get("min_id") or 0)
         max_id = int(kwargs.get("max_id") or 0)
         return [
@@ -732,7 +846,7 @@ class _TimelineMigrationClient(_MediaMigrationClient):
         self.timeline_events = []
         self.sent_messages = []
 
-    def send_message(self, _entity, text):
+    def send_message(self, _entity, text, **_kwargs):
         self.sent_messages.append(str(text))
         self.timeline_events.append(("text", str(text)))
         return SimpleNamespace(id=9300 + len(self.sent_messages))
@@ -1072,9 +1186,345 @@ def test_clone_timeline_stops_when_sent_text_mapping_cannot_be_persisted(tmp_pat
     assert client.sent_messages == ["hello clone"]
     assert migration is not None
     assert migration["status"] == "error"
-    assert mapping is None
+    assert mapping is not None
+    assert mapping["status"] == "pending"
+    assert mapping["delivery_random_id"] is not None
     assert statuses[-1] == "error"
     assert any("完整时间线迁移失败" in message for message in logs)
+
+
+def test_clone_timeline_reuses_text_delivery_random_id_after_mapping_failure(tmp_path):
+    class _IdempotentTextClient(_TimelineMigrationClient):
+        def __init__(self):
+            super().__init__()
+            self._remote_text_ids = {}
+            self.raw_text_random_ids = []
+
+        def get_input_entity(self, value):
+            return f"input:{value}"
+
+        def __call__(self, request):
+            random_id = int(request.random_id)
+            self.raw_text_random_ids.append(random_id)
+            if random_id not in self._remote_text_ids:
+                target_message_id = 9400 + len(self._remote_text_ids) + 1
+                self._remote_text_ids[random_id] = target_message_id
+                self.sent_messages.append(str(request.message))
+                self.timeline_events.append(("text", str(request.message)))
+            return "updates"
+
+        def _get_response_message(self, request, _updates, _target):
+            return SimpleNamespace(id=self._remote_text_ids[int(request.random_id)])
+
+    db_path = tmp_path / "clone-timeline-text-resume.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        create_clone_migration(
+            conn,
+            migration_id="job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-timeline",
+            mode="timeline_replay",
+            target_chat_id=777,
+            target_title="Source Backup",
+            target_write_account="text:primary",
+            plan={"plan_id": "plan-text"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    client = _IdempotentTextClient()
+    def run_timeline(*, mapping_failure: bool) -> None:
+        with ExitStack() as stack:
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._start_job_heartbeat",
+                    return_value=_heartbeat_pair(),
+                )
+            )
+            stack.enter_context(
+                patch("tg_harvest.admin_jobs.clone_timeline_migration.finish_job_heartbeat")
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._admin_job_update_progress"
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._admin_job_stop_requested",
+                    return_value=False,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._ensure_base_session_valid",
+                    return_value=True,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._create_isolated_worker_client",
+                    return_value=client,
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._disconnect_worker_client"
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "tg_harvest.admin_jobs.clone_timeline_migration._cleanup_isolated_worker_session"
+                )
+            )
+            stack.enter_context(
+                patch("tg_harvest.admin_jobs.clone_timeline_migration.time.sleep")
+            )
+            if mapping_failure:
+                stack.enter_context(
+                    patch(
+                        "tg_harvest.admin_jobs.clone_timeline_migration.record_text_mapping",
+                        side_effect=CloneMappingPersistenceError("mapping write failed"),
+                    )
+                )
+            _admin_clone_timeline_migration_job_runner(
+                "job-timeline",
+                run_id="job-clone",
+                plan_id="plan-text",
+                migration_id="job-timeline",
+                cfg=_runner_cfg(),
+                get_conn_fn=lambda: _connect(db_path),
+                admin_job_set_status_fn=lambda *_args: True,
+                admin_job_append_log_fn=lambda *_args: None,
+            )
+
+    run_timeline(mapping_failure=True)
+
+    conn = _connect(db_path)
+    try:
+        pending_mapping = load_clone_message_mapping(
+            conn,
+            run_id="job-clone",
+            source_chat_id=100,
+            source_message_id=1,
+            chunk_index=0,
+            mode="text_replay",
+        )
+    finally:
+        conn.close()
+
+    assert pending_mapping is not None
+    assert pending_mapping["status"] == "pending"
+    assert pending_mapping["delivery_random_id"] is not None
+
+    run_timeline(mapping_failure=False)
+
+    conn = _connect(db_path)
+    try:
+        mapping = load_clone_message_mapping(
+            conn,
+            run_id="job-clone",
+            source_chat_id=100,
+            source_message_id=1,
+            chunk_index=0,
+            mode="text_replay",
+        )
+    finally:
+        conn.close()
+
+    assert client.sent_messages == ["hello clone"]
+    assert client.raw_text_random_ids == [
+        pending_mapping["delivery_random_id"],
+        pending_mapping["delivery_random_id"],
+    ]
+    assert mapping is not None
+    assert mapping["status"] == "done"
+    assert mapping["target_message_id"] == 9401
+
+
+def test_clone_timeline_stops_before_send_when_source_advances_past_snapshot(tmp_path):
+    db_path = tmp_path / "clone-timeline-stale-snapshot.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        update_clone_plan(
+            conn,
+            plan_id="plan-text",
+            capabilities={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 1},
+            },
+            plan={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 1},
+            },
+        )
+        create_clone_migration(
+            conn,
+            migration_id="job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-timeline",
+            mode="timeline_replay",
+            target_chat_id=777,
+            target_title="Source Backup",
+            target_write_account="text:primary",
+            plan={"plan_id": "plan-text"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    client = _TimelineMigrationClient()
+    client.add_source_message(2, media=False)
+    statuses = []
+    logs = []
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._start_job_heartbeat",
+            return_value=_heartbeat_pair(),
+        ),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._admin_job_update_progress"),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._admin_job_stop_requested",
+            return_value=False,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._ensure_base_session_valid",
+            return_value=True,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._create_isolated_worker_client",
+            return_value=client,
+        ),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._disconnect_worker_client"),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._cleanup_isolated_worker_session"
+        ),
+    ):
+        _admin_clone_timeline_migration_job_runner(
+            "job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            migration_id="job-timeline",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+        )
+
+    conn = _connect(db_path)
+    try:
+        migration = load_latest_clone_migration(conn, "job-clone", mode="timeline_replay")
+    finally:
+        conn.close()
+
+    assert client.sent_messages == []
+    assert migration is not None
+    assert migration["status"] == "error"
+    assert statuses[-1] == "error"
+    assert any("源群在预检后已有新消息" in message for message in logs)
+
+
+def test_clone_timeline_does_not_mark_stale_snapshot_complete_after_send(tmp_path):
+    class _SourceAdvancingClient(_TimelineMigrationClient):
+        def send_message(self, entity, text, **kwargs):
+            result = super().send_message(entity, text, **kwargs)
+            if 2 not in self.source_messages:
+                self.add_source_message(2, media=False)
+            return result
+
+    db_path = tmp_path / "clone-timeline-snapshot-advance.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        update_clone_plan(
+            conn,
+            plan_id="plan-text",
+            capabilities={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 1},
+            },
+            plan={
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 1},
+            },
+        )
+        create_clone_migration(
+            conn,
+            migration_id="job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-timeline",
+            mode="timeline_replay",
+            target_chat_id=777,
+            target_title="Source Backup",
+            target_write_account="text:primary",
+            plan={"plan_id": "plan-text"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    client = _SourceAdvancingClient()
+    client.add_source_message(1, media=False)
+    statuses = []
+    logs = []
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._start_job_heartbeat",
+            return_value=_heartbeat_pair(),
+        ),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._admin_job_update_progress"),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._admin_job_stop_requested",
+            return_value=False,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._ensure_base_session_valid",
+            return_value=True,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._create_isolated_worker_client",
+            return_value=client,
+        ),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration._disconnect_worker_client"),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._cleanup_isolated_worker_session"
+        ),
+        patch("tg_harvest.admin_jobs.clone_timeline_migration.time.sleep"),
+    ):
+        _admin_clone_timeline_migration_job_runner(
+            "job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            migration_id="job-timeline",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: statuses.append(status) or True,
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+        )
+
+    conn = _connect(db_path)
+    try:
+        migration = load_latest_clone_migration(conn, "job-clone", mode="timeline_replay")
+    finally:
+        conn.close()
+
+    assert client.sent_messages == ["hello clone"]
+    assert migration is not None
+    assert migration["status"] == "error"
+    assert statuses[-1] == "error"
+    assert any("迁移期间已有新消息" in message for message in logs)
 
 
 def test_text_mapping_write_failure_is_not_reclassified_as_send_failure():
@@ -1261,7 +1711,7 @@ def test_clone_timeline_migration_job_preserves_mixed_text_media_order(tmp_path)
     ]
     assert client.timeline_events[1][2]["drop_author"] is True
     assert client.timeline_events[3][2]["drop_author"] is True
-    assert "as_album" not in client.timeline_events[3][2]
+    assert client.timeline_events[3][2]["silent"] is True
     assert migration is not None
     assert migration["status"] == "done"
     assert migration["phase"] == "done"
@@ -1434,7 +1884,7 @@ def test_clone_timeline_migration_job_api_expands_incomplete_media_group_in_plac
         ("text", "after album"),
     ]
     assert client.timeline_events[1][2]["drop_author"] is True
-    assert "as_album" not in client.timeline_events[1][2]
+    assert client.timeline_events[1][2]["silent"] is True
     assert migration is not None
     assert migration["status"] == "done"
     assert migration["phase"] == "done"
@@ -1566,7 +2016,7 @@ def test_clone_timeline_migration_splits_mixed_media_group_in_order(tmp_path):
         ("media", 24),
     ]
     assert all(event[2]["drop_author"] is True for event in client.timeline_events)
-    assert all("as_album" not in event[2] for event in client.timeline_events)
+    assert all(event[2]["silent"] is True for event in client.timeline_events)
     assert migration is not None
     assert migration["status"] == "done"
     assert migration["phase"] == "done"
@@ -1690,7 +2140,7 @@ def test_clone_timeline_migration_chunks_album_compatible_group_at_limit(tmp_pat
         ("media", [41, 42]),
     ]
     assert all(event[2]["drop_author"] is True for event in client.timeline_events)
-    assert all("as_album" not in event[2] for event in client.timeline_events)
+    assert all(event[2]["silent"] is True for event in client.timeline_events)
     assert migration is not None
     assert migration["status"] == "done"
     assert migration["phase"] == "done"
@@ -1841,13 +2291,13 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
                 "relay_api_rebuild",
                 "skip_not_implemented",
                 (
-                    '{"target_write_account":"secondary","media_relay":'
+                    '{"target_write_account":"secondary","source_snapshot":{"message_id":100000},"media_relay":'
                     '{"enabled":true,"chat_id":999,"source_account":"primary",'
                     '"target_account":"secondary","keeps_source_link":false,'
                     '"keeps_relay_link":false}}'
                 ),
                 (
-                    '{"target_write_account":"secondary","media_relay":'
+                    '{"target_write_account":"secondary","source_snapshot":{"message_id":100000},"media_relay":'
                     '{"enabled":true,"chat_id":999,"source_account":"primary",'
                     '"target_account":"secondary","keeps_source_link":false,'
                     '"keeps_relay_link":false}}'
@@ -1916,18 +2366,20 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
     assert source_client.forward_calls == [
         (
             (SimpleNamespace(id=999, title="Relay Channel"), 1),
-            {
-                "from_peer": SimpleNamespace(id=100, title="Source Group"),
-                "drop_author": True,
+                {
+                    "from_peer": SimpleNamespace(id=100, title="Source Group"),
+                    "drop_author": True,
+                    "silent": True,
             },
         )
     ]
     assert target_client.forward_calls == [
         (
             (SimpleNamespace(id=777, title="Source Backup"), 9201),
-            {
-                "from_peer": SimpleNamespace(id=999, title="Relay Channel"),
-                "drop_author": True,
+                {
+                    "from_peer": SimpleNamespace(id=999, title="Relay Channel"),
+                    "drop_author": True,
+                    "silent": True,
             },
         )
     ]
@@ -1947,7 +2399,7 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
     assert mapping["status"] == "done"
 
 
-def test_clone_timeline_migration_relay_second_hop_floodwait_switches_to_first_account(tmp_path):
+def test_clone_timeline_migration_relay_second_hop_floodwait_preserves_recovery_state(tmp_path):
     db_path = tmp_path / "clone-timeline-relay-second-hop-switch.db"
     _create_job_db(db_path)
     _create_ready_clone_state(db_path)
@@ -1988,13 +2440,13 @@ def test_clone_timeline_migration_relay_second_hop_floodwait_switches_to_first_a
                 "relay_api_rebuild",
                 "skip_not_implemented",
                 (
-                    '{"target_write_account":"secondary","media_relay":'
+                    '{"target_write_account":"secondary","source_snapshot":{"message_id":100000},"media_relay":'
                     '{"enabled":true,"chat_id":999,"source_account":"primary",'
                     '"target_account":"secondary","keeps_source_link":false,'
                     '"keeps_relay_link":false}}'
                 ),
                 (
-                    '{"target_write_account":"secondary","media_relay":'
+                    '{"target_write_account":"secondary","source_snapshot":{"message_id":100000},"media_relay":'
                     '{"enabled":true,"chat_id":999,"source_account":"primary",'
                     '"target_account":"secondary","keeps_source_link":false,'
                     '"keeps_relay_link":false}}'
@@ -2067,11 +2519,10 @@ def test_clone_timeline_migration_relay_second_hop_floodwait_switches_to_first_a
         conn.close()
 
     assert migration is not None
-    assert migration["status"] == "done"
+    assert migration["status"] == "error"
     assert mapping is not None
-    assert mapping["status"] == "done"
-    assert any("第二跳触发频控" in message for message in logs)
-    assert any("改由 primary 接管中转群 -> 克隆群" in message for message in logs)
+    assert mapping["status"] == "error"
+    assert any("媒体桥接第二跳" in message for message in logs)
 
 
 def test_clone_timeline_migration_does_not_fallback_to_username_resolution(tmp_path):

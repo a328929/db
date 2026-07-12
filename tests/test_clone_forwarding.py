@@ -1,13 +1,8 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-import pytest
-
 from tg_harvest.admin_jobs.clone_forwarding import (
     clone_forward_without_source_attribution,
-)
-from tg_harvest.admin_jobs.clone_media_copy import (
-    copy_clone_media_via_relay_without_source,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -22,44 +17,22 @@ class _ForwardClient:
         return ["sent"]
 
 
-class _RelaySourceClient:
+class _DurableForwardClient:
     def __init__(self):
-        self.forward_calls = []
-        self.delete_calls = []
+        self.request = None
 
-    def forward_messages(self, *args, **kwargs):
-        self.forward_calls.append((args, kwargs))
-        return [SimpleNamespace(id=7001), SimpleNamespace(id=7002)]
+    def get_input_entity(self, value):
+        return f"input:{value}"
 
-    def delete_messages(self, *args, **kwargs):
-        self.delete_calls.append((args, kwargs))
-        return True
+    def __call__(self, request):
+        self.request = request
+        return "updates"
 
-
-class _RelayPartialSourceClient:
-    def __init__(self):
-        self.forward_calls = []
-        self.delete_calls = []
-
-    def forward_messages(self, *args, **kwargs):
-        self.forward_calls.append((args, kwargs))
-        return [None, SimpleNamespace(id=7002)]
-
-    def delete_messages(self, *args, **kwargs):
-        self.delete_calls.append((args, kwargs))
-        return True
+    def _get_response_message(self, request, _updates, _target):
+        return [SimpleNamespace(id=7000 + index) for index, _ in enumerate(request.id)]
 
 
-class _RelayTargetFailClient:
-    def __init__(self):
-        self.forward_calls = []
-
-    def forward_messages(self, *args, **kwargs):
-        self.forward_calls.append((args, kwargs))
-        raise RuntimeError("target copy failed")
-
-
-def test_clone_forward_without_source_attribution_forces_drop_author():
+def test_clone_forward_without_source_attribution_forces_drop_author_and_silence():
     client = _ForwardClient()
 
     result = clone_forward_without_source_attribution(
@@ -67,7 +40,6 @@ def test_clone_forward_without_source_attribution_forces_drop_author():
         "target",
         [1, 2],
         from_peer="source",
-        as_album=True,
     )
 
     assert result == ["sent"]
@@ -77,79 +49,29 @@ def test_clone_forward_without_source_attribution_forces_drop_author():
             {
                 "from_peer": "source",
                 "drop_author": True,
+                "silent": True,
             },
         )
     ]
 
 
-def test_relay_copy_cleans_temporary_messages_when_target_copy_fails():
-    source_client = _RelaySourceClient()
-    target_client = _RelayTargetFailClient()
+def test_clone_forward_reuses_persisted_random_ids_when_available():
+    client = _DurableForwardClient()
 
-    with pytest.raises(RuntimeError, match="target copy failed"):
-        copy_clone_media_via_relay_without_source(
-            source_client=source_client,
-            target_client=target_client,
-            relay_entity_for_source="relay-for-source",
-            relay_entity_for_target="relay-for-target",
-            target_entity="target",
-            message_ids=[11, 12],
-            source_entity="source",
-            as_album=True,
-        )
+    result = clone_forward_without_source_attribution(
+        client,
+        "target",
+        [11, 12],
+        from_peer="source",
+        random_ids=[101, 102],
+    )
 
-    assert source_client.forward_calls == [
-        (
-            ("relay-for-source", [11, 12]),
-            {
-                "from_peer": "source",
-                "drop_author": True,
-            },
-        )
-    ]
-    assert target_client.forward_calls == [
-        (
-            ("target", [7001, 7002]),
-            {
-                "from_peer": "relay-for-target",
-                "drop_author": True,
-            },
-        )
-    ]
-    assert source_client.delete_calls == [
-        (("relay-for-source", [7001, 7002]), {"revoke": True})
-    ]
-
-
-def test_relay_copy_rejects_partial_first_hop_to_keep_mapping_aligned():
-    source_client = _RelayPartialSourceClient()
-    target_client = _ForwardClient()
-
-    with pytest.raises(RuntimeError, match="未完整返回消息 ID"):
-        copy_clone_media_via_relay_without_source(
-            source_client=source_client,
-            target_client=target_client,
-            relay_entity_for_source="relay-for-source",
-            relay_entity_for_target="relay-for-target",
-            target_entity="target",
-            message_ids=[11, 12],
-            source_entity="source",
-            as_album=True,
-        )
-
-    assert source_client.forward_calls == [
-        (
-            ("relay-for-source", [11, 12]),
-            {
-                "from_peer": "source",
-                "drop_author": True,
-            },
-        )
-    ]
-    assert target_client.calls == []
-    assert source_client.delete_calls == [
-        (("relay-for-source", [7002]), {"revoke": True})
-    ]
+    assert [message.id for message in result] == [7000, 7001]
+    assert client.request is not None
+    assert client.request.id == [11, 12]
+    assert client.request.random_id == [101, 102]
+    assert client.request.drop_author is True
+    assert client.request.silent is True
 
 
 def test_clone_forward_messages_calls_are_centralized():

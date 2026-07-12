@@ -12,6 +12,7 @@ from tg_harvest.admin_jobs.clone_job_state import (
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    call_with_conn,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
     mark_admin_job_running,
@@ -36,7 +37,11 @@ from tg_harvest.domain.clone_plan import (
 )
 from tg_harvest.domain.coerce import safe_int
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry
-from tg_harvest.storage.clone import load_clone_run, update_clone_plan
+from tg_harvest.storage.clone import (
+    build_clone_source_snapshot,
+    load_clone_run,
+    update_clone_plan,
+)
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
 
@@ -95,6 +100,32 @@ def _target_send_permission(entity: Any) -> str:
     return "unknown"
 
 
+def _source_forwarding_permission(entity: Any) -> str:
+    if entity is None:
+        return "unknown"
+    if bool(getattr(entity, "noforwards", False)):
+        return "blocked"
+    if hasattr(entity, "noforwards"):
+        return "ok"
+    return "unknown"
+
+
+def _relay_safety_state(entity: Any) -> str:
+    """Only a private broadcast channel is safe for temporary source media."""
+    if entity is None:
+        return "unknown"
+    username = _clean_text(getattr(entity, "username", ""))
+    if username:
+        return "unsafe_public"
+    if bool(getattr(entity, "megagroup", False)):
+        return "unsafe_group"
+    if getattr(entity, "broadcast", None) is True:
+        return "private_channel"
+    if getattr(entity, "broadcast", None) is False:
+        return "unsafe_group"
+    return "unknown"
+
+
 def _resolve_access(
     client: Any,
     *,
@@ -147,12 +178,14 @@ def _base_account_result(
         "authorized": False,
         "source_access": "unknown",
         "source_error": "",
+        "source_forwarding_permission": "unknown",
         "target_access": "unknown",
         "target_error": "",
         "target_send_permission": "unknown",
         "relay_access": "not_configured",
         "relay_error": "",
         "relay_send_permission": "unknown",
+        "relay_safety": "not_configured",
         "source_latest_message": {},
         "source_latest_error": "",
     }
@@ -194,6 +227,9 @@ def _check_account_access(
         result["source_access"] = source_access
         result["source_error"] = source_error
         if source_entity is not None:
+            result["source_forwarding_permission"] = _source_forwarding_permission(
+                source_entity
+            )
             latest_message, latest_error = _read_latest_source_message(
                 client,
                 source_entity,
@@ -220,14 +256,19 @@ def _check_account_access(
             relay_access, relay_entity, relay_error = _resolve_access(
                 client,
                 chat_id=relay_chat_id,
-                chat_username=_clean_text(getattr(cfg, "clone_relay_chat_username", "")),
+                chat_username=_clean_text(
+                    getattr(cfg, "clone_relay_chat_username", "")
+                ),
             )
             result["relay_access"] = relay_access
             result["relay_error"] = relay_error
             result["relay_send_permission"] = _target_send_permission(relay_entity)
+            result["relay_safety"] = _relay_safety_state(relay_entity)
         return result
     except Exception as exc:
-        logging.exception("克隆深度预检账号检查失败: job_id=%s account=%s", job_id, account)
+        logging.exception(
+            "克隆深度预检账号检查失败: job_id=%s account=%s", job_id, account
+        )
         result["session_status"] = "error"
         result["source_error"] = result["source_error"] or admin_error_message(exc)
         result["target_error"] = result["target_error"] or admin_error_message(exc)
@@ -269,23 +310,34 @@ def _first_account(
 
 
 def _target_usable(account: dict[str, Any]) -> bool:
-    return account.get("target_access") == "ok" and account.get(
-        "target_send_permission"
-    ) != "blocked"
+    return (
+        account.get("target_access") == "ok"
+        and account.get("target_send_permission") != "blocked"
+    )
 
 
 def _account_can_migrate_media(account: dict[str, Any]) -> bool:
-    return account.get("source_access") == "ok" and _target_usable(account)
+    return (
+        account.get("source_access") == "ok"
+        and account.get("source_forwarding_permission") != "blocked"
+        and _target_usable(account)
+    )
 
 
 def _relay_usable(account: dict[str, Any]) -> bool:
-    return account.get("relay_access") == "ok" and account.get(
-        "relay_send_permission"
-    ) != "blocked"
+    return (
+        account.get("relay_access") == "ok"
+        and account.get("relay_send_permission") != "blocked"
+        and account.get("relay_safety") == "private_channel"
+    )
 
 
 def _account_can_relay_from_source(account: dict[str, Any]) -> bool:
-    return account.get("source_access") == "ok" and _relay_usable(account)
+    return (
+        account.get("source_access") == "ok"
+        and account.get("source_forwarding_permission") != "blocked"
+        and _relay_usable(account)
+    )
 
 
 def _account_can_relay_to_target(account: dict[str, Any]) -> bool:
@@ -316,8 +368,12 @@ def _relay_account_diagnostics(accounts: list[dict[str, Any]]) -> str:
             continue
         relay_access = _clean_text(account.get("relay_access")) or "unknown"
         send_permission = _clean_text(account.get("relay_send_permission")) or "unknown"
+        relay_safety = _clean_text(account.get("relay_safety")) or "unknown"
         relay_error = _clean_text(account.get("relay_error"))
-        detail = f"{account_name}: access={relay_access}, send={send_permission}"
+        detail = (
+            f"{account_name}: access={relay_access}, send={send_permission}, "
+            f"safety={relay_safety}"
+        )
         if relay_error:
             detail += f", error={relay_error}"
         parts.append(detail)
@@ -337,6 +393,7 @@ def _build_deep_preflight_outcome(
     run: dict[str, Any],
     accounts: list[dict[str, Any]],
     network_access_checked: bool,
+    source_snapshot: dict[str, Any] | None = None,
     cfg: Any | None = None,
 ) -> dict[str, Any]:
     source_access = _aggregate_access(accounts, "source_access")
@@ -353,6 +410,16 @@ def _build_deep_preflight_outcome(
         _first_account(accounts, _account_can_relay_to_target) if relay else ""
     )
     relay_ready = bool(relay and relay_source_account and relay_target_account)
+    local_snapshot = source_snapshot if isinstance(source_snapshot, dict) else {}
+    local_latest_message_id = safe_int(local_snapshot.get("latest_message_id"))
+    remote_latest_message = _first_latest_message(accounts)
+    remote_latest_message_id = safe_int(remote_latest_message.get("message_id"))
+    source_snapshot_payload = {
+        "message_id": remote_latest_message_id,
+        "local_message_id": local_latest_message_id,
+        "local_message_count": safe_int(local_snapshot.get("message_count")),
+        "local_message_ts": safe_int(local_snapshot.get("latest_message_ts")),
+    }
 
     blocking_issues: list[str] = []
     warnings: list[str] = []
@@ -374,8 +441,27 @@ def _build_deep_preflight_outcome(
     ):
         blocking_issues.append("检测到目标副本可能禁止当前账号发消息。")
 
+    if remote_latest_message_id <= 0:
+        blocking_issues.append("未能确认源群最新消息，不能建立无遗漏迁移快照。")
+    elif local_latest_message_id < remote_latest_message_id:
+        blocking_issues.append(
+            "本地数据库尚未采集到源群最新消息，不能开始迁移以免遗漏；"
+            "请先完成源群同步后重新执行在线深度预检。"
+        )
+
     if source_access != "ok":
-        warnings.append("源群无法被当前可用账号稳定访问；媒体只能依赖已有数据库文本，不能从源群转发。")
+        warnings.append(
+            "源群无法被当前可用账号稳定访问；媒体只能依赖已有数据库文本，不能从源群转发。"
+        )
+
+    if any(
+        account.get("source_forwarding_permission") == "blocked"
+        for account in accounts
+        if account.get("source_access") == "ok"
+    ):
+        warnings.append(
+            "源群已限制转发或保存内容；媒体迁移会被 Telegram 阻断，不会尝试绕过限制。"
+        )
 
     if not migration_account and relay_ready:
         warnings.append(
@@ -394,6 +480,21 @@ def _build_deep_preflight_outcome(
                 "才能让两个账号桥接媒体和相册迁移。"
             )
 
+    if relay and any(
+        _clean_text(account.get("relay_safety")).startswith("unsafe_")
+        for account in accounts
+    ):
+        blocking_issues.append(
+            "固定中转目标不是私有广播频道，拒绝暂存源媒体以避免向第三方暴露内容。"
+        )
+    elif relay and any(
+        account.get("relay_access") == "ok" and account.get("relay_safety") == "unknown"
+        for account in accounts
+    ):
+        blocking_issues.append(
+            "无法验证固定中转频道的私有广播属性，拒绝执行中转媒体迁移。"
+        )
+
     if secondary_session_status == "not_configured":
         warnings.append("未配置独立第二账号，无法验证第二账号迁移链路。")
 
@@ -402,7 +503,9 @@ def _build_deep_preflight_outcome(
         for account in accounts
         if account.get("target_access") == "ok"
     ):
-        warnings.append("目标副本写入权限未执行试发验证，真正迁移前仍建议先小批量试跑。")
+        warnings.append(
+            "目标副本写入权限未执行试发验证，真正迁移前仍建议先小批量试跑。"
+        )
 
     if any(account.get("source_latest_error") for account in accounts):
         warnings.append("源群最新消息读取失败，源群访问只确认到实体解析层。")
@@ -411,7 +514,7 @@ def _build_deep_preflight_outcome(
     if migration_account:
         media_strategy = CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION
         media_group_strategy = "strict_skip_incomplete"
-        avatar_strategy = "copy_if_accessible"
+        avatar_strategy = "skip_not_implemented"
     elif relay_ready:
         media_strategy = CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION
         media_group_strategy = "relay_api_rebuild"
@@ -432,6 +535,7 @@ def _build_deep_preflight_outcome(
         "forward_requires_drop_author": True,
         "forward_keeps_source_link": False,
         "source_latest_message": _first_latest_message(accounts),
+        "source_snapshot": source_snapshot_payload,
         "accounts": accounts,
         "media_relay": {
             **relay,
@@ -442,12 +546,13 @@ def _build_deep_preflight_outcome(
             "requires_drop_author_each_hop": True,
             "keeps_source_link": False,
             "keeps_relay_link": False,
+            "requires_private_broadcast_channel": True,
         }
         if relay
         else {},
     }
     plan = {
-        "version": 1,
+        "version": 2,
         "generated_at": _admin_now_iso(),
         "run_id": run.get("run_id"),
         "source": {
@@ -457,6 +562,7 @@ def _build_deep_preflight_outcome(
             "message_count": run.get("source_message_count"),
             "last_message_at": run.get("source_last_message_at"),
             "last_message_ts": run.get("source_last_message_ts"),
+            "snapshot": source_snapshot_payload,
         },
         "target": {
             "chat_id": run.get("target_chat_id"),
@@ -476,6 +582,7 @@ def _build_deep_preflight_outcome(
         "forward_privacy": CLONE_FORWARD_PRIVACY_MODE,
         "forward_requires_drop_author": True,
         "forward_keeps_source_link": False,
+        "source_snapshot": source_snapshot_payload,
         "text_strategy": text_strategy,
         "media_strategy": media_strategy,
         "media_group_strategy": media_group_strategy,
@@ -576,6 +683,11 @@ def _admin_clone_deep_preflight_job_runner(
         )
 
         run = _load_clone_run_required(get_conn_fn=get_conn_fn, run_id=run_id)
+        source_snapshot = call_with_conn(
+            get_conn_fn,
+            build_clone_source_snapshot,
+            source_chat_id=int(run["source_chat_id"]),
+        )
         admin_job_append_log_fn(
             job_id,
             f"开始在线深度预检：run={run_id}，源={run['source_title']}，目标={run.get('target_title') or '未创建'}",
@@ -594,6 +706,7 @@ def _admin_clone_deep_preflight_job_runner(
                 run=run,
                 accounts=accounts,
                 network_access_checked=False,
+                source_snapshot=source_snapshot,
                 cfg=cfg,
             )
         else:
@@ -644,6 +757,7 @@ def _admin_clone_deep_preflight_job_runner(
                 run=run,
                 accounts=accounts,
                 network_access_checked=True,
+                source_snapshot=source_snapshot,
                 cfg=cfg,
             )
 

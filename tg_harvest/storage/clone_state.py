@@ -18,6 +18,7 @@ from tg_harvest.storage.clone_state_common import (
 from tg_harvest.storage.clone_state_delete import delete_clone_run
 from tg_harvest.storage.clone_state_mappings import (
     count_clone_message_mappings,
+    ensure_clone_text_delivery,
     list_clone_message_mappings,
     load_clone_message_mapping,
     load_clone_message_mapping_summary,
@@ -65,6 +66,7 @@ __all__ = [
     "_query_count",
     "_query_one",
     "count_clone_message_mappings",
+    "ensure_clone_text_delivery",
     "count_clone_runs",
     "create_clone_migration",
     "create_clone_plan",

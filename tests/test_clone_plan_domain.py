@@ -28,6 +28,7 @@ class ClonePlanDomainTests(unittest.TestCase):
             "blocking_issues": [],
             "capabilities": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 100},
                 "media_relay": {
                     "enabled": True,
                     "chat_id": 999,
@@ -37,6 +38,7 @@ class ClonePlanDomainTests(unittest.TestCase):
             },
             "plan": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 100},
                 "media_relay": {
                     "enabled": True,
                     "chat_id": 999,
@@ -69,6 +71,7 @@ class ClonePlanDomainTests(unittest.TestCase):
             "blocking_issues": [],
             "capabilities": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 100},
                 "media_relay": {
                     "enabled": True,
                     "chat_id": 999,
@@ -78,6 +81,7 @@ class ClonePlanDomainTests(unittest.TestCase):
             },
             "plan": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 100},
                 "media_relay": {
                     "enabled": True,
                     "chat_id": 999,

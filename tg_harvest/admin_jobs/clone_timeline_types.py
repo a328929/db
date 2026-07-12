@@ -36,6 +36,7 @@ class TimelineExecutionState:
     plan_id: str
     migration_id: str
     source_chat_id: int
+    source_snapshot_message_id: int
     target_chat_id: int
     target_title: str
     source_title: str

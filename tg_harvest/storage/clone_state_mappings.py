@@ -1,4 +1,5 @@
 import logging
+import secrets
 import sqlite3
 from typing import Any
 
@@ -14,6 +15,19 @@ from tg_harvest.storage.clone_state_common import (
     _query_one,
 )
 from tg_harvest.storage.row_access import row_int as _row_int
+
+_MAX_TELEGRAM_RANDOM_ID = (1 << 63) - 1
+
+
+def _new_delivery_random_id() -> int:
+    return secrets.randbelow(_MAX_TELEGRAM_RANDOM_ID) + 1
+
+
+def _valid_delivery_random_id(value: Any) -> int | None:
+    normalized = _optional_int(value)
+    if normalized is None or normalized <= 0 or normalized > _MAX_TELEGRAM_RANDOM_ID:
+        return None
+    return normalized
 
 
 def record_clone_message_mapping(
@@ -34,13 +48,17 @@ def record_clone_message_mapping(
     status: str = "done",
     error_message: Any = None,
     sent_at: Any = None,
+    delivery_random_id: Any = None,
+    delivery_account: Any = None,
 ) -> dict:
     now = _now_iso()
     normalized_run_id = _clean_text(run_id)
     normalized_mode = _clean_text(mode) or "text_replay"
     normalized_sent_at = _clean_text(sent_at) if sent_at is not None else now
+    normalized_delivery_account = _clean_text(delivery_account).lower()
     cur = conn.cursor()
     try:
+        normalized_delivery_random_id = _valid_delivery_random_id(delivery_random_id)
         cur.execute(
             """
             INSERT INTO admin_clone_message_map(
@@ -53,6 +71,8 @@ def record_clone_message_mapping(
                 source_msg_date_text,
                 target_chat_id,
                 target_message_id,
+                delivery_random_id,
+                delivery_account,
                 chunk_index,
                 chunk_count,
                 mode,
@@ -62,7 +82,7 @@ def record_clone_message_mapping(
                 created_at,
                 updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(
                 run_id,
                 source_chat_id,
@@ -76,6 +96,14 @@ def record_clone_message_mapping(
                 source_msg_date_text = excluded.source_msg_date_text,
                 target_chat_id = excluded.target_chat_id,
                 target_message_id = excluded.target_message_id,
+                delivery_random_id = COALESCE(
+                    excluded.delivery_random_id,
+                    admin_clone_message_map.delivery_random_id
+                ),
+                delivery_account = CASE
+                    WHEN excluded.delivery_account <> '' THEN excluded.delivery_account
+                    ELSE admin_clone_message_map.delivery_account
+                END,
                 chunk_count = excluded.chunk_count,
                 status = excluded.status,
                 error_message = excluded.error_message,
@@ -92,6 +120,8 @@ def record_clone_message_mapping(
                 _clean_text(source_msg_date_text),
                 int(target_chat_id),
                 _optional_int(target_message_id),
+                normalized_delivery_random_id,
+                normalized_delivery_account,
                 int(chunk_index),
                 int(chunk_count),
                 normalized_mode,
@@ -149,6 +179,152 @@ def record_clone_message_mapping(
             source_message_id,
             normalized_mode,
         )
+        raise
+    finally:
+        cur.close()
+
+
+def ensure_clone_text_delivery(
+    conn: sqlite3.Connection,
+    *,
+    migration_id: str,
+    run_id: str,
+    plan_id: str,
+    source_chat_id: int,
+    source_message_id: int,
+    source_msg_date_ts: Any = None,
+    source_msg_date_text: Any = None,
+    target_chat_id: int,
+    target_account: str,
+    chunk_index: int,
+    chunk_count: int,
+) -> dict:
+    """Durably reserve a text delivery before sending it to Telegram.
+
+    The stored MTProto random ID is reused after a timeout or process restart,
+    preventing a successful but not-yet-mapped text message from being sent
+    twice.
+    """
+    normalized_run_id = _clean_text(run_id)
+    normalized_source_chat_id = int(source_chat_id)
+    normalized_source_message_id = int(source_message_id)
+    normalized_chunk_index = int(chunk_index)
+    normalized_target_account = _clean_text(target_account).lower()
+    existing = load_clone_message_mapping(
+        conn,
+        run_id=normalized_run_id,
+        source_chat_id=normalized_source_chat_id,
+        source_message_id=normalized_source_message_id,
+        chunk_index=normalized_chunk_index,
+        mode="text_replay",
+    )
+    if existing is not None and existing.get("status") == "done":
+        return existing
+    if existing is not None and int(existing.get("target_chat_id") or 0) not in (
+        0,
+        int(target_chat_id),
+    ):
+        raise RuntimeError("已存在文本交付记录指向不同目标，拒绝重复迁移")
+    if (
+        existing is not None
+        and existing.get("delivery_account")
+        and normalized_target_account
+        and existing["delivery_account"] != normalized_target_account
+    ):
+        raise RuntimeError("已存在文本交付记录绑定不同目标侧账号，拒绝跨账号恢复")
+
+    delivery_random_id = _valid_delivery_random_id(
+        existing.get("delivery_random_id") if existing is not None else None
+    ) or _new_delivery_random_id()
+    now = _now_iso()
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            INSERT INTO admin_clone_message_map(
+                migration_id,
+                run_id,
+                plan_id,
+                source_chat_id,
+                source_message_id,
+                source_msg_date_ts,
+                source_msg_date_text,
+                target_chat_id,
+                target_message_id,
+                delivery_random_id,
+                delivery_account,
+                chunk_index,
+                chunk_count,
+                mode,
+                status,
+                error_message,
+                sent_at,
+                created_at,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, 'text_replay', 'pending', '', NULL, ?, ?)
+            ON CONFLICT(
+                run_id,
+                source_chat_id,
+                source_message_id,
+                chunk_index,
+                mode
+            ) DO UPDATE SET
+                migration_id = excluded.migration_id,
+                plan_id = excluded.plan_id,
+                source_msg_date_ts = excluded.source_msg_date_ts,
+                source_msg_date_text = excluded.source_msg_date_text,
+                target_chat_id = excluded.target_chat_id,
+                delivery_random_id = excluded.delivery_random_id,
+                delivery_account = CASE
+                    WHEN excluded.delivery_account <> '' THEN excluded.delivery_account
+                    ELSE admin_clone_message_map.delivery_account
+                END,
+                chunk_count = excluded.chunk_count,
+                status = 'pending',
+                error_message = '',
+                updated_at = excluded.updated_at
+            """,
+            (
+                _clean_text(migration_id),
+                normalized_run_id,
+                _clean_text(plan_id),
+                normalized_source_chat_id,
+                normalized_source_message_id,
+                _optional_int(source_msg_date_ts),
+                _clean_text(source_msg_date_text),
+                int(target_chat_id),
+                delivery_random_id,
+                normalized_target_account,
+                normalized_chunk_index,
+                int(chunk_count),
+                now,
+                now,
+            ),
+        )
+        return _commit_and_load_required(
+            conn,
+            load_fn=lambda: load_clone_message_mapping(
+                conn,
+                run_id=normalized_run_id,
+                source_chat_id=normalized_source_chat_id,
+                source_message_id=normalized_source_message_id,
+                chunk_index=normalized_chunk_index,
+                mode="text_replay",
+            ),
+            missing_message="clone text delivery 写入后读取失败",
+        )
+    except Exception:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            logging.exception(
+                "克隆文本交付意图写入失败后的回滚也失败: run_id=%s source=%s/%s chunk=%s",
+                normalized_run_id,
+                normalized_source_chat_id,
+                normalized_source_message_id,
+                normalized_chunk_index,
+            )
         raise
     finally:
         cur.close()

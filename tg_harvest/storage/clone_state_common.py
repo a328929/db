@@ -276,6 +276,10 @@ def _clone_message_mapping_from_row(row: sqlite3.Row | None) -> dict | None:
         "source_msg_date_text": str(row["source_msg_date_text"] or ""),
         "target_chat_id": _row_int(row, "target_chat_id"),
         "target_message_id": _optional_int(row["target_message_id"]),
+        "delivery_random_id": (
+            value if (value := _row_int(row, "delivery_random_id")) > 0 else None
+        ),
+        "delivery_account": str(row["delivery_account"] or ""),
         "chunk_index": _row_int(row, "chunk_index"),
         "chunk_count": _row_int(row, "chunk_count", 1),
         "mode": str(row["mode"] or ""),

@@ -415,6 +415,8 @@ def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: st
         source_msg_date_text     TEXT,
         target_chat_id           INTEGER NOT NULL,
         target_message_id        INTEGER,
+        delivery_random_id       INTEGER,
+        delivery_account         TEXT NOT NULL DEFAULT '',
         chunk_index              INTEGER NOT NULL DEFAULT 0,
         chunk_count              INTEGER NOT NULL DEFAULT 1,
         mode                     TEXT NOT NULL DEFAULT 'text_replay',
@@ -436,6 +438,49 @@ def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: st
         FOREIGN KEY(plan_id) REFERENCES admin_clone_plans(plan_id) ON DELETE SET NULL
     ){strict_suffix}
     """)
+
+
+def _create_admin_clone_media_transfers_table(
+    cur: sqlite3.Cursor,
+    strict_suffix: str,
+):
+    """Persist every media delivery hop so a restart can resume idempotently."""
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_clone_media_transfers (
+        id                       INTEGER PRIMARY KEY AUTOINCREMENT,
+        migration_id             TEXT NOT NULL,
+        run_id                   TEXT NOT NULL,
+        plan_id                  TEXT,
+        source_chat_id           INTEGER NOT NULL,
+        source_message_id        INTEGER NOT NULL,
+        target_chat_id           INTEGER NOT NULL,
+        transfer_strategy        TEXT NOT NULL,
+        relay_chat_id            INTEGER,
+        source_account           TEXT NOT NULL DEFAULT '',
+        target_account           TEXT NOT NULL DEFAULT '',
+        source_random_id         INTEGER,
+        target_random_id         INTEGER NOT NULL,
+        relay_message_id         INTEGER,
+        target_message_id        INTEGER,
+        source_hop_status        TEXT NOT NULL DEFAULT 'not_required',
+        target_hop_status        TEXT NOT NULL DEFAULT 'pending',
+        cleanup_status           TEXT NOT NULL DEFAULT 'not_required',
+        error_message            TEXT NOT NULL DEFAULT '',
+        created_at               TEXT NOT NULL,
+        updated_at               TEXT NOT NULL,
+        UNIQUE(run_id, source_chat_id, source_message_id),
+        FOREIGN KEY(migration_id) REFERENCES admin_clone_migrations(migration_id)
+            ON DELETE CASCADE,
+        FOREIGN KEY(run_id) REFERENCES admin_clone_runs(run_id) ON DELETE CASCADE,
+        FOREIGN KEY(plan_id) REFERENCES admin_clone_plans(plan_id) ON DELETE SET NULL
+    ){strict_suffix}
+    """)
+    cur.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_clone_media_transfers_recovery
+        ON admin_clone_media_transfers(run_id, target_hop_status, cleanup_status)
+        """
+    )
 
 
 def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
@@ -569,6 +614,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_clone_plans_table(cur, strict_suffix)
     _create_admin_clone_migrations_table(cur, strict_suffix)
     _create_admin_clone_message_map_table(cur, strict_suffix)
+    _create_admin_clone_media_transfers_table(cur, strict_suffix)
     _create_sync_scheduler_tables(cur, strict_suffix)
 
 
@@ -962,6 +1008,8 @@ def _ensure_admin_clone_message_map_schema(cur: sqlite3.Cursor) -> None:
             ("source_msg_date_text", "source_msg_date_text TEXT"),
             ("target_chat_id", "target_chat_id INTEGER NOT NULL DEFAULT 0"),
             ("target_message_id", "target_message_id INTEGER"),
+            ("delivery_random_id", "delivery_random_id INTEGER"),
+            ("delivery_account", "delivery_account TEXT NOT NULL DEFAULT ''"),
             ("chunk_index", "chunk_index INTEGER NOT NULL DEFAULT 0"),
             ("chunk_count", "chunk_count INTEGER NOT NULL DEFAULT 1"),
             ("mode", "mode TEXT NOT NULL DEFAULT 'text_replay'"),

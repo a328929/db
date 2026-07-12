@@ -14,6 +14,7 @@ from tg_harvest.admin_jobs.clone_timeline_types import (
 from tg_harvest.admin_jobs.common import call_with_conn
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.domain.clone_plan import (
+    clone_plan_source_snapshot_message_id,
     clone_plan_timeline_readiness,
     clone_plan_uses_media_relay,
 )
@@ -98,12 +99,14 @@ def timeline_preview(
     get_conn_fn: Callable[[], Any],
     run_id: str,
     source_chat_id: int,
+    max_source_message_id: int,
 ) -> dict[str, Any]:
     return call_with_conn(
         get_conn_fn,
         build_clone_timeline_replay_preview,
         run_id=run_id,
         source_chat_id=source_chat_id,
+        max_source_message_id=max_source_message_id,
     )
 
 
@@ -119,6 +122,8 @@ def validate_plan_for_timeline(
         raise RuntimeError("最新迁移计划存在阻断项，不能执行完整时间线迁移")
     if "target_inaccessible" in readiness["reason_codes"]:
         raise RuntimeError("目标副本不可访问，不能执行完整时间线迁移")
+    if "source_snapshot_missing" in readiness["reason_codes"]:
+        raise RuntimeError("迁移计划缺少已核验的源消息快照，请重新执行在线深度预检")
     if "no_timeline_remaining" in readiness["reason_codes"]:
         raise RuntimeError("没有剩余可迁移时间线消息")
     if "text_strategy_blocked" in readiness["reason_codes"]:
@@ -128,7 +133,7 @@ def validate_plan_for_timeline(
     if "source_inaccessible" in readiness["reason_codes"]:
         raise RuntimeError("源群不可访问，不能执行媒体时间线复制")
     if "media_strategy_blocked" in readiness["reason_codes"]:
-            raise RuntimeError("最新迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检")
+        raise RuntimeError("最新迁移计划不允许隐藏来源媒体复制，请重新执行在线深度预检")
     if "media_relay_not_ready" in readiness["reason_codes"]:
         raise RuntimeError("固定中转频道桥接计划未就绪，请重新执行在线深度预检")
     if "missing_media_account" in readiness["reason_codes"]:
@@ -139,6 +144,9 @@ def validate_plan_for_timeline(
         "media_execution_account": str(readiness["media_execution_account"] or ""),
         "media_source_account": str(readiness["media_source_account"] or ""),
         "media_target_account": str(readiness["media_target_account"] or ""),
+        "source_snapshot_message_id": str(
+            clone_plan_source_snapshot_message_id(plan) or ""
+        ),
     }
 
 
@@ -178,6 +186,7 @@ def build_execution_state(
         plan_id=plan_id,
         migration_id=migration_id,
         source_chat_id=source_chat_id,
+        source_snapshot_message_id=clone_plan_source_snapshot_message_id(plan),
         target_chat_id=target_chat_id,
         target_title=str(run.get("target_title") or target_chat_id),
         source_title=str(run.get("source_title") or source_chat_id),
@@ -218,7 +227,9 @@ def resolve_final_status(state: TimelineExecutionState) -> TimelineFinalStatus:
             ),
         )
     if state.limit_reached:
-        return TimelineFinalStatus(status="done", phase="limited_done", error_message="")
+        return TimelineFinalStatus(
+            status="done", phase="limited_done", error_message=""
+        )
     return TimelineFinalStatus(status="done", phase="done", error_message="")
 
 

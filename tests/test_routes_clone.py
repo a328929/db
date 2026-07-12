@@ -420,7 +420,7 @@ class CloneRoutesTests(unittest.TestCase):
             "text_strategy": "database_replay",
             "media_strategy": "source_copy_without_attribution",
             "media_group_strategy": "strict_skip_incomplete",
-            "avatar_strategy": "copy_if_accessible",
+            "avatar_strategy": "skip_not_implemented",
             "blocking_issues": [],
             "warnings": [],
             "capabilities": {"target_write_account": "primary"},

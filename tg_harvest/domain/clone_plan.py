@@ -7,12 +7,8 @@ CLONE_TEXT_MIGRATION_DEFAULT_SEND_DELAY_MS = 500
 CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT = 100_000
 CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS = 60_000
 CLONE_TEXT_REPLAY_CHUNK_MAX_LEN = 3900
-CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION = (
-    "source_copy_without_attribution"
-)
-CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION = (
-    "relay_copy_without_attribution"
-)
+CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION = "source_copy_without_attribution"
+CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION = "relay_copy_without_attribution"
 CLONE_FORWARD_PRIVACY_MODE = "without_source_attribution"
 VALID_CLONE_WRITE_ACCOUNTS = frozenset({"primary", "secondary"})
 VALID_CLONE_MEDIA_STRATEGIES = frozenset(
@@ -99,6 +95,23 @@ def clone_plan_media_relay(plan: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
+def clone_plan_source_snapshot(plan: dict[str, Any]) -> dict[str, Any]:
+    capabilities = clone_plan_capabilities(plan)
+    payload = clone_plan_payload(plan)
+    for value in (
+        capabilities.get("source_snapshot"),
+        payload.get("source_snapshot"),
+        plan.get("source_snapshot"),
+    ):
+        if isinstance(value, dict):
+            return value
+    return {}
+
+
+def clone_plan_source_snapshot_message_id(plan: dict[str, Any]) -> int:
+    return safe_int(clone_plan_source_snapshot(plan).get("message_id"))
+
+
 def clone_plan_media_relay_chat_id(plan: dict[str, Any]) -> int:
     relay = clone_plan_media_relay(plan)
     return safe_int(relay.get("chat_id"))
@@ -171,6 +184,7 @@ def clone_plan_timeline_readiness(
             "media_source_account": "",
             "media_target_account": "",
             "media_relay_ready": False,
+            "source_snapshot_message_id": 0,
             "text_account": "",
         }
 
@@ -180,6 +194,7 @@ def clone_plan_timeline_readiness(
     media_source_account = clone_plan_media_source_account(plan)
     media_target_account = clone_plan_media_target_account(plan)
     media_relay_ready = clone_plan_media_relay_ready(plan)
+    source_snapshot_message_id = clone_plan_source_snapshot_message_id(plan)
 
     reasons: list[str] = []
     if plan.get("status") != "done":
@@ -188,6 +203,8 @@ def clone_plan_timeline_readiness(
         reasons.append("plan_blocked")
     if plan.get("target_access") != "ok":
         reasons.append("target_inaccessible")
+    if source_snapshot_message_id <= 0:
+        reasons.append("source_snapshot_missing")
 
     if has_preview and text_remaining <= 0 and media_remaining <= 0:
         reasons.append("no_timeline_remaining")
@@ -225,5 +242,6 @@ def clone_plan_timeline_readiness(
         "media_source_account": media_source_account,
         "media_target_account": media_target_account,
         "media_relay_ready": media_relay_ready,
+        "source_snapshot_message_id": source_snapshot_message_id,
         "text_account": target_write_account if text_remaining > 0 else "",
     }

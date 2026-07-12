@@ -188,6 +188,8 @@ def _create_clone_schema(conn):
             source_msg_date_text TEXT,
             target_chat_id INTEGER NOT NULL,
             target_message_id INTEGER,
+            delivery_random_id INTEGER,
+            delivery_account TEXT NOT NULL DEFAULT '',
             chunk_index INTEGER NOT NULL DEFAULT 0,
             chunk_count INTEGER NOT NULL DEFAULT 1,
             mode TEXT NOT NULL DEFAULT 'text_replay',
@@ -378,9 +380,9 @@ def test_clone_preflight_allows_structure_clone_with_distinct_second_account():
     finally:
         conn.close()
 
-    structure = {
-        item["key"]: item for item in report["capabilities"]
-    }["structure_clone"]
+    structure = {item["key"]: item for item in report["capabilities"]}[
+        "structure_clone"
+    ]
     assert structure["status"] == "ready"
     assert report["account"]["target_owner_account"] == "secondary"
     assert report["target"]["default_title"] == "Source Group 副本"
@@ -664,7 +666,7 @@ def test_clone_plan_create_update_latest_and_list_roundtrip():
             text_strategy="database_replay",
             media_strategy="source_copy_without_attribution",
             media_group_strategy="strict_skip_incomplete",
-            avatar_strategy="copy_if_accessible",
+            avatar_strategy="skip_not_implemented",
             blocking_issues=[],
             warnings=["目标副本写入权限未执行试发验证"],
             capabilities={"target_write_account": "primary"},

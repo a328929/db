@@ -11,6 +11,35 @@ from tg_harvest.storage.clone_common import (
 from tg_harvest.storage.row_access import row_int as _row_int
 
 
+def build_clone_source_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    source_chat_id: int,
+) -> dict[str, int]:
+    """Describe the locally durable source boundary used by a clone plan."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                COUNT(*) AS message_count,
+                COALESCE(MAX(message_id), 0) AS latest_message_id,
+                COALESCE(MAX(msg_date_ts), 0) AS latest_message_ts
+            FROM messages
+            WHERE chat_id = ?
+            """,
+            (int(source_chat_id),),
+        )
+        row = cur.fetchone()
+        return {
+            "message_count": _row_int(row, "message_count"),
+            "latest_message_id": _row_int(row, "latest_message_id"),
+            "latest_message_ts": _row_int(row, "latest_message_ts"),
+        }
+    finally:
+        cur.close()
+
+
 def count_clone_text_replay_candidates(conn: sqlite3.Connection, chat_id: int) -> int:
     cur = conn.cursor()
     try:
@@ -58,14 +87,17 @@ def build_clone_text_replay_preview(
     *,
     run_id: str,
     source_chat_id: int,
+    max_source_message_id: Any = None,
 ) -> dict:
     normalized_run_id = _clean_text(run_id)
     normalized_source_chat_id = int(source_chat_id)
+    normalized_max_message_id = _optional_int(max_source_message_id)
+    max_filter = "AND message_id <= ?" if normalized_max_message_id else ""
     chunk_size = CLONE_TEXT_REPLAY_CHUNK_MAX_LEN
     cur = conn.cursor()
     try:
         cur.execute(
-            """
+            f"""
             WITH raw_candidates AS (
                 SELECT
                     message_id,
@@ -76,6 +108,7 @@ def build_clone_text_replay_preview(
                     ) AS text
                 FROM messages
                 WHERE chat_id = ?
+                  {max_filter}
                   AND COALESCE(has_media, 0) = 0
                   AND grouped_id IS NULL
                   AND COALESCE(
@@ -141,20 +174,21 @@ def build_clone_text_replay_preview(
             FROM candidates c
             LEFT JOIN mapped m ON m.source_message_id = c.message_id
             """,
-            (
+            [
                 normalized_source_chat_id,
+                *([normalized_max_message_id] if normalized_max_message_id else []),
                 chunk_size,
                 chunk_size,
                 normalized_run_id,
                 normalized_source_chat_id,
-            ),
+            ],
         )
         row = cur.fetchone()
         text_total = _row_int(row, "text_total")
         text_completed = _row_int(row, "text_completed")
 
         cur.execute(
-            """
+            f"""
             SELECT
                 COUNT(*) AS total_messages,
                 SUM(CASE WHEN COALESCE(has_media, 0) = 1 THEN 1 ELSE 0 END)
@@ -175,13 +209,18 @@ def build_clone_text_replay_preview(
                 ) AS empty_text_skipped
             FROM messages
             WHERE chat_id = ?
+              {max_filter}
             """,
-            (normalized_source_chat_id,),
+            [
+                normalized_source_chat_id,
+                *([normalized_max_message_id] if normalized_max_message_id else []),
+            ],
         )
         skip_row = cur.fetchone()
         return {
             "run_id": normalized_run_id,
             "source_chat_id": normalized_source_chat_id,
+            "source_snapshot_message_id": normalized_max_message_id or 0,
             "chunk_size": chunk_size,
             "text_total": text_total,
             "text_completed": text_completed,
@@ -285,13 +324,16 @@ def build_clone_media_copy_preview(
     *,
     run_id: str,
     source_chat_id: int,
+    max_source_message_id: Any = None,
 ) -> dict:
     normalized_run_id = _clean_text(run_id)
     normalized_source_chat_id = int(source_chat_id)
+    normalized_max_message_id = _optional_int(max_source_message_id)
+    max_filter = "AND m.message_id <= ?" if normalized_max_message_id else ""
     cur = conn.cursor()
     try:
         cur.execute(
-            """
+            f"""
             WITH group_stats AS (
                 SELECT
                     m.chat_id,
@@ -302,6 +344,7 @@ def build_clone_media_copy_preview(
                     MAX(m.message_id) - MIN(m.message_id) + 1 AS message_id_span
                 FROM messages m
                 WHERE m.chat_id = ?
+                  {max_filter}
                   AND m.grouped_id IS NOT NULL
                   AND COALESCE(m.has_media, 0) = 1
                 GROUP BY m.chat_id, m.grouped_id
@@ -334,6 +377,7 @@ def build_clone_media_copy_preview(
                   ON gs.chat_id = m.chat_id
                  AND gs.grouped_id = m.grouped_id
                 WHERE m.chat_id = ?
+                  {max_filter}
                   AND COALESCE(m.has_media, 0) = 1
             ),
             mapped AS (
@@ -387,12 +431,14 @@ def build_clone_media_copy_preview(
               ON mg.source_message_id = mm.message_id
              AND mg.mode = 'media_group_copy'
             """,
-            (
+            [
                 normalized_source_chat_id,
+                *([normalized_max_message_id] if normalized_max_message_id else []),
                 normalized_source_chat_id,
+                *([normalized_max_message_id] if normalized_max_message_id else []),
                 normalized_run_id,
                 normalized_source_chat_id,
-            ),
+            ],
         )
         row = cur.fetchone()
         solo_total = _row_int(row, "solo_media_total")
@@ -405,8 +451,12 @@ def build_clone_media_copy_preview(
         media_group_candidate_items = _row_int(row, "media_group_candidate_items")
         incomplete_group_total = _row_int(row, "incomplete_group_total")
         incomplete_group_items = _row_int(row, "incomplete_group_items")
-        suspected_incomplete_group_total = _row_int(row, "suspected_incomplete_group_total")
-        suspected_incomplete_group_items = _row_int(row, "suspected_incomplete_group_items")
+        suspected_incomplete_group_total = _row_int(
+            row, "suspected_incomplete_group_total"
+        )
+        suspected_incomplete_group_items = _row_int(
+            row, "suspected_incomplete_group_items"
+        )
         missing_group_meta_total = _row_int(row, "missing_group_meta_total")
         missing_group_meta_items = _row_int(row, "missing_group_meta_items")
         executable_total = media_total
@@ -425,6 +475,7 @@ def build_clone_media_copy_preview(
         return {
             "run_id": normalized_run_id,
             "source_chat_id": normalized_source_chat_id,
+            "source_snapshot_message_id": normalized_max_message_id or 0,
             "mode": "media_copy_without_attribution",
             "forward_privacy": "without_source_attribution",
             "media_total": media_total,
@@ -630,11 +681,17 @@ def list_clone_media_group_messages(
     *,
     chat_id: int,
     grouped_id: int,
+    max_source_message_id: Any = None,
 ) -> list[dict]:
+    normalized_max_message_id = _optional_int(max_source_message_id)
+    max_filter = "AND message_id <= ?" if normalized_max_message_id else ""
+    params: list[Any] = [int(chat_id), int(grouped_id)]
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
     cur = conn.cursor()
     try:
         cur.execute(
-            """
+            f"""
             SELECT
                 chat_id,
                 message_id,
@@ -647,9 +704,10 @@ def list_clone_media_group_messages(
             WHERE chat_id = ?
               AND grouped_id = ?
               AND COALESCE(has_media, 0) = 1
+              {max_filter}
             ORDER BY message_id ASC
             """,
-            (int(chat_id), int(grouped_id)),
+            params,
         )
         return [
             {
@@ -671,25 +729,31 @@ def build_clone_timeline_replay_preview(
     *,
     run_id: str,
     source_chat_id: int,
+    max_source_message_id: Any = None,
 ) -> dict:
+    normalized_max_message_id = _optional_int(max_source_message_id)
+    text_max_filter = "AND message_id <= ?" if normalized_max_message_id else ""
     text_preview = build_clone_text_replay_preview(
         conn,
         run_id=run_id,
         source_chat_id=source_chat_id,
+        max_source_message_id=normalized_max_message_id,
     )
     media_preview = build_clone_media_copy_preview(
         conn,
         run_id=run_id,
         source_chat_id=source_chat_id,
+        max_source_message_id=normalized_max_message_id,
     )
     cur = conn.cursor()
     try:
         cur.execute(
-            """
+            f"""
             WITH timeline_items AS (
                 SELECT message_id AS sort_message_id
                 FROM messages
                 WHERE chat_id = ?
+                  {text_max_filter}
                   AND COALESCE(has_media, 0) = 0
                   AND grouped_id IS NULL
                   AND COALESCE(
@@ -701,12 +765,14 @@ def build_clone_timeline_replay_preview(
                 SELECT message_id AS sort_message_id
                 FROM messages
                 WHERE chat_id = ?
+                  {text_max_filter}
                   AND COALESCE(has_media, 0) = 1
                   AND grouped_id IS NULL
                 UNION ALL
                 SELECT MIN(message_id) AS sort_message_id
                 FROM messages
                 WHERE chat_id = ?
+                  {text_max_filter}
                   AND COALESCE(has_media, 0) = 1
                   AND grouped_id IS NOT NULL
                 GROUP BY grouped_id
@@ -714,7 +780,14 @@ def build_clone_timeline_replay_preview(
             SELECT COUNT(*) AS c
             FROM timeline_items
             """,
-            (int(source_chat_id), int(source_chat_id), int(source_chat_id)),
+            [
+                int(source_chat_id),
+                *([normalized_max_message_id] if normalized_max_message_id else []),
+                int(source_chat_id),
+                *([normalized_max_message_id] if normalized_max_message_id else []),
+                int(source_chat_id),
+                *([normalized_max_message_id] if normalized_max_message_id else []),
+            ],
         )
         row = cur.fetchone()
         timeline_items_total = _row_int(row, "c")
@@ -729,6 +802,7 @@ def build_clone_timeline_replay_preview(
     return {
         "run_id": _clean_text(run_id),
         "source_chat_id": int(source_chat_id),
+        "source_snapshot_message_id": normalized_max_message_id or 0,
         "mode": "timeline_replay",
         "timeline_items_total": timeline_items_total,
         "timeline_source_messages_total": text_total + media_total,
@@ -761,6 +835,7 @@ def list_clone_timeline_replay_batch(
     chat_id: int,
     after_ts: Any = None,
     after_message_id: Any = None,
+    max_source_message_id: Any = None,
     limit: Any = 100,
 ) -> list[dict]:
     normalized_limit = _normalize_bounded_int(
@@ -772,22 +847,37 @@ def list_clone_timeline_replay_batch(
     normalized_run_id = _clean_text(run_id)
     normalized_after_ts = _optional_int(after_ts)
     normalized_after_message_id = _optional_int(after_message_id)
+    normalized_max_message_id = _optional_int(max_source_message_id)
+    text_max_filter = "AND message_id <= ?" if normalized_max_message_id else ""
+    media_max_filter = "AND m.message_id <= ?" if normalized_max_message_id else ""
 
     where_cursor = ""
     params: list[Any] = [
         CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
         CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
         int(chat_id),
-        int(chat_id),
-        int(chat_id),
-        normalized_run_id,
-        int(chat_id),
-        normalized_run_id,
-        int(chat_id),
-        normalized_run_id,
-        int(chat_id),
-        normalized_run_id,
     ]
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
+    params.append(int(chat_id))
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
+    params.append(int(chat_id))
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
+    params.extend(
+        [
+            normalized_run_id,
+            int(chat_id),
+            normalized_run_id,
+            int(chat_id),
+            normalized_run_id,
+            int(chat_id),
+        ]
+    )
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
+    params.append(normalized_run_id)
     if normalized_after_ts is not None and normalized_after_message_id is not None:
         where_cursor = """
           AND (
@@ -835,6 +925,7 @@ def list_clone_timeline_replay_batch(
                     ) AS INTEGER) AS expected_done_count
                 FROM messages
                 WHERE chat_id = ?
+                  {text_max_filter}
                   AND COALESCE(has_media, 0) = 0
                   AND grouped_id IS NULL
                   AND COALESCE(
@@ -860,6 +951,7 @@ def list_clone_timeline_replay_batch(
                     1 AS expected_done_count
                 FROM messages m
                 WHERE m.chat_id = ?
+                  {media_max_filter}
                   AND COALESCE(m.has_media, 0) = 1
                   AND m.grouped_id IS NULL
 
@@ -879,6 +971,7 @@ def list_clone_timeline_replay_batch(
                     COUNT(*) AS expected_done_count
                 FROM messages m
                 WHERE m.chat_id = ?
+                  {media_max_filter}
                   AND COALESCE(m.has_media, 0) = 1
                   AND m.grouped_id IS NOT NULL
                 GROUP BY m.chat_id, m.grouped_id
@@ -917,6 +1010,7 @@ def list_clone_timeline_replay_batch(
                  AND cmm.mode = 'media_group_copy'
                  AND cmm.status = 'done'
                 WHERE m.chat_id = ?
+                  {media_max_filter}
                   AND COALESCE(m.has_media, 0) = 1
                   AND m.grouped_id IS NOT NULL
                 GROUP BY m.grouped_id

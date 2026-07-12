@@ -12,6 +12,7 @@ from tg_harvest.admin_jobs.clone_execution import (
 )
 from tg_harvest.admin_jobs.clone_job_state import _clean_text
 from tg_harvest.admin_jobs.clone_media_copy import (
+    CloneMediaTransferContext,
     copy_clone_media_direct_without_source,
     copy_clone_media_via_relay_without_source,
     record_clone_media_mapping,
@@ -32,8 +33,10 @@ from tg_harvest.admin_jobs.clone_timeline_state import (
     validate_plan_for_timeline,
 )
 from tg_harvest.admin_jobs.clone_timeline_store import (
+    CloneMappingPersistenceError,
     media_mapping_done,
     next_timeline_batch,
+    prepare_text_mapping_delivery,
     record_text_mapping,
     source_message_from_timeline_item,
     text_mapping_done,
@@ -58,11 +61,15 @@ from tg_harvest.admin_jobs.sessions import (
     _disconnect_worker_client,
     _ensure_base_session_valid,
     _start_job_heartbeat,
+    bind_client_event_loop,
 )
 from tg_harvest.domain.clone_plan import (
     CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
     CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
+    clone_plan_media_relay_chat_id,
+    clone_plan_source_snapshot_message_id,
 )
+from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 
 
 def _execution_entity_lookup_error_message(*, role: str, account: str) -> str:
@@ -104,6 +111,49 @@ def _sleep_after_send(send_delay_ms: int) -> None:
     if send_delay_ms <= 0:
         return
     time.sleep(float(send_delay_ms) / 1000.0)
+
+
+def _source_latest_message_id(client: Any, source_entity: Any) -> int:
+    with bind_client_event_loop(client):
+        messages = call_with_bounded_retry(
+            client.get_messages,
+            source_entity,
+            limit=1,
+            scope="clone-timeline-source-snapshot-check",
+        )
+    if isinstance(messages, (list, tuple)):
+        message_ids = [
+            int(getattr(message, "id", 0) or 0)
+            for message in messages
+            if getattr(message, "id", None) is not None
+        ]
+        return max(message_ids, default=0)
+    try:
+        message = next(iter(messages), None)
+    except TypeError:
+        message = messages
+    try:
+        return max(0, int(getattr(message, "id", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _plan_source_read_account(plan: dict[str, Any]) -> str:
+    capabilities = plan.get("capabilities")
+    account_records = (
+        capabilities.get("accounts") if isinstance(capabilities, dict) else None
+    )
+    if not isinstance(account_records, list):
+        return ""
+    for preferred in ("primary", "secondary"):
+        for account in account_records:
+            if not isinstance(account, dict):
+                continue
+            if _clean_text(account.get("account")).lower() != preferred:
+                continue
+            if _clean_text(account.get("source_access")).lower() == "ok":
+                return preferred
+    return ""
 
 
 def _log_timeline_start(
@@ -212,7 +262,9 @@ def _finalize_success(
     admin_job_set_status_fn(state.job_id, final.status)
 
 
-def _cleanup_runner_clients(clients: dict[str, Any], worker_ids: dict[str, str], account_cfgs: dict[str, Any]) -> None:
+def _cleanup_runner_clients(
+    clients: dict[str, Any], worker_ids: dict[str, str], account_cfgs: dict[str, Any]
+) -> None:
     disconnected_ids: set[int] = set()
     for cleanup_client in clients.values():
         if cleanup_client is None or id(cleanup_client) in disconnected_ids:
@@ -226,58 +278,6 @@ def _cleanup_runner_clients(clients: dict[str, Any], worker_ids: dict[str, str],
             continue
         with suppress(Exception):
             _cleanup_isolated_worker_session(account_cfg, worker_id)
-
-
-def _normalized_distinct_accounts(*accounts: str) -> list[str]:
-    result: list[str] = []
-    seen: set[str] = set()
-    for account in accounts:
-        normalized = _clean_text(account).lower()
-        if not normalized or normalized in seen:
-            continue
-        seen.add(normalized)
-        result.append(normalized)
-    return result
-
-
-def _plan_account_records(plan: dict[str, Any] | None) -> list[dict[str, Any]]:
-    if not isinstance(plan, dict):
-        return []
-    capabilities = plan.get("capabilities")
-    if not isinstance(capabilities, dict):
-        return []
-    accounts = capabilities.get("accounts")
-    if not isinstance(accounts, list):
-        return []
-    return [item for item in accounts if isinstance(item, dict)]
-
-
-def _plan_account_allows_relay_target_hop(
-    plan: dict[str, Any] | None,
-    account: str,
-) -> bool:
-    normalized_account = _clean_text(account).lower()
-    if not normalized_account:
-        return False
-
-    account_records = _plan_account_records(plan)
-    if not account_records:
-        return True
-
-    for item in account_records:
-        if _clean_text(item.get("account")).lower() != normalized_account:
-            continue
-        target_access = _clean_text(item.get("target_access")).lower()
-        relay_access = _clean_text(item.get("relay_access")).lower()
-        target_send_permission = _clean_text(item.get("target_send_permission")).lower()
-        relay_send_permission = _clean_text(item.get("relay_send_permission")).lower()
-        return (
-            target_access == "ok"
-            and relay_access == "ok"
-            and target_send_permission != "blocked"
-            and relay_send_permission != "blocked"
-        )
-    return False
 
 
 def _admin_clone_timeline_migration_job_runner(
@@ -294,7 +294,9 @@ def _admin_clone_timeline_migration_job_runner(
     send_delay_ms: Any = 0,
 ) -> None:
     job_context.set(str(job_id))
-    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
+    heartbeat_stop, heartbeat_thread = _start_job_heartbeat(
+        job_id, _admin_job_heartbeat
+    )
     clients: dict[str, Any] = {}
     worker_ids: dict[str, str] = {}
     account_cfgs: dict[str, Any] = {}
@@ -326,6 +328,9 @@ def _admin_clone_timeline_migration_job_runner(
         )
         source_chat_id = int(run["source_chat_id"])
         target_chat_id = int(run.get("target_chat_id") or 0)
+        source_snapshot_message_id = clone_plan_source_snapshot_message_id(plan)
+        if source_snapshot_message_id <= 0:
+            raise RuntimeError("迁移计划缺少已核验的源消息快照，请重新执行在线深度预检")
         if not target_chat_id:
             raise RuntimeError("目标副本尚未创建，不能执行完整时间线迁移")
 
@@ -345,6 +350,7 @@ def _admin_clone_timeline_migration_job_runner(
             get_conn_fn=get_conn_fn,
             run_id=run_id,
             source_chat_id=source_chat_id,
+            max_source_message_id=source_snapshot_message_id,
         )
         admin_job_append_log_fn(
             job_id,
@@ -377,7 +383,9 @@ def _admin_clone_timeline_migration_job_runner(
             media_total=state.media_total,
             media_group_total=state.media_group_total,
         )
-        _log_timeline_start(state=state, admin_job_append_log_fn=admin_job_append_log_fn)
+        _log_timeline_start(
+            state=state, admin_job_append_log_fn=admin_job_append_log_fn
+        )
 
         def account_client(account: str) -> Any:
             normalized = _clean_text(account).lower()
@@ -386,7 +394,9 @@ def _admin_clone_timeline_migration_job_runner(
             if normalized in clients:
                 return clients[normalized]
             account_cfg = clone_cfg_for_account(cfg, normalized)
-            if not _ensure_base_session_valid(account_cfg, job_id, admin_job_append_log_fn):
+            if not _ensure_base_session_valid(
+                account_cfg, job_id, admin_job_append_log_fn
+            ):
                 raise RuntimeError(f"计划指定的账号会话不可用：{normalized}")
             worker_id = f"{job_id}_clone_timeline_{normalized}"
             account_cfgs[normalized] = account_cfg
@@ -412,19 +422,36 @@ def _admin_clone_timeline_migration_job_runner(
         text_client = account_client(text_account) if text_account else None
         text_target_entity = target_entity_for(text_account) if text_account else None
 
-        source_client = account_client(media_source_account) if media_source_account else None
-        target_client = account_client(media_target_account) if media_target_account else None
+        source_read_account = media_source_account or _plan_source_read_account(plan)
+        source_client = (
+            account_client(source_read_account) if source_read_account else None
+        )
+        target_client = (
+            account_client(media_target_account) if media_target_account else None
+        )
         source_entity = (
             _resolve_entity_for_execution(
                 source_client,
                 chat_id=source_chat_id,
                 chat_username=_clean_text(run.get("source_chat_username")),
-                account=media_source_account,
+                account=source_read_account,
                 role="源群",
             )
             if source_client is not None
             else None
         )
+        if source_client is not None and source_entity is not None:
+            latest_source_message_id = _source_latest_message_id(
+                source_client,
+                source_entity,
+            )
+            if latest_source_message_id <= 0:
+                raise RuntimeError("无法确认源群最新消息，不能执行无遗漏时间线迁移")
+            if latest_source_message_id > state.source_snapshot_message_id:
+                raise RuntimeError(
+                    "源群在预检后已有新消息，请先完成采集并重新执行在线深度预检，"
+                    "以免迁移遗漏最新消息"
+                )
         media_target_entity = (
             target_entity_for(media_target_account) if media_target_account else None
         )
@@ -438,32 +465,26 @@ def _admin_clone_timeline_migration_job_runner(
             if state.using_relay and target_client is not None
             else None
         )
-        relay_target_attempts: list[dict[str, Any]] = []
-        if state.using_relay:
-            for relay_target_account in _normalized_distinct_accounts(
-                media_target_account,
-                text_account,
-                media_source_account,
-            ):
-                if not _plan_account_allows_relay_target_hop(plan, relay_target_account):
-                    continue
-                try:
-                    relay_target_attempts.append(
-                        {
-                            "client": account_client(relay_target_account),
-                            "relay_entity": resolve_clone_relay_chat(
-                                account_client(relay_target_account),
-                                plan,
-                            ),
-                            "target_entity": target_entity_for(relay_target_account),
-                            "account": relay_target_account,
-                        }
-                    )
-                except Exception:
-                    continue
+        media_transfer_context = CloneMediaTransferContext(
+            get_conn_fn=get_conn_fn,
+            migration_id=migration_id,
+            run_id=run_id,
+            plan_id=plan_id,
+            source_chat_id=source_chat_id,
+            target_chat_id=target_chat_id,
+            source_account=_clean_text(media_source_account).lower(),
+            target_account=_clean_text(media_target_account).lower(),
+            relay_chat_id=(
+                clone_plan_media_relay_chat_id(plan) if state.using_relay else 0
+            ),
+        )
 
-        def copy_media_to_target(message_ids: int | list[int], *, as_album: bool | None = None) -> Any:
-            if source_client is None or source_entity is None or media_target_entity is None:
+        def copy_media_to_target(message_ids: int | list[int]) -> Any:
+            if (
+                source_client is None
+                or source_entity is None
+                or media_target_entity is None
+            ):
                 raise RuntimeError("媒体迁移账号或实体尚未初始化")
             if state.using_relay:
                 if (
@@ -480,19 +501,15 @@ def _admin_clone_timeline_migration_job_runner(
                     target_entity=media_target_entity,
                     message_ids=message_ids,
                     source_entity=source_entity,
-                    as_album=as_album,
+                    transfer_context=media_transfer_context,
                     log_step=lambda message: admin_job_append_log_fn(job_id, message),
-                    target_attempts=relay_target_attempts,
-                    flood_wait_threshold_seconds=int(
-                        getattr(cfg, "flood_wait_switch_threshold", 30) or 30
-                    ),
                 )
             return copy_clone_media_direct_without_source(
                 client=source_client,
                 target_entity=media_target_entity,
                 message_ids=message_ids,
                 source_entity=source_entity,
-                as_album=as_album,
+                transfer_context=media_transfer_context,
             )
 
         update_migration_required(
@@ -511,17 +528,22 @@ def _admin_clone_timeline_migration_job_runner(
                 source_chat_id=source_chat_id,
                 after_ts=state.after_ts,
                 after_message_id=state.after_message_id,
+                max_source_message_id=state.source_snapshot_message_id,
             )
             if not batch:
                 break
             for item in batch:
                 source_count = max(1, int(item.get("item_count") or 1))
-                if normalized_message_limit > 0 and state.counters.processed >= normalized_message_limit:
+                if (
+                    normalized_message_limit > 0
+                    and state.counters.processed >= normalized_message_limit
+                ):
                     state.limit_reached = True
                     break
                 if (
                     normalized_message_limit > 0
-                    and state.counters.processed + source_count > normalized_message_limit
+                    and state.counters.processed + source_count
+                    > normalized_message_limit
                 ):
                     state.limit_reached = True
                     break
@@ -565,14 +587,38 @@ def _admin_clone_timeline_migration_job_runner(
                             chunk_index=chunk_index,
                         ):
                             continue
+                        delivery_random_id: int | None = None
                         try:
+                            delivery = prepare_text_mapping_delivery(
+                                get_conn_fn=get_conn_fn,
+                                migration_id=migration_id,
+                                run_id=run_id,
+                                plan_id=plan_id,
+                                source_message=source_message,
+                                target_chat_id=target_chat_id,
+                                target_account=text_account,
+                                chunk_index=chunk_index,
+                                chunk_count=chunk_count,
+                            )
+                            delivery_random_id = int(
+                                delivery.get("delivery_random_id") or 0
+                            )
+                            if delivery_random_id <= 0:
+                                raise CloneMappingPersistenceError(
+                                    "克隆文本交付意图缺少可恢复随机 ID"
+                                )
                             if text_client is None or text_target_entity is None:
                                 raise RuntimeError("文本迁移账号或目标实体尚未初始化")
                             target_message_id = send_clone_text_chunk(
                                 text_client,
                                 text_target_entity,
                                 chunk,
+                                random_id=delivery_random_id,
                             )
+                            if target_message_id is None or target_message_id <= 0:
+                                raise RuntimeError("时间线文本发送后未返回有效目标消息 ID")
+                        except CloneMappingPersistenceError:
+                            raise
                         except Exception as exc:
                             message_failed = True
                             message = admin_error_message(exc)
@@ -588,6 +634,8 @@ def _admin_clone_timeline_migration_job_runner(
                                 chunk_count=chunk_count,
                                 status="error",
                                 error_message=message,
+                                delivery_random_id=delivery_random_id,
+                                delivery_account=text_account,
                             )
                             admin_job_append_log_fn(
                                 job_id,
@@ -605,6 +653,8 @@ def _admin_clone_timeline_migration_job_runner(
                             chunk_index=chunk_index,
                             chunk_count=chunk_count,
                             status="done",
+                            delivery_random_id=delivery_random_id,
+                            delivery_account=text_account,
                         )
                         _sleep_after_send(normalized_send_delay_ms)
                     state.counters.processed += 1
@@ -638,7 +688,9 @@ def _admin_clone_timeline_migration_job_runner(
                             raise RuntimeError(
                                 str(resolved.get("error") or "API 源媒体消息解析失败")
                             )
-                        api_message_id = int(resolved.get("message_id") or source_message_id)
+                        api_message_id = int(
+                            resolved.get("message_id") or source_message_id
+                        )
                         result = copy_media_to_target(api_message_id)
                         target_message_id = first_required_target_message_id(
                             result,
@@ -701,6 +753,24 @@ def _admin_clone_timeline_migration_job_runner(
                 )
             if state.stopped or state.limit_reached:
                 break
+
+        if (
+            not state.stopped
+            and not state.limit_reached
+            and source_client is not None
+            and source_entity is not None
+        ):
+            latest_source_message_id = _source_latest_message_id(
+                source_client,
+                source_entity,
+            )
+            if latest_source_message_id <= 0:
+                raise RuntimeError("无法确认源群最新消息，不能确认时间线迁移完成")
+            if latest_source_message_id > state.source_snapshot_message_id:
+                raise RuntimeError(
+                    "源群在完整时间线迁移期间已有新消息，请先完成采集并重新执行在线深度预检，"
+                    "以免将过期快照标记为完成"
+                )
 
         _finalize_success(
             state=state,

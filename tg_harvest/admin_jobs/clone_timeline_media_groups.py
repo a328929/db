@@ -45,6 +45,7 @@ def handle_media_group_item(
         get_conn_fn=get_conn_fn,
         source_chat_id=state.source_chat_id,
         grouped_id=int(grouped_id),
+        max_source_message_id=state.source_snapshot_message_id,
     )
     if not messages:
         source_count = max(1, int(item.get("item_count") or 1))
@@ -65,7 +66,9 @@ def handle_media_group_item(
         if not resolved_group.get("ok"):
             raise RuntimeError(str(resolved_group.get("error") or "API 媒体组解析失败"))
         resolved_message_ids = [
-            int(message_id) for message_id in resolved_group.get("message_ids") or []
+            int(message_id)
+            for message_id in resolved_group.get("message_ids") or []
+            if int(message_id) <= state.source_snapshot_message_id
         ]
         if not resolved_message_ids:
             raise RuntimeError("API 未解析出可复制媒体组成员")
@@ -201,7 +204,9 @@ def handle_media_group_item(
                 message = admin_error_message(exc)
                 record_group_item_error(source_message_id, message)
                 media_kind = _clean_text(
-                    (resolved_items_by_id.get(source_message_id) or {}).get("media_kind")
+                    (resolved_items_by_id.get(source_message_id) or {}).get(
+                        "media_kind"
+                    )
                 )
                 media_kind_suffix = f"，media_kind={media_kind}" if media_kind else ""
                 admin_job_append_log_fn(
@@ -227,27 +232,15 @@ def handle_media_group_item(
             return 0, len(chunk_message_ids), 0
 
         if any(done_in_chunk):
-            message = "相册分块已有部分完成映射，跳过该分块避免重复相册"
-            missing_ids = [
-                int(source_message_id)
-                for source_message_id, done in zip(
-                    chunk_message_ids,
-                    done_in_chunk,
-                    strict=False,
-                )
-                if not done
-            ]
-            for source_message_id in missing_ids:
-                record_group_item_error(source_message_id, message)
             admin_job_append_log_fn(
                 state.job_id,
-                "时间线媒体组相册分块存在部分映射，已跳过："
+                "时间线媒体组相册分块存在部分映射，剩余成员将逐条补齐："
                 f"grouped_id={grouped_id}，"
                 f"chunk={chunk_index}/{chunk_count}，"
                 f"done={sum(1 for done in done_in_chunk if done)}，"
-                f"missing={len(missing_ids)}",
+                f"missing={sum(1 for done in done_in_chunk if not done)}",
             )
-            return 0, len(chunk_message_ids) - len(missing_ids), len(missing_ids)
+            return copy_group_sequentially(tuple(chunk_message_ids))
 
         if len(chunk_message_ids) <= 1:
             return copy_group_sequentially(tuple(chunk_message_ids))
