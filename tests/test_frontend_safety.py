@@ -503,6 +503,11 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin_clone.css", template)
         self.assertIn('data-clone-mode="migrate"', template)
         self.assertIn("admin-clone-runs-list", template)
+        self.assertIn("admin-clone-source-status", template)
+        self.assertIn(
+            "|| document.getElementById('admin-clone-runs-status')",
+            source,
+        )
         self.assertIn("admin-clone-plan-summary", template)
         self.assertIn("admin-clone-timeline-summary", template)
         self.assertIn("admin-clone-message-limit-input", template)

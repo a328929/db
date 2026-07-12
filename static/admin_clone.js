@@ -72,7 +72,8 @@
       selectStage: document.getElementById('admin-clone-select-stage'),
       planStage: document.getElementById('admin-clone-plan-stage'),
       migrationStage: document.getElementById('admin-clone-migration-stage'),
-      sourceStatus: document.getElementById('admin-clone-source-status'),
+      sourceStatus: document.getElementById('admin-clone-source-status')
+        || document.getElementById('admin-clone-runs-status'),
       sortSelect: document.getElementById('admin-clone-sort-select'),
       refreshBtn: document.getElementById('admin-clone-refresh-btn'),
       sourceSelect: document.getElementById('admin-clone-source-select'),
