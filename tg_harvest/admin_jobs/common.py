@@ -43,6 +43,8 @@ def admin_error_message(exc: Exception) -> str:
         return "您的账号已被该群组/频道封禁"
     if "not exist" in err_str or "could not find the input entity" in err_str:
         return "该群组/频道已解散或不存在"
+    if "chatadminrequired" in err_str:
+        return "当前账号缺少目标频道发布消息或目标群管理权限"
     if "chatrestrictd" in err_str or "chatwriteforbidden" in err_str:
         return "账号被限制或禁言"
     if "floodwait" in err_str:

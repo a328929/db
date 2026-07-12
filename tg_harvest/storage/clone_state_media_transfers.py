@@ -3,6 +3,7 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Any
 
+from tg_harvest.domain.clone_target_permissions import clone_target_write_was_rejected
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
 from tg_harvest.storage.row_access import row_int as _row_int
 
@@ -28,6 +29,96 @@ def _normalized_message_ids(message_ids: Iterable[Any]) -> list[int]:
 
 def _new_random_id() -> int:
     return secrets.randbelow(_MAX_TELEGRAM_RANDOM_ID) + 1
+
+
+def _insert_clone_media_transfer(
+    cur: sqlite3.Cursor,
+    *,
+    migration_id: str,
+    run_id: str,
+    plan_id: str,
+    source_chat_id: int,
+    source_message_id: int,
+    target_chat_id: int,
+    strategy: str,
+    relay_chat_id: int | None,
+    source_account: str,
+    target_account: str,
+    now: str,
+) -> None:
+    cur.execute(
+        """
+        INSERT INTO admin_clone_media_transfers(
+            migration_id, run_id, plan_id, source_chat_id,
+            source_message_id, target_chat_id, transfer_strategy,
+            relay_chat_id, source_account, target_account,
+            source_random_id, target_random_id, source_hop_status,
+            target_hop_status, cleanup_status, error_message,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?)
+        """,
+        (
+            migration_id,
+            run_id,
+            plan_id,
+            source_chat_id,
+            source_message_id,
+            target_chat_id,
+            strategy,
+            relay_chat_id,
+            source_account,
+            target_account,
+            _new_random_id() if strategy == CLONE_MEDIA_TRANSFER_RELAY else None,
+            _new_random_id(),
+            "pending" if strategy == CLONE_MEDIA_TRANSFER_RELAY else "not_required",
+            "pending" if strategy == CLONE_MEDIA_TRANSFER_RELAY else "not_required",
+            now,
+            now,
+        ),
+    )
+
+
+def _transfer_plan_changed(
+    existing: dict,
+    *,
+    strategy: str,
+    relay_chat_id: int | None,
+    source_account: str,
+    target_account: str,
+) -> bool:
+    if existing["transfer_strategy"] != strategy:
+        return True
+    if strategy == CLONE_MEDIA_TRANSFER_RELAY and existing["relay_chat_id"] not in (
+        None,
+        relay_chat_id,
+    ):
+        return True
+    return bool(
+        existing["source_account"]
+        and source_account
+        and existing["source_account"] != source_account
+    ) or bool(
+        existing["target_account"]
+        and target_account
+        and existing["target_account"] != target_account
+    )
+
+
+def _relay_first_hop_is_reusable(existing: dict) -> bool:
+    return (
+        existing["transfer_strategy"] == CLONE_MEDIA_TRANSFER_RELAY
+        and existing["source_hop_status"] == "sent"
+        and existing["relay_message_id"] is not None
+    )
+
+
+def _can_replan_unsent_transfer(existing: dict) -> bool:
+    return (
+        existing["target_hop_status"] != "sent"
+        and not _relay_first_hop_is_reusable(existing)
+        and clone_target_write_was_rejected(existing["error_message"])
+    )
 
 
 def _transfer_from_row(row: sqlite3.Row | None) -> dict | None:
@@ -109,6 +200,10 @@ def ensure_clone_media_transfers(
 
     A transfer row is created before any Telegram write. Reusing the stored
     random IDs makes a retry of a timed-out forward idempotent at MTProto level.
+    A target-side permission rejection may be replanned after an online
+    preflight selects a different writable account.  Other failed or pending
+    transfers remain account-bound because the remote outcome may be
+    ambiguous; a sent target hop is always account-bound.
     """
     normalized_ids = _normalized_message_ids(source_message_ids)
     if not normalized_ids:
@@ -142,65 +237,87 @@ def ensure_clone_media_transfers(
         for source_message_id in normalized_ids:
             existing = existing_by_id.get(source_message_id)
             if existing is None:
-                cur.execute(
-                    """
-                    INSERT INTO admin_clone_media_transfers(
-                        migration_id, run_id, plan_id, source_chat_id,
-                        source_message_id, target_chat_id, transfer_strategy,
-                        relay_chat_id, source_account, target_account,
-                        source_random_id, target_random_id, source_hop_status,
-                        target_hop_status, cleanup_status, error_message,
-                        created_at, updated_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, '', ?, ?)
-                    """,
-                    (
-                        normalized_migration_id,
-                        normalized_run_id,
-                        normalized_plan_id,
-                        int(source_chat_id),
-                        source_message_id,
-                        int(target_chat_id),
-                        strategy,
-                        normalized_relay_chat_id,
-                        normalized_source_account,
-                        normalized_target_account,
-                        _new_random_id()
-                        if strategy == CLONE_MEDIA_TRANSFER_RELAY
-                        else None,
-                        _new_random_id(),
-                        "pending"
-                        if strategy == CLONE_MEDIA_TRANSFER_RELAY
-                        else "not_required",
-                        "pending"
-                        if strategy == CLONE_MEDIA_TRANSFER_RELAY
-                        else "not_required",
-                        now,
-                        now,
-                    ),
+                _insert_clone_media_transfer(
+                    cur,
+                    migration_id=normalized_migration_id,
+                    run_id=normalized_run_id,
+                    plan_id=normalized_plan_id,
+                    source_chat_id=int(source_chat_id),
+                    source_message_id=source_message_id,
+                    target_chat_id=int(target_chat_id),
+                    strategy=strategy,
+                    relay_chat_id=normalized_relay_chat_id,
+                    source_account=normalized_source_account,
+                    target_account=normalized_target_account,
+                    now=now,
                 )
                 continue
 
             if int(existing["target_chat_id"]) != int(target_chat_id):
                 raise RuntimeError("已存在媒体传输记录指向不同目标，拒绝重复迁移")
-            if existing["transfer_strategy"] != strategy:
-                raise RuntimeError("已存在媒体传输记录，不能切换传输策略")
-            if strategy == CLONE_MEDIA_TRANSFER_RELAY and existing[
-                "relay_chat_id"
-            ] not in (None, normalized_relay_chat_id):
-                raise RuntimeError("已存在媒体传输记录指向不同中转频道")
-            if (
-                existing["source_account"]
-                and normalized_source_account
-                and existing["source_account"] != normalized_source_account
-            ):
-                raise RuntimeError("已存在媒体传输记录绑定不同源侧账号，拒绝跨账号恢复")
-            if (
-                existing["target_account"]
-                and normalized_target_account
-                and existing["target_account"] != normalized_target_account
-            ):
-                raise RuntimeError("已存在媒体传输记录绑定不同目标侧账号，拒绝跨账号恢复")
+            plan_changed = _transfer_plan_changed(
+                existing,
+                strategy=strategy,
+                relay_chat_id=normalized_relay_chat_id,
+                source_account=normalized_source_account,
+                target_account=normalized_target_account,
+            )
+            if plan_changed and _can_replan_unsent_transfer(existing):
+                cur.execute(
+                    "DELETE FROM admin_clone_media_transfers WHERE id = ?",
+                    (int(existing["id"]),),
+                )
+                _insert_clone_media_transfer(
+                    cur,
+                    migration_id=normalized_migration_id,
+                    run_id=normalized_run_id,
+                    plan_id=normalized_plan_id,
+                    source_chat_id=int(source_chat_id),
+                    source_message_id=source_message_id,
+                    target_chat_id=int(target_chat_id),
+                    strategy=strategy,
+                    relay_chat_id=normalized_relay_chat_id,
+                    source_account=normalized_source_account,
+                    target_account=normalized_target_account,
+                    now=now,
+                )
+                continue
+
+            if plan_changed and _relay_first_hop_is_reusable(existing):
+                if not clone_target_write_was_rejected(existing["error_message"]):
+                    raise RuntimeError(
+                        "媒体传输状态尚未确认可安全重规划，拒绝跨账号恢复"
+                    )
+                if (
+                    existing["transfer_strategy"] == strategy
+                    and existing["source_account"] == normalized_source_account
+                    and existing["relay_chat_id"] in (None, normalized_relay_chat_id)
+                ):
+                    cur.execute(
+                        """
+                        UPDATE admin_clone_media_transfers
+                        SET migration_id = ?, plan_id = ?, target_account = ?,
+                            target_random_id = ?, target_message_id = NULL,
+                            target_hop_status = 'pending', error_message = '',
+                            updated_at = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            normalized_migration_id,
+                            normalized_plan_id,
+                            normalized_target_account,
+                            _new_random_id(),
+                            now,
+                            int(existing["id"]),
+                        ),
+                    )
+                    continue
+                raise RuntimeError(
+                    "中转第一跳已完成，不能切换源侧账号、传输策略或中转频道"
+                )
+
+            if plan_changed:
+                raise RuntimeError("媒体传输状态尚未确认可安全重规划，拒绝跨账号恢复")
 
             cur.execute(
                 """

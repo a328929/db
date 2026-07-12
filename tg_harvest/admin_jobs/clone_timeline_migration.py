@@ -69,6 +69,9 @@ from tg_harvest.domain.clone_plan import (
     clone_plan_media_relay_chat_id,
     clone_plan_source_snapshot_message_id,
 )
+from tg_harvest.domain.clone_target_permissions import (
+    clone_target_send_permission,
+)
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 
 
@@ -407,13 +410,20 @@ def _admin_clone_timeline_migration_job_runner(
         def target_entity_for(account: str) -> Any:
             normalized = _clean_text(account).lower()
             if normalized not in target_entities:
-                target_entities[normalized] = _resolve_entity_for_execution(
+                target_entity = _resolve_entity_for_execution(
                     account_client(normalized),
                     chat_id=target_chat_id,
                     chat_username=_clean_text(run.get("target_username")),
                     account=normalized,
                     role="目标群",
                 )
+                if clone_target_send_permission(target_entity) != "ok":
+                    raise RuntimeError(
+                        "计划指定的目标写入账号没有可确认的发消息权限："
+                        f"{normalized}。请授予目标频道发布消息权限或目标群发消息权限，"
+                        "然后重新执行在线深度预检。"
+                    )
+                target_entities[normalized] = target_entity
             return target_entities[normalized]
 
         text_account = accounts.get("text_account") or ""

@@ -35,6 +35,9 @@ from tg_harvest.domain.clone_plan import (
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
     CLONE_MEDIA_STRATEGY_SOURCE_COPY_WITHOUT_ATTRIBUTION,
 )
+from tg_harvest.domain.clone_target_permissions import (
+    clone_target_send_permission,
+)
 from tg_harvest.domain.coerce import safe_int
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 from tg_harvest.storage.clone import (
@@ -83,21 +86,7 @@ def _message_summary(message: Any) -> dict[str, Any]:
 
 
 def _target_send_permission(entity: Any) -> str:
-    if entity is None:
-        return "unknown"
-    if bool(getattr(entity, "creator", False)):
-        return "ok"
-
-    admin_rights = getattr(entity, "admin_rights", None)
-    if admin_rights is not None and bool(getattr(admin_rights, "post_messages", False)):
-        return "ok"
-
-    default_banned_rights = getattr(entity, "default_banned_rights", None)
-    if default_banned_rights is not None and bool(
-        getattr(default_banned_rights, "send_messages", False)
-    ):
-        return "blocked"
-    return "unknown"
+    return clone_target_send_permission(entity)
 
 
 def _source_forwarding_permission(entity: Any) -> str:
@@ -312,7 +301,7 @@ def _first_account(
 def _target_usable(account: dict[str, Any]) -> bool:
     return (
         account.get("target_access") == "ok"
-        and account.get("target_send_permission") != "blocked"
+        and account.get("target_send_permission") == "ok"
     )
 
 
@@ -327,7 +316,7 @@ def _account_can_migrate_media(account: dict[str, Any]) -> bool:
 def _relay_usable(account: dict[str, Any]) -> bool:
     return (
         account.get("relay_access") == "ok"
-        and account.get("relay_send_permission") != "blocked"
+        and account.get("relay_send_permission") == "ok"
         and account.get("relay_safety") == "private_channel"
     )
 
@@ -341,7 +330,7 @@ def _account_can_relay_from_source(account: dict[str, Any]) -> bool:
 
 
 def _account_can_relay_to_target(account: dict[str, Any]) -> bool:
-    return account.get("target_access") == "ok" and _relay_usable(account)
+    return _target_usable(account) and _relay_usable(account)
 
 
 def _configured_relay(cfg: Any | None = None) -> dict[str, Any]:
@@ -431,15 +420,25 @@ def _build_deep_preflight_outcome(
     if not any(account.get("session_status") == "ok" for account in accounts):
         blocking_issues.append("没有可用的 Telegram 登录会话，无法执行在线迁移。")
 
-    if target_access != "ok" or not target_write_account:
+    if target_access != "ok":
         blocking_issues.append("没有账号能访问目标副本，后续文本和媒体迁移均不可执行。")
+    elif not target_write_account:
+        blocking_issues.append(
+            "没有账号拥有或可确认目标副本写入权限；"
+            "频道需要发布消息管理员权限，群组需要发消息权限。"
+        )
 
-    if any(
-        account.get("target_access") == "ok"
-        and account.get("target_send_permission") == "blocked"
+    blocked_target_accounts = [
+        _clean_text(account.get("account"))
         for account in accounts
-    ):
-        blocking_issues.append("检测到目标副本可能禁止当前账号发消息。")
+        if account.get("target_access") == "ok"
+        and account.get("target_send_permission") == "blocked"
+    ]
+    if blocked_target_accounts and target_write_account:
+        warnings.append(
+            "以下账号不能写入目标副本，迁移将不会选用它们："
+            f"{', '.join(blocked_target_accounts)}。"
+        )
 
     if remote_latest_message_id <= 0:
         blocking_issues.append("未能确认源群最新消息，不能建立无遗漏迁移快照。")
@@ -504,7 +503,7 @@ def _build_deep_preflight_outcome(
         if account.get("target_access") == "ok"
     ):
         warnings.append(
-            "目标副本写入权限未执行试发验证，真正迁移前仍建议先小批量试跑。"
+            "无法确认部分账号的目标副本写入权限；这些账号不会被选为迁移写入账号。"
         )
 
     if any(account.get("source_latest_error") for account in accounts):

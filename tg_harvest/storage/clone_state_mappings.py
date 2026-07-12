@@ -4,6 +4,7 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Any
 
+from tg_harvest.domain.clone_target_permissions import clone_target_write_was_rejected
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
 from tg_harvest.storage.clone_state_common import (
     _build_clone_message_mapping_filters,
@@ -438,14 +439,40 @@ def ensure_clone_text_delivery(
         and normalized_target_account
         and existing["delivery_account"] != normalized_target_account
     ):
-        raise RuntimeError("已存在文本交付记录绑定不同目标侧账号，拒绝跨账号恢复")
+        if not (
+            existing.get("status") == "error"
+            and clone_target_write_was_rejected(existing.get("error_message"))
+        ):
+            raise RuntimeError("已存在文本交付记录绑定不同目标侧账号，拒绝跨账号恢复")
+        reset_failed_delivery = True
+    else:
+        reset_failed_delivery = False
 
     delivery_random_id = _valid_delivery_random_id(
-        existing.get("delivery_random_id") if existing is not None else None
+        existing.get("delivery_random_id")
+        if existing is not None and not reset_failed_delivery
+        else None
     ) or _new_delivery_random_id()
     now = _now_iso()
     cur = conn.cursor()
     try:
+        if reset_failed_delivery:
+            cur.execute(
+                """
+                DELETE FROM admin_clone_message_map
+                WHERE run_id = ?
+                  AND source_chat_id = ?
+                  AND source_message_id = ?
+                  AND chunk_index = ?
+                  AND mode = 'text_replay'
+                """,
+                (
+                    normalized_run_id,
+                    normalized_source_chat_id,
+                    normalized_source_message_id,
+                    normalized_chunk_index,
+                ),
+            )
         cur.execute(
             """
             INSERT INTO admin_clone_message_map(
