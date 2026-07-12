@@ -261,6 +261,21 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 """,
                 "idx_admin_clone_message_map_run_status_updated",
             ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT
+                    mode,
+                    source_chat_id,
+                    source_message_id,
+                    SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END)
+                FROM admin_clone_message_map
+                WHERE run_id = 'run-1'
+                  AND mode IN ('text_replay', 'media_copy', 'media_group_copy')
+                GROUP BY mode, source_chat_id, source_message_id
+                """,
+                "idx_admin_clone_message_map_run_mode_source",
+            ),
         ]
 
         for sql, expected_index in cases:

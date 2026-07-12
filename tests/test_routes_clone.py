@@ -112,6 +112,7 @@ class CloneRoutesTests(unittest.TestCase):
             list_clone_runs_fn=self._list_clone_runs,
             count_clone_runs_fn=self._count_clone_runs,
             load_clone_run_detail_fn=self._load_clone_run_detail,
+            load_clone_run_progress_fn=self._load_clone_run_progress,
             list_clone_message_mappings_fn=self._list_clone_message_mappings,
             count_clone_message_mappings_fn=self._count_clone_message_mappings,
             delete_clone_run_fn=self._delete_clone_run,
@@ -520,6 +521,80 @@ class CloneRoutesTests(unittest.TestCase):
                     continue
                 return dict(migration)
         return None
+
+    def _load_clone_run_progress(self, _conn, run_id):
+        snapshot = next(
+            (
+                item
+                for item in reversed(self.created_clone_migrations)
+                if str(item.get("run_id") or "") == str(run_id)
+                and str(item.get("mode") or "") == "timeline_replay"
+                and (
+                    int(item.get("text_total") or 0) > 0
+                    or int(item.get("media_total") or 0) > 0
+                    or int(item.get("media_group_total") or 0) > 0
+                )
+            ),
+            None,
+        )
+        text_done = {
+            int(item.get("source_message_id") or 0)
+            for item in self.clone_message_mappings
+            if str(item.get("run_id") or "") == str(run_id)
+            and str(item.get("mode") or "") == "text_replay"
+            and str(item.get("status") or "") == "done"
+        }
+        media_done = {
+            int(item.get("source_message_id") or 0)
+            for item in self.clone_message_mappings
+            if str(item.get("run_id") or "") == str(run_id)
+            and str(item.get("mode") or "")
+            in {"media_copy", "media_group_copy"}
+            and str(item.get("status") or "") == "done"
+        }
+        if snapshot is None:
+            return {
+                "assessment_state": "unverified",
+                "snapshot_migration_id": "",
+                "verified_at": "",
+                "messages_total": 0,
+                "messages_done": len(text_done) + len(media_done),
+                "messages_error": 0,
+                "messages_remaining": 0,
+                "text_total": 0,
+                "text_done": len(text_done),
+                "text_error": 0,
+                "text_remaining": 0,
+                "media_total": 0,
+                "media_done": len(media_done),
+                "media_error": 0,
+                "media_remaining": 0,
+                "media_group_total": 0,
+                "media_group_items_done": 0,
+            }
+        text_total = int(snapshot.get("text_total") or 0)
+        media_total = int(snapshot.get("media_total") or 0)
+        message_total = text_total + media_total
+        message_done = min(message_total, len(text_done) + len(media_done))
+        return {
+            "assessment_state": "verified",
+            "snapshot_migration_id": str(snapshot.get("migration_id") or ""),
+            "verified_at": str(snapshot.get("updated_at") or ""),
+            "messages_total": message_total,
+            "messages_done": message_done,
+            "messages_error": 0,
+            "messages_remaining": message_total - message_done,
+            "text_total": text_total,
+            "text_done": min(text_total, len(text_done)),
+            "text_error": 0,
+            "text_remaining": max(0, text_total - len(text_done)),
+            "media_total": media_total,
+            "media_done": min(media_total, len(media_done)),
+            "media_error": 0,
+            "media_remaining": max(0, media_total - len(media_done)),
+            "media_group_total": int(snapshot.get("media_group_total") or 0),
+            "media_group_items_done": 0,
+        }
 
     def _build_clone_timeline_replay_preview(self, _conn, *, run_id, source_chat_id):
         preview = {
@@ -1204,8 +1279,52 @@ class CloneRoutesTests(unittest.TestCase):
         payload = response.get_json()
         self.assertIn("timeline_preview", payload)
         self.assertIn("timeline_migration", payload)
+        self.assertIn("task_report", payload)
+        self.assertIn("group_progress", payload)
         self.assertEqual("timeline_replay", payload["timeline_migration"]["mode"])
         self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
+
+    def test_clone_migration_payload_keeps_task_report_and_group_progress_separate(
+        self,
+    ) -> None:
+        self._create_done_plan()
+        self.created_clone_migrations.append(
+            {
+                "migration_id": "migration-latest",
+                "run_id": "run-existing",
+                "plan_id": "plan-ready",
+                "job_id": "job-latest",
+                "mode": "timeline_replay",
+                "status": "done",
+                "phase": "limited_done",
+                "requested_limit": 200,
+                "text_total": 1,
+                "text_sent": 0,
+                "text_skipped": 0,
+                "text_failed": 0,
+                "media_total": 14129,
+                "media_sent": 200,
+                "media_skipped": 0,
+                "media_failed": 0,
+                "media_group_total": 0,
+                "media_group_sent": 0,
+                "media_group_skipped": 0,
+                "media_group_failed": 0,
+                "updated_at": "2026-06-18T00:00:00+00:00",
+            }
+        )
+
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/runs/run-existing/migration")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual(200, payload["task_report"]["processed"])
+        self.assertEqual(200, payload["task_report"]["media"]["sent"])
+        self.assertEqual(200, payload["task_report"]["requested_limit"])
+        self.assertEqual(14130, payload["group_progress"]["messages_total"])
+        self.assertEqual("verified", payload["group_progress"]["assessment_state"])
 
     def test_clone_preflight_rejects_missing_csrf_token(self) -> None:
         with self._auth_config_patch():

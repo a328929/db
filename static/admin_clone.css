@@ -331,6 +331,25 @@
   font-variant-numeric: tabular-nums;
 }
 
+.clone-summary-grid .clone-summary-section,
+.clone-mini-summary .clone-summary-section {
+  grid-column: 1 / -1;
+  border: 0;
+  border-top: 1px solid var(--border);
+  border-radius: 0;
+  background: transparent;
+  color: #243657;
+  padding: 12px 0 2px;
+  font-size: 0.88rem;
+  font-weight: 700;
+}
+
+.clone-summary-grid .clone-summary-section:first-child,
+.clone-mini-summary .clone-summary-section:first-child {
+  border-top: 0;
+  padding-top: 0;
+}
+
 .clone-stats {
   grid-template-columns: repeat(4, minmax(0, 1fr));
   margin-bottom: 14px;

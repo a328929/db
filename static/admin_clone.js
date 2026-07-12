@@ -33,6 +33,8 @@
     migration: null,
     timelineMigration: null,
     timelinePreview: null,
+    groupProgress: null,
+    timelineTaskReport: null,
     report: null,
     busy: false
   };
@@ -237,6 +239,9 @@
     var hasBlockingIssues = Array.isArray(plan && plan.blocking_issues)
       && plan.blocking_issues.length > 0;
     var remaining = Number((cloneState.timelinePreview || {}).timeline_remaining || 0);
+    var groupProgress = cloneState.groupProgress || {};
+    var groupComplete = String(groupProgress.assessment_state || '').trim() === 'verified'
+      && Number(groupProgress.messages_remaining || 0) <= 0;
 
     setStageState(elements.selectStage, run ? 'complete' : 'current');
     if (!run) {
@@ -272,9 +277,11 @@
     }
     setStageState(
       elements.migrationStage,
-      cloneState.timelinePreview
+      groupComplete || (
+        cloneState.timelinePreview
         && cloneState.timelinePreview.assessment_state !== 'deferred'
         && remaining <= 0
+      )
         ? 'complete'
         : 'current'
     );
@@ -462,6 +469,8 @@
       cloneState.migration = null;
       cloneState.timelineMigration = null;
       cloneState.timelinePreview = null;
+      cloneState.groupProgress = null;
+      cloneState.timelineTaskReport = null;
       renderReport(elements, null);
       renderMigrationPlan(elements, null);
       renderTimelineMigration(elements, null);
@@ -822,6 +831,8 @@
       cloneState.migration = null;
       cloneState.timelineMigration = null;
       cloneState.timelinePreview = null;
+      cloneState.groupProgress = null;
+      cloneState.timelineTaskReport = null;
       renderCloneRuns(elements, []);
       renderMigrationPlan(elements, null);
       renderTimelineMigration(elements, null);
@@ -1152,6 +1163,8 @@
     cloneState.migration = null;
     cloneState.timelineMigration = null;
     cloneState.timelinePreview = null;
+    cloneState.groupProgress = null;
+    cloneState.timelineTaskReport = null;
     syncUrlRunId(elements, cloneState.selectedRunId);
     renderCloneRuns(elements, cloneState.runs);
     renderMigrationPlan(elements, null);
@@ -1240,6 +1253,8 @@
       cloneState.migration = null;
       cloneState.timelineMigration = null;
       cloneState.timelinePreview = null;
+      cloneState.groupProgress = null;
+      cloneState.timelineTaskReport = null;
       renderTimelineMigration(elements, null);
       return;
     }
@@ -1261,6 +1276,12 @@
       cloneState.timelinePreview = payload && payload.timeline_preview
         ? payload.timeline_preview
         : null;
+      cloneState.groupProgress = payload && payload.group_progress
+        ? payload.group_progress
+        : null;
+      cloneState.timelineTaskReport = payload && payload.task_report
+        ? payload.task_report
+        : null;
       renderTimelineMigration(elements, cloneState.timelineMigration);
     } catch (error) {
       if (requestToken !== requestState.migrationToken) {
@@ -1269,6 +1290,8 @@
       cloneState.migration = null;
       cloneState.timelineMigration = null;
       cloneState.timelinePreview = null;
+      cloneState.groupProgress = null;
+      cloneState.timelineTaskReport = null;
       renderTimelineMigration(elements, null);
       appendLog(elements, '读取迁移记录失败：' + error.message);
     } finally {
@@ -1318,6 +1341,14 @@
       return;
     }
     if (!isTimelineMigrationAllowed()) {
+      var groupProgress = cloneState.groupProgress || {};
+      if (
+        String(groupProgress.assessment_state || '').trim() === 'verified'
+        && Number(groupProgress.messages_remaining || 0) <= 0
+      ) {
+        elements.timelineStatus.textContent = '群总进度已完成，没有剩余消息需要克隆。';
+        return;
+      }
       var preview = cloneState.timelinePreview || {};
       var readinessReasons = Array.isArray(preview.readiness_reasons) ? preview.readiness_reasons : [];
       elements.timelineStatus.textContent = readinessReasons[0] || '克隆计划还未满足继续克隆条件。';
@@ -1336,6 +1367,12 @@
       var jobId = getCreatedJobId(payload);
       cloneState.migration = payload && payload.migration ? payload.migration : null;
       cloneState.timelineMigration = cloneState.migration;
+      cloneState.timelineTaskReport = payload && payload.task_report
+        ? payload.task_report
+        : null;
+      cloneState.groupProgress = payload && payload.group_progress
+        ? payload.group_progress
+        : cloneState.groupProgress;
       if (payload && payload.timeline_preview) {
         cloneState.timelinePreview = payload.timeline_preview;
       }
@@ -1408,6 +1445,7 @@
 
     var run = getSelectedCloneRun();
     var preview = cloneState.timelinePreview || null;
+    var groupProgress = cloneState.groupProgress || null;
     var timelineMigration = migration && String(migration.mode || '') === 'timeline_replay'
       ? migration
       : null;
@@ -1417,35 +1455,34 @@
       elements.timelineStatus.textContent = '选择副本后继续。';
       appendSummaryPair(elements.timelineSummary, '克隆群', '未选择');
       appendSummaryPair(elements.timelineSummary, '状态', '未选择');
-      appendSummaryPair(elements.timelineSummary, '时间线总数', '0');
-      appendSummaryPair(elements.timelineSummary, '剩余时间线', '0');
       return;
     }
 
     appendSummaryPair(elements.timelineSummary, '克隆群', getCloneRunTargetLabel(run));
     if (!timelineMigration) {
-      elements.timelineStatus.textContent = preview && preview.can_migrate_timeline
+      var groupComplete = String((groupProgress && groupProgress.assessment_state) || '').trim() === 'verified'
+        && Number(groupProgress.messages_remaining || 0) <= 0;
+      elements.timelineStatus.textContent = groupComplete
+        ? '群内可迁移消息已全部完成。'
+        : preview && preview.can_migrate_timeline
         ? (preview.assessment_state === 'deferred'
           ? '迁移方案已就绪；开始后会在后台核验本地时间线。'
           : '可以开始克隆消息。')
         : '等待迁移方案完成。';
       appendSummaryPair(elements.timelineSummary, '状态', '未执行');
+      appendGroupProgressSummary(elements.timelineSummary, groupProgress);
       appendTimelinePreviewSummary(elements, preview);
       return;
     }
 
     elements.timelineStatus.textContent = buildTimelineMigrationStatusText(timelineMigration);
+    appendSummarySection(elements.timelineSummary, '最近任务报告');
     appendSummaryPair(elements.timelineSummary, '状态', getMigrationStatusLabel(timelineMigration.status));
     appendSummaryPair(elements.timelineSummary, '阶段', getMigrationPhaseLabel(timelineMigration.phase));
-    appendSummaryPair(
+    appendTaskReportSummary(
       elements.timelineSummary,
-      '文本已发送',
-      formatDoneTotal(timelineMigration.text_sent, timelineMigration.text_total)
-    );
-    appendSummaryPair(
-      elements.timelineSummary,
-      '媒体已复制',
-      formatDoneTotal(timelineMigration.media_sent, timelineMigration.media_total)
+      cloneState.timelineTaskReport,
+      timelineMigration
     );
     appendSummaryPair(
       elements.timelineSummary,
@@ -1458,7 +1495,92 @@
       '发送间隔',
       formatNumber(timelineMigration.send_delay_ms) + 'ms'
     );
+    appendGroupProgressSummary(elements.timelineSummary, groupProgress);
     appendTimelinePreviewSummary(elements, preview);
+  }
+
+  function appendSummarySection(container, title) {
+    var heading = document.createElement('div');
+    heading.className = 'clone-summary-section';
+    heading.textContent = String(title || '摘要');
+    container.appendChild(heading);
+  }
+
+  function nonnegativeProgressNumber(value) {
+    var number = Number(value || 0);
+    return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+  }
+
+  function buildTaskReportFromMigration(migration) {
+    var source = migration && typeof migration === 'object' ? migration : {};
+    function outcome(prefix) {
+      var sent = nonnegativeProgressNumber(source[prefix + '_sent']);
+      var skipped = nonnegativeProgressNumber(source[prefix + '_skipped']);
+      var failed = nonnegativeProgressNumber(source[prefix + '_failed']);
+      return {
+        sent: sent,
+        skipped: skipped,
+        failed: failed,
+        processed: sent + skipped + failed
+      };
+    }
+    var text = outcome('text');
+    var media = outcome('media');
+    var mediaGroups = outcome('media_group');
+    return {
+      requested_limit: nonnegativeProgressNumber(source.requested_limit),
+      text: text,
+      media: media,
+      media_groups: mediaGroups,
+      processed: text.processed + media.processed
+    };
+  }
+
+  function taskOutcomeText(outcome, completedLabel) {
+    var data = outcome && typeof outcome === 'object' ? outcome : {};
+    return completedLabel
+      + ' ' + formatNumber(data.sent)
+      + '，跳过 ' + formatNumber(data.skipped)
+      + '，失败 ' + formatNumber(data.failed);
+  }
+
+  function appendTaskReportSummary(container, report, migration) {
+    var data = report && typeof report === 'object'
+      ? report
+      : buildTaskReportFromMigration(migration);
+    appendSummaryPair(container, '本次处理', formatNumber(data.processed) + ' 条');
+    appendSummaryPair(container, '本次文本', taskOutcomeText(data.text, '已发'));
+    appendSummaryPair(container, '本次媒体', taskOutcomeText(data.media, '已复制'));
+    appendSummaryPair(container, '本次相册组', taskOutcomeText(data.media_groups, '已复制'));
+  }
+
+  function appendGroupProgressSummary(container, progress) {
+    var data = progress && typeof progress === 'object' ? progress : {};
+    var verified = String(data.assessment_state || '').trim() === 'verified';
+    appendSummarySection(container, '群总进度');
+    if (!verified) {
+      appendSummaryPair(container, '核验状态', '尚未完成首次时间线核验');
+      appendSummaryPair(container, '已完成映射', formatNumber(data.messages_done));
+      return;
+    }
+    appendSummaryPair(
+      container,
+      '已完成消息',
+      formatDoneTotal(data.messages_done, data.messages_total)
+    );
+    appendSummaryPair(container, '剩余消息', formatNumber(data.messages_remaining));
+    appendSummaryPair(
+      container,
+      '群文本',
+      formatDoneTotal(data.text_done, data.text_total)
+    );
+    appendSummaryPair(
+      container,
+      '群媒体',
+      formatDoneTotal(data.media_done, data.media_total)
+    );
+    appendSummaryPair(container, '未解决失败', formatNumber(data.messages_error));
+    appendSummaryPair(container, '最近核验', formatDateTime(data.verified_at));
   }
 
   function appendTimelinePreviewSummary(elements, preview) {
@@ -1468,19 +1590,12 @@
     var assessmentLabel = data.can_migrate_timeline
       ? (assessmentState === 'deferred' ? '开始后后台核验' : '可执行')
       : readinessReasons[0] || '未完成评估';
+    appendSummarySection(elements.timelineSummary, '执行条件');
     appendSummaryPair(
       elements.timelineSummary,
       '执行评估',
       assessmentLabel
     );
-    if (assessmentState === 'deferred') {
-      appendSummaryPair(elements.timelineSummary, '时间线统计', '将在后台核验后显示');
-      return;
-    }
-    appendSummaryPair(elements.timelineSummary, '时间线总数', formatNumber(data.timeline_items_total));
-    appendSummaryPair(elements.timelineSummary, '剩余时间线', formatNumber(data.timeline_remaining));
-    appendSummaryPair(elements.timelineSummary, '文本剩余', formatNumber(data.text_remaining));
-    appendSummaryPair(elements.timelineSummary, '媒体剩余', formatNumber(data.media_remaining));
   }
 
   function buildTimelineMigrationStatusText(migration) {
@@ -1920,6 +2035,13 @@
   function isTimelineMigrationAllowed() {
     if (cloneState.busy || jobPollState.isPolling) return false;
     if (!getSelectedCloneRun()) return false;
+    var groupProgress = cloneState.groupProgress || {};
+    if (
+      String(groupProgress.assessment_state || '').trim() === 'verified'
+      && Number(groupProgress.messages_remaining || 0) <= 0
+    ) {
+      return false;
+    }
     var preview = cloneState.timelinePreview;
     if (!preview || typeof preview !== 'object') return false;
     if (preview.can_migrate_timeline !== true) return false;

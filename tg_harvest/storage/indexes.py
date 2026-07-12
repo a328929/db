@@ -510,6 +510,14 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
         "run_id, status, updated_at DESC, created_at DESC, id DESC"
         ")",
     )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_message_map_run_mode_source",
+        "CREATE INDEX idx_admin_clone_message_map_run_mode_source "
+        "ON admin_clone_message_map("
+        "run_id, mode, source_chat_id, source_message_id, chunk_index, status"
+        ")",
+    )
 
 
 def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):

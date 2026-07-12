@@ -13,6 +13,7 @@ from tg_harvest.storage.clone_state_common import (
     _query_count,
     _query_one,
 )
+from tg_harvest.storage.row_access import row_int as _row_int
 
 
 def record_clone_message_mapping(
@@ -214,6 +215,151 @@ def load_clone_message_mapping_summary(
         (normalized_run_id,),
         _clone_message_mapping_summary_from_row,
     )
+
+
+def load_clone_run_progress(
+    conn: sqlite3.Connection,
+    run_id: str,
+) -> dict[str, Any]:
+    """Load the latest verified whole-group snapshot and deduplicated progress.
+
+    Migration records retain the complete source snapshot calculated before an
+    execution starts.  Message mappings are durable per-source-message records
+    across all executions of a clone run.  Keeping the two together here makes
+    the group-level progress independent from the counters of the latest task.
+    """
+
+    normalized_run_id = _clean_text(run_id)
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT
+                migration_id,
+                text_total,
+                media_total,
+                media_group_total,
+                updated_at
+            FROM admin_clone_migrations
+            WHERE run_id = ?
+              AND mode = 'timeline_replay'
+              AND (
+                    text_total > 0
+                 OR media_total > 0
+                 OR media_group_total > 0
+              )
+            ORDER BY updated_at DESC, created_at DESC, migration_id DESC
+            LIMIT 1
+            """,
+            (normalized_run_id,),
+        )
+        snapshot = cur.fetchone()
+
+        cur.execute(
+            """
+            WITH mapping_state AS (
+                SELECT
+                    CASE WHEN mode = 'text_replay' THEN 'text' ELSE 'media' END
+                        AS mapping_kind,
+                    source_chat_id,
+                    source_message_id,
+                    CASE
+                        WHEN MAX(CASE WHEN mode = 'text_replay' THEN 1 ELSE 0 END) = 1
+                        THEN CASE
+                            WHEN SUM(CASE WHEN status = 'done'
+                                THEN 1 ELSE 0 END) >= MAX(
+                                    CASE WHEN chunk_count > 0 THEN chunk_count ELSE 1 END
+                                )
+                            THEN 1 ELSE 0
+                        END
+                        WHEN MAX(CASE WHEN status = 'done' THEN 1 ELSE 0 END) = 1
+                        THEN 1 ELSE 0
+                    END AS is_done,
+                    MAX(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS has_error,
+                    MAX(CASE WHEN mode = 'media_group_copy' AND status = 'done'
+                        THEN 1 ELSE 0 END) AS media_group_item_done
+                FROM admin_clone_message_map
+                WHERE run_id = ?
+                  AND mode IN ('text_replay', 'media_copy', 'media_group_copy')
+                GROUP BY
+                    CASE WHEN mode = 'text_replay' THEN 'text' ELSE 'media' END,
+                    source_chat_id,
+                    source_message_id
+            )
+            SELECT
+                SUM(CASE WHEN mapping_kind = 'text' AND is_done = 1
+                    THEN 1 ELSE 0 END) AS text_done,
+                SUM(CASE WHEN mapping_kind = 'text' AND is_done = 0
+                              AND has_error = 1
+                    THEN 1 ELSE 0 END) AS text_error,
+                SUM(CASE WHEN mapping_kind = 'media' AND is_done = 1
+                    THEN 1 ELSE 0 END) AS media_done,
+                SUM(CASE WHEN mapping_kind = 'media' AND is_done = 0
+                              AND has_error = 1
+                    THEN 1 ELSE 0 END) AS media_error,
+                SUM(CASE WHEN mapping_kind = 'media' AND is_done = 1
+                              AND media_group_item_done = 1
+                    THEN 1 ELSE 0 END) AS media_group_items_done
+            FROM mapping_state
+            """,
+            (normalized_run_id,),
+        )
+        mapped = cur.fetchone()
+    finally:
+        cur.close()
+
+    text_done = _row_int(mapped, "text_done")
+    text_error = _row_int(mapped, "text_error")
+    media_done = _row_int(mapped, "media_done")
+    media_error = _row_int(mapped, "media_error")
+    media_group_items_done = _row_int(mapped, "media_group_items_done")
+
+    if snapshot is None:
+        return {
+            "assessment_state": "unverified",
+            "snapshot_migration_id": "",
+            "verified_at": "",
+            "messages_total": 0,
+            "messages_done": text_done + media_done,
+            "messages_error": text_error + media_error,
+            "messages_remaining": 0,
+            "text_total": 0,
+            "text_done": text_done,
+            "text_error": text_error,
+            "text_remaining": 0,
+            "media_total": 0,
+            "media_done": media_done,
+            "media_error": media_error,
+            "media_remaining": 0,
+            "media_group_total": 0,
+            "media_group_items_done": media_group_items_done,
+        }
+
+    text_total = _row_int(snapshot, "text_total")
+    media_total = _row_int(snapshot, "media_total")
+    message_total = text_total + media_total
+    completed = min(message_total, text_done + media_done)
+    text_completed = min(text_total, text_done)
+    media_completed = min(media_total, media_done)
+    return {
+        "assessment_state": "verified",
+        "snapshot_migration_id": str(snapshot["migration_id"] or ""),
+        "verified_at": str(snapshot["updated_at"] or ""),
+        "messages_total": message_total,
+        "messages_done": completed,
+        "messages_error": text_error + media_error,
+        "messages_remaining": max(0, message_total - completed),
+        "text_total": text_total,
+        "text_done": text_completed,
+        "text_error": text_error,
+        "text_remaining": max(0, text_total - text_completed),
+        "media_total": media_total,
+        "media_done": media_completed,
+        "media_error": media_error,
+        "media_remaining": max(0, media_total - media_completed),
+        "media_group_total": _row_int(snapshot, "media_group_total"),
+        "media_group_items_done": media_group_items_done,
+    }
 
 
 def list_clone_message_mappings(

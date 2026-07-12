@@ -47,6 +47,7 @@ class _CloneRouteDeps:
     list_clone_runs_fn: Any
     count_clone_runs_fn: Any
     load_clone_run_detail_fn: Any
+    load_clone_run_progress_fn: Any
     list_clone_message_mappings_fn: Any
     count_clone_message_mappings_fn: Any
     delete_clone_run_fn: Any
@@ -466,6 +467,50 @@ def _deferred_timeline_preview(
         "db_self_check_risk_group_total": 0,
         "db_self_check_risk_group_items": 0,
         **readiness,
+    }
+
+
+def _nonnegative_progress_count(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _build_timeline_task_report(migration: dict | None) -> dict | None:
+    """Return counters for one execution, never the whole-group snapshot."""
+
+    if not isinstance(migration, dict):
+        return None
+    if str(migration.get("mode") or "").strip() != "timeline_replay":
+        return None
+
+    def outcome(prefix: str) -> dict[str, int]:
+        sent = _nonnegative_progress_count(migration.get(prefix + "_sent"))
+        skipped = _nonnegative_progress_count(migration.get(prefix + "_skipped"))
+        failed = _nonnegative_progress_count(migration.get(prefix + "_failed"))
+        return {
+            "sent": sent,
+            "skipped": skipped,
+            "failed": failed,
+            "processed": sent + skipped + failed,
+        }
+
+    text = outcome("text")
+    media = outcome("media")
+    media_groups = outcome("media_group")
+    return {
+        "migration_id": str(migration.get("migration_id") or ""),
+        "status": str(migration.get("status") or ""),
+        "phase": str(migration.get("phase") or ""),
+        "requested_limit": _nonnegative_progress_count(
+            migration.get("requested_limit")
+        ),
+        "text": text,
+        "media": media,
+        "media_groups": media_groups,
+        "processed": text["processed"] + media["processed"],
+        "updated_at": str(migration.get("updated_at") or ""),
     }
 
 
@@ -902,6 +947,10 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 detail = deps.load_clone_run_detail_fn(conn, normalized_run_id)
                 if detail is None:
                     return json_error("克隆运行记录不存在", 404)
+                group_progress = deps.load_clone_run_progress_fn(
+                    conn,
+                    normalized_run_id,
+                )
             run = _with_clone_run_link(
                 detail["run"],
                 deps.build_telegram_chat_link_bundle_fn,
@@ -917,6 +966,10 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     "plan": detail.get("plan"),
                     "migration": detail.get("migration"),
                     "timeline_preview": timeline_preview,
+                    "task_report": _build_timeline_task_report(
+                        detail.get("migration")
+                    ),
+                    "group_progress": group_progress,
                     "mapping_summary": detail.get("mapping_summary"),
                     "recent_mappings": detail.get("recent_mappings") or [],
                     "failure_items": detail.get("failure_items") or [],
@@ -1094,6 +1147,10 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     mode="timeline_replay",
                 )
                 latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
+                group_progress = deps.load_clone_run_progress_fn(
+                    conn,
+                    normalized_run_id,
+                )
             timeline_preview = _deferred_timeline_preview(clone_run, latest_plan)
             if timeline_migration is not None:
                 timeline_preview["latest_migration_id"] = timeline_migration.get(
@@ -1111,6 +1168,8 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     "migration": timeline_migration,
                     "timeline_migration": timeline_migration,
                     "timeline_preview": timeline_preview,
+                    "task_report": _build_timeline_task_report(timeline_migration),
+                    "group_progress": group_progress,
                 }
             )
         except sqlite3.Error:
@@ -1461,6 +1520,7 @@ def _clone_deps_from_services(services: CloneRouteServices) -> _CloneRouteDeps:
         list_clone_runs_fn=services.list_clone_runs_fn,
         count_clone_runs_fn=services.count_clone_runs_fn,
         load_clone_run_detail_fn=services.load_clone_run_detail_fn,
+        load_clone_run_progress_fn=services.load_clone_run_progress_fn,
         list_clone_message_mappings_fn=services.list_clone_message_mappings_fn,
         count_clone_message_mappings_fn=services.count_clone_message_mappings_fn,
         delete_clone_run_fn=services.delete_clone_run_fn,
@@ -1500,6 +1560,7 @@ def _clone_deps_from_legacy_kwargs(
     list_clone_runs_fn=None,
     count_clone_runs_fn=None,
     load_clone_run_detail_fn=None,
+    load_clone_run_progress_fn=None,
     list_clone_message_mappings_fn=None,
     count_clone_message_mappings_fn=None,
     delete_clone_run_fn=None,
@@ -1528,6 +1589,7 @@ def _clone_deps_from_legacy_kwargs(
         list_clone_runs_fn=list_clone_runs_fn,
         count_clone_runs_fn=count_clone_runs_fn,
         load_clone_run_detail_fn=load_clone_run_detail_fn,
+        load_clone_run_progress_fn=load_clone_run_progress_fn,
         list_clone_message_mappings_fn=list_clone_message_mappings_fn,
         count_clone_message_mappings_fn=count_clone_message_mappings_fn,
         delete_clone_run_fn=delete_clone_run_fn,
@@ -1569,6 +1631,7 @@ def register_clone_routes(
     list_clone_runs_fn=None,
     count_clone_runs_fn=None,
     load_clone_run_detail_fn=None,
+    load_clone_run_progress_fn=None,
     list_clone_message_mappings_fn=None,
     count_clone_message_mappings_fn=None,
     delete_clone_run_fn=None,
@@ -1600,6 +1663,7 @@ def register_clone_routes(
             list_clone_runs_fn=list_clone_runs_fn,
             count_clone_runs_fn=count_clone_runs_fn,
             load_clone_run_detail_fn=load_clone_run_detail_fn,
+            load_clone_run_progress_fn=load_clone_run_progress_fn,
             list_clone_message_mappings_fn=list_clone_message_mappings_fn,
             count_clone_message_mappings_fn=count_clone_message_mappings_fn,
             delete_clone_run_fn=delete_clone_run_fn,

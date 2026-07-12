@@ -19,6 +19,7 @@ from tg_harvest.storage.clone import (
     list_clone_text_replay_batch,
     load_clone_message_mapping,
     load_clone_run,
+    load_clone_run_progress,
     load_latest_clone_migration,
     load_latest_clone_plan,
     record_clone_message_mapping,
@@ -813,6 +814,66 @@ def test_clone_migration_mapping_and_text_candidate_roundtrip():
         latest = load_latest_clone_migration(conn, "run-migration")
         assert latest is not None
         assert latest["migration_id"] == "migration-1"
+    finally:
+        conn.close()
+
+
+def test_clone_run_progress_separates_verified_group_totals_from_mappings():
+    conn = _new_conn()
+    try:
+        create_clone_migration(
+            conn,
+            migration_id="migration-progress",
+            run_id="run-progress",
+            mode="timeline_replay",
+            status="done",
+            text_total=2,
+            media_total=4,
+            media_group_total=1,
+        )
+
+        def record(
+            source_message_id: int,
+            *,
+            mode: str,
+            status: str,
+            chunk_index: int = 0,
+            chunk_count: int = 1,
+        ) -> None:
+            record_clone_message_mapping(
+                conn,
+                migration_id="migration-progress",
+                run_id="run-progress",
+                source_chat_id=100,
+                source_message_id=source_message_id,
+                target_chat_id=777,
+                mode=mode,
+                status=status,
+                chunk_index=chunk_index,
+                chunk_count=chunk_count,
+            )
+
+        # A long text can have several mapping rows but is one group message.
+        record(1, mode="text_replay", status="done", chunk_index=0, chunk_count=2)
+        record(1, mode="text_replay", status="done", chunk_index=1, chunk_count=2)
+        record(2, mode="text_replay", status="error")
+        record(3, mode="media_copy", status="done")
+        record(4, mode="media_group_copy", status="done")
+        record(5, mode="media_group_copy", status="done")
+        record(6, mode="media_copy", status="error")
+
+        progress = load_clone_run_progress(conn, "run-progress")
+
+        assert progress["assessment_state"] == "verified"
+        assert progress["snapshot_migration_id"] == "migration-progress"
+        assert progress["messages_total"] == 6
+        assert progress["messages_done"] == 4
+        assert progress["messages_error"] == 2
+        assert progress["messages_remaining"] == 2
+        assert progress["text_done"] == 1
+        assert progress["text_error"] == 1
+        assert progress["media_done"] == 3
+        assert progress["media_error"] == 1
     finally:
         conn.close()
 

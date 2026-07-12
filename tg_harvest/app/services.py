@@ -14,6 +14,7 @@ class CloneRouteServices:
     list_clone_runs_fn: Any
     count_clone_runs_fn: Any
     load_clone_run_detail_fn: Any
+    load_clone_run_progress_fn: Any
     list_clone_message_mappings_fn: Any
     count_clone_message_mappings_fn: Any
     delete_clone_run_fn: Any

@@ -99,6 +99,7 @@ from tg_harvest.storage.clone import (
     list_clone_source_chats,
     load_clone_run,
     load_clone_run_detail,
+    load_clone_run_progress,
     load_latest_clone_migration,
     load_latest_clone_plan,
 )
@@ -407,6 +408,7 @@ def _build_route_services() -> RouteRegistryServices:
         list_clone_runs_fn=list_clone_runs,
         count_clone_runs_fn=count_clone_runs,
         load_clone_run_detail_fn=load_clone_run_detail,
+        load_clone_run_progress_fn=load_clone_run_progress,
         list_clone_message_mappings_fn=list_clone_message_mappings,
         count_clone_message_mappings_fn=count_clone_message_mappings,
         delete_clone_run_fn=delete_clone_run,

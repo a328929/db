@@ -643,8 +643,16 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("preview.can_migrate_timeline !== true", source)
         self.assertIn("cloneState.timelineMigration = payload && payload.timeline_migration", source)
         self.assertIn("function appendTimelinePreviewSummary", source)
-        self.assertIn("'剩余时间线'", source)
-        self.assertIn("'文本剩余'", source)
+        self.assertIn("function appendGroupProgressSummary", source)
+        self.assertIn("function appendTaskReportSummary", source)
+        self.assertIn("group_progress", source)
+        self.assertIn("task_report", source)
+        self.assertIn("'群总进度'", source)
+        self.assertIn("'最近任务报告'", source)
+        self.assertIn("'已完成消息'", source)
+        self.assertIn("'本次处理'", source)
+        self.assertNotIn("'剩余时间线'", source)
+        self.assertNotIn("'文本剩余'", source)
         self.assertNotIn("'数据库风险组'", source)
 
     def test_clone_migrate_preserves_explicit_run_selection(self) -> None:

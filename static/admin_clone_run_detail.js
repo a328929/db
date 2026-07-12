@@ -254,7 +254,8 @@
     var run = payload && payload.run ? payload.run : null;
     var plan = payload && payload.plan ? payload.plan : null;
     var migration = payload && payload.migration ? payload.migration : null;
-    var preview = payload && payload.timeline_preview ? payload.timeline_preview : null;
+    var taskReport = payload && payload.task_report ? payload.task_report : null;
+    var groupProgress = payload && payload.group_progress ? payload.group_progress : null;
     var summary = payload && payload.mapping_summary ? payload.mapping_summary : null;
     var failures = payload && Array.isArray(payload.failure_items) ? payload.failure_items : [];
 
@@ -293,24 +294,40 @@
     appendSummaryPair(elements.detailSummary, '消息克隆', getMigrationStatusLabel(migration && migration.status));
     appendSummaryPair(
       elements.detailSummary,
-      '剩余时间线',
-      formatTimelineMetric(preview, 'timeline_remaining')
+      '群剩余消息',
+      formatGroupProgressMetric(groupProgress, 'messages_remaining')
     );
     appendSummaryPair(elements.detailSummary, '更新时间', formatDateTime(run.updated_at));
 
-    appendMiniPair(elements.progressSummary, '迁移状态', getMigrationStatusLabel(migration && migration.status));
+    appendMiniSection(elements.progressSummary, '群总进度');
     appendMiniPair(
       elements.progressSummary,
-      '时间线总数',
-      formatTimelineMetric(preview, 'timeline_items_total')
+      '已完成消息',
+      formatGroupProgressDoneTotal(groupProgress)
     );
     appendMiniPair(
       elements.progressSummary,
-      '剩余时间线',
-      formatTimelineMetric(preview, 'timeline_remaining')
+      '剩余消息',
+      formatGroupProgressMetric(groupProgress, 'messages_remaining')
     );
-    appendMiniPair(elements.progressSummary, '文本已发', formatDoneTotal(migration && migration.text_sent, migration && migration.text_total));
-    appendMiniPair(elements.progressSummary, '媒体已复制', formatDoneTotal(migration && migration.media_sent, migration && migration.media_total));
+    appendMiniPair(
+      elements.progressSummary,
+      '群文本',
+      formatGroupProgressDoneTotal(groupProgress, 'text')
+    );
+    appendMiniPair(
+      elements.progressSummary,
+      '群媒体',
+      formatGroupProgressDoneTotal(groupProgress, 'media')
+    );
+    appendMiniPair(
+      elements.progressSummary,
+      '最近核验',
+      formatGroupProgressMetric(groupProgress, 'verified_at', true)
+    );
+
+    appendMiniSection(elements.progressSummary, '最近任务报告');
+    appendTaskReport(elements.progressSummary, taskReport, migration);
     appendMiniPair(
       elements.progressSummary,
       '执行方式',
@@ -349,15 +366,96 @@
     container.appendChild(wrap);
   }
 
-  function formatTimelineMetric(preview, key) {
-    if (String((preview && preview.assessment_state) || '').trim() === 'deferred') {
-      return '待后台核验';
+  function appendMiniSection(container, title) {
+    var heading = document.createElement('div');
+    heading.className = 'clone-summary-section';
+    heading.textContent = String(title || '摘要');
+    container.appendChild(heading);
+  }
+
+  function nonnegativeProgressNumber(value) {
+    var number = Number(value || 0);
+    return Number.isFinite(number) && number > 0 ? Math.trunc(number) : 0;
+  }
+
+  function isGroupProgressVerified(progress) {
+    return String((progress && progress.assessment_state) || '').trim() === 'verified';
+  }
+
+  function formatGroupProgressMetric(progress, key, isDate) {
+    if (!isGroupProgressVerified(progress)) {
+      return key === 'messages_remaining' ? '尚未完成首次核验' : '尚未核验';
     }
-    return formatNumber(preview && preview[key]);
+    return isDate
+      ? formatDateTime(progress && progress[key])
+      : formatNumber(progress && progress[key]);
+  }
+
+  function formatGroupProgressDoneTotal(progress, prefix) {
+    if (!isGroupProgressVerified(progress)) {
+      return '尚未完成首次核验';
+    }
+    var keyPrefix = String(prefix || 'messages');
+    return formatDoneTotal(
+      progress && progress[keyPrefix + '_done'],
+      progress && progress[keyPrefix + '_total']
+    );
+  }
+
+  function buildTaskReport(migration) {
+    var source = migration && typeof migration === 'object' ? migration : {};
+    function outcome(prefix) {
+      var sent = nonnegativeProgressNumber(source[prefix + '_sent']);
+      var skipped = nonnegativeProgressNumber(source[prefix + '_skipped']);
+      var failed = nonnegativeProgressNumber(source[prefix + '_failed']);
+      return {
+        sent: sent,
+        skipped: skipped,
+        failed: failed,
+        processed: sent + skipped + failed
+      };
+    }
+    var text = outcome('text');
+    var media = outcome('media');
+    var mediaGroups = outcome('media_group');
+    return {
+      requested_limit: nonnegativeProgressNumber(source.requested_limit),
+      text: text,
+      media: media,
+      media_groups: mediaGroups,
+      processed: text.processed + media.processed
+    };
+  }
+
+  function formatTaskOutcome(outcome, completedLabel) {
+    var data = outcome && typeof outcome === 'object' ? outcome : {};
+    return completedLabel
+      + ' ' + formatNumber(data.sent)
+      + '，跳过 ' + formatNumber(data.skipped)
+      + '，失败 ' + formatNumber(data.failed);
+  }
+
+  function appendTaskReport(container, report, migration) {
+    var data = report && typeof report === 'object' ? report : buildTaskReport(migration);
+    appendMiniPair(container, '本次处理', formatNumber(data.processed) + ' 条');
+    appendMiniPair(container, '本次文本', formatTaskOutcome(data.text, '已发'));
+    appendMiniPair(container, '本次媒体', formatTaskOutcome(data.media, '已复制'));
+    appendMiniPair(container, '本次相册组', formatTaskOutcome(data.media_groups, '已复制'));
+    appendMiniPair(container, '本次上限', formatLimit(data.requested_limit));
+  }
+
+  function formatLimit(value) {
+    var number = nonnegativeProgressNumber(value);
+    return number > 0 ? formatNumber(number) + ' 条' : '全部';
   }
 
   function renderDetailActions(elements, run, payload) {
-    var resumeHref = run && canResumeMigration(run) ? buildRunMigrationHref(run) : '';
+    var groupProgress = payload && payload.group_progress ? payload.group_progress : null;
+    var resumeHref = run
+      && canResumeMigration(run)
+      && !isGroupProgressComplete(groupProgress)
+      ? buildRunMigrationHref(run)
+      : '';
     var resumeLabel = buildResumeLinkLabel(payload);
 
     syncActionLink(elements.openSourceLink, run && run.source_telegram_app_link, '打开源群');
@@ -383,12 +481,15 @@
     var plan = payload && payload.plan ? payload.plan : null;
     var migration = payload && payload.migration ? payload.migration : null;
     var preview = payload && payload.timeline_preview ? payload.timeline_preview : null;
+    var groupProgress = payload && payload.group_progress ? payload.group_progress : null;
     if (!run || !canResumeMigration(run)) {
       return '去继续克隆消息';
     }
     if (!plan) return '去生成克隆计划';
     if (hasPlanBlockingIssues(plan)) return '去处理阻断项';
     if (isMigrationErrored(migration)) return '去重试继续克隆';
+    if (isGroupProgressComplete(groupProgress)) return '群内消息已完成';
+    if (isGroupProgressRemaining(groupProgress)) return '继续克隆消息';
     if (isPreviewRemaining(preview)) return '继续克隆消息';
     return '去继续克隆消息';
   }
@@ -408,6 +509,7 @@
     var plan = payload && payload.plan ? payload.plan : null;
     var migration = payload && payload.migration ? payload.migration : null;
     var preview = payload && payload.timeline_preview ? payload.timeline_preview : null;
+    var groupProgress = payload && payload.group_progress ? payload.group_progress : null;
 
     if (!run) {
       return '请回到“已克隆群管理”选择一条记录进入详情页。';
@@ -432,8 +534,16 @@
     if (isMigrationErrored(migration)) {
       return '最近一次继续克隆失败了。建议回到“继续克隆消息”重试。';
     }
+    if (isGroupProgressComplete(groupProgress)) {
+      return '最近一次核验显示该群的可迁移消息已全部完成。';
+    }
+    if (isGroupProgressRemaining(groupProgress)) {
+      return '最近一次核验显示仍有 '
+        + formatNumber(groupProgress.messages_remaining)
+        + ' 条消息待处理，可以继续克隆。';
+    }
     if (String((preview && preview.assessment_state) || '').trim() === 'deferred') {
-      return '迁移方案已读取。开始继续克隆后，系统会在后台核验本地消息并显示准确的时间线统计。';
+      return '迁移方案已读取。首次继续克隆时系统会在后台核验本地消息。';
     }
     if (isPreviewRemaining(preview)) {
       return '这条记录还有剩余消息未处理，可以继续克隆。文本会按数据库顺序发送；媒体会按当前计划直接复制或通过中转群桥接。';
@@ -714,6 +824,16 @@
 
   function isPreviewRemaining(preview) {
     return Number((preview && preview.timeline_remaining) || 0) > 0;
+  }
+
+  function isGroupProgressComplete(progress) {
+    return isGroupProgressVerified(progress)
+      && Number((progress && progress.messages_remaining) || 0) <= 0;
+  }
+
+  function isGroupProgressRemaining(progress) {
+    return isGroupProgressVerified(progress)
+      && Number((progress && progress.messages_remaining) || 0) > 0;
   }
 
   function getRunIdFromLocation() {
