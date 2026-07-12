@@ -306,6 +306,76 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-restricted-filter-select", template)
         self.assertNotIn("搜索框", template)
 
+    def test_restricted_channel_results_group_membership_scopes(self) -> None:
+        source = (ROOT / "static" / "admin_channels.js").read_text(encoding="utf-8")
+        self.assertIn("function orderRestrictedItemsByMembership(items)", source)
+        self.assertIn("function createRestrictedMembershipGroupHeader(scope, count)", source)
+        self.assertIn("getGroup: function (item)", source)
+        self.assertIn("createGroupHeader: function (scope)", source)
+        self.assertIn("数据库已入库、账号未加入的公开群组/频道", source)
+
+        script = r"""
+        const fs = require('fs');
+        const vm = require('vm');
+        const source = fs.readFileSync('static/admin_channels.js', 'utf8');
+        const closingMarker = '\n})();';
+        const closingIndex = source.lastIndexOf(closingMarker);
+        if (closingIndex < 0) throw new Error('channels script closing marker not found');
+        const instrumented = source.slice(0, closingIndex)
+          + '\n  window.__channelMembershipTestHooks = {'
+          + ' orderRestrictedItemsByMembership: orderRestrictedItemsByMembership,'
+          + ' countRestrictedItemsByMembership: countRestrictedItemsByMembership,'
+          + ' restrictedMembershipGroupLabel: restrictedMembershipGroupLabel'
+          + ' };'
+          + source.slice(closingIndex);
+        const shared = {
+          appendLog() {}, clearLogs() {}, ensurePlaceholder() {}, fetchJSON() {},
+          getCreatedJobId() { return ''; }, setDialogOpenState() {},
+          setElementDisabled() {}, setPageInteractionState() {},
+          syncClearLogsButtonVisibility() {}, trapFocusWithin() {},
+          formatDateTime() { return ''; }, formatNumber() { return ''; },
+          createAdminSessionController() {
+            return { checkAuth() {}, handleLogin() {}, handleUnauthorizedResponse() {} };
+          },
+          createAdminJobPollController() { return { start() {}, stop() {} }; }
+        };
+        const sandbox = {
+          console,
+          document: { addEventListener() {}, getElementById() { return null; } }
+        };
+        sandbox.window = sandbox;
+        sandbox.AdminManageShared = shared;
+        vm.runInNewContext(instrumented, sandbox);
+        const hooks = sandbox.__channelMembershipTestHooks;
+        const ordered = hooks.orderRestrictedItemsByMembership([
+          { chat_id: 1, membership_scope: 'public_unjoined' },
+          { chat_id: 2, membership_scope: 'joined' },
+          { chat_id: 3, membership_scope: 'public_unjoined' },
+          { chat_id: 4, membership_scope: 'joined' }
+        ]);
+        if (ordered.map((item) => item.chat_id).join(',') !== '2,4,1,3') {
+          throw new Error('membership scopes were not grouped');
+        }
+        const counts = hooks.countRestrictedItemsByMembership(ordered);
+        if (counts.joined !== 2 || counts.public_unjoined !== 2) {
+          throw new Error('membership group counts are incorrect');
+        }
+        if (hooks.restrictedMembershipGroupLabel('public_unjoined')
+          !== '数据库已入库、账号未加入的公开群组/频道') {
+          throw new Error('public-unjoined group label is incorrect');
+        }
+        """
+        import subprocess
+
+        result = subprocess.run(
+            ["node", "-e", script],
+            cwd=str(ROOT),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
     def test_admin_recovery_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_recovery.html").read_text(
             encoding="utf-8"
@@ -409,6 +479,20 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("进入群详情", source)
         self.assertIn("var CLONE_MODE_CREATE = 'create';", source)
 
+    def test_clone_group_selects_default_to_name_order(self) -> None:
+        create_template = (ROOT / "templates" / "admin_clone_create.html").read_text(
+            encoding="utf-8"
+        )
+        migrate_template = (ROOT / "templates" / "admin_clone_migrate.html").read_text(
+            encoding="utf-8"
+        )
+        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+
+        expected_option = '<option value="title_asc" selected>名称 A-Z</option>'
+        self.assertIn(expected_option, create_template)
+        self.assertIn(expected_option, migrate_template)
+        self.assertIn("elements.sortSelect.value = 'title_asc';", source)
+
     def test_admin_clone_migrate_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_clone_migrate.html").read_text(
             encoding="utf-8"
@@ -475,7 +559,7 @@ class FrontendSafetyTests(unittest.TestCase):
           clearLogs() {},
           ensurePlaceholder() {},
           fetchJSON(url) {
-            if (url === '/api/admin/clone/runs/run-requested/detail') {
+            if (url === '/api/admin/clone/runs/run-requested') {
               return Promise.resolve({
                 run: {
                   run_id: 'run-requested',

@@ -413,7 +413,14 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     ORDER BY m.msg_date_ts DESC, m.message_id DESC
                     LIMIT 1
                 )
-            ORDER BY a.chat_title COLLATE NOCASE ASC, a.chat_id ASC
+            ORDER BY
+                CASE a.membership_scope
+                    WHEN 'joined' THEN 0
+                    WHEN 'public_unjoined' THEN 1
+                    ELSE 2
+                END ASC,
+                a.chat_title COLLATE NOCASE ASC,
+                a.chat_id ASC
             """
         )
         rows = []

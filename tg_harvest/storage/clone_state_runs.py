@@ -10,7 +10,6 @@ from tg_harvest.storage.clone_common import (
     _now_iso,
     _optional_int,
 )
-from tg_harvest.storage.clone_preview import build_clone_timeline_replay_preview
 from tg_harvest.storage.clone_state_common import (
     _append_optional_fields,
     _build_clone_run_filters,
@@ -273,11 +272,6 @@ def load_clone_run_detail(
         return None
     plan = load_latest_clone_plan_fn(conn, normalized_run_id)
     migration = load_latest_clone_migration_fn(conn, normalized_run_id)
-    preview = build_clone_timeline_replay_preview(
-        conn,
-        run_id=normalized_run_id,
-        source_chat_id=int(run["source_chat_id"]),
-    )
     summary = load_clone_message_mapping_summary_fn(conn, normalized_run_id)
     recent_mappings = list_clone_message_mappings_fn(
         conn,
@@ -294,7 +288,6 @@ def load_clone_run_detail(
         "run": run,
         "plan": plan,
         "migration": migration,
-        "timeline_preview": preview,
         "mapping_summary": summary,
         "recent_mappings": recent_mappings,
         "failure_items": failures,

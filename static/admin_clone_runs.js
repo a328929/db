@@ -2,6 +2,7 @@
   'use strict';
 
   var shared = window.AdminManageShared;
+  var DATABASE_READ_TIMEOUT_MS = 20000;
   var sharedFetchJSON = shared.fetchJSON;
   var formatDateTime = shared.formatDateTime;
   var setDialogOpenState = shared.setDialogOpenState;
@@ -509,7 +510,11 @@
   }
 
   async function fetchJSON(url, options) {
-    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+    var requestOptions = Object.assign({}, options || {});
+    if (!requestOptions.method || String(requestOptions.method).toUpperCase() === 'GET') {
+      requestOptions.timeoutMs = requestOptions.timeoutMs || DATABASE_READ_TIMEOUT_MS;
+    }
+    return sharedFetchJSON(url, Object.assign(requestOptions, {
       onUnauthorized: sessionController.handleUnauthorizedResponse
     }));
   }

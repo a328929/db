@@ -88,7 +88,6 @@ from tg_harvest.storage.channel_management import (
 )
 from tg_harvest.storage.clone import (
     build_clone_preflight_report,
-    build_clone_timeline_replay_preview,
     count_clone_message_mappings,
     count_clone_runs,
     create_clone_migration,
@@ -415,7 +414,6 @@ def _build_route_services() -> RouteRegistryServices:
         load_latest_clone_plan_fn=load_latest_clone_plan,
         create_clone_migration_fn=create_clone_migration,
         load_latest_clone_migration_fn=load_latest_clone_migration,
-        build_clone_timeline_replay_preview_fn=build_clone_timeline_replay_preview,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         **_shared_admin_job_route_kwargs(admin_services),
         admin_start_clone_structure_job_thread_fn=_admin_start_clone_structure_job_thread,

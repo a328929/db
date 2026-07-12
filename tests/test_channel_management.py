@@ -267,6 +267,40 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("2026-04-04 10:00:00", rows[0]["last_message_at"])
         self.assertEqual(1775296800, rows[0]["last_message_ts"])
 
+    def test_list_restricted_chat_scan_results_groups_membership_scopes(self) -> None:
+        replace_restricted_chat_scan_results(
+            self.conn,
+            [
+                RestrictedChatInventoryRow(
+                    chat_id=8,
+                    chat_title="Zulu Joined",
+                    chat_type="Channel",
+                    membership_scope="joined",
+                ),
+                RestrictedChatInventoryRow(
+                    chat_id=9,
+                    chat_title="Alpha Public",
+                    chat_type="Channel",
+                    membership_scope="public_unjoined",
+                ),
+                RestrictedChatInventoryRow(
+                    chat_id=10,
+                    chat_title="Alpha Joined",
+                    chat_type="Channel",
+                    membership_scope="joined",
+                ),
+            ],
+            scan_job_id="job-5",
+            scanned_at="2026-04-05T00:00:00+00:00",
+        )
+
+        rows = list_restricted_chat_scan_results(self.conn)
+
+        self.assertEqual(
+            ["Alpha Joined", "Zulu Joined", "Alpha Public"],
+            [row["chat_title"] for row in rows],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

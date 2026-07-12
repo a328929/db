@@ -119,9 +119,6 @@ class CloneRoutesTests(unittest.TestCase):
             load_latest_clone_plan_fn=self._load_latest_clone_plan,
             create_clone_migration_fn=self._create_clone_migration,
             load_latest_clone_migration_fn=self._load_latest_clone_migration,
-            build_clone_timeline_replay_preview_fn=(
-                self._build_clone_timeline_replay_preview
-            ),
             build_telegram_chat_link_bundle_fn=build_bundle,
             admin_try_create_exclusive_job_fn=self._create_job,
             admin_job_get_snapshot_fn=self._job_snapshot,
@@ -749,6 +746,16 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(20, payload["limit"])
         self.assertEqual(0, payload["offset"])
 
+    def test_clone_runs_api_can_skip_unused_total_count(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/runs?limit=20&include_total=0")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("run-existing", payload["items"][0]["run_id"])
+        self.assertNotIn("total", payload)
+
     def test_clone_runs_api_supports_manage_filters(self) -> None:
         self.clone_runs.append(
             {
@@ -919,6 +926,19 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(404, response.status_code)
         self.assertEqual("克隆运行记录不存在", response.get_json()["error"])
 
+    def test_clone_run_api_returns_lightweight_record(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/runs/run-existing")
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("run-existing", payload["run"]["run_id"])
+        self.assertEqual(
+            "tg://resolve?domain=source",
+            payload["run"]["source_telegram_app_link"],
+        )
+
     def test_clone_run_migration_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
@@ -933,7 +953,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertNotIn("media_migration", payload)
         self.assertNotIn("preview", payload)
         self.assertNotIn("media_preview", payload)
-        self.assertEqual(11, payload["timeline_preview"]["timeline_remaining"])
+        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
         self.assertFalse(payload["timeline_preview"]["can_migrate_timeline"])
         self.assertEqual(
             ["请先执行在线深度预检并生成迁移计划"],
@@ -1032,7 +1052,7 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         payload = response.get_json()
-        self.assertEqual(11, payload["timeline_preview"]["timeline_remaining"])
+        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
         self.assertEqual(
             {
                 "job_id": "job-clone-1",
@@ -1047,9 +1067,9 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("text:primary; media:primary", migration["target_write_account"])
         self.assertEqual(20, migration["requested_limit"])
         self.assertEqual(1000, migration["send_delay_ms"])
-        self.assertEqual(8, migration["text_total"])
-        self.assertEqual(6, migration["media_total"])
-        self.assertEqual(3, migration["media_group_total"])
+        self.assertEqual(0, migration["text_total"])
+        self.assertEqual(0, migration["media_total"])
+        self.assertEqual(0, migration["media_group_total"])
         self.assertEqual(1, len(self.started_timeline_migration_jobs))
         args, kwargs = self.started_timeline_migration_jobs[0]
         self.assertEqual(("job-clone-1",), args)
@@ -1101,7 +1121,7 @@ class CloneRoutesTests(unittest.TestCase):
         )
         self.assertEqual(1, len(self.started_timeline_migration_jobs))
 
-    def test_clone_timeline_migration_rejects_incomplete_relay_plan(self) -> None:
+    def test_clone_timeline_migration_defers_incomplete_relay_check_to_job(self) -> None:
         plan = self._create_relay_done_plan()
         plan["capabilities"]["media_relay"]["target_account"] = ""
         plan["plan"]["media_relay"]["target_account"] = ""
@@ -1113,16 +1133,12 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual(
-            "固定中转频道桥接计划未就绪，请重新执行在线深度预检",
-            response.get_json()["error"],
-        )
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.created_clone_migrations)
-        self.assertEqual([], self.started_timeline_migration_jobs)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, len(self.created_jobs))
+        self.assertEqual(1, len(self.created_clone_migrations))
+        self.assertEqual(1, len(self.started_timeline_migration_jobs))
 
-    def test_clone_timeline_migration_rejects_no_remaining_items(self) -> None:
+    def test_clone_timeline_migration_defers_no_remaining_check_to_job(self) -> None:
         self._create_done_plan()
         self.clone_timeline_preview_override = {
             "timeline_remaining": 0,
@@ -1137,11 +1153,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("没有剩余可迁移时间线消息", response.get_json()["error"])
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.created_clone_migrations)
-        self.assertEqual([], self.started_timeline_migration_jobs)
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(1, len(self.created_jobs))
+        self.assertEqual(1, len(self.created_clone_migrations))
+        self.assertEqual(1, len(self.started_timeline_migration_jobs))
 
     def test_clone_migration_payload_includes_timeline_preview(self) -> None:
         self._create_done_plan()
@@ -1190,7 +1205,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertIn("timeline_preview", payload)
         self.assertIn("timeline_migration", payload)
         self.assertEqual("timeline_replay", payload["timeline_migration"]["mode"])
-        self.assertEqual(11, payload["timeline_preview"]["timeline_remaining"])
+        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
 
     def test_clone_preflight_rejects_missing_csrf_token(self) -> None:
         with self._auth_config_patch():

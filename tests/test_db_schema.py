@@ -224,6 +224,52 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
         self.assertIn("idx_messages_created_at", plan_text)
 
+    def test_clone_record_queries_use_paging_indexes(self) -> None:
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+        cur = self.conn.cursor()
+
+        cases = [
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT run_id
+                FROM admin_clone_runs
+                ORDER BY updated_at DESC, created_at DESC, run_id DESC
+                LIMIT 20
+                """,
+                "idx_admin_clone_runs_updated",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT id
+                FROM admin_clone_message_map
+                WHERE run_id = 'run-1'
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                LIMIT 25
+                """,
+                "idx_admin_clone_message_map_run_updated",
+            ),
+            (
+                """
+                EXPLAIN QUERY PLAN
+                SELECT id
+                FROM admin_clone_message_map
+                WHERE run_id = 'run-1' AND status = 'error'
+                ORDER BY updated_at DESC, created_at DESC, id DESC
+                LIMIT 25
+                """,
+                "idx_admin_clone_message_map_run_status_updated",
+            ),
+        ]
+
+        for sql, expected_index in cases:
+            with self.subTest(expected_index=expected_index):
+                cur.execute(sql)
+                plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+                self.assertIn(expected_index, plan_text)
+                self.assertNotIn("USE TEMP B-TREE", plan_text)
+
     def test_sync_learning_failure_query_uses_partial_index(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()

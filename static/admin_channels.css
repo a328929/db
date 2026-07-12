@@ -60,6 +60,17 @@
   padding: 12px;
 }
 
+.restricted-membership-heading {
+  margin: 10px 0 0;
+  color: #243657;
+  font-size: 0.92rem;
+  line-height: 1.35;
+}
+
+.restricted-membership-heading:first-child {
+  margin-top: 0;
+}
+
 .channel-item-head {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;

@@ -430,6 +430,12 @@ def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor):
 def _create_admin_clone_run_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
+        "idx_admin_clone_runs_updated",
+        "CREATE INDEX idx_admin_clone_runs_updated "
+        "ON admin_clone_runs(updated_at DESC, created_at DESC, run_id DESC)",
+    )
+    _ensure_index(
+        cur,
         "idx_admin_clone_runs_source_updated",
         "CREATE INDEX idx_admin_clone_runs_source_updated "
         "ON admin_clone_runs(source_chat_id, updated_at DESC)",
@@ -489,6 +495,20 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
         "idx_admin_clone_message_map_migration",
         "CREATE INDEX idx_admin_clone_message_map_migration "
         "ON admin_clone_message_map(migration_id, status, updated_at DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_message_map_run_updated",
+        "CREATE INDEX idx_admin_clone_message_map_run_updated "
+        "ON admin_clone_message_map(run_id, updated_at DESC, created_at DESC, id DESC)",
+    )
+    _ensure_index(
+        cur,
+        "idx_admin_clone_message_map_run_status_updated",
+        "CREATE INDEX idx_admin_clone_message_map_run_status_updated "
+        "ON admin_clone_message_map("
+        "run_id, status, updated_at DESC, created_at DESC, id DESC"
+        ")",
     )
 
 

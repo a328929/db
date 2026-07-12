@@ -251,10 +251,13 @@
     var statusElement = options.statusElement;
     var progressText = options.progressText;
     var doneText = options.doneText;
+    var getGroup = options.getGroup;
+    var createGroupHeader = options.createGroupHeader;
     var token = nextListRenderToken(key);
     var total = items.length;
     var index = 0;
     var lastStatusUpdateAt = 0;
+    var previousGroup;
 
     container.textContent = '';
     setListRenderBusy(container, true);
@@ -276,7 +279,16 @@
       var batchSize = index === 0 ? LIST_INITIAL_RENDER_BATCH_SIZE : LIST_RENDER_BATCH_SIZE;
       var end = Math.min(index + batchSize, total);
       while (index < end) {
-        fragment.appendChild(createItem(items[index], index));
+        var item = items[index];
+        var group = typeof getGroup === 'function' ? getGroup(item, index) : undefined;
+        if (
+          typeof createGroupHeader === 'function'
+          && (index === 0 || group !== previousGroup)
+        ) {
+          fragment.appendChild(createGroupHeader(group));
+        }
+        previousGroup = group;
+        fragment.appendChild(createItem(item, index));
         index += 1;
       }
       container.appendChild(fragment);
@@ -641,7 +653,51 @@
   }
 
   function restrictedMembershipLabel(scope) {
-    return String(scope || '') === 'public_unjoined' ? '账号未加入' : '账号已加入';
+    return normalizeRestrictedMembershipScope(scope) === 'public_unjoined'
+      ? '账号未加入'
+      : '账号已加入';
+  }
+
+  function normalizeRestrictedMembershipScope(scope) {
+    return String(scope || '') === 'public_unjoined' ? 'public_unjoined' : 'joined';
+  }
+
+  function orderRestrictedItemsByMembership(items) {
+    var joinedItems = [];
+    var publicUnjoinedItems = [];
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+      if (normalizeRestrictedMembershipScope(item && item.membership_scope) === 'public_unjoined') {
+        publicUnjoinedItems.push(item);
+        return;
+      }
+      joinedItems.push(item);
+    });
+    return joinedItems.concat(publicUnjoinedItems);
+  }
+
+  function countRestrictedItemsByMembership(items) {
+    var counts = {
+      joined: 0,
+      public_unjoined: 0
+    };
+    (Array.isArray(items) ? items : []).forEach(function (item) {
+      var scope = normalizeRestrictedMembershipScope(item && item.membership_scope);
+      counts[scope] += 1;
+    });
+    return counts;
+  }
+
+  function restrictedMembershipGroupLabel(scope) {
+    return normalizeRestrictedMembershipScope(scope) === 'public_unjoined'
+      ? '数据库已入库、账号未加入的公开群组/频道'
+      : '已加入账号的群组/频道';
+  }
+
+  function createRestrictedMembershipGroupHeader(scope, count) {
+    var heading = document.createElement('h3');
+    heading.className = 'restricted-membership-heading';
+    heading.textContent = restrictedMembershipGroupLabel(scope) + '（' + count + '）';
+    return heading;
   }
 
   function splitRestrictionTokens(value) {
@@ -748,7 +804,10 @@
   }
 
   function renderRestrictedChannels(elements) {
-    var items = filterRestrictedItems(restrictedState.items);
+    var items = orderRestrictedItemsByMembership(
+      filterRestrictedItems(restrictedState.items)
+    );
+    var membershipCounts = countRestrictedItemsByMembership(items);
     stopListRendering('restricted', elements.restrictedList);
     elements.restrictedList.textContent = '';
     if (!Array.isArray(restrictedState.items) || restrictedState.items.length === 0) {
@@ -788,6 +847,12 @@
         return '当前类型 ' + total + ' 个，共 '
           + restrictedState.items.length
           + ' 个内容限制/风险标记结果。';
+      },
+      getGroup: function (item) {
+        return normalizeRestrictedMembershipScope(item && item.membership_scope);
+      },
+      createGroupHeader: function (scope) {
+        return createRestrictedMembershipGroupHeader(scope, membershipCounts[scope] || 0);
       },
       createItem: function (item) {
         var metaParts = [];

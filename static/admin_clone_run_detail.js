@@ -10,6 +10,7 @@
   var formatNumber = shared.formatNumber;
 
   var MAPPING_PAGE_SIZE = 25;
+  var DATABASE_READ_TIMEOUT_MS = 20000;
 
   var state = {
     runId: '',
@@ -289,12 +290,24 @@
     appendSummaryPair(elements.detailSummary, '状态', getRunStatusLabel(run.status));
     appendSummaryPair(elements.detailSummary, '克隆计划', getPlanStatusLabel(plan && plan.status));
     appendSummaryPair(elements.detailSummary, '消息克隆', getMigrationStatusLabel(migration && migration.status));
-    appendSummaryPair(elements.detailSummary, '剩余时间线', formatNumber(preview && preview.timeline_remaining));
+    appendSummaryPair(
+      elements.detailSummary,
+      '剩余时间线',
+      formatTimelineMetric(preview, 'timeline_remaining')
+    );
     appendSummaryPair(elements.detailSummary, '更新时间', formatDateTime(run.updated_at));
 
     appendMiniPair(elements.progressSummary, '迁移状态', getMigrationStatusLabel(migration && migration.status));
-    appendMiniPair(elements.progressSummary, '时间线总数', formatNumber(preview && preview.timeline_items_total));
-    appendMiniPair(elements.progressSummary, '剩余时间线', formatNumber(preview && preview.timeline_remaining));
+    appendMiniPair(
+      elements.progressSummary,
+      '时间线总数',
+      formatTimelineMetric(preview, 'timeline_items_total')
+    );
+    appendMiniPair(
+      elements.progressSummary,
+      '剩余时间线',
+      formatTimelineMetric(preview, 'timeline_remaining')
+    );
     appendMiniPair(elements.progressSummary, '文本已发', formatDoneTotal(migration && migration.text_sent, migration && migration.text_total));
     appendMiniPair(elements.progressSummary, '媒体已复制', formatDoneTotal(migration && migration.media_sent, migration && migration.media_total));
     appendMiniPair(
@@ -333,6 +346,13 @@
     wrap.appendChild(dt);
     wrap.appendChild(dd);
     container.appendChild(wrap);
+  }
+
+  function formatTimelineMetric(preview, key) {
+    if (String((preview && preview.assessment_state) || '').trim() === 'deferred') {
+      return '待后台核验';
+    }
+    return formatNumber(preview && preview[key]);
   }
 
   function renderDetailActions(elements, run, payload) {
@@ -410,6 +430,9 @@
     }
     if (isMigrationErrored(migration)) {
       return '最近一次继续克隆失败了。建议回到“继续克隆消息”重试。';
+    }
+    if (String((preview && preview.assessment_state) || '').trim() === 'deferred') {
+      return '迁移方案已读取。开始继续克隆后，系统会在后台核验本地消息并显示准确的时间线统计。';
     }
     if (isPreviewRemaining(preview)) {
       return '这条记录还有剩余消息未处理，可以继续克隆。文本会按数据库顺序发送；媒体会按当前计划直接复制或通过中转群桥接。';
@@ -813,7 +836,11 @@
   }
 
   async function fetchJSON(url, options) {
-    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+    var requestOptions = Object.assign({}, options || {});
+    if (!requestOptions.method || String(requestOptions.method).toUpperCase() === 'GET') {
+      requestOptions.timeoutMs = requestOptions.timeoutMs || DATABASE_READ_TIMEOUT_MS;
+    }
+    return sharedFetchJSON(url, Object.assign(requestOptions, {
       onUnauthorized: sessionController.handleUnauthorizedResponse
     }));
   }

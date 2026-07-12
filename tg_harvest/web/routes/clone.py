@@ -54,7 +54,6 @@ class _CloneRouteDeps:
     load_latest_clone_plan_fn: Any
     create_clone_migration_fn: Any
     load_latest_clone_migration_fn: Any
-    build_clone_timeline_replay_preview_fn: Any
     build_telegram_chat_link_bundle_fn: Any
     admin_try_create_exclusive_job_fn: Any
     admin_job_get_snapshot_fn: Any
@@ -435,6 +434,50 @@ def _timeline_migration_readiness(
     }
 
 
+def _deferred_timeline_preview(
+    clone_run: dict,
+    latest_plan: dict | None,
+) -> dict[str, Any]:
+    """Return the immediately available migration state without scanning messages.
+
+    A complete time-line preview aggregates every message in the source chat.  It is
+    required immediately before execution, but it must not make a page view wait
+    for a multi-million-row scan.  The migration worker performs that authoritative
+    check and records its progress after a user starts the task.
+    """
+
+    readiness = _timeline_migration_start_readiness(clone_run, latest_plan)
+    return {
+        "run_id": str(clone_run.get("run_id") or ""),
+        "source_chat_id": int(clone_run.get("source_chat_id") or 0),
+        "mode": "timeline_replay",
+        "assessment_state": "deferred",
+        "timeline_items_total": 0,
+        "timeline_source_messages_total": 0,
+        "timeline_remaining": 0,
+        "text_total": 0,
+        "text_completed": 0,
+        "text_remaining": 0,
+        "media_total": 0,
+        "media_completed": 0,
+        "media_remaining": 0,
+        "media_group_total": 0,
+        "media_group_candidate_items": 0,
+        "db_self_check_risk_group_total": 0,
+        "db_self_check_risk_group_items": 0,
+        **readiness,
+    }
+
+
+def _timeline_migration_start_readiness(
+    clone_run: dict,
+    latest_plan: dict | None,
+) -> dict:
+    """Validate plan-level constraints without guessing which content is present."""
+
+    return _timeline_migration_readiness(clone_run, latest_plan)
+
+
 def _clone_workbench_run_label(run: dict) -> str:
     source_title = str(run.get("source_title") or run.get("source_chat_id") or "源群")
     target_title = str(run.get("target_title") or run.get("target_chat_id") or "副本")
@@ -604,31 +647,16 @@ def _clone_workbench_focus(
             or str((plan or {}).get("status") or "").strip().lower() != "done"
         ):
             continue
-        preview = deps.build_clone_timeline_replay_preview_fn(
-            conn,
-            run_id=str(run.get("run_id") or ""),
-            source_chat_id=int(run.get("source_chat_id") or 0),
-        )
-        readiness = _timeline_migration_readiness(run, plan, preview)
+        readiness = _timeline_migration_start_readiness(run, plan)
         if readiness["can_migrate_timeline"]:
             return focus(
                 "ready",
                 "migrate",
                 "可以继续克隆消息",
-                "迁移方案已通过，剩余消息可按当前方案继续处理。",
+                "迁移方案已通过；开始执行时会在后台核验本地消息并继续处理。",
                 run,
                 "继续克隆消息",
                 _clone_workbench_href("/admin/clone/migrate", run),
-            )
-        if int(preview.get("timeline_remaining") or 0) <= 0:
-            return focus(
-                "complete",
-                "manage",
-                "最近记录已完成",
-                "当前记录没有待处理的时间线消息，可在管理页核对详情。",
-                run,
-                "查看克隆记录",
-                _clone_workbench_href("/admin/clone/runs/detail", run),
             )
 
     return {
@@ -754,6 +782,8 @@ def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:
         status = str(request.args.get("status", "") or "").strip()
         query = str(request.args.get("q", "") or "").strip()
         sort = str(request.args.get("sort", "") or "").strip()
+        include_total = str(request.args.get("include_total", "1") or "1").strip().lower()
+        should_include_total = include_total not in {"0", "false", "no"}
 
         try:
             with closing(deps.get_conn_fn()) as conn:
@@ -766,24 +796,28 @@ def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:
                     q=query,
                     sort=sort,
                 )
-                total = deps.count_clone_runs_fn(
-                    conn,
-                    source_chat_id=source_chat_id,
-                    status=status,
-                    q=query,
+                total = (
+                    deps.count_clone_runs_fn(
+                        conn,
+                        source_chat_id=source_chat_id,
+                        status=status,
+                        q=query,
+                    )
+                    if should_include_total
+                    else None
                 )
-            return jsonify(
-                {
-                    "ok": True,
-                    "items": _with_clone_run_links(
-                        rows,
-                        deps.build_telegram_chat_link_bundle_fn,
-                    ),
-                    "total": total,
-                    "limit": limit,
-                    "offset": offset,
-                }
-            )
+            payload = {
+                "ok": True,
+                "items": _with_clone_run_links(
+                    rows,
+                    deps.build_telegram_chat_link_bundle_fn,
+                ),
+                "limit": limit,
+                "offset": offset,
+            }
+            if total is not None:
+                payload["total"] = total
+            return jsonify(payload)
         except sqlite3.Error:
             return logged_json_error(
                 deps.logger,
@@ -822,6 +856,40 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
         except Exception:
             return logged_json_error(deps.logger, "系统异常", "系统异常")
 
+    @app.get("/api/admin/clone/runs/<run_id>")
+    @admin_login_required
+    def api_admin_clone_run(run_id):
+        normalized_run_id, error_response = _parse_run_id(run_id)
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(deps.get_conn_fn()) as conn:
+                clone_run, error_response = _load_clone_run_or_response(
+                    conn,
+                    deps.load_clone_run_fn,
+                    normalized_run_id,
+                )
+                if error_response is not None:
+                    return error_response
+            return jsonify(
+                {
+                    "ok": True,
+                    "run": _with_clone_run_link(
+                        clone_run,
+                        deps.build_telegram_chat_link_bundle_fn,
+                    ),
+                }
+            )
+        except sqlite3.Error:
+            return logged_json_error(
+                deps.logger,
+                "读取克隆运行记录失败",
+                "读取克隆运行记录失败",
+            )
+        except Exception:
+            return logged_json_error(deps.logger, "系统异常", "系统异常")
+
     @app.get("/api/admin/clone/runs/<run_id>/detail")
     @admin_login_required
     def api_admin_clone_run_detail(run_id):
@@ -838,13 +906,17 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 detail["run"],
                 deps.build_telegram_chat_link_bundle_fn,
             )
+            timeline_preview = _deferred_timeline_preview(
+                detail["run"],
+                detail.get("plan"),
+            )
             return jsonify(
                 {
                     "ok": True,
                     "run": run,
                     "plan": detail.get("plan"),
                     "migration": detail.get("migration"),
-                    "timeline_preview": detail.get("timeline_preview"),
+                    "timeline_preview": timeline_preview,
                     "mapping_summary": detail.get("mapping_summary"),
                     "recent_mappings": detail.get("recent_mappings") or [],
                     "failure_items": detail.get("failure_items") or [],
@@ -1022,19 +1094,7 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     mode="timeline_replay",
                 )
                 latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
-                source_chat_id = int(clone_run.get("source_chat_id") or 0)
-                timeline_preview = deps.build_clone_timeline_replay_preview_fn(
-                    conn,
-                    run_id=normalized_run_id,
-                    source_chat_id=source_chat_id,
-                )
-            timeline_preview.update(
-                _timeline_migration_readiness(
-                    clone_run,
-                    latest_plan,
-                    timeline_preview,
-                )
-            )
+            timeline_preview = _deferred_timeline_preview(clone_run, latest_plan)
             if timeline_migration is not None:
                 timeline_preview["latest_migration_id"] = timeline_migration.get(
                     "migration_id"
@@ -1165,15 +1225,6 @@ def _register_clone_job_routes(app, deps: _CloneRouteDeps) -> None:
             with closing(deps.get_conn_fn()) as conn:
                 clone_run = deps.load_clone_run_fn(conn, normalized_run_id)
                 latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
-                timeline_preview = (
-                    deps.build_clone_timeline_replay_preview_fn(
-                        conn,
-                        run_id=normalized_run_id,
-                        source_chat_id=int((clone_run or {}).get("source_chat_id") or 0),
-                    )
-                    if clone_run is not None
-                    else None
-                )
         except sqlite3.Error:
             return logged_json_error(
                 deps.logger,
@@ -1185,11 +1236,7 @@ def _register_clone_job_routes(app, deps: _CloneRouteDeps) -> None:
 
         if clone_run is None:
             return json_error("克隆运行记录不存在", 404)
-        readiness = _timeline_migration_readiness(
-            clone_run,
-            latest_plan,
-            timeline_preview,
-        )
+        readiness = _timeline_migration_start_readiness(clone_run, latest_plan)
         if not readiness["can_migrate_timeline"]:
             return json_error(readiness["readiness_reasons"][0], 400)
         execution_label = str(readiness["execution_label"] or "")
@@ -1225,11 +1272,6 @@ def _register_clone_job_routes(app, deps: _CloneRouteDeps) -> None:
                 target_write_account=execution_label,
                 requested_limit=options["message_limit"],
                 send_delay_ms=options["send_delay_ms"],
-                text_total=int((timeline_preview or {}).get("text_total") or 0),
-                media_total=int((timeline_preview or {}).get("media_total") or 0),
-                media_group_total=int(
-                    (timeline_preview or {}).get("media_group_total") or 0
-                ),
                 plan=latest_plan,
             ),
         )
@@ -1272,7 +1314,10 @@ def _register_clone_job_routes(app, deps: _CloneRouteDeps) -> None:
                     "send_delay_ms": options["send_delay_ms"],
                 },
                 "migration": migration,
-                "timeline_preview": timeline_preview,
+                "timeline_preview": _deferred_timeline_preview(
+                    clone_run,
+                    latest_plan,
+                ),
             },
         )
 
@@ -1423,9 +1468,6 @@ def _clone_deps_from_services(services: CloneRouteServices) -> _CloneRouteDeps:
         load_latest_clone_plan_fn=services.load_latest_clone_plan_fn,
         create_clone_migration_fn=services.create_clone_migration_fn,
         load_latest_clone_migration_fn=services.load_latest_clone_migration_fn,
-        build_clone_timeline_replay_preview_fn=(
-            services.build_clone_timeline_replay_preview_fn
-        ),
         build_telegram_chat_link_bundle_fn=services.build_telegram_chat_link_bundle_fn,
         admin_try_create_exclusive_job_fn=services.admin_try_create_exclusive_job_fn,
         admin_job_get_snapshot_fn=services.admin_job_get_snapshot_fn,
@@ -1465,7 +1507,6 @@ def _clone_deps_from_legacy_kwargs(
     load_latest_clone_plan_fn=None,
     create_clone_migration_fn=None,
     load_latest_clone_migration_fn=None,
-    build_clone_timeline_replay_preview_fn=None,
     build_telegram_chat_link_bundle_fn=None,
     admin_try_create_exclusive_job_fn=None,
     admin_job_get_snapshot_fn=None,
@@ -1494,7 +1535,6 @@ def _clone_deps_from_legacy_kwargs(
         load_latest_clone_plan_fn=load_latest_clone_plan_fn,
         create_clone_migration_fn=create_clone_migration_fn,
         load_latest_clone_migration_fn=load_latest_clone_migration_fn,
-        build_clone_timeline_replay_preview_fn=build_clone_timeline_replay_preview_fn,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
         admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
         admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,
@@ -1536,7 +1576,6 @@ def register_clone_routes(
     load_latest_clone_plan_fn=None,
     create_clone_migration_fn=None,
     load_latest_clone_migration_fn=None,
-    build_clone_timeline_replay_preview_fn=None,
     build_telegram_chat_link_bundle_fn=None,
     admin_try_create_exclusive_job_fn=None,
     admin_job_get_snapshot_fn=None,
@@ -1568,9 +1607,6 @@ def register_clone_routes(
             load_latest_clone_plan_fn=load_latest_clone_plan_fn,
             create_clone_migration_fn=create_clone_migration_fn,
             load_latest_clone_migration_fn=load_latest_clone_migration_fn,
-            build_clone_timeline_replay_preview_fn=(
-                build_clone_timeline_replay_preview_fn
-            ),
             build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
             admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
             admin_job_get_snapshot_fn=admin_job_get_snapshot_fn,

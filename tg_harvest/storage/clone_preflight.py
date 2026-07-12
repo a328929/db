@@ -10,6 +10,8 @@ from tg_harvest.storage.clone_common import (
 )
 from tg_harvest.storage.row_access import row_int as _row_int
 
+CLONE_SOURCE_CHAT_SORT_DEFAULT = "title_asc"
+
 
 def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | None:
     cur = conn.cursor()
@@ -66,10 +68,10 @@ def _fetch_clone_source_chat(conn: sqlite3.Connection, chat_id: int) -> dict | N
 def list_clone_source_chats(
     conn: sqlite3.Connection,
     *,
-    sort: Any = "message_count_desc",
+    sort: Any = CLONE_SOURCE_CHAT_SORT_DEFAULT,
 ) -> list[dict]:
-    normalized_sort = str(sort or "message_count_desc").strip().lower()
-    order_sql = {
+    normalized_sort = str(sort or CLONE_SOURCE_CHAT_SORT_DEFAULT).strip().lower()
+    order_by_sort = {
         "title_asc": "c.chat_id ASC",
         "message_count_asc": (
             "c.message_count ASC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
@@ -82,10 +84,10 @@ def list_clone_source_chats(
             "CASE WHEN last_message_ts IS NULL THEN 1 ELSE 0 END ASC, "
             "last_message_ts ASC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
         ),
-    }.get(
-        normalized_sort,
-        "c.message_count DESC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC",
-    )
+    }
+    if normalized_sort not in order_by_sort:
+        normalized_sort = CLONE_SOURCE_CHAT_SORT_DEFAULT
+    order_sql = order_by_sort[normalized_sort]
     cur = conn.cursor()
     try:
         cur.execute(
@@ -98,8 +100,7 @@ def list_clone_source_chats(
                 c.message_count,
                 c.last_seen_at,
                 lm.msg_date_text AS last_message_at,
-                lm.msg_date_ts AS last_message_ts,
-                COALESCE(mm.media_rows, 0) AS media_rows
+                lm.msg_date_ts AS last_message_ts
             FROM chats c
             LEFT JOIN messages lm
               ON lm.chat_id = c.chat_id
@@ -110,11 +111,6 @@ def list_clone_source_chats(
                     ORDER BY m.msg_date_ts DESC, m.message_id DESC
                     LIMIT 1
                 )
-            LEFT JOIN (
-                SELECT chat_id, COUNT(*) AS media_rows
-                FROM message_media
-                GROUP BY chat_id
-            ) mm ON mm.chat_id = c.chat_id
             ORDER BY {order_sql}
             """
         )
@@ -128,7 +124,6 @@ def list_clone_source_chats(
                     "chat_username": str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
                     "message_count": _row_int(row, "message_count"),
-                    "media_rows": _row_int(row, "media_rows"),
                     "last_seen_at": str(row["last_seen_at"] or ""),
                     "last_message_at": str(row["last_message_at"] or ""),
                     "last_message_ts": _optional_int(row["last_message_ts"]),

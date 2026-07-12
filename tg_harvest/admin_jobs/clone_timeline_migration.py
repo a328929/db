@@ -314,7 +314,7 @@ def _admin_clone_timeline_migration_job_runner(
             get_conn_fn=get_conn_fn,
             migration_id=migration_id,
             status="running",
-            phase="validating",
+            phase="preparing_timeline",
             error_message="",
         )
 
@@ -329,10 +329,26 @@ def _admin_clone_timeline_migration_job_runner(
         if not target_chat_id:
             raise RuntimeError("目标副本尚未创建，不能执行完整时间线迁移")
 
+        admin_job_append_log_fn(
+            job_id,
+            "正在读取本地消息并核验待迁移时间线；大型源群可能需要一些时间。",
+        )
+        _admin_job_update_progress(
+            job_id,
+            0,
+            total=None,
+            stage="preparing_timeline",
+            log_step=0,
+            auto_log=False,
+        )
         preview = timeline_preview(
             get_conn_fn=get_conn_fn,
             run_id=run_id,
             source_chat_id=source_chat_id,
+        )
+        admin_job_append_log_fn(
+            job_id,
+            "本地时间线核验完成，正在准备迁移连接。",
         )
         accounts = validate_plan_for_timeline(plan=plan, preview=preview)
         state = build_execution_state(

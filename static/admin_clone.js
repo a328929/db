@@ -18,6 +18,7 @@
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
   var JOB_POLL_RETRY_BASE_MS = 3000;
+  var DATABASE_READ_TIMEOUT_MS = 20000;
   var CLONE_MODE_CREATE = 'create';
   var CLONE_MODE_MIGRATE = 'migrate';
 
@@ -270,7 +271,11 @@
     }
     setStageState(
       elements.migrationStage,
-      cloneState.timelinePreview && remaining <= 0 ? 'complete' : 'current'
+      cloneState.timelinePreview
+        && cloneState.timelinePreview.assessment_state !== 'deferred'
+        && remaining <= 0
+        ? 'complete'
+        : 'current'
     );
   }
 
@@ -362,7 +367,8 @@
     });
   }
 
-  async function loadSourceChats(elements) {
+  async function loadSourceChats(elements, options) {
+    var opts = options || {};
     var previousValue = String(elements.sourceSelect.value || cloneState.sourceChatId || '');
     setBusy(elements, true);
     elements.sourceStatus.textContent = isCreatePage(elements)
@@ -376,8 +382,12 @@
       cloneState.items = Array.isArray(payload.items) ? payload.items : [];
       renderSourceOptions(elements, previousValue);
       elements.sourceStatus.textContent = buildSourceStatusText(elements, cloneState.items.length);
-      handleSourceChange(elements);
-      await loadCloneRuns(elements);
+      handleSourceChange(elements, {
+        preserveMigrationState: opts.loadRuns === false && isMigratePage(elements)
+      });
+      if (opts.loadRuns !== false) {
+        await loadCloneRuns(elements);
+      }
     } catch (error) {
       cloneState.items = [];
       renderSourceOptions(elements, '');
@@ -444,14 +454,17 @@
       }
       syncUrlRunId(elements, '');
     }
-    cloneState.plan = null;
-    cloneState.migration = null;
-    cloneState.timelineMigration = null;
-    cloneState.timelinePreview = null;
     renderSourceSummary(elements, selected);
-    renderReport(elements, null);
-    renderMigrationPlan(elements, null);
-    renderTimelineMigration(elements, null);
+
+    if (!opts.preserveMigrationState) {
+      cloneState.plan = null;
+      cloneState.migration = null;
+      cloneState.timelineMigration = null;
+      cloneState.timelinePreview = null;
+      renderReport(elements, null);
+      renderMigrationPlan(elements, null);
+      renderTimelineMigration(elements, null);
+    }
 
     if (isCreatePage(elements)) {
       if (selected) {
@@ -462,7 +475,7 @@
       }
     }
 
-    if (isMigratePage(elements)) {
+    if (isMigratePage(elements) && !opts.preserveMigrationState) {
       elements.planStatus.textContent = '选择副本后生成迁移方案。';
       elements.timelineStatus.textContent = '等待迁移方案完成。';
     }
@@ -520,7 +533,13 @@
 
     appendSummaryPair(elements.sourceSummary, '当前源', item.chat_title || item.chat_id);
     appendSummaryPair(elements.sourceSummary, '消息数', formatNumber(item.message_count));
-    appendSummaryPair(elements.sourceSummary, '媒体元信息', formatNumber(item.media_rows));
+    appendSummaryPair(
+      elements.sourceSummary,
+      '媒体元信息',
+      item.media_rows === undefined || item.media_rows === null
+        ? '完成预检后统计'
+        : formatNumber(item.media_rows)
+    );
     appendSummaryPair(
       elements.sourceSummary,
       '最后消息',
@@ -766,8 +785,8 @@
       var url = selected
         ? '/api/admin/clone/runs?source_chat_id='
           + encodeURIComponent(String(selected.chat_id))
-          + '&limit=20'
-        : '/api/admin/clone/runs?limit=20';
+          + '&limit=20&include_total=0'
+        : '/api/admin/clone/runs?limit=20&include_total=0';
       var payload = await fetchJSON(url);
       if (requestToken !== requestState.runsToken) {
         return;
@@ -1096,7 +1115,6 @@
       var payload = await fetchJSON(
         '/api/admin/clone/runs/'
           + encodeURIComponent(requestedRunId)
-          + '/detail'
       );
       if (requestToken !== requestState.runsToken) {
         return;
@@ -1406,7 +1424,9 @@
     appendSummaryPair(elements.timelineSummary, '克隆群', getCloneRunTargetLabel(run));
     if (!timelineMigration) {
       elements.timelineStatus.textContent = preview && preview.can_migrate_timeline
-        ? '可以开始克隆消息。'
+        ? (preview.assessment_state === 'deferred'
+          ? '迁移方案已就绪；开始后会在后台核验本地时间线。'
+          : '可以开始克隆消息。')
         : '等待迁移方案完成。';
       appendSummaryPair(elements.timelineSummary, '状态', '未执行');
       appendTimelinePreviewSummary(elements, preview);
@@ -1416,8 +1436,16 @@
     elements.timelineStatus.textContent = buildTimelineMigrationStatusText(timelineMigration);
     appendSummaryPair(elements.timelineSummary, '状态', getMigrationStatusLabel(timelineMigration.status));
     appendSummaryPair(elements.timelineSummary, '阶段', getMigrationPhaseLabel(timelineMigration.phase));
-    appendSummaryPair(elements.timelineSummary, '文本已发送', formatNumber(timelineMigration.text_sent));
-    appendSummaryPair(elements.timelineSummary, '媒体已复制', formatNumber(timelineMigration.media_sent));
+    appendSummaryPair(
+      elements.timelineSummary,
+      '文本已发送',
+      formatDoneTotal(timelineMigration.text_sent, timelineMigration.text_total)
+    );
+    appendSummaryPair(
+      elements.timelineSummary,
+      '媒体已复制',
+      formatDoneTotal(timelineMigration.media_sent, timelineMigration.media_total)
+    );
     appendSummaryPair(
       elements.timelineSummary,
       '执行方式',
@@ -1435,11 +1463,19 @@
   function appendTimelinePreviewSummary(elements, preview) {
     var data = preview && typeof preview === 'object' ? preview : {};
     var readinessReasons = Array.isArray(data.readiness_reasons) ? data.readiness_reasons : [];
+    var assessmentState = String(data.assessment_state || '').trim();
+    var assessmentLabel = data.can_migrate_timeline
+      ? (assessmentState === 'deferred' ? '开始后后台核验' : '可执行')
+      : readinessReasons[0] || '未完成评估';
     appendSummaryPair(
       elements.timelineSummary,
       '执行评估',
-      data.can_migrate_timeline ? '可执行' : readinessReasons[0] || '未完成评估'
+      assessmentLabel
     );
+    if (assessmentState === 'deferred') {
+      appendSummaryPair(elements.timelineSummary, '时间线统计', '将在后台核验后显示');
+      return;
+    }
     appendSummaryPair(elements.timelineSummary, '时间线总数', formatNumber(data.timeline_items_total));
     appendSummaryPair(elements.timelineSummary, '剩余时间线', formatNumber(data.timeline_remaining));
     appendSummaryPair(elements.timelineSummary, '文本剩余', formatNumber(data.text_remaining));
@@ -1602,6 +1638,7 @@
   function getMigrationPhaseLabel(phase) {
     var normalized = String(phase || '').trim();
     if (normalized === 'queued') return '等待迁移';
+    if (normalized === 'preparing_timeline') return '核验本地时间线';
     if (normalized === 'validating') return '校验计划';
     if (normalized === 'connecting') return '连接账号';
     if (normalized === 'replaying_timeline') return '重放完整时间线';
@@ -1791,7 +1828,7 @@
     cloneState.requestedRunId = isMigratePage(elements) ? getRunIdFromLocation() : '';
     cloneState.requestedRunError = '';
     cloneState.selectedRunId = cloneState.requestedRunId;
-    elements.sortSelect.value = isCreatePage(elements) ? 'message_count_desc' : 'updated_desc';
+    elements.sortSelect.value = 'title_asc';
 
     if (isMigratePage(elements)) {
       elements.messageLimitInput.value = '';
@@ -1885,6 +1922,7 @@
     var preview = cloneState.timelinePreview;
     if (!preview || typeof preview !== 'object') return false;
     if (preview.can_migrate_timeline !== true) return false;
+    if (String(preview.assessment_state || '').trim() === 'deferred') return true;
     return Number(preview.timeline_remaining || 0) > 0;
   }
 
@@ -1920,6 +1958,10 @@
     return formatNumber(n);
   }
 
+  function formatDoneTotal(done, total) {
+    return formatNumber(done) + ' / ' + formatNumber(total);
+  }
+
   function formatPercent(value) {
     var n = Number(value || 0);
     if (!Number.isFinite(n)) return '0%';
@@ -1927,7 +1969,11 @@
   }
 
   async function fetchJSON(url, options) {
-    return sharedFetchJSON(url, Object.assign({}, options || {}, {
+    var requestOptions = Object.assign({}, options || {});
+    if (!requestOptions.method || String(requestOptions.method).toUpperCase() === 'GET') {
+      requestOptions.timeoutMs = requestOptions.timeoutMs || DATABASE_READ_TIMEOUT_MS;
+    }
+    return sharedFetchJSON(url, Object.assign(requestOptions, {
       onUnauthorized: sessionController.handleUnauthorizedResponse
     }));
   }
@@ -1940,7 +1986,10 @@
 
   var sessionController = shared.createAdminSessionController({
     afterAuth: async function (elements, context) {
-      await loadSourceChats(elements);
+      await Promise.all([
+        loadCloneRuns(elements),
+        loadSourceChats(elements, { loadRuns: false })
+      ]);
       await resumeActiveJobPolling(elements);
       if (context.reason === 'login') {
         appendLog(

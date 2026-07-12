@@ -21,7 +21,6 @@ class CloneRouteServices:
     load_latest_clone_plan_fn: Any
     create_clone_migration_fn: Any
     load_latest_clone_migration_fn: Any
-    build_clone_timeline_replay_preview_fn: Any
     build_telegram_chat_link_bundle_fn: Any
     admin_try_create_exclusive_job_fn: Any
     admin_job_get_snapshot_fn: Any

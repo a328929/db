@@ -387,7 +387,7 @@ def test_clone_preflight_allows_structure_clone_with_distinct_second_account():
     assert report["recommendation"]["mode"] == "structure_then_text"
 
 
-def test_list_clone_source_chats_exposes_media_counts_and_last_message():
+def test_list_clone_source_chats_avoids_media_table_aggregation():
     conn = _new_conn()
     try:
         items = list_clone_source_chats(conn, sort="updated_desc")
@@ -398,12 +398,12 @@ def test_list_clone_source_chats_exposes_media_counts_and_last_message():
     item = items[0]
     assert item["chat_id"] == 100
     assert item["chat_title"] == "Source Group"
-    assert item["media_rows"] == 2
+    assert "media_rows" not in item
     assert item["last_message_at"] == "2026-01-01 00:00:05"
     assert item["last_message_ts"] == 5
 
 
-def test_list_clone_source_chats_sorts_title_asc_by_display_name():
+def test_list_clone_source_chats_defaults_to_display_name_order():
     conn = _new_conn()
     try:
         conn.executemany(
@@ -423,7 +423,7 @@ def test_list_clone_source_chats_sorts_title_asc_by_display_name():
                 (205, "[Only]足控", "", "Megagroup", 2, "", ""),
             ],
         )
-        items = list_clone_source_chats(conn, sort="title_asc")
+        items = list_clone_source_chats(conn)
     finally:
         conn.close()
 
