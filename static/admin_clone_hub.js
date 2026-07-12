@@ -25,7 +25,6 @@
       summary: document.getElementById('admin-clone-hub-summary'),
       refreshBtn: document.getElementById('admin-clone-hub-refresh-btn'),
       createStep: document.getElementById('admin-clone-hub-step-create'),
-      migrateStep: document.getElementById('admin-clone-hub-step-migrate'),
       manageStep: document.getElementById('admin-clone-hub-step-manage')
     };
     var required = Object.keys(elements).filter(function (key) {
@@ -122,7 +121,6 @@
   function renderWorkflowSteps(elements, focus) {
     var states = {
       create: 'ready',
-      migrate: 'pending',
       manage: 'available'
     };
     var currentStep = String(focus.step || 'create');
@@ -130,17 +128,15 @@
 
     if (currentStep === 'migrate') {
       states.create = 'complete';
-      states.migrate = currentState;
+      states.manage = currentState;
     } else if (currentStep === 'manage') {
       states.create = 'complete';
-      states.migrate = 'complete';
       states.manage = currentState;
     } else {
       states.create = currentState;
     }
 
     setWorkflowStepState(elements.createStep, states.create);
-    setWorkflowStepState(elements.migrateStep, states.migrate);
     setWorkflowStepState(elements.manageStep, states.manage);
   }
 

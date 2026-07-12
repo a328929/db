@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>已克隆群管理</title>
+  <title>克隆记录目录</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -11,27 +11,21 @@
 <body>
   <main class="page" id="admin-clone-runs-page">
     <header class="page-header">
-      <p class="eyebrow">第 3 步 / 共 3 步</p>
-      <h1>已克隆群管理</h1>
-      <p class="subtle">源群只用于识别记录；删除操作仅处理克隆副本及其本地记录。</p>
-      <nav class="clone-workflow-nav" aria-label="克隆流程">
-        <ol class="clone-workflow-nav-list">
+      <p class="eyebrow">克隆工作台 / 记录目录</p>
+      <h1>克隆记录目录</h1>
+      <p class="subtle">在这里定位记录；打开记录后可完成预检、迁移、恢复和删除。源群只用于识别，不会被修改。</p>
+      <nav class="clone-workflow-nav" aria-label="克隆工作台导航">
+        <ol class="clone-workflow-nav-list clone-workflow-nav-list-two-column">
           <li class="clone-workflow-nav-item">
             <a href="/admin/clone/create">
-              <span class="clone-workflow-nav-index">1</span>
+              <span class="clone-workflow-nav-index">+</span>
               <span>创建副本</span>
             </a>
           </li>
-          <li class="clone-workflow-nav-item">
-            <a href="/admin/clone/migrate">
-              <span class="clone-workflow-nav-index">2</span>
-              <span>迁移消息</span>
-            </a>
-          </li>
           <li class="clone-workflow-nav-item is-current">
-            <a href="/admin/clone/runs/manage" aria-current="step">
-              <span class="clone-workflow-nav-index">3</span>
-              <span>管理记录</span>
+            <a href="/admin/clone/runs/manage" aria-current="page">
+              <span class="clone-workflow-nav-index">≡</span>
+              <span>记录目录</span>
             </a>
           </li>
         </ol>
@@ -90,7 +84,7 @@
     <section class="panel clone-panel" aria-labelledby="cloneRunsListTitle">
       <div class="clone-panel-head">
         <div>
-          <h2 id="cloneRunsListTitle" class="section-title">已克隆群列表</h2>
+          <h2 id="cloneRunsListTitle" class="section-title">克隆记录</h2>
           <p id="admin-clone-runs-page-status" class="clone-subline" aria-live="polite">暂无分页信息。</p>
         </div>
         <div class="clone-toolbar">
@@ -107,34 +101,6 @@
   </main>
 
   <section
-    id="admin-clone-run-delete-dialog"
-    class="admin-dialog"
-    role="dialog"
-    aria-modal="true"
-    aria-labelledby="adminCloneRunDeleteDialogTitle"
-    hidden
-  >
-    <h2 id="adminCloneRunDeleteDialogTitle">删除克隆副本</h2>
-    <p class="subtle">只会删除目标副本及其本地克隆记录，不会读取或删除源群。</p>
-    <p id="admin-clone-run-delete-status" class="admin-login-status" role="status" aria-live="polite"></p>
-    <div class="field">
-      <label for="admin-clone-run-delete-confirm-input">确认码</label>
-      <input
-        id="admin-clone-run-delete-confirm-input"
-        name="admin-clone-run-delete-confirm-input"
-        type="text"
-        autocomplete="off"
-        aria-label="删除克隆副本确认码"
-      />
-    </div>
-    <p id="admin-clone-run-delete-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
-    <div aria-label="删除克隆副本操作按钮组">
-      <button id="admin-clone-run-delete-cancel-btn" class="btn" type="button" aria-label="取消删除克隆副本">取消</button>
-      <button id="admin-clone-run-delete-confirm-btn" class="btn danger" type="button" aria-label="确认删除克隆副本">确认删除</button>
-    </div>
-  </section>
-
-  <section
     id="admin-login-dialog"
     class="admin-dialog"
     role="dialog"
@@ -143,7 +109,7 @@
     hidden
   >
     <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
-    <p class="subtle">进入已克隆群管理，请先验证管理员密码。</p>
+    <p class="subtle">进入克隆记录目录，请先验证管理员密码。</p>
     <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-password-input">登录密码</label>

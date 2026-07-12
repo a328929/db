@@ -11,29 +11,23 @@
 <body>
   <main class="page" id="admin-clone-hub-page" aria-busy="true">
     <header class="page-header clone-workbench-header">
-      <p class="eyebrow">克隆流程</p>
+      <p class="eyebrow">克隆工作台</p>
       <h1>克隆工作台</h1>
       <div class="clone-header-links">
         <a href="/admin/manage" class="admin-link">返回后台管理</a>
       </div>
-      <nav class="clone-workflow-nav" aria-label="克隆流程">
-        <ol class="clone-workflow-nav-list">
+      <nav class="clone-workflow-nav" aria-label="克隆工作台导航">
+        <ol class="clone-workflow-nav-list clone-workflow-nav-list-two-column">
           <li class="clone-workflow-nav-item is-current">
-            <a href="/admin/clone/create" aria-current="step">
-              <span class="clone-workflow-nav-index">1</span>
+            <a href="/admin/clone/create">
+              <span class="clone-workflow-nav-index">+</span>
               <span>创建副本</span>
             </a>
           </li>
           <li class="clone-workflow-nav-item">
-            <a href="/admin/clone/migrate">
-              <span class="clone-workflow-nav-index">2</span>
-              <span>迁移消息</span>
-            </a>
-          </li>
-          <li class="clone-workflow-nav-item">
             <a href="/admin/clone/runs/manage">
-              <span class="clone-workflow-nav-index">3</span>
-              <span>管理记录</span>
+              <span class="clone-workflow-nav-index">≡</span>
+              <span>记录目录</span>
             </a>
           </li>
         </ol>
@@ -60,27 +54,21 @@
 
     <section class="clone-workbench-flow" aria-labelledby="cloneHubFlowTitle">
       <div class="clone-section-heading">
-        <p class="clone-stage-kicker">操作流程</p>
-        <h2 id="cloneHubFlowTitle" class="section-title">按步骤完成克隆</h2>
+        <p class="clone-stage-kicker">入口说明</p>
+        <h2 id="cloneHubFlowTitle" class="section-title">从记录开始，而不是重复走步骤</h2>
       </div>
-      <ol class="clone-hub-grid" aria-label="克隆工作台步骤">
+      <ol class="clone-hub-grid clone-hub-grid-two-column" aria-label="克隆工作台入口">
         <li id="admin-clone-hub-step-create" class="clone-hub-card" data-workflow-state="ready">
-          <span class="clone-hub-step">步骤 1</span>
+          <span class="clone-hub-step">新建</span>
           <strong>创建副本</strong>
-          <span class="clone-hub-card-description">选择源群，完成检查并创建目标副本。</span>
+          <span class="clone-hub-card-description">选择源群、完成基础检查，并创建一个新的目标副本。</span>
           <a href="/admin/clone/create" class="clone-hub-card-link">进入创建副本</a>
         </li>
-        <li id="admin-clone-hub-step-migrate" class="clone-hub-card" data-workflow-state="pending">
-          <span class="clone-hub-step">步骤 2</span>
-          <strong>迁移消息</strong>
-          <span class="clone-hub-card-description">选择已创建副本，确认方案后继续克隆消息。</span>
-          <a href="/admin/clone/migrate" class="clone-hub-card-link">进入消息迁移</a>
-        </li>
         <li id="admin-clone-hub-step-manage" class="clone-hub-card" data-workflow-state="available">
-          <span class="clone-hub-step">步骤 3</span>
-          <strong>管理记录</strong>
-          <span class="clone-hub-card-description">查看进度、失败样本和消息映射。</span>
-          <a href="/admin/clone/runs/manage" class="clone-hub-card-link">管理克隆记录</a>
+          <span class="clone-hub-step">继续</span>
+          <strong>打开记录</strong>
+          <span class="clone-hub-card-description">在同一记录中完成在线预检、迁移、失败恢复、局部删除和完整删除。</span>
+          <a href="/admin/clone/runs/manage" class="clone-hub-card-link">打开记录目录</a>
         </li>
       </ol>
     </section>

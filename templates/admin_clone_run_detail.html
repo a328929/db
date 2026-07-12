@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>已克隆群详情</title>
+  <title>克隆记录中心</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -11,26 +11,27 @@
 <body>
   <main class="page" id="admin-clone-run-detail-page">
     <header class="page-header">
-      <p class="eyebrow">第 3 步 / 共 3 步</p>
-      <h1>已克隆群详情</h1>
-      <nav class="clone-workflow-nav" aria-label="克隆流程">
+      <p class="eyebrow">克隆工作台 / 当前记录</p>
+      <h1>克隆记录中心</h1>
+      <p class="subtle">围绕当前记录完成预检、迁移、恢复、局部删除与完整删除；源群始终只读。</p>
+      <nav class="clone-workflow-nav" aria-label="克隆工作台导航">
         <ol class="clone-workflow-nav-list">
           <li class="clone-workflow-nav-item">
             <a href="/admin/clone/create">
-              <span class="clone-workflow-nav-index">1</span>
+              <span class="clone-workflow-nav-index">+</span>
               <span>创建副本</span>
             </a>
           </li>
-          <li class="clone-workflow-nav-item">
-            <a href="/admin/clone/migrate" id="admin-clone-run-detail-migrate-nav-link">
-              <span class="clone-workflow-nav-index">2</span>
-              <span>迁移消息</span>
+          <li class="clone-workflow-nav-item is-current">
+            <a href="#admin-clone-run-operation-panel" aria-current="page">
+              <span class="clone-workflow-nav-index">●</span>
+              <span>当前记录</span>
             </a>
           </li>
-          <li class="clone-workflow-nav-item is-current">
-            <a href="/admin/clone/runs/manage" aria-current="step">
-              <span class="clone-workflow-nav-index">3</span>
-              <span>管理记录</span>
+          <li class="clone-workflow-nav-item">
+            <a href="/admin/clone/runs/manage">
+              <span class="clone-workflow-nav-index">≡</span>
+              <span>记录目录</span>
             </a>
           </li>
         </ol>
@@ -42,7 +43,7 @@
         <div>
           <h2 id="cloneRunsDetailTitle" class="section-title">基本信息</h2>
           <p id="admin-clone-runs-detail-status" class="clone-subline" aria-live="polite">
-            正在读取已克隆群详情...
+            正在读取克隆记录...
           </p>
         </div>
         <div class="clone-toolbar">
@@ -52,15 +53,106 @@
         </div>
       </div>
 
-      <dl id="admin-clone-runs-detail-summary" class="clone-summary-grid clone-runs-detail-summary" aria-label="已克隆群详情摘要"></dl>
+      <dl id="admin-clone-runs-detail-summary" class="clone-summary-grid clone-runs-detail-summary" aria-label="克隆记录摘要"></dl>
       <section class="clone-report-block clone-runs-next-step-block" aria-labelledby="cloneRunNextStepTitle">
         <h3 id="cloneRunNextStepTitle">推荐下一步</h3>
         <p id="admin-clone-runs-next-step" class="clone-recommendation">请选择有效记录后查看建议。</p>
         <div id="admin-clone-runs-detail-actions" class="clone-run-actions clone-detail-actions" aria-label="当前记录可执行操作">
           <a id="admin-clone-runs-open-source-link" href="#" rel="noopener noreferrer" hidden>打开源群</a>
           <a id="admin-clone-runs-open-target-link" href="#" rel="noopener noreferrer" hidden>打开目标副本</a>
-          <a id="admin-clone-runs-resume-link" href="#" hidden>继续克隆消息</a>
+          <a id="admin-clone-runs-resume-link" href="#admin-clone-run-operation-panel" hidden>继续克隆消息</a>
         </div>
+      </section>
+
+      <section
+        id="admin-clone-run-operation-panel"
+        class="clone-report-block clone-record-operation-panel"
+        aria-labelledby="cloneRunOperationTitle"
+      >
+        <div class="clone-panel-head">
+          <div>
+            <p class="clone-stage-kicker">执行中心</p>
+            <h3 id="cloneRunOperationTitle">在线预检与继续迁移</h3>
+            <p id="admin-clone-runs-operation-status" class="clone-subline" role="status" aria-live="polite">
+              正在读取当前记录的执行状态...
+            </p>
+          </div>
+          <div class="clone-toolbar">
+            <button id="admin-clone-runs-plan-refresh-btn" class="btn" type="button" aria-label="刷新在线预检结果">
+              刷新状态
+            </button>
+            <button id="admin-clone-runs-deep-preflight-btn" class="btn primary" type="button" aria-label="执行当前克隆记录的在线预检">
+              执行在线预检
+            </button>
+          </div>
+        </div>
+
+        <dl id="admin-clone-runs-plan-summary" class="clone-summary-grid clone-record-plan-summary" aria-label="在线预检与执行方案摘要"></dl>
+        <div class="clone-report-grid clone-record-plan-grid">
+          <section class="clone-report-block" aria-labelledby="cloneRunPlanBlockingTitle">
+            <h4 id="cloneRunPlanBlockingTitle">阻断项</h4>
+            <ul id="admin-clone-runs-plan-blocking" class="clone-warning-list clone-blocking-list"></ul>
+          </section>
+          <section class="clone-report-block" aria-labelledby="cloneRunPlanWarningsTitle">
+            <h4 id="cloneRunPlanWarningsTitle">注意事项</h4>
+            <ul id="admin-clone-runs-plan-warnings" class="clone-warning-list"></ul>
+          </section>
+        </div>
+
+        <div class="clone-record-migration-head">
+          <div>
+            <h4>继续迁移</h4>
+            <p id="admin-clone-runs-timeline-status" class="clone-subline" role="status" aria-live="polite">
+              正在读取最近迁移状态...
+            </p>
+          </div>
+          <button id="admin-clone-runs-timeline-migration-btn" class="btn primary" type="button" aria-label="继续克隆当前记录的消息">
+            继续迁移
+          </button>
+        </div>
+        <details class="clone-options-details">
+          <summary>本次执行设置</summary>
+          <div class="clone-form-grid clone-migration-options">
+            <div class="field">
+              <label for="admin-clone-runs-message-limit-input">本次处理上限</label>
+              <input
+                id="admin-clone-runs-message-limit-input"
+                name="admin-clone-runs-message-limit-input"
+                type="number"
+                min="0"
+                max="100000"
+                inputmode="numeric"
+                placeholder="留空表示全部"
+                aria-label="本次最多处理的时间线消息数"
+              />
+            </div>
+            <div class="field">
+              <label for="admin-clone-runs-send-delay-input">发送间隔（毫秒）</label>
+              <input
+                id="admin-clone-runs-send-delay-input"
+                name="admin-clone-runs-send-delay-input"
+                type="number"
+                min="0"
+                max="60000"
+                inputmode="numeric"
+                value="500"
+                aria-label="每次时间线发送后的等待毫秒数"
+              />
+            </div>
+          </div>
+        </details>
+        <dl id="admin-clone-runs-timeline-summary" class="clone-summary-grid clone-record-migration-summary" aria-label="最近迁移任务摘要"></dl>
+
+        <details id="admin-clone-runs-operation-log-panel" class="clone-log-panel" open>
+          <summary class="clone-log-summary">本记录执行日志</summary>
+          <div class="admin-log-head clone-log-head">
+            <h4 class="sr-only">在线预检与迁移日志</h4>
+            <button id="admin-clear-clone-runs-operation-logs-btn" class="btn" type="button" hidden aria-label="清空当前记录执行日志">
+              清空日志
+            </button>
+          </div>
+          <div id="admin-clone-runs-operation-log-container" class="admin-log-container" aria-label="当前记录执行日志"></div>
+        </details>
       </section>
 
       <div class="clone-report-grid clone-runs-detail-grid">
@@ -109,6 +201,18 @@
         </div>
         <div id="admin-clone-runs-mapping-list" class="clone-mapping-list" aria-label="最近消息映射列表"></div>
       </details>
+
+      <section class="clone-report-block clone-record-local-delete" aria-labelledby="cloneRunLocalDeleteTitle">
+        <div class="clone-panel-head">
+          <div>
+            <h3 id="cloneRunLocalDeleteTitle">局部删除</h3>
+            <p class="clone-subline">按消息数量倒序删除尾部内容，或按消息 ID 区间删除；删除后会回退匹配映射，后续迁移自动补齐。</p>
+          </div>
+          <div class="clone-toolbar">
+            <a id="admin-clone-runs-message-delete-link" class="btn danger" href="#" hidden>打开局部删除</a>
+          </div>
+        </div>
+      </section>
 
       <details class="clone-report-block clone-danger-block clone-expand-block" aria-labelledby="cloneRunDangerTitle">
         <summary class="clone-expand-summary">
@@ -165,7 +269,7 @@
     hidden
   >
     <h2 id="adminLoginDialogTitle">管理员身份验证</h2>
-    <p class="subtle">进入已克隆群详情，请先验证管理员密码。</p>
+    <p class="subtle">进入克隆记录中心，请先验证管理员密码。</p>
     <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-password-input">登录密码</label>

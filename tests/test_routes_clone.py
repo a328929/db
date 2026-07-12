@@ -694,8 +694,8 @@ class CloneRoutesTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("克隆工作台", body)
         self.assertIn("创建副本", body)
-        self.assertIn("迁移消息", body)
-        self.assertIn("管理克隆记录", body)
+        self.assertIn("打开记录", body)
+        self.assertIn("记录目录", body)
 
     def test_clone_create_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -706,20 +706,26 @@ class CloneRoutesTests(unittest.TestCase):
         body = response.get_data(as_text=True)
         self.assertIn("创建副本", body)
         self.assertIn('data-clone-mode="create"', body)
-        self.assertIn("最近创建记录", body)
-        self.assertIn("第 1 步 / 共 3 步", body)
+        self.assertIn("创建任务提交后会自动打开该记录", body)
 
-    def test_clone_migrate_page_renders_when_authenticated(self) -> None:
+    def test_clone_migrate_page_redirects_to_record_directory_when_authenticated(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/clone/migrate")
 
-        self.assertEqual(200, response.status_code)
-        body = response.get_data(as_text=True)
-        self.assertIn("迁移消息", body)
-        self.assertIn('data-clone-mode="migrate"', body)
-        self.assertIn("生成迁移方案", body)
-        self.assertIn("第 2 步 / 共 3 步", body)
+        self.assertEqual(302, response.status_code)
+        self.assertEqual("/admin/clone/runs/manage", response.location)
+
+    def test_clone_migrate_page_redirects_to_requested_record_execution_center(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/admin/clone/migrate?run_id=run-existing")
+
+        self.assertEqual(302, response.status_code)
+        self.assertEqual(
+            "/admin/clone/runs/detail?run_id=run-existing",
+            response.location,
+        )
 
     def test_clone_runs_manage_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -728,8 +734,8 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("已克隆群管理", body)
-        self.assertIn("第 3 步 / 共 3 步", body)
+        self.assertIn("克隆记录目录", body)
+        self.assertIn("打开记录", body)
 
     def test_clone_run_detail_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
@@ -738,9 +744,9 @@ class CloneRoutesTests(unittest.TestCase):
 
         self.assertEqual(200, response.status_code)
         body = response.get_data(as_text=True)
-        self.assertIn("已克隆群详情", body)
+        self.assertIn("克隆记录中心", body)
+        self.assertIn("在线预检与继续迁移", body)
         self.assertIn("消息映射与排错", body)
-        self.assertIn("第 3 步 / 共 3 步", body)
 
     def test_clone_workbench_api_returns_next_action_and_summary(self) -> None:
         with self._auth_config_patch():
@@ -758,7 +764,7 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("ready", payload["focus"]["state"])
         self.assertEqual("run-existing", payload["focus"]["run"]["run_id"])
         self.assertEqual(
-            "/admin/clone/migrate?run_id=run-existing",
+            "/admin/clone/runs/detail?run_id=run-existing",
             payload["focus"]["action"]["href"],
         )
 

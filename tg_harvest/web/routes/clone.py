@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import quote
 
-from flask import jsonify, render_template, request
+from flask import jsonify, redirect, render_template, request
 
 from tg_harvest.admin_jobs.clone import (
     CLONE_TARGET_TITLE_MAX_LEN,
@@ -633,7 +633,7 @@ def _clone_workbench_focus(
                 "迁移任务仍在执行，可查看实时状态与最近进度。",
                 item["run"],
                 "查看迁移进度",
-                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
             )
 
     for item in candidates:
@@ -646,7 +646,7 @@ def _clone_workbench_focus(
                 "正在验证源群、目标副本和可执行的消息迁移路径。",
                 item["run"],
                 "查看迁移方案",
-                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
             )
 
     for item in candidates:
@@ -685,7 +685,7 @@ def _clone_workbench_focus(
                 "先生成迁移方案，再开始克隆历史消息和媒体。",
                 item["run"],
                 "生成迁移方案",
-                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
             )
         plan_status = str(plan.get("status") or "").strip().lower()
         if plan_status == "error" or plan.get("blocking_issues"):
@@ -696,7 +696,7 @@ def _clone_workbench_focus(
                 "检查方案中的阻断项或重新生成方案后再继续。",
                 item["run"],
                 "处理迁移方案",
-                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
             )
 
     for item in candidates:
@@ -711,7 +711,7 @@ def _clone_workbench_focus(
                 "最近一次迁移未完成，可查看状态后继续执行。",
                 item["run"],
                 "继续克隆消息",
-                _clone_workbench_href("/admin/clone/migrate", item["run"]),
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
             )
 
     for item in candidates:
@@ -732,7 +732,7 @@ def _clone_workbench_focus(
                 "迁移方案已通过；开始执行时会在后台核验本地消息并继续处理。",
                 run,
                 "继续克隆消息",
-                _clone_workbench_href("/admin/clone/migrate", run),
+                _clone_workbench_href("/admin/clone/runs/detail", run),
             )
 
     return {
@@ -771,7 +771,13 @@ def _register_clone_page_routes(app) -> None:
     @app.get("/admin/clone/migrate")
     @admin_page_login_required
     def admin_clone_migrate_page():
-        return render_template("admin_clone_migrate.html")
+        run_id = str(request.args.get("run_id") or "").strip()
+        if run_id:
+            return redirect(
+                "/admin/clone/runs/detail?run_id="
+                + quote(run_id, safe="")
+            )
+        return redirect("/admin/clone/runs/manage")
 
     @app.get("/admin/clone/runs/manage")
     @admin_page_login_required

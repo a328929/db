@@ -35,6 +35,7 @@
   function getElements() {
     var elements = {
       page: document.getElementById('admin-clone-message-delete-page'),
+      backLink: document.getElementById('admin-clone-message-delete-back-link'),
       target: document.getElementById('admin-clone-message-delete-target'),
       status: document.getElementById('admin-clone-message-delete-status'),
       refreshMessageCountBtn: document.getElementById('admin-clone-message-count-refresh-btn'),
@@ -63,6 +64,7 @@
   function initializeUI(elements) {
     shared.ensurePlaceholder(elements.logContainer);
     shared.syncClearLogsButtonVisibility(elements);
+    syncBackLink(elements);
     renderRun(elements);
     renderSelectionPreview(elements);
     setBusy(elements, false);
@@ -334,6 +336,13 @@
   function readRunId() {
     var params = new URLSearchParams(window.location.search || '');
     return String(params.get('run_id') || '').trim();
+  }
+
+  function syncBackLink(elements) {
+    if (!elements || !elements.backLink) return;
+    elements.backLink.href = state.runId
+      ? '/admin/clone/runs/detail?run_id=' + encodeURIComponent(state.runId)
+      : '/admin/clone/runs/manage';
   }
 
   async function fetchJSON(url, options) {

@@ -51,6 +51,10 @@
   list-style: none;
 }
 
+.clone-workflow-nav-list-two-column {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .clone-workflow-nav-item {
   min-width: 0;
 }
@@ -196,6 +200,10 @@
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.clone-hub-grid-two-column {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
 }
 
 .clone-hub-card {
@@ -785,6 +793,55 @@
   margin-top: 10px;
 }
 
+.clone-record-operation-panel,
+.clone-record-local-delete {
+  margin-top: 14px;
+}
+
+.clone-record-operation-panel > .clone-panel-head {
+  margin-bottom: 16px;
+}
+
+.clone-record-plan-summary,
+.clone-record-migration-summary {
+  margin-top: 14px;
+}
+
+.clone-record-plan-grid {
+  margin-top: 12px;
+}
+
+.clone-record-migration-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 18px;
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+
+.clone-record-migration-head h4,
+.clone-record-operation-panel h4 {
+  margin: 0 0 6px;
+  color: #243657;
+  font-size: 0.96rem;
+}
+
+.clone-record-operation-panel .clone-log-panel {
+  margin-top: 14px;
+  border-top: 1px solid var(--border);
+  padding-top: 14px;
+}
+
+.clone-record-local-delete .clone-toolbar .btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 42px;
+  text-decoration: none;
+}
+
 .clone-detail-actions {
   margin-top: 12px;
 }
@@ -962,6 +1019,7 @@
 
 @media (max-width: 760px) {
   .clone-panel-head,
+  .clone-record-migration-head,
   .clone-mapping-head,
   .clone-toolbar,
   .clone-actions {

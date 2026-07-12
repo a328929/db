@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>创建副本</title>
+  <title>创建目标副本</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -11,26 +11,21 @@
 <body>
   <main class="page" id="admin-clone-page" data-clone-mode="create">
     <header class="page-header">
-      <p class="eyebrow">第 1 步 / 共 3 步</p>
-      <h1>创建副本</h1>
-      <nav class="clone-workflow-nav" aria-label="克隆流程">
-        <ol class="clone-workflow-nav-list">
+      <p class="eyebrow">克隆工作台 / 新建记录</p>
+      <h1>创建目标副本</h1>
+      <p class="subtle">这里只创建新的目标副本。创建任务提交后会自动打开该记录，在同一处继续预检和迁移消息。</p>
+      <nav class="clone-workflow-nav" aria-label="克隆工作台导航">
+        <ol class="clone-workflow-nav-list clone-workflow-nav-list-two-column">
           <li class="clone-workflow-nav-item is-current">
-            <a href="/admin/clone/create" aria-current="step">
-              <span class="clone-workflow-nav-index">1</span>
+            <a href="/admin/clone/create" aria-current="page">
+              <span class="clone-workflow-nav-index">+</span>
               <span>创建副本</span>
             </a>
           </li>
           <li class="clone-workflow-nav-item">
-            <a href="/admin/clone/migrate">
-              <span class="clone-workflow-nav-index">2</span>
-              <span>迁移消息</span>
-            </a>
-          </li>
-          <li class="clone-workflow-nav-item">
             <a href="/admin/clone/runs/manage">
-              <span class="clone-workflow-nav-index">3</span>
-              <span>管理记录</span>
+              <span class="clone-workflow-nav-index">≡</span>
+              <span>记录目录</span>
             </a>
           </li>
         </ol>
@@ -40,7 +35,7 @@
     <section id="admin-clone-source-stage" class="panel clone-panel clone-stage-section" data-stage-state="current" aria-labelledby="cloneSourceTitle">
       <div class="clone-panel-head">
         <div>
-          <p class="clone-stage-kicker">本页 1 / 2</p>
+          <p class="clone-stage-kicker">准备</p>
           <h2 id="cloneSourceTitle" class="section-title">选择源群并完成检查</h2>
           <p id="admin-clone-source-status" class="clone-subline" role="status" aria-live="polite">
             正在读取数据库群组...
@@ -99,7 +94,7 @@
     <section id="admin-clone-create-stage" class="panel clone-panel clone-stage-section" data-stage-state="pending" aria-labelledby="cloneTargetTitle">
       <div class="clone-panel-head">
         <div>
-          <p class="clone-stage-kicker">本页 2 / 2</p>
+          <p class="clone-stage-kicker">确认</p>
           <h2 id="cloneTargetTitle" class="section-title">确认并创建副本</h2>
           <p class="clone-subline">检查完成后可编辑副本信息。</p>
         </div>
@@ -147,32 +142,6 @@
       </div>
     </section>
 
-    <section class="panel clone-panel clone-secondary-panel" aria-labelledby="cloneRunsTitle">
-      <div class="clone-panel-head">
-        <div>
-          <h2 id="cloneRunsTitle" class="section-title">最近创建记录</h2>
-          <p id="admin-clone-runs-status" class="clone-subline" role="status" aria-live="polite">正在读取记录...</p>
-        </div>
-        <div class="clone-toolbar">
-          <button id="admin-clone-runs-refresh-btn" class="btn" type="button" aria-label="刷新克隆运行记录">
-            刷新
-          </button>
-        </div>
-      </div>
-
-      <div id="admin-clone-runs-list" class="clone-run-list" aria-label="最近克隆运行记录列表"></div>
-    </section>
-
-    <details id="admin-clone-log-panel" class="panel clone-panel clone-log-panel">
-      <summary class="clone-log-summary">执行日志</summary>
-      <div class="admin-log-head clone-log-head">
-        <h2 class="sr-only">本页日志</h2>
-        <button id="admin-clear-clone-logs-btn" class="btn" type="button" hidden aria-label="清空克隆日志">
-          清空日志
-        </button>
-      </div>
-      <div id="admin-clone-log-container" class="admin-log-container" aria-label="执行日志"></div>
-    </details>
   </main>
 
   <section
@@ -202,6 +171,6 @@
   </section>
 
   <script src="{{ url_for('static', filename='admin_manage_shared.js') }}"></script>
-  <script src="{{ url_for('static', filename='admin_clone.js') }}"></script>
+  <script src="{{ url_for('static', filename='admin_clone_create.js') }}"></script>
 </body>
 </html>

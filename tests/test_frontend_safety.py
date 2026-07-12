@@ -283,7 +283,6 @@ class FrontendSafetyTests(unittest.TestCase):
             "admin_recovery.html",
             "admin_clone.html",
             "admin_clone_create.html",
-            "admin_clone_migrate.html",
             "admin_clone_runs.html",
             "admin_clone_run_detail.html",
             "admin_clone_message_delete.html",
@@ -400,8 +399,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("eyebrow", template)
         self.assertIn("当前工作", template)
         self.assertIn("创建副本", template)
-        self.assertIn("迁移消息", template)
-        self.assertIn("管理记录", template)
+        self.assertIn("打开记录", template)
+        self.assertIn("记录目录", template)
         self.assertIn("clone-hub-card", template)
         self.assertIn("admin_manage_shared.js", template)
         self.assertIn("admin_clone_hub.js", template)
@@ -425,16 +424,17 @@ class FrontendSafetyTests(unittest.TestCase):
             ROOT / "static" / "admin_clone_run_detail.js"
         ).read_text(encoding="utf-8")
 
-        for template in (runs_template, detail_template):
-            self.assertIn("删除克隆副本", template)
-            self.assertIn("源群", template)
-            self.assertIn('id="admin-clone-run-delete-dialog"', template)
-            self.assertIn('id="admin-clone-run-delete-confirm-btn"', template)
-        for source in (runs_source, detail_source):
-            self.assertIn("/api/admin/clone/runs/", source)
-            self.assertIn("method: 'DELETE'", source)
-            self.assertIn("pollDeleteJob", source)
-            self.assertNotIn("innerHTML", source)
+        self.assertNotIn("删除克隆副本", runs_template)
+        self.assertIn("删除克隆副本", detail_template)
+        self.assertIn("局部删除", detail_template)
+        self.assertIn("源群", detail_template)
+        self.assertIn('id="admin-clone-run-delete-dialog"', detail_template)
+        self.assertIn('id="admin-clone-run-delete-confirm-btn"', detail_template)
+        self.assertIn("/api/admin/clone/runs/", detail_source)
+        self.assertIn("method: 'DELETE'", detail_source)
+        self.assertIn("pollDeleteJob", detail_source)
+        self.assertNotIn("innerHTML", runs_source)
+        self.assertNotIn("innerHTML", detail_source)
 
     def test_clone_management_scripts_only_reference_existing_template_elements(self) -> None:
         page_assets = (
@@ -466,10 +466,7 @@ class FrontendSafetyTests(unittest.TestCase):
             (("admin_sync.html",), "admin_sync.js"),
             (("admin_channels.html",), "admin_channels.js"),
             (("admin_clone.html",), "admin_clone_hub.js"),
-            (
-                ("admin_clone_create.html", "admin_clone_migrate.html"),
-                "admin_clone.js",
-            ),
+            (("admin_clone_create.html",), "admin_clone_create.js"),
             (("admin_clone_runs.html",), "admin_clone_runs.js"),
             (("admin_clone_run_detail.html",), "admin_clone_run_detail.js"),
             (("admin_recovery.html",), "admin_recovery.js"),
@@ -499,8 +496,7 @@ class FrontendSafetyTests(unittest.TestCase):
             ("context.html", "display_helpers.js", "context.js"),
             ("admin_channels.html", "admin_manage_shared.js", "admin_channels.js"),
             ("admin_clone.html", "admin_manage_shared.js", "admin_clone_hub.js"),
-            ("admin_clone_create.html", "admin_manage_shared.js", "admin_clone.js"),
-            ("admin_clone_migrate.html", "admin_manage_shared.js", "admin_clone.js"),
+            ("admin_clone_create.html", "admin_manage_shared.js", "admin_clone_create.js"),
             (
                 "admin_clone_run_detail.html",
                 "admin_manage_shared.js",
@@ -566,207 +562,31 @@ class FrontendSafetyTests(unittest.TestCase):
         template = (ROOT / "templates" / "admin_clone_create.html").read_text(
             encoding="utf-8"
         )
-        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+        source = (ROOT / "static" / "admin_clone_create.js").read_text(encoding="utf-8")
         self.assertIn("admin_manage_shared.js", template)
-        self.assertIn("admin_clone.js", template)
+        self.assertIn("admin_clone_create.js", template)
         self.assertIn("admin_clone.css", template)
         self.assertIn('data-clone-mode="create"', template)
         self.assertIn("admin-clone-source-select", template)
         self.assertIn("admin-clone-preflight-btn", template)
         self.assertIn("admin-clone-start-btn", template)
-        self.assertIn("admin-clone-runs-list", template)
-        self.assertIn("/admin/clone/migrate", template)
-        self.assertIn("管理记录", template)
+        self.assertNotIn("admin-clone-runs-list", template)
+        self.assertIn("记录目录", template)
         self.assertNotIn("admin-clone-plan-summary", template)
         self.assertNotIn("admin-clone-message-limit-input", template)
-        self.assertNotIn("下一步：迁移历史消息", template)
-        self.assertIn("function isCreatePage(elements)", source)
-        self.assertIn("function getSourcePlaceholderText(elements)", source)
-        self.assertIn("克隆群创建完成后，这里会出现“继续克隆消息”。", source)
-        self.assertIn("进入群详情", source)
-        self.assertIn("var CLONE_MODE_CREATE = 'create';", source)
+        self.assertIn("function loadSourceChats(elements)", source)
+        self.assertIn("function handleStartCloneClick(elements)", source)
+        self.assertIn("window.location.assign('/admin/clone/runs/detail?run_id='", source)
 
     def test_clone_group_selects_default_to_name_order(self) -> None:
         create_template = (ROOT / "templates" / "admin_clone_create.html").read_text(
             encoding="utf-8"
         )
-        migrate_template = (ROOT / "templates" / "admin_clone_migrate.html").read_text(
-            encoding="utf-8"
-        )
-        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+        source = (ROOT / "static" / "admin_clone_create.js").read_text(encoding="utf-8")
 
         expected_option = '<option value="title_asc" selected>名称 A-Z</option>'
         self.assertIn(expected_option, create_template)
-        self.assertIn(expected_option, migrate_template)
-        self.assertIn("elements.sortSelect.value = 'title_asc';", source)
-
-    def test_admin_clone_migrate_template_loads_shared_helpers(self) -> None:
-        template = (ROOT / "templates" / "admin_clone_migrate.html").read_text(
-            encoding="utf-8"
-        )
-        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
-        self.assertIn("admin_manage_shared.js", template)
-        self.assertIn("admin_clone.js", template)
-        self.assertIn("admin_clone.css", template)
-        self.assertIn('data-clone-mode="migrate"', template)
-        self.assertIn("admin-clone-runs-list", template)
-        self.assertIn("admin-clone-source-status", template)
-        self.assertIn(
-            "|| document.getElementById('admin-clone-runs-status')",
-            source,
-        )
-        self.assertIn("admin-clone-plan-summary", template)
-        self.assertIn("admin-clone-timeline-summary", template)
-        self.assertIn("admin-clone-message-limit-input", template)
-        self.assertIn("admin-clone-send-delay-input", template)
-        self.assertNotIn("admin-clone-start-btn", template)
-        self.assertIn("开始克隆消息", template)
-        self.assertIn("迁移方案摘要", template)
-        self.assertIn("function isMigratePage(elements)", source)
-        self.assertIn("function buildPlanStatusText(plan)", source)
-        self.assertIn("function syncUrlRunId(elements, runId)", source)
-        self.assertIn("function buildTimelineMigrationOptions", source)
-        self.assertNotIn("消息数从小到大", template)
-        self.assertEqual(1, source.count("message_limit:"))
-        self.assertIn("send_delay_ms:", source)
-        self.assertIn("source_copy_without_attribution", source)
-        self.assertIn("通过中转群桥接", source)
-        self.assertNotIn("/resolve-media", source)
-        self.assertNotIn("/migrate-media", source)
-        self.assertNotIn("/migrate-text", source)
-        self.assertIn("/migrate-timeline", source)
-        self.assertNotIn("clone_media_resolve_preflight", source)
-        self.assertNotIn("clone_media_migration", source)
-        self.assertNotIn("clone_text_migration", source)
-        self.assertIn("clone_timeline_migration", source)
-        self.assertIn("function renderTimelineMigration", source)
-        self.assertIn("function isTimelineMigrationAllowed", source)
-        self.assertIn("preview.can_migrate_timeline !== true", source)
-        self.assertIn("cloneState.timelineMigration = payload && payload.timeline_migration", source)
-        self.assertIn("function appendTimelinePreviewSummary", source)
-        self.assertIn("function appendGroupProgressSummary", source)
-        self.assertIn("function appendTaskReportSummary", source)
-        self.assertIn("group_progress", source)
-        self.assertIn("task_report", source)
-        self.assertIn("'群总进度'", source)
-        self.assertIn("'最近任务报告'", source)
-        self.assertIn("'已完成消息'", source)
-        self.assertIn("'本次处理'", source)
-        self.assertNotIn("'剩余时间线'", source)
-        self.assertNotIn("'文本剩余'", source)
-        self.assertNotIn("'数据库风险组'", source)
-
-    def test_clone_migrate_preserves_explicit_run_selection(self) -> None:
-        script = r"""
-        const fs = require('fs');
-        const vm = require('vm');
-        const source = fs.readFileSync('static/admin_clone.js', 'utf8');
-        const closingMarker = '\n})();';
-        const closingIndex = source.lastIndexOf(closingMarker);
-        if (closingIndex < 0) {
-          throw new Error('clone script closing marker not found');
-        }
-        const instrumented = source.slice(0, closingIndex)
-          + '\n  window.__cloneTestHooks = {'
-          + ' cloneState: cloneState,'
-          + ' requestState: requestState,'
-          + ' resolveRequestedCloneRun: resolveRequestedCloneRun,'
-          + ' syncSelectedRunFromRuns: syncSelectedRunFromRuns'
-          + ' };'
-          + source.slice(closingIndex);
-        const shared = {
-          appendLog() {},
-          clearLogs() {},
-          ensurePlaceholder() {},
-          fetchJSON(url) {
-            if (url === '/api/admin/clone/runs/run-requested') {
-              return Promise.resolve({
-                run: {
-                  run_id: 'run-requested',
-                  status: 'done',
-                  target_chat_id: 200
-                }
-              });
-            }
-            throw new Error('unexpected URL: ' + url);
-          },
-          postJSON() {},
-          getCreatedJobId() { return 'job'; },
-          setElementDisabled() {},
-          syncClearLogsButtonVisibility() {},
-          trapFocusWithin() {},
-          normalizeNonnegativeInteger() { return 0; },
-          formatDateTime() { return ''; },
-          formatNumber(value) { return String(value || 0); },
-          buildSnapshotProgressMessage() { return {}; },
-          createAdminSessionController() {
-            return {
-              checkAuth() {},
-              handleLogin() {},
-              handleUnauthorizedResponse() {}
-            };
-          }
-        };
-        const sandbox = {
-          console,
-          document: {
-            addEventListener() {},
-            getElementById() { return null; }
-          },
-          URL,
-          URLSearchParams,
-          setTimeout,
-          clearTimeout
-        };
-        sandbox.window = sandbox;
-        sandbox.AdminManageShared = shared;
-        vm.runInNewContext(instrumented, sandbox);
-        const hooks = sandbox.__cloneTestHooks;
-        hooks.cloneState.runs = [{
-          run_id: 'run-newest',
-          status: 'done',
-          target_chat_id: 100
-        }];
-        hooks.cloneState.selectedRunId = 'run-requested';
-        hooks.cloneState.requestedRunId = 'run-requested';
-        hooks.requestState.runsToken = 1;
-        (async () => {
-          await hooks.resolveRequestedCloneRun(1);
-          hooks.syncSelectedRunFromRuns();
-          if (hooks.cloneState.selectedRunId !== 'run-requested') {
-            throw new Error('explicit run selection was replaced');
-          }
-          if (!hooks.cloneState.runs.some((item) => item.run_id === 'run-requested')) {
-            throw new Error('explicit run was not resolved into the list');
-          }
-          hooks.cloneState.runs = [{
-            run_id: 'run-newest',
-            status: 'done',
-            target_chat_id: 100
-          }];
-          hooks.cloneState.selectedRunId = 'run-missing';
-          hooks.cloneState.requestedRunId = 'run-missing';
-          hooks.requestState.runsToken = 2;
-          await hooks.resolveRequestedCloneRun(2);
-          hooks.syncSelectedRunFromRuns();
-          if (hooks.cloneState.selectedRunId) {
-            throw new Error('missing explicit run fell back to another record');
-          }
-        })().catch((error) => {
-          console.error(error);
-          process.exitCode = 1;
-        });
-        """
-        import subprocess
-
-        result = subprocess.run(
-            ["node", "-e", script],
-            cwd=str(ROOT),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("function loadSourceChats(elements)", source)
 
     def test_admin_clone_runs_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_clone_runs.html").read_text(
@@ -780,11 +600,9 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin_clone.css", template)
         self.assertIn("admin-clone-runs-manage-list", template)
         self.assertNotIn("admin-clone-runs-limit-select", template)
-        self.assertIn("已克隆群管理", template)
+        self.assertIn("克隆记录目录", template)
         self.assertIn("/api/admin/clone/runs", source)
-        self.assertIn("function buildRunMigrationHref(run)", source)
-        self.assertIn("function buildRunDetailHref(runId)", source)
-        self.assertIn("进入群详情", source)
+        self.assertIn("打开记录", source)
         self.assertNotIn("run_id", template)
         self.assertNotIn("源消息数", source)
         self.assertNotIn("localStorage", source)
@@ -805,10 +623,13 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("admin-clone-runs-delete-help", template)
         self.assertIn("admin-clone-runs-failure-summary-text", template)
         self.assertIn("admin-clone-runs-mapping-summary-text", template)
+        self.assertIn("admin-clone-runs-deep-preflight-btn", template)
+        self.assertIn("admin-clone-runs-timeline-migration-btn", template)
+        self.assertIn("admin-clone-runs-message-delete-link", template)
         self.assertIn("var formatDateTime = shared.formatDateTime;", source)
         self.assertIn("admin-clone-run-delete-dialog", template)
-        self.assertIn("已克隆群详情", template)
-        self.assertIn("已克隆群详情摘要", template)
+        self.assertIn("克隆记录中心", template)
+        self.assertIn("在线预检与继续迁移", template)
         self.assertNotIn("admin-clone-runs-mapping-mode-filter", template)
         self.assertIn("/detail", source)
         self.assertIn("method: 'DELETE'", source)
@@ -816,7 +637,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("function renderDetailActions(elements, run, payload)", source)
         self.assertIn("当前将删除 “", source)
         self.assertIn("window.location.assign('/admin/clone/runs/manage');", source)
-        self.assertIn("admin-clone-run-detail-migrate-nav-link", source)
+        self.assertIn("function startDeepPreflight(elements)", source)
+        self.assertIn("function startTimelineMigration(elements)", source)
         template_ids = set(re.findall(r'\bid="([^"]+)"', template))
         script_ids = set(
             re.findall(r"document\.getElementById\('([^']+)'\)", source)
@@ -1038,18 +860,16 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("alert(", source)
         self.assertNotIn("window.location.reload", source)
 
-    def test_admin_clone_traps_login_dialog_focus(self) -> None:
-        source = (ROOT / "static" / "admin_clone.js").read_text(encoding="utf-8")
+    def test_clone_record_scripts_trap_login_dialog_focus(self) -> None:
+        source = (ROOT / "static" / "admin_clone_run_detail.js").read_text(encoding="utf-8")
         self.assertIn("shared.trapFocusWithin", source)
         self.assertIn("document.addEventListener('keydown'", source)
         self.assertIn("trapFocusWithin(elements.loginDialog, event);", source)
-        self.assertIn("/api/admin/clone/runs", source)
+        self.assertIn("/api/admin/clone/runs/", source)
         self.assertIn("/deep-preflight", source)
         self.assertNotIn("/migrate-text", source)
         self.assertIn("/migrate-timeline", source)
-        self.assertIn("clone_timeline_migration", source)
-        self.assertNotIn("clone_text_migration", source)
-        self.assertIn("admin-clone-plan-summary", source)
+        self.assertIn("admin-clone-runs-plan-summary", source)
         self.assertNotIn("alert(", source)
         self.assertNotIn("window.location.reload", source)
 
@@ -1150,7 +970,7 @@ class FrontendSafetyTests(unittest.TestCase):
     def test_admin_page_scripts_consistently_route_unauthorized_callbacks(self) -> None:
         for script_name in (
             "admin_channels.js",
-            "admin_clone.js",
+            "admin_clone_create.js",
             "admin_clone_run_detail.js",
             "admin_clone_runs.js",
             "admin_manage.js",

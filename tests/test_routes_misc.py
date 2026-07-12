@@ -345,7 +345,7 @@ class AdminPageRoutesTests(unittest.TestCase):
         self.assertEqual(302, response.status_code)
         self.assertEqual("/admin/clone/create", response.location)
 
-    def test_authenticated_login_page_redirects_to_clone_migrate_page(self) -> None:
+    def test_authenticated_login_page_preserves_legacy_clone_migrate_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone/migrate")
