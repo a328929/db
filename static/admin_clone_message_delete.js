@@ -9,6 +9,9 @@
   var state = {
     runId: readRunId(),
     run: null,
+    remoteMessageCount: null,
+    remoteMessageCountError: '',
+    remoteMessageCountLoading: false,
     busy: false,
     job: {
       jobId: '',
@@ -34,6 +37,7 @@
       page: document.getElementById('admin-clone-message-delete-page'),
       target: document.getElementById('admin-clone-message-delete-target'),
       status: document.getElementById('admin-clone-message-delete-status'),
+      refreshMessageCountBtn: document.getElementById('admin-clone-message-count-refresh-btn'),
       form: document.getElementById('admin-clone-message-delete-form'),
       selection: document.getElementById('admin-clone-message-delete-selection'),
       selectionPreview: document.getElementById('admin-clone-message-delete-preview'),
@@ -80,6 +84,9 @@
     elements.delay.addEventListener('input', function () {
       syncSubmitButton(elements);
     });
+    elements.refreshMessageCountBtn.addEventListener('click', function () {
+      loadTargetMessageCount(elements, { force: true });
+    });
     elements.form.addEventListener('submit', function (event) {
       event.preventDefault();
       submitDeleteJob(elements);
@@ -109,6 +116,9 @@
         ? '已选择目标副本。删除操作将由第二账号执行。'
         : '该记录尚未创建目标副本，不能删除局部消息。';
       await resumeMatchingDeleteJob(elements);
+      if (!state.job.isPolling) {
+        await loadTargetMessageCount(elements, { force: true });
+      }
     } catch (error) {
       state.run = null;
       renderRun(elements);
@@ -129,6 +139,11 @@
     appendSummaryItem(elements.target, '源群（保留）', run.source_title || run.source_chat_id || '未知源群');
     appendSummaryItem(elements.target, '克隆副本', run.target_title || run.target_chat_id || '未创建');
     appendSummaryItem(elements.target, '目标群 ID', run.target_chat_id || '未创建');
+    appendSummaryItem(
+      elements.target,
+      '当前远端消息数',
+      remoteMessageCountDisplay()
+    );
     appendSummaryItem(elements.target, '执行账号', '第二账号');
     syncSubmitButton(elements);
   }
@@ -142,6 +157,48 @@
     item.appendChild(term);
     item.appendChild(description);
     container.appendChild(item);
+  }
+
+  function remoteMessageCountDisplay() {
+    if (state.remoteMessageCountLoading) return '正在读取...';
+    if (state.remoteMessageCountError) return '读取失败：' + state.remoteMessageCountError;
+    if (state.remoteMessageCount === null) return '待读取';
+    return shared.formatNumber(state.remoteMessageCount) + ' 条';
+  }
+
+  async function loadTargetMessageCount(elements, options) {
+    var opts = options || {};
+    if (
+      !state.run
+      || !state.run.target_chat_id
+      || state.remoteMessageCountLoading
+      || (state.busy && !opts.force)
+    ) {
+      return;
+    }
+    state.remoteMessageCountLoading = true;
+    state.remoteMessageCountError = '';
+    renderRun(elements);
+    syncMessageCountRefreshButton(elements);
+    try {
+      var payload = await fetchJSON(
+        '/api/admin/clone/runs/'
+          + encodeURIComponent(state.runId)
+          + '/target-message-count'
+      );
+      var count = Number(payload && payload.message_count);
+      if (!Number.isSafeInteger(count) || count < 0) {
+        throw new Error('目标副本消息数量响应异常');
+      }
+      state.remoteMessageCount = count;
+    } catch (error) {
+      state.remoteMessageCount = null;
+      state.remoteMessageCountError = error.message;
+    } finally {
+      state.remoteMessageCountLoading = false;
+      renderRun(elements);
+      syncMessageCountRefreshButton(elements);
+    }
   }
 
   function readSelection() {
@@ -262,7 +319,16 @@
     state.busy = !!busy;
     shared.setElementDisabled(elements.selection, state.busy);
     shared.setElementDisabled(elements.delay, state.busy);
+    syncMessageCountRefreshButton(elements);
     syncSubmitButton(elements);
+  }
+
+  function syncMessageCountRefreshButton(elements) {
+    var disabled = state.busy
+      || !state.run
+      || !state.run.target_chat_id
+      || state.remoteMessageCountLoading;
+    shared.setElementDisabled(elements.refreshMessageCountBtn, disabled);
   }
 
   function readRunId() {
@@ -321,6 +387,7 @@
       elements.formStatus.textContent = stage === 'stopped'
         ? '删除已停止，未提交的消息不会被处理。'
         : '局部消息删除已完成。';
+      await loadTargetMessageCount(elements, { force: true });
     },
     onError: async function () {
       var elements = getElements();

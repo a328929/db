@@ -16,6 +16,9 @@ from tg_harvest.admin_jobs.clone import (
 from tg_harvest.admin_jobs.clone_message_delete import (
     CLONE_MESSAGE_DELETE_MAX_DELAY_MS,
 )
+from tg_harvest.admin_jobs.clone_target_metrics import (
+    load_clone_target_message_count,
+)
 from tg_harvest.app.services import CloneRouteServices
 from tg_harvest.domain.clone_message_delete import (
     parse_clone_message_delete_selection,
@@ -1076,6 +1079,43 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
             )
         except Exception:
             return logged_json_error(deps.logger, "系统异常", "系统异常")
+
+    @app.get("/api/admin/clone/runs/<run_id>/target-message-count")
+    @admin_login_required
+    def api_admin_clone_run_target_message_count(run_id):
+        normalized_run_id, error_response = _parse_run_id(run_id)
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(deps.get_conn_fn()) as conn:
+                clone_run, error_response = _load_clone_run_or_response(
+                    conn,
+                    deps.load_clone_run_fn,
+                    normalized_run_id,
+                )
+                if error_response is not None:
+                    return error_response
+            message_count = load_clone_target_message_count(clone_run, cfg=deps.cfg)
+            return jsonify(
+                {
+                    "ok": True,
+                    "run_id": normalized_run_id,
+                    "target_chat_id": int(clone_run["target_chat_id"]),
+                    "message_count": message_count,
+                }
+            )
+        except ValueError as exc:
+            return json_error(str(exc), 400)
+        except sqlite3.Error:
+            return logged_json_error(
+                deps.logger,
+                "读取克隆目标消息数量失败",
+                "读取克隆目标消息数量失败",
+            )
+        except Exception as exc:
+            deps.logger.exception("读取克隆目标消息数量失败")
+            return json_error(str(exc) or "读取克隆目标消息数量失败", 502)
 
     @app.delete("/api/admin/clone/runs/<run_id>")
     @admin_login_required

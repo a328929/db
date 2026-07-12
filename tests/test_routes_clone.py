@@ -1038,6 +1038,25 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(200, response.status_code)
         self.assertIn("删除局部克隆消息", response.get_data(as_text=True))
 
+    def test_clone_run_target_message_count_reads_remote_snapshot(self) -> None:
+        with (
+            self._auth_config_patch(),
+            patch(
+                "tg_harvest.web.routes.clone.load_clone_target_message_count",
+                return_value=4321,
+            ) as load_count,
+        ):
+            self._login_admin()
+            response = self.client.get(
+                "/api/admin/clone/runs/run-existing/target-message-count"
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual(4321, response.get_json()["message_count"])
+        load_count.assert_called_once()
+        clone_run = load_count.call_args.args[0]
+        self.assertEqual(777, clone_run["target_chat_id"])
+
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
