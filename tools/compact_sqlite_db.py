@@ -28,7 +28,6 @@ _TABLES_IN_COPY_ORDER = (
     "admin_jobs",
     "admin_job_logs",
     "admin_missing_chats",
-    "admin_absent_chats",
     "admin_restricted_chats",
     "admin_recovery_chats",
     "admin_clone_runs",

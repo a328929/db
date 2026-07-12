@@ -262,24 +262,6 @@ def _create_admin_missing_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_absent_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
-    cur.execute(f"""
-    CREATE TABLE IF NOT EXISTS admin_absent_chats (
-        chat_id              INTEGER PRIMARY KEY,
-        chat_title           TEXT NOT NULL,
-        chat_username        TEXT,
-        chat_type            TEXT,
-        message_count        INTEGER NOT NULL DEFAULT 0,
-        last_seen_at         TEXT,
-        last_message_at      TEXT,
-        last_message_ts      INTEGER,
-        scan_reason          TEXT,
-        scan_job_id          TEXT,
-        scanned_at           TEXT NOT NULL
-    ){strict_suffix}
-    """)
-
-
 def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_restricted_chats (
@@ -292,6 +274,7 @@ def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str
         restriction_reasons      TEXT,
         restriction_text         TEXT,
         risk_flags               TEXT,
+        membership_scope         TEXT NOT NULL DEFAULT 'joined',
         last_message_at          TEXT,
         last_message_ts          INTEGER,
         scan_job_id              TEXT,
@@ -580,7 +563,6 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_message_search_terms_meta_table(cur, strict_suffix)
     _create_admin_job_tables(cur, strict_suffix)
     _create_admin_missing_chats_table(cur, strict_suffix)
-    _create_admin_absent_chats_table(cur, strict_suffix)
     _create_admin_restricted_chats_table(cur, strict_suffix)
     _create_admin_recovery_chats_table(cur, strict_suffix)
     _create_admin_clone_runs_table(cur, strict_suffix)
@@ -805,24 +787,6 @@ def _ensure_admin_missing_chats_schema(cur: sqlite3.Cursor) -> None:
     )
 
 
-def _ensure_admin_absent_chats_schema(cur: sqlite3.Cursor) -> None:
-    _ensure_table_columns(
-        cur,
-        "admin_absent_chats",
-        [
-            ("chat_username", "chat_username TEXT"),
-            ("chat_type", "chat_type TEXT"),
-            ("message_count", "message_count INTEGER NOT NULL DEFAULT 0"),
-            ("last_seen_at", "last_seen_at TEXT"),
-            ("last_message_at", "last_message_at TEXT"),
-            ("last_message_ts", "last_message_ts INTEGER"),
-            ("scan_reason", "scan_reason TEXT"),
-            ("scan_job_id", "scan_job_id TEXT"),
-            ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
-        ],
-    )
-
-
 def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
     _ensure_table_columns(
         cur,
@@ -835,6 +799,10 @@ def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
             ("restriction_reasons", "restriction_reasons TEXT"),
             ("restriction_text", "restriction_text TEXT"),
             ("risk_flags", "risk_flags TEXT"),
+            (
+                "membership_scope",
+                "membership_scope TEXT NOT NULL DEFAULT 'joined'",
+            ),
             ("last_message_at", "last_message_at TEXT"),
             ("last_message_ts", "last_message_ts INTEGER"),
             ("scan_job_id", "scan_job_id TEXT"),
@@ -1275,7 +1243,6 @@ def create_schema(
         _ensure_dedupe_schema(cur)
         _ensure_admin_job_schema(cur)
         _ensure_admin_missing_chats_schema(cur)
-        _ensure_admin_absent_chats_schema(cur)
         _ensure_admin_restricted_chats_schema(cur)
         _ensure_admin_recovery_chats_schema(cur)
         _ensure_admin_clone_runs_schema(cur)

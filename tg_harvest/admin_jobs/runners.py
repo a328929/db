@@ -3258,7 +3258,6 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
             triggers_dropped = True
             if fts_enabled:
                 _delete_fts_entries_for_chat_targets(cur)
-        _delete_from_optional_chat_table(cur, "admin_absent_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
@@ -3316,9 +3315,6 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
                 "deleted_media_groups": 0,
             }
 
-        _delete_from_optional_chat_targets_table(
-            cur, "admin_absent_chats", "temp_delete_empty_chats"
-        )
         _delete_from_optional_chat_targets_table(
             cur, "admin_missing_chats", "temp_delete_empty_chats"
         )

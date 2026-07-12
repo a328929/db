@@ -537,16 +537,10 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("last_message_ts", admin_missing_chat_columns)
         self.assertIn("scanned_at", admin_missing_chat_columns)
 
-        cur.execute("PRAGMA table_info(admin_absent_chats)")
-        admin_absent_chat_columns = {row[1] for row in cur.fetchall()}
-        self.assertIn("chat_id", admin_absent_chat_columns)
-        self.assertIn("chat_title", admin_absent_chat_columns)
-        self.assertIn("message_count", admin_absent_chat_columns)
-        self.assertIn("last_seen_at", admin_absent_chat_columns)
-        self.assertIn("last_message_at", admin_absent_chat_columns)
-        self.assertIn("last_message_ts", admin_absent_chat_columns)
-        self.assertIn("scan_reason", admin_absent_chat_columns)
-        self.assertIn("scanned_at", admin_absent_chat_columns)
+        cur.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'admin_absent_chats'"
+        )
+        self.assertIsNone(cur.fetchone())
 
         cur.execute("PRAGMA table_info(admin_restricted_chats)")
         admin_restricted_chat_columns = {row[1] for row in cur.fetchall()}
@@ -557,6 +551,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("restriction_reasons", admin_restricted_chat_columns)
         self.assertIn("restriction_text", admin_restricted_chat_columns)
         self.assertIn("risk_flags", admin_restricted_chat_columns)
+        self.assertIn("membership_scope", admin_restricted_chat_columns)
         self.assertIn("last_message_at", admin_restricted_chat_columns)
         self.assertIn("last_message_ts", admin_restricted_chat_columns)
         self.assertIn("scanned_at", admin_restricted_chat_columns)

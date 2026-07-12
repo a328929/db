@@ -91,37 +91,6 @@
       <div id="admin-missing-list" class="channel-list" aria-label="未入库群组或频道列表" hidden></div>
     </section>
 
-    <section class="panel channel-panel" aria-labelledby="absentChannelsTitle">
-      <div class="channel-panel-head">
-        <div>
-          <h2 id="absentChannelsTitle" class="section-title">数据库中账号未加入或不可用的群组/频道</h2>
-          <p id="admin-absent-status" class="channel-subline" role="status" aria-live="polite">
-            暂无扫描结果。
-          </p>
-        </div>
-        <div class="channel-toolbar">
-          <button id="admin-scan-absent-btn" class="btn primary" type="button" aria-label="扫描数据库中账号未加入或不可用的群组或频道">
-            扫描账号外数据
-          </button>
-          <button id="admin-refresh-absent-btn" class="btn" type="button" aria-label="刷新账号外数据库扫描结果">
-            刷新结果
-          </button>
-          <button
-            id="admin-absent-list-toggle-btn"
-            class="btn"
-            type="button"
-            aria-expanded="false"
-            aria-controls="admin-absent-list"
-            aria-label="收起或展开账号外数据库群组列表"
-          >
-            展开列表
-          </button>
-        </div>
-      </div>
-
-      <div id="admin-absent-list" class="channel-list" aria-label="数据库中账号未加入或不可用的群组或频道列表" hidden></div>
-    </section>
-
     <section class="panel channel-panel" aria-labelledby="restrictedChannelsTitle">
       <div class="channel-panel-head">
         <div>
@@ -135,7 +104,7 @@
           <select id="admin-restricted-filter-select" aria-label="按平台和原因筛选内容限制扫描结果">
             <option value="__all__">全部类型</option>
           </select>
-          <button id="admin-scan-restricted-btn" class="btn primary" type="button" aria-label="扫描当前账号中带内容限制或风险标记的群组或频道">
+          <button id="admin-scan-restricted-btn" class="btn primary" type="button" aria-label="扫描已加入及数据库公开群组中的内容限制或风险标记">
             扫描限制标记
           </button>
           <button id="admin-refresh-restricted-btn" class="btn" type="button" aria-label="刷新内容限制扫描结果">

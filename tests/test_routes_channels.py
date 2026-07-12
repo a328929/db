@@ -56,21 +56,6 @@ class ChannelRoutesTests(unittest.TestCase):
                 }
             ],
             list_missing_chat_scan_results_fn=lambda _conn: [],
-            list_absent_chat_scan_results_fn=lambda _conn: [
-                {
-                    "chat_id": 2,
-                    "chat_title": "Absent",
-                    "chat_username": "",
-                    "chat_type": "Channel",
-                    "message_count": 5,
-                    "last_seen_at": "2026-02-01 00:00:00",
-                    "last_message_at": "2026-01-31 00:00:00",
-                    "last_message_ts": 1769817600,
-                    "scan_reason": "账号未加入",
-                    "scan_job_id": "job-2",
-                    "scanned_at": "2026-02-02 00:00:00",
-                }
-            ],
             list_restricted_chat_scan_results_fn=lambda _conn: [
                 {
                     "chat_id": 3,
@@ -82,6 +67,7 @@ class ChannelRoutesTests(unittest.TestCase):
                     "restriction_reasons": "porn",
                     "restriction_text": "This channel can't be displayed.",
                     "risk_flags": "restricted",
+                    "membership_scope": "joined",
                     "last_message_at": "2026-03-01 00:00:00",
                     "last_message_ts": 1772323200,
                     "scan_job_id": "job-3",
@@ -97,7 +83,6 @@ class ChannelRoutesTests(unittest.TestCase):
             admin_job_append_log_fn=lambda *_args, **_kwargs: None,
             admin_job_set_status_fn=lambda *_args, **_kwargs: True,
             admin_start_missing_chats_scan_job_thread_fn=lambda *_args, **_kwargs: None,
-            admin_start_absent_chats_scan_job_thread_fn=lambda *_args, **_kwargs: None,
             admin_start_restricted_chats_scan_job_thread_fn=(
                 lambda *_args, **_kwargs: None
             ),
@@ -135,20 +120,6 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertEqual("2026-01-02 00:00:00", item["last_message_at"])
         self.assertTrue(item["has_public_link"])
 
-    def test_absent_channels_api_includes_telegram_links(self) -> None:
-        with self._auth_config_patch():
-            self._login_admin()
-            response = self.client.get("/api/admin/channels/absent")
-
-        self.assertEqual(200, response.status_code)
-        item = response.get_json()["items"][0]
-        self.assertEqual("Absent", item["chat_title"])
-        self.assertEqual("tg://openmessage?chat_id=2", item["telegram_app_link"])
-        self.assertEqual("", item["telegram_web_link"])
-        self.assertFalse(item["has_public_link"])
-        self.assertEqual("账号未加入", item["scan_reason"])
-        self.assertEqual("2026-01-31 00:00:00", item["last_message_at"])
-
     def test_channels_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/channels")
@@ -166,7 +137,7 @@ class ChannelRoutesTests(unittest.TestCase):
 
     def test_channel_scan_routes_reject_unauthenticated_requests(self) -> None:
         with self._auth_config_patch():
-            response = self.client.post("/api/admin/channels/absent/scan")
+            response = self.client.post("/api/admin/channels/restricted/scan")
 
         self.assertEqual(401, response.status_code)
         self.assertTrue(response.get_json()["auth_required"])
@@ -174,7 +145,7 @@ class ChannelRoutesTests(unittest.TestCase):
     def test_channel_scan_routes_reject_missing_csrf_token(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
-            response = self.client.post("/api/admin/channels/absent/scan")
+            response = self.client.post("/api/admin/channels/restricted/scan")
 
         self.assertEqual(403, response.status_code)
         self.assertTrue(response.get_json()["csrf_required"])
@@ -182,7 +153,6 @@ class ChannelRoutesTests(unittest.TestCase):
     def test_channel_scan_routes_accept_real_login_and_csrf_token(self) -> None:
         endpoints = [
             "/api/admin/channels/missing/scan",
-            "/api/admin/channels/absent/scan",
             "/api/admin/channels/restricted/scan",
         ]
 
@@ -196,6 +166,18 @@ class ChannelRoutesTests(unittest.TestCase):
                     )
                     self.assertEqual(200, response.status_code)
                     self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+
+    def test_removed_absent_channels_routes_return_not_found(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            get_response = self.client.get("/api/admin/channels/absent")
+            scan_response = self.client.post(
+                "/api/admin/channels/absent/scan",
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(404, get_response.status_code)
+        self.assertEqual(404, scan_response.status_code)
 
 
     def test_restricted_channels_api_includes_telegram_links(self) -> None:
@@ -211,6 +193,7 @@ class ChannelRoutesTests(unittest.TestCase):
         self.assertTrue(item["has_public_link"])
         self.assertEqual("porn", item["restriction_reasons"])
         self.assertEqual("restricted", item["risk_flags"])
+        self.assertEqual("joined", item["membership_scope"])
         self.assertEqual("2026-03-01 00:00:00", item["last_message_at"])
 
 

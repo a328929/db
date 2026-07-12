@@ -25,7 +25,6 @@
   var listRenderTokens = {
     channels: 0,
     missing: 0,
-    absent: 0,
     restricted: 0
   };
 
@@ -74,11 +73,6 @@
       missingListToggleBtn: document.getElementById('admin-missing-list-toggle-btn'),
       missingStatus: document.getElementById('admin-missing-status'),
       missingList: document.getElementById('admin-missing-list'),
-      scanAbsentBtn: document.getElementById('admin-scan-absent-btn'),
-      refreshAbsentBtn: document.getElementById('admin-refresh-absent-btn'),
-      absentListToggleBtn: document.getElementById('admin-absent-list-toggle-btn'),
-      absentStatus: document.getElementById('admin-absent-status'),
-      absentList: document.getElementById('admin-absent-list'),
       scanRestrictedBtn: document.getElementById('admin-scan-restricted-btn'),
       refreshRestrictedBtn: document.getElementById('admin-refresh-restricted-btn'),
       restrictedFilterSelect: document.getElementById('admin-restricted-filter-select'),
@@ -105,11 +99,6 @@
       'missingListToggleBtn',
       'missingStatus',
       'missingList',
-      'scanAbsentBtn',
-      'refreshAbsentBtn',
-      'absentListToggleBtn',
-      'absentStatus',
-      'absentList',
       'scanRestrictedBtn',
       'refreshRestrictedBtn',
       'restrictedFilterSelect',
@@ -173,15 +162,6 @@
     elements.scanMissingBtn.addEventListener('click', function () {
       handleScanMissingClick(elements);
     });
-    elements.refreshAbsentBtn.addEventListener('click', function () {
-      loadAbsentChannels(elements);
-    });
-    elements.absentListToggleBtn.addEventListener('click', function () {
-      toggleListArea(elements.absentListToggleBtn, elements.absentList);
-    });
-    elements.scanAbsentBtn.addEventListener('click', function () {
-      handleScanAbsentClick(elements);
-    });
     elements.refreshRestrictedBtn.addEventListener('click', function () {
       loadRestrictedChannels(elements);
     });
@@ -212,7 +192,6 @@
   async function loadInitialData(elements) {
     await loadChannels(elements);
     await loadMissingChannels(elements);
-    await loadAbsentChannels(elements);
     await loadRestrictedChannels(elements);
   }
 
@@ -652,78 +631,6 @@
     }
   }
 
-  function renderAbsentChannels(elements, items) {
-    stopListRendering('absent', elements.absentList);
-    elements.absentList.textContent = '';
-    if (!Array.isArray(items) || items.length === 0) {
-      var empty = document.createElement('div');
-      empty.className = 'empty-box';
-      empty.textContent = '暂无账号外数据库扫描结果。';
-      elements.absentList.appendChild(empty);
-      elements.absentStatus.textContent = '暂无账号外数据库扫描结果，可点击“扫描账号外数据”。';
-      return;
-    }
-
-    renderItemsInBatches({
-      key: 'absent',
-      container: elements.absentList,
-      items: items,
-      statusElement: elements.absentStatus,
-      progressText: function (visible, total) {
-        return '正在显示 ' + visible + '/' + total + ' 个账号外数据库扫描结果...';
-      },
-      doneText: function (total) {
-        return '发现 ' + total + ' 个数据库中存在但账号未加入或不可用的群组/频道。';
-      },
-      createItem: function (item) {
-        var metaParts = [];
-        if (item.chat_username) metaParts.push('@' + item.chat_username);
-        if (item.chat_type) metaParts.push(item.chat_type);
-
-        return createChannelRecordItem({
-          title: item.chat_title || ('Chat ' + item.chat_id),
-          subtitle: metaParts.join(' | '),
-          metrics: [
-            { label: '消息数', value: formatNumber(item.message_count) },
-            { label: '最后消息', value: formatDateTime(itemLastMessageAt(item)) },
-            { label: '扫描', value: formatDateTime(item.scanned_at) }
-          ],
-          meta: [
-            { label: 'chat_id', value: String(item.chat_id) },
-            { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
-            { label: '类型', value: item.chat_type || '' },
-            { label: '原因', value: item.scan_reason || '账号未加入' },
-            { label: '入库更新', value: formatDateTime(item.last_seen_at) },
-          ],
-          actions: createChannelActions(item, elements, {
-            allowDelete: true,
-            allowProbe: true
-          }),
-          note: item.scan_reason && item.scan_reason !== '账号未加入'
-            ? item.scan_reason
-            : (
-                item.has_public_link
-                  ? ''
-                  : '私有群组通常没有稳定网页入口；删除前可复制信息核对目标。'
-              )
-        });
-      }
-    });
-  }
-
-  async function loadAbsentChannels(elements) {
-    stopListRendering('absent', elements.absentList);
-    elements.absentStatus.textContent = '正在读取扫描结果...';
-    try {
-      var data = await fetchJSON('/api/admin/channels/absent');
-      if (!data.ok) throw new Error(data.error || '读取失败');
-      renderAbsentChannels(elements, data.items || []);
-    } catch (error) {
-      stopListRendering('absent', elements.absentList);
-      elements.absentStatus.textContent = '读取扫描结果失败：' + error.message;
-    }
-  }
-
   function buildRestrictedNote(item) {
     var parts = [];
     if (item.restriction_text) parts.push(item.restriction_text);
@@ -731,6 +638,10 @@
     if (item.restriction_reasons) parts.push('原因：' + item.restriction_reasons);
     if (item.risk_flags) parts.push('标记：' + item.risk_flags);
     return parts.join(' | ');
+  }
+
+  function restrictedMembershipLabel(scope) {
+    return String(scope || '') === 'public_unjoined' ? '账号未加入' : '账号已加入';
   }
 
   function splitRestrictionTokens(value) {
@@ -898,6 +809,7 @@
             { label: '平台', value: item.restriction_platforms || '' },
             { label: '原因', value: item.restriction_reasons || '' },
             { label: '标记', value: item.risk_flags || '' },
+            { label: '账号状态', value: restrictedMembershipLabel(item.membership_scope) },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements, {
@@ -948,31 +860,8 @@
     }
   }
 
-  async function handleScanAbsentClick(elements) {
-    if (!window.confirm('确认扫描数据库中存在但当前账号未加入或不可用的群组或频道？')) {
-      appendLog(elements, '已取消扫描');
-      return;
-    }
-    try {
-      var payload = await fetchJSON('/api/admin/channels/absent/scan', {
-        method: 'POST'
-      });
-      var jobId = getCreatedJobId(payload);
-      appendLog(elements, '扫描任务已创建：' + jobId);
-      startJobPolling(elements, jobId, {
-        doneMessage: '扫描任务执行完成',
-        errorMessage: '扫描任务执行失败，请检查日志',
-        onDone: function () {
-          return loadAbsentChannels(elements);
-        }
-      });
-    } catch (error) {
-      appendLog(elements, '创建扫描任务失败：' + error.message);
-    }
-  }
-
   async function handleScanRestrictedClick(elements) {
-    if (!window.confirm('确认扫描当前 Telegram 账号中带内容限制或风险标记的群组或频道？')) {
+    if (!window.confirm('确认扫描账号已加入及数据库中可解析的公开群组/频道风险标记？')) {
       appendLog(elements, '已取消扫描');
       return;
     }
@@ -1034,7 +923,6 @@
         errorMessage: '删除任务执行失败，请检查日志',
         onDone: async function () {
           await loadChannels(elements);
-          await loadAbsentChannels(elements);
           await loadRestrictedChannels(elements);
         }
       });
@@ -1095,9 +983,6 @@
     setElementDisabled(elements.scanMissingBtn, disabled);
     setElementDisabled(elements.refreshMissingBtn, disabled);
     setElementDisabled(elements.missingListToggleBtn, disabled);
-    setElementDisabled(elements.scanAbsentBtn, disabled);
-    setElementDisabled(elements.refreshAbsentBtn, disabled);
-    setElementDisabled(elements.absentListToggleBtn, disabled);
     setElementDisabled(elements.scanRestrictedBtn, disabled);
     setElementDisabled(elements.refreshRestrictedBtn, disabled);
     setElementDisabled(elements.restrictedFilterSelect, disabled);

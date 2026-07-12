@@ -43,8 +43,11 @@ class RestrictedChatInventoryRow:
     restriction_reasons: str = ""
     restriction_text: str = ""
     risk_flags: str = ""
+    membership_scope: str = "joined"
     last_message_at: str = ""
     last_message_ts: int | None = None
+    scan_job_id: str = ""
+    scanned_at: str = ""
 
 
 @dataclass(frozen=True)
@@ -145,19 +148,6 @@ def _normalize_identity_keys(items: Iterable[Any]) -> set[ChatIdentity]:
     for item in items:
         keys.update(_identity_candidates_from_item(item))
     return keys
-
-
-def _normalize_identity_reason_map(
-    values: Mapping[Any, str] | None,
-) -> dict[ChatIdentity, str]:
-    reasons: dict[ChatIdentity, str] = {}
-    for item, reason in (values or {}).items():
-        text = str(reason or "").strip()
-        if not text:
-            continue
-        for key in _identity_candidates_from_item(item):
-            reasons[key] = text
-    return reasons
 
 
 def _is_joined_group_or_channel(dialog: Any) -> bool:
@@ -316,6 +306,52 @@ def _entity_risk_flags(entity: Any) -> str:
     )
 
 
+def restricted_chat_row_from_entity(
+    entity: Any,
+    *,
+    chat_id: int | None = None,
+    chat_title: str = "",
+    chat_username: str = "",
+    last_message_at: str = "",
+    last_message_ts: int | None = None,
+    membership_scope: str = "public_unjoined",
+) -> RestrictedChatInventoryRow | None:
+    entity_type = entity.__class__.__name__
+    entity_id = _safe_int(getattr(entity, "id", None))
+    stored_id = int(chat_id if chat_id is not None else entity_id)
+    if entity_id <= 0 or stored_id == 0:
+        return None
+
+    platforms, reasons, reason_text = _restriction_reason_parts(entity)
+    risk_flags = _entity_risk_flags(entity)
+    if not any((platforms, reasons, reason_text, risk_flags)):
+        return None
+
+    username = _clean_username(getattr(entity, "username", None)) or _clean_username(
+        chat_username
+    )
+    title = str(getattr(entity, "title", None) or chat_title or "").strip()
+    return RestrictedChatInventoryRow(
+        chat_id=stored_id,
+        chat_title=title or f"Chat {stored_id}",
+        chat_username=username,
+        chat_type=entity_type,
+        is_public=1 if username else 0,
+        restriction_platforms=platforms,
+        restriction_reasons=reasons,
+        restriction_text=reason_text
+        or (
+            "Telegram 标记为内容受限"
+            if "restricted" in risk_flags.split("、")
+            else ""
+        ),
+        risk_flags=risk_flags,
+        membership_scope=str(membership_scope or "public_unjoined"),
+        last_message_at=str(last_message_at or ""),
+        last_message_ts=last_message_ts,
+    )
+
+
 def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatInventoryRow]:
     rows: list[RestrictedChatInventoryRow] = []
     seen_chat_ids: set[ChatIdentity] = set()
@@ -326,35 +362,23 @@ def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatI
             continue
 
         entity = getattr(dialog, "entity", None)
-        platforms, reasons, reason_text = _restriction_reason_parts(entity)
-        risk_flags = _entity_risk_flags(entity)
-        if not any((platforms, reasons, reason_text, risk_flags)):
+        restricted_row = restricted_chat_row_from_entity(
+            entity,
+            chat_id=base_row.chat_id,
+            chat_title=base_row.chat_title,
+            chat_username=base_row.chat_username,
+            last_message_at=base_row.last_message_at,
+            last_message_ts=base_row.last_message_ts,
+            membership_scope="joined",
+        )
+        if restricted_row is None:
             continue
 
         identity = chat_identity_key(base_row.chat_id, base_row.chat_type)
         if identity in seen_chat_ids:
             continue
         seen_chat_ids.add(identity)
-        rows.append(
-            RestrictedChatInventoryRow(
-                chat_id=base_row.chat_id,
-                chat_title=base_row.chat_title,
-                chat_username=base_row.chat_username,
-                chat_type=base_row.chat_type,
-                is_public=base_row.is_public,
-                restriction_platforms=platforms,
-                restriction_reasons=reasons,
-                restriction_text=reason_text
-                or (
-                    "Telegram 标记为内容受限"
-                    if "restricted" in risk_flags.split("、")
-                    else ""
-                ),
-                risk_flags=risk_flags,
-                last_message_at=base_row.last_message_at,
-                last_message_ts=base_row.last_message_ts,
-            )
-        )
+        rows.append(restricted_row)
 
     rows.sort(key=lambda item: (item.chat_title.casefold(), item.chat_id))
     return rows
@@ -450,62 +474,6 @@ def filter_database_chats_to_joined(
 def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
     value = row.get(key, default)
     return default if value is None else value
-
-
-def find_database_chats_not_joined(
-    database_rows: Iterable[Mapping[str, Any]],
-    joined_chat_ids: Iterable[Any],
-    unavailable_chat_reasons: Mapping[Any, str] | None = None,
-) -> list[dict]:
-    joined_identities = _normalize_identity_keys(joined_chat_ids)
-    unavailable_reasons = _normalize_identity_reason_map(unavailable_chat_reasons)
-    rows: list[dict] = []
-    seen_chat_ids: set[tuple[int, str]] = set()
-
-    for row in database_rows:
-        chat_id = int(_mapping_value(row, "chat_id", 0) or 0)
-        if chat_id == 0:
-            continue
-        dedupe_key = (
-            _chat_id_identity(chat_id),
-            normalize_chat_type_category(_mapping_value(row, "chat_type", "")),
-        )
-        identity_candidates = chat_identity_candidates(
-            chat_id,
-            _mapping_value(row, "chat_type", ""),
-        )
-        if dedupe_key in seen_chat_ids:
-            continue
-        if (
-            not joined_identities.isdisjoint(identity_candidates)
-            and all(candidate not in unavailable_reasons for candidate in identity_candidates)
-        ):
-            continue
-        seen_chat_ids.add(dedupe_key)
-        scan_reason = next(
-            (
-                unavailable_reasons[candidate]
-                for candidate in identity_candidates
-                if candidate in unavailable_reasons
-            ),
-            "账号未加入",
-        )
-        rows.append(
-            {
-                "chat_id": chat_id,
-                "chat_title": str(_mapping_value(row, "chat_title", "")).strip()
-                or f"Chat {chat_id}",
-                "chat_username": _clean_username(_mapping_value(row, "chat_username", "")),
-                "chat_type": str(_mapping_value(row, "chat_type", "")),
-                "message_count": int(_mapping_value(row, "message_count", 0) or 0),
-                "last_seen_at": str(_mapping_value(row, "last_seen_at", "")),
-                "last_message_at": str(_mapping_value(row, "last_message_at", "")),
-                "last_message_ts": _mapping_value(row, "last_message_ts", None),
-                "scan_reason": scan_reason,
-            }
-        )
-
-    return rows
 
 
 def discover_session_files(base_session_name: str | Path) -> list[Path]:

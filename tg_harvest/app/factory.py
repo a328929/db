@@ -8,7 +8,6 @@ from pathlib import Path
 from flask import Flask, request
 
 from tg_harvest.admin_jobs.channel_inventory import (
-    _admin_start_absent_chats_scan_job_thread,
     _admin_start_missing_chats_scan_job_thread,
     _admin_start_restricted_chats_scan_job_thread,
 )
@@ -83,7 +82,6 @@ from tg_harvest.search.service import _search_payload_service
 from tg_harvest.storage.access import FROM_SQL, has_fts
 from tg_harvest.storage.access import get_conn as runtime_get_conn
 from tg_harvest.storage.channel_management import (
-    list_absent_chat_scan_results,
     list_database_channels,
     list_missing_chat_scan_results,
     list_restricted_chat_scan_results,
@@ -435,15 +433,11 @@ def _build_route_services() -> RouteRegistryServices:
         **_shared_route_service_kwargs(admin_services),
         list_database_channels_fn=list_database_channels,
         list_missing_chat_scan_results_fn=list_missing_chat_scan_results,
-        list_absent_chat_scan_results_fn=list_absent_chat_scan_results,
         list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle,
         **_shared_admin_job_route_kwargs(admin_services),
         admin_start_missing_chats_scan_job_thread_fn=(
             _admin_start_missing_chats_scan_job_thread
-        ),
-        admin_start_absent_chats_scan_job_thread_fn=(
-            _admin_start_absent_chats_scan_job_thread
         ),
         admin_start_restricted_chats_scan_job_thread_fn=(
             _admin_start_restricted_chats_scan_job_thread

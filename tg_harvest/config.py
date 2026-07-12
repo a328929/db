@@ -167,6 +167,14 @@ def _load_raw_config_values() -> dict:
         "admin_update_secondary_public_resolve_limit": _env_optional_int(
             "TG_ADMIN_UPDATE_SECONDARY_PUBLIC_RESOLVE_LIMIT"
         ),
+        # 风险扫描中主动解析未加入公开频道的单轮上限；缓存命中不计入该预算。
+        "admin_restricted_public_resolve_limit": _env_int(
+            "TG_ADMIN_RESTRICTED_PUBLIC_RESOLVE_LIMIT", 40
+        ),
+        # 同一账号连续主动解析公开 username 的最小间隔秒数。
+        "admin_restricted_public_resolve_gap_seconds": _env_float(
+            "TG_ADMIN_RESTRICTED_PUBLIC_RESOLVE_GAP_SECONDS", 1.0
+        ),
         # 全部群组更新时，全部账号都处于 FloodWait 时最多等待多久。
         "admin_update_max_cooldown_wait_seconds": _env_int(
             "TG_ADMIN_UPDATE_MAX_COOLDOWN_WAIT_SECONDS", 45

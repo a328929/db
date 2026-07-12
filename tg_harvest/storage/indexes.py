@@ -373,33 +373,6 @@ def _create_admin_missing_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_absent_chat_indexes(cur: sqlite3.Cursor):
-    _ensure_index(
-        cur,
-        "idx_admin_absent_chats_scanned",
-        "CREATE INDEX idx_admin_absent_chats_scanned "
-        "ON admin_absent_chats(scanned_at DESC)"
-    )
-    _ensure_index(
-        cur,
-        "idx_admin_absent_chats_count",
-        "CREATE INDEX idx_admin_absent_chats_count "
-        "ON admin_absent_chats(message_count DESC, last_message_ts DESC)"
-    )
-    _ensure_index(
-        cur,
-        "idx_admin_absent_chats_title",
-        "CREATE INDEX idx_admin_absent_chats_title "
-        "ON admin_absent_chats(chat_title COLLATE NOCASE)"
-    )
-    _ensure_index(
-        cur,
-        "idx_admin_absent_chats_last_message",
-        "CREATE INDEX idx_admin_absent_chats_last_message "
-        "ON admin_absent_chats(last_message_ts DESC)"
-    )
-
-
 def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
@@ -580,7 +553,6 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_message_search_term_indexes(cur)
     _create_admin_job_indexes(cur)
     _create_admin_missing_chat_indexes(cur)
-    _create_admin_absent_chat_indexes(cur)
     _create_admin_restricted_chat_indexes(cur)
     _create_admin_recovery_chat_indexes(cur)
     _create_admin_clone_run_indexes(cur)

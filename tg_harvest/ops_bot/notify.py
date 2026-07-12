@@ -25,7 +25,6 @@ _JOB_TYPE_LABELS = {
     "recovery_scan": "恢复扫描",
     "recovery_restore": "恢复入库",
     "missing_chats_scan": "缺失群组扫描",
-    "absent_chats_scan": "未加入群组扫描",
     "restricted_chats_scan": "受限群组扫描",
 }
 

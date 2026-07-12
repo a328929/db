@@ -6,12 +6,10 @@ from tg_harvest.domain.chat_inventory import (
     RestrictedChatInventoryRow,
 )
 from tg_harvest.storage.channel_management import (
-    list_absent_chat_scan_results,
     list_database_channels,
     list_missing_chat_scan_results,
     list_restricted_chat_scan_results,
     normalize_channel_sort,
-    replace_absent_chat_scan_results,
     replace_missing_chat_scan_results,
     replace_restricted_chat_scan_results,
 )
@@ -64,23 +62,6 @@ class ChannelManagementStorageTests(unittest.TestCase):
         )
         cur.execute(
             """
-            CREATE TABLE admin_absent_chats (
-                chat_id INTEGER PRIMARY KEY,
-                chat_title TEXT NOT NULL,
-                chat_username TEXT,
-                chat_type TEXT,
-                message_count INTEGER NOT NULL DEFAULT 0,
-                last_seen_at TEXT,
-                last_message_at TEXT,
-                last_message_ts INTEGER,
-                scan_reason TEXT,
-                scan_job_id TEXT,
-                scanned_at TEXT NOT NULL
-            )
-            """
-        )
-        cur.execute(
-            """
             CREATE TABLE admin_restricted_chats (
                 chat_id INTEGER PRIMARY KEY,
                 chat_title TEXT NOT NULL,
@@ -91,6 +72,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 restriction_reasons TEXT,
                 restriction_text TEXT,
                 risk_flags TEXT,
+                membership_scope TEXT NOT NULL DEFAULT 'joined',
                 last_message_at TEXT,
                 last_message_ts INTEGER,
                 scan_job_id TEXT,
@@ -250,84 +232,6 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("Channel With Chat Id Collision", rows[0]["chat_title"])
         self.assertEqual("Telegram 返回该会话不可访问", rows[0]["unavailable_reason"])
 
-    def test_replace_and_list_absent_chat_scan_results(self) -> None:
-        count = replace_absent_chat_scan_results(
-            self.conn,
-            [
-                {
-                    "chat_id": 1,
-                    "chat_title": "Small",
-                    "chat_username": "",
-                    "chat_type": "Channel",
-                    "message_count": 2,
-                    "last_seen_at": "2026-01-01 00:00:00",
-                    "last_message_at": "2026-01-15 00:00:00",
-                    "last_message_ts": 1768435200,
-                },
-                {
-                    "chat_id": 2,
-                    "chat_title": "Large",
-                    "chat_username": "large",
-                    "chat_type": "Channel",
-                    "message_count": 20,
-                    "last_seen_at": "2026-02-01 00:00:00",
-                    "last_message_at": "2026-03-10 00:00:00",
-                    "last_message_ts": 1773100800,
-                    "scan_reason": "Telegram 返回该会话不可访问",
-                },
-            ],
-            scan_job_id="job-2",
-            scanned_at="2026-04-02T00:00:00+00:00",
-        )
-
-        rows = list_absent_chat_scan_results(self.conn)
-        self.assertEqual(2, count)
-        self.assertEqual(["Large", "Small"], [row["chat_title"] for row in rows])
-        self.assertEqual("large", rows[0]["chat_username"])
-        self.assertEqual(20, rows[0]["message_count"])
-        self.assertEqual("2026-03-10 00:00:00", rows[0]["last_message_at"])
-        self.assertEqual(1773100800, rows[0]["last_message_ts"])
-        self.assertEqual("Telegram 返回该会话不可访问", rows[0]["scan_reason"])
-        self.assertEqual("账号未加入", rows[1]["scan_reason"])
-
-    def test_list_absent_chat_scan_results_hides_deleted_chat(self) -> None:
-        replace_absent_chat_scan_results(
-            self.conn,
-            [
-                {
-                    "chat_id": 999,
-                    "chat_title": "Deleted",
-                    "message_count": 1,
-                    "last_seen_at": "2026-01-01 00:00:00",
-                }
-            ],
-            scan_job_id="job-3",
-            scanned_at="2026-04-03T00:00:00+00:00",
-        )
-
-        rows = list_absent_chat_scan_results(self.conn)
-        self.assertEqual([], rows)
-
-    def test_list_absent_chat_scan_results_hides_same_numeric_id_with_other_type(self) -> None:
-        replace_absent_chat_scan_results(
-            self.conn,
-            [
-                {
-                    "chat_id": 3,
-                    "chat_title": "Channel With Chat Id Collision",
-                    "chat_type": "Channel",
-                    "message_count": 4,
-                    "last_seen_at": "2026-04-01 00:00:00",
-                    "scan_reason": "账号未加入",
-                }
-            ],
-            scan_job_id="job-3",
-            scanned_at="2026-04-03T00:00:00+00:00",
-        )
-
-        rows = list_absent_chat_scan_results(self.conn)
-        self.assertEqual([], rows)
-
     def test_replace_and_list_restricted_chat_scan_results(self) -> None:
         count = replace_restricted_chat_scan_results(
             self.conn,
@@ -359,6 +263,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("porn", rows[0]["restriction_reasons"])
         self.assertEqual("This channel can't be displayed.", rows[0]["restriction_text"])
         self.assertEqual("restricted", rows[0]["risk_flags"])
+        self.assertEqual("joined", rows[0]["membership_scope"])
         self.assertEqual("2026-04-04 10:00:00", rows[0]["last_message_at"])
         self.assertEqual(1775296800, rows[0]["last_message_ts"])
 

@@ -4836,14 +4836,6 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         self.conn.execute(
             """
-            INSERT INTO admin_absent_chats(
-                chat_id, chat_title, message_count, scanned_at
-            )
-            VALUES (2, 'Empty', 0, '2026-01-01 00:00:00')
-            """
-        )
-        self.conn.execute(
-            """
             INSERT INTO media_groups(chat_id, grouped_id, item_count, active_items)
             VALUES (2, 77, 0, 0)
             """
@@ -4861,8 +4853,6 @@ class WriteConsistencyTests(unittest.TestCase):
             self.assertEqual(1, int(cur.fetchone()["c"]))
             cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 3")
             self.assertEqual(1, int(cur.fetchone()["c"]))
-            cur.execute("SELECT COUNT(*) AS c FROM admin_absent_chats WHERE chat_id = 2")
-            self.assertEqual(0, int(cur.fetchone()["c"]))
             cur.execute("SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 2")
             self.assertEqual(0, int(cur.fetchone()["c"]))
         finally:

@@ -21,8 +21,6 @@ REQUIRED_ROUTES = {
     "/api/admin/channels",
     "/api/admin/channels/missing",
     "/api/admin/channels/missing/scan",
-    "/api/admin/channels/absent",
-    "/api/admin/channels/absent/scan",
     "/api/admin/channels/restricted",
     "/api/admin/channels/restricted/scan",
     "/api/admin/clone/workbench",

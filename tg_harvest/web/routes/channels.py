@@ -30,7 +30,6 @@ def _resolve_channel_services(
     cfg=None,
     list_database_channels_fn=None,
     list_missing_chat_scan_results_fn=None,
-    list_absent_chat_scan_results_fn=None,
     list_restricted_chat_scan_results_fn=None,
     build_telegram_chat_link_bundle_fn=None,
     admin_try_create_exclusive_job_fn=None,
@@ -38,7 +37,6 @@ def _resolve_channel_services(
     admin_job_append_log_fn=None,
     admin_job_set_status_fn=None,
     admin_start_missing_chats_scan_job_thread_fn=None,
-    admin_start_absent_chats_scan_job_thread_fn=None,
     admin_start_restricted_chats_scan_job_thread_fn=None,
 ) -> ChannelRouteServices:
     if services is not None:
@@ -49,7 +47,6 @@ def _resolve_channel_services(
         cfg=cfg,
         list_database_channels_fn=list_database_channels_fn,
         list_missing_chat_scan_results_fn=list_missing_chat_scan_results_fn,
-        list_absent_chat_scan_results_fn=list_absent_chat_scan_results_fn,
         list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results_fn,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
         admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
@@ -58,9 +55,6 @@ def _resolve_channel_services(
         admin_job_set_status_fn=admin_job_set_status_fn,
         admin_start_missing_chats_scan_job_thread_fn=(
             admin_start_missing_chats_scan_job_thread_fn
-        ),
-        admin_start_absent_chats_scan_job_thread_fn=(
-            admin_start_absent_chats_scan_job_thread_fn
         ),
         admin_start_restricted_chats_scan_job_thread_fn=(
             admin_start_restricted_chats_scan_job_thread_fn
@@ -77,7 +71,6 @@ def register_channel_routes(
     cfg=None,
     list_database_channels_fn=None,
     list_missing_chat_scan_results_fn=None,
-    list_absent_chat_scan_results_fn=None,
     list_restricted_chat_scan_results_fn=None,
     build_telegram_chat_link_bundle_fn=None,
     admin_try_create_exclusive_job_fn=None,
@@ -85,7 +78,6 @@ def register_channel_routes(
     admin_job_append_log_fn=None,
     admin_job_set_status_fn=None,
     admin_start_missing_chats_scan_job_thread_fn=None,
-    admin_start_absent_chats_scan_job_thread_fn=None,
     admin_start_restricted_chats_scan_job_thread_fn=None,
 ) -> None:
     services = _resolve_channel_services(
@@ -95,7 +87,6 @@ def register_channel_routes(
         cfg=cfg,
         list_database_channels_fn=list_database_channels_fn,
         list_missing_chat_scan_results_fn=list_missing_chat_scan_results_fn,
-        list_absent_chat_scan_results_fn=list_absent_chat_scan_results_fn,
         list_restricted_chat_scan_results_fn=list_restricted_chat_scan_results_fn,
         build_telegram_chat_link_bundle_fn=build_telegram_chat_link_bundle_fn,
         admin_try_create_exclusive_job_fn=admin_try_create_exclusive_job_fn,
@@ -104,9 +95,6 @@ def register_channel_routes(
         admin_job_set_status_fn=admin_job_set_status_fn,
         admin_start_missing_chats_scan_job_thread_fn=(
             admin_start_missing_chats_scan_job_thread_fn
-        ),
-        admin_start_absent_chats_scan_job_thread_fn=(
-            admin_start_absent_chats_scan_job_thread_fn
         ),
         admin_start_restricted_chats_scan_job_thread_fn=(
             admin_start_restricted_chats_scan_job_thread_fn
@@ -162,14 +150,6 @@ def register_channel_routes(
             "读取未入库群组扫描结果失败",
         )
 
-    @app.get("/api/admin/channels/absent")
-    @admin_login_required
-    def api_admin_absent_channels():
-        return _scan_result_response(
-            services.list_absent_chat_scan_results_fn,
-            "读取账号外数据库群组扫描结果失败",
-        )
-
     @app.get("/api/admin/channels/restricted")
     @admin_login_required
     def api_admin_restricted_channels():
@@ -211,16 +191,6 @@ def register_channel_routes(
             target_label="账号未入库群组扫描",
             received_log="已接收账号未入库群组扫描请求",
             start_thread_fn=services.admin_start_missing_chats_scan_job_thread_fn,
-        )
-
-    @app.post("/api/admin/channels/absent/scan")
-    @admin_login_required
-    def api_admin_absent_channels_scan():
-        return _create_scan_job_response(
-            "absent_chats_scan",
-            target_label="账号外数据库群组扫描",
-            received_log="已接收账号外数据库群组扫描请求",
-            start_thread_fn=services.admin_start_absent_chats_scan_job_thread_fn,
         )
 
     @app.post("/api/admin/channels/restricted/scan")
