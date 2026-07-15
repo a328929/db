@@ -238,6 +238,69 @@ def test_direct_media_delivery_replans_a_failed_target_hop_for_new_account(tmp_p
     assert len(resumed_client.forward_calls) == 1
 
 
+def test_direct_media_delivery_replans_real_telethon_permission_failure_to_relay(
+    tmp_path,
+):
+    db_path = tmp_path / "direct-to-relay-replan.db"
+    context = _create_context(db_path, relay_chat_id=999)
+    permission_error = (
+        "Chat admin privileges are required to do that in the specified chat "
+        "(for example, in a channel which is not yours), or invalid permissions "
+        "used for the channel or group"
+    )
+
+    with pytest.raises(RuntimeError, match="Chat admin privileges are required"):
+        copy_clone_media_direct_without_source(
+            client=_ForwardClient(fail=True, failure_message=permission_error),
+            target_entity="target",
+            message_ids=11,
+            source_entity="source",
+            transfer_context=replace(
+                context,
+                source_account="primary",
+                target_account="primary",
+            ),
+        )
+
+    result = copy_clone_media_via_relay_without_source(
+        source_client=_ForwardClient(first_id=7200),
+        target_client=_ForwardClient(first_id=8300),
+        relay_entity_for_source="relay",
+        relay_entity_for_target="relay",
+        target_entity="target",
+        message_ids=11,
+        source_entity="source",
+        transfer_context=replace(
+            context,
+            source_account="primary",
+            target_account="secondary",
+        ),
+    )
+
+    assert result.id == 8300
+    conn = _connect(db_path)
+    try:
+        transfer = conn.execute(
+            """
+            SELECT transfer_strategy, source_account, target_account,
+                   source_hop_status, target_hop_status, target_message_id
+            FROM admin_clone_media_transfers
+            WHERE run_id = 'run-1' AND source_message_id = 11
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert dict(transfer) == {
+        "transfer_strategy": "relay",
+        "source_account": "primary",
+        "target_account": "secondary",
+        "source_hop_status": "sent",
+        "target_hop_status": "sent",
+        "target_message_id": 8300,
+    }
+
+
 def test_text_delivery_refuses_cross_account_resume(tmp_path):
     db_path = tmp_path / "text-account-lock.db"
     context = _create_context(db_path)

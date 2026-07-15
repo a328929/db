@@ -1,7 +1,20 @@
 from types import SimpleNamespace
 
 from tg_harvest.admin_jobs.clone_preflight import _build_deep_preflight_outcome
-from tg_harvest.domain.clone_target_permissions import clone_target_send_permission
+from tg_harvest.domain.clone_target_permissions import (
+    clone_target_send_permission,
+    clone_target_write_was_rejected,
+)
+
+
+def test_target_write_rejection_recognizes_telethon_admin_privileges_message():
+    error = (
+        "Chat admin privileges are required to do that in the specified chat "
+        "(for example, in a channel which is not yours), or invalid permissions "
+        "used for the channel or group"
+    )
+
+    assert clone_target_write_was_rejected(error)
 
 
 def test_broadcast_channel_requires_creator_or_post_messages_permission():

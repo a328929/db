@@ -55,6 +55,7 @@ def clone_target_write_was_rejected(error: Any) -> bool:
     text = f"{type(error).__name__}: {error}".lower()
     markers = (
         "chatadminrequired",
+        "chat admin privileges are required",
         "chatwriteforbidden",
         "chatrestricted",
         "userbanned",
