@@ -206,7 +206,7 @@
         <div class="clone-panel-head">
           <div>
             <h3 id="cloneRunLocalDeleteTitle">局部删除</h3>
-            <p class="clone-subline">按消息数量倒序删除尾部内容，或按消息 ID 区间删除；删除后会回退匹配映射，后续迁移自动补齐。</p>
+            <p class="clone-subline">按已克隆源消息数量回滚尾部并更新续克隆边界；目标消息 ID 区间只做独立清理，不修改克隆映射。</p>
           </div>
           <div class="clone-toolbar">
             <a id="admin-clone-runs-message-delete-link" class="btn danger" href="#" hidden>打开局部删除</a>

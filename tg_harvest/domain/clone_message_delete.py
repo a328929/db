@@ -17,10 +17,13 @@ class CloneMessageDeleteSelection:
     @property
     def description(self) -> str:
         if self.mode == "latest":
-            return f"最后 {self.requested_count} 条消息（按最新到最早选择）"
+            return (
+                f"最后 {self.requested_count} 条已克隆源消息"
+                "（按源消息 ID 从新到旧回滚）"
+            )
         return (
-            f"消息 ID {self.first_message_id}-{self.last_message_id}"
-            "（按 ID 递增处理）"
+            f"目标消息 ID {self.first_message_id}-{self.last_message_id}"
+            "（仅清理目标消息，不修改克隆映射）"
         )
 
 

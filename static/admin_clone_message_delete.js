@@ -251,8 +251,8 @@
       return;
     }
     var message = selection.mode === 'latest'
-      ? '将从当前最新消息开始倒序选择最后 ' + shared.formatNumber(selection.count) + ' 条，随后按批删除并回退匹配的续传映射。'
-      : '将按消息 ID 正序提交删除 ' + selection.first + ' 到 ' + selection.last + '，共 ' + shared.formatNumber(selection.count) + ' 个 ID；匹配映射会在删除确认后回退。';
+      ? '将按源消息 ID 从新到旧回滚最后 ' + shared.formatNumber(selection.count) + ' 条已克隆内容；公告等未映射消息不参与计数，删除后续克隆会从最早回退位置继续。'
+      : '将清理目标消息 ID ' + selection.first + ' 到 ' + selection.last + '，共 ' + shared.formatNumber(selection.count) + ' 个 ID；克隆映射保持不变，后续迁移不会补回。';
     elements.selectionPreview.textContent = message;
     elements.selectionPreview.className = 'clone-message-delete-preview';
   }
@@ -395,7 +395,7 @@
       var stage = String((((snapshot || {}).progress || {}).stage) || '');
       elements.formStatus.textContent = stage === 'stopped'
         ? '删除已停止，未提交的消息不会被处理。'
-        : '局部消息删除已完成；可重新执行完整时间线迁移补齐缺失消息。';
+        : '局部消息删除已完成；整数回滚可通过续克隆补齐，目标消息 ID 区间不会补回。';
       await loadTargetMessageCount(elements, { force: true });
     },
     onError: async function () {

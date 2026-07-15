@@ -1010,6 +1010,11 @@ class CloneRoutesTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual("clone_message_delete", payload["job"]["job_type"])
         self.assertEqual("range", payload["deletion"]["mode"])
+        self.assertEqual(
+            "target_message_id_range",
+            payload["deletion"]["selection_scope"],
+        )
+        self.assertFalse(payload["deletion"]["updates_clone_state"])
         self.assertEqual(801, payload["deletion"]["requested_count"])
         self.assertEqual(50, payload["deletion"]["delete_delay_ms"])
         self.assertEqual(1, len(self.started_message_delete_jobs))

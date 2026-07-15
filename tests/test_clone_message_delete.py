@@ -48,7 +48,27 @@ def _rewind_result(*_args, **kwargs):
     }
 
 
-def _run_job(client, selection, *, rewind_side_effect=None):
+def _tail_selection_result(target_message_ids=(905, 901, 899)):
+    target_ids = list(target_message_ids)
+    source_ids = list(range(6000, 6000 - len(target_ids), -1))
+    return {
+        "requested_source_message_count": 5,
+        "selected_source_message_count": len(source_ids),
+        "selected_target_message_count": len(target_ids),
+        "first_source_message_id": min(source_ids, default=0),
+        "last_source_message_id": max(source_ids, default=0),
+        "source_message_ids": source_ids,
+        "target_message_ids": target_ids,
+    }
+
+
+def _run_job(
+    client,
+    selection,
+    *,
+    tail_selection_result=None,
+    rewind_side_effect=None,
+):
     statuses = []
     logs = []
 
@@ -74,9 +94,18 @@ def _run_job(client, selection, *, rewind_side_effect=None):
         ) as create_client,
         patch(
             "tg_harvest.admin_jobs.clone_message_delete."
+            "load_clone_tail_delete_selection",
+            return_value=(
+                _tail_selection_result()
+                if tail_selection_result is None
+                else tail_selection_result
+            ),
+        ) as load_tail_selection,
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete."
             "rewind_clone_mappings_for_deleted_target_messages",
             side_effect=rewind_side_effect or _rewind_result,
-        ),
+        ) as rewind_mappings,
         patch("tg_harvest.admin_jobs.clone_message_delete._disconnect_worker_client"),
         patch("tg_harvest.admin_jobs.clone_message_delete._cleanup_isolated_worker_session"),
     ):
@@ -90,7 +119,14 @@ def _run_job(client, selection, *, rewind_side_effect=None):
             admin_job_set_status_fn=lambda _job_id, status: statuses.append(status),
             admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
         )
-    return statuses, logs, create_client, update_progress
+    return (
+        statuses,
+        logs,
+        create_client,
+        update_progress,
+        load_tail_selection,
+        rewind_mappings,
+    )
 
 
 def test_clone_message_delete_selection_parses_latest_and_forward_range():
@@ -123,43 +159,43 @@ def test_clone_message_delete_selection_rejects_invalid_or_excessive_ranges():
         raise AssertionError("expected count limit validation")
 
 
-def test_latest_message_delete_uses_secondary_account_and_latest_message_ids():
+def test_latest_message_delete_uses_mapped_clone_tail_and_ignores_remote_posts():
     class Client:
         def __init__(self):
             self.iter_calls = []
             self.delete_calls = []
 
-        def iter_messages(self, target, *, limit, wait_time):
-            self.iter_calls.append((target, limit, wait_time))
-            return iter(
-                [
-                    SimpleNamespace(id=905),
-                    SimpleNamespace(id=901),
-                    SimpleNamespace(id=899),
-                ]
-            )
+        def iter_messages(self, *_args, **_kwargs):
+            raise AssertionError("clone-tail rollback must not scan remote latest posts")
 
         def delete_messages(self, target, message_ids, *, revoke):
             self.delete_calls.append((target, list(message_ids), revoke))
             return []
 
     client = Client()
-    statuses, logs, create_client, update_progress = _run_job(
+    (
+        statuses,
+        logs,
+        create_client,
+        update_progress,
+        load_tail_selection,
+        rewind_mappings,
+    ) = _run_job(
         client,
         parse_clone_message_delete_selection("5"),
     )
 
     assert statuses == ["running", "done"]
     assert create_client.call_args.args[0].session_name == "secondary"
-    assert len(client.iter_calls) == 1
-    target, limit, wait_time = client.iter_calls[0]
+    target = client.delete_calls[0][0]
     assert isinstance(target, InputChannel)
     assert target.channel_id == 777
     assert target.access_hash == 123
-    assert limit == 5
-    assert wait_time == 0
     assert client.delete_calls == [(target, [905, 901, 899], True)]
-    assert any("最新到最早顺序锁定 3 条" in message for message in logs)
+    assert load_tail_selection.call_args.kwargs["source_message_limit"] == 5
+    assert rewind_mappings.call_count == 1
+    assert any("3/5 条已克隆源消息" in message for message in logs)
+    assert any("目标群公告等未映射消息不会参与计数或删除" in message for message in logs)
     assert any("已回退 0 条本地映射" in message for message in logs)
     assert any(
         call.kwargs.get("total") == 3 for call in update_progress.call_args_list
@@ -181,7 +217,14 @@ def test_range_message_delete_submits_ids_in_ascending_batches():
             return []
 
     client = Client()
-    statuses, logs, _create_client, _update_progress = _run_job(
+    (
+        statuses,
+        logs,
+        _create_client,
+        _update_progress,
+        load_tail_selection,
+        rewind_mappings,
+    ) = _run_job(
         client,
         parse_clone_message_delete_selection("200-399"),
     )
@@ -193,7 +236,10 @@ def test_range_message_delete_submits_ids_in_ascending_batches():
         list(range(300, 400)),
     ]
     assert all(call[2] is True for call in client.delete_calls)
-    assert any("消息 ID 从小到大" in message for message in logs)
+    assert load_tail_selection.call_count == 0
+    assert rewind_mappings.call_count == 0
+    assert any("区间清理不会修改克隆映射" in message for message in logs)
+    assert any("克隆映射未修改" in message for message in logs)
 
 
 def test_latest_message_delete_marks_empty_target_as_completed():
@@ -204,13 +250,16 @@ def test_latest_message_delete_marks_empty_target_as_completed():
         def delete_messages(self, *_args, **_kwargs):
             raise AssertionError("empty target must not issue a delete request")
 
-    statuses, logs, _create_client, update_progress = _run_job(
+    empty_selection = _tail_selection_result(())
+    statuses, logs, create_client, update_progress, _load_tail, _rewind = _run_job(
         Client(),
         parse_clone_message_delete_selection("1000"),
+        tail_selection_result=empty_selection,
     )
 
     assert statuses == ["running", "done"]
-    assert any("没有可删除消息" in message for message in logs)
+    assert create_client.call_count == 0
+    assert any("没有可回滚的已完成消息" in message for message in logs)
     assert update_progress.call_args_list[-1].kwargs == {
         "total": 0,
         "stage": "done",
@@ -230,12 +279,14 @@ def test_mapping_rewind_failure_stops_after_the_confirmed_remote_batch():
         raise RuntimeError("database unavailable")
 
     client = Client()
-    statuses, logs, _create_client, _update_progress = _run_job(
+    tail_selection = _tail_selection_result(range(1200, 1000, -1))
+    statuses, logs, _create_client, _update_progress, _load_tail, _rewind = _run_job(
         client,
-        parse_clone_message_delete_selection("200-399"),
+        parse_clone_message_delete_selection("200"),
+        tail_selection_result=tail_selection,
         rewind_side_effect=fail_rewind,
     )
 
     assert statuses == ["running", "error"]
-    assert [call[1] for call in client.delete_calls] == [list(range(200, 300))]
+    assert [call[1] for call in client.delete_calls] == [list(range(1200, 1100, -1))]
     assert any("本地续克隆状态回退失败" in message for message in logs)

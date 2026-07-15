@@ -1273,8 +1273,12 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 f"运行记录：{normalized_run_id}",
                 f"删除规则：{selection.description}",
                 f"批次间隔：{options['delete_delay_ms']}ms",
-                "只处理目标副本消息；不会删除源群或克隆记录。"
-                "Telegram 确认删除后会同步回退对应映射，以便后续迁移补齐。",
+                (
+                    "克隆尾部回滚会同步回退源消息映射，以便后续迁移从删除位置继续。"
+                    if selection.mode == "latest"
+                    else "目标消息 ID 区间只做清理，不修改克隆映射，后续迁移不会补回。"
+                ),
+                "只处理目标副本消息；不会读取、修改或删除源群。",
             ],
             start_job_fn=lambda current_job_id: (
                 deps.admin_start_clone_message_delete_job_thread_fn(
@@ -1293,6 +1297,12 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     "run_id": normalized_run_id,
                     "target_chat_id": target_chat_id,
                     "mode": selection.mode,
+                    "selection_scope": (
+                        "clone_source_tail"
+                        if selection.mode == "latest"
+                        else "target_message_id_range"
+                    ),
+                    "updates_clone_state": selection.mode == "latest",
                     "requested_count": selection.requested_count,
                     "first_message_id": selection.first_message_id,
                     "last_message_id": selection.last_message_id,

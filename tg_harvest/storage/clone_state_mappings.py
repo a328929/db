@@ -50,6 +50,103 @@ def _message_id_chunks(message_ids: list[int]) -> Iterable[list[int]]:
         yield message_ids[offset : offset + _TARGET_MESSAGE_ID_BATCH_SIZE]
 
 
+def load_clone_tail_delete_selection(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    target_chat_id: int,
+    source_message_limit: int,
+) -> dict[str, Any]:
+    """Resolve the last successfully cloned source messages to target IDs.
+
+    Source message IDs define the rollback boundary. Target message IDs are
+    only immutable handles for deleting the already mapped deliveries; target
+    announcements and other unmapped posts never consume the requested limit.
+    Results are newest-source-first so a partially completed delete still
+    leaves the missing clone state as a suffix of the source timeline.
+    """
+
+    normalized_run_id = _clean_text(run_id)
+    normalized_target_chat_id = int(target_chat_id)
+    normalized_limit = int(source_message_limit)
+    if not normalized_run_id:
+        raise ValueError("run_id 不能为空")
+    if normalized_target_chat_id <= 0:
+        raise ValueError("target_chat_id 参数非法")
+    if normalized_limit <= 0:
+        raise ValueError("回滚源消息数量必须为正整数")
+
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            WITH source_tail AS (
+                SELECT source_chat_id, source_message_id
+                FROM admin_clone_message_map
+                WHERE run_id = ?
+                  AND target_chat_id = ?
+                  AND status = 'done'
+                  AND target_message_id IS NOT NULL
+                GROUP BY source_chat_id, source_message_id
+                ORDER BY source_message_id DESC
+                LIMIT ?
+            )
+            SELECT
+                mapping.source_chat_id,
+                mapping.source_message_id,
+                mapping.target_message_id,
+                mapping.chunk_index,
+                mapping.mode
+            FROM admin_clone_message_map mapping
+            JOIN source_tail tail
+              ON tail.source_chat_id = mapping.source_chat_id
+             AND tail.source_message_id = mapping.source_message_id
+            WHERE mapping.run_id = ?
+              AND mapping.target_chat_id = ?
+              AND mapping.status = 'done'
+              AND mapping.target_message_id IS NOT NULL
+            ORDER BY
+                mapping.source_message_id DESC,
+                mapping.chunk_index DESC,
+                mapping.id DESC
+            """,
+            (
+                normalized_run_id,
+                normalized_target_chat_id,
+                normalized_limit,
+                normalized_run_id,
+                normalized_target_chat_id,
+            ),
+        )
+        rows = cur.fetchall()
+    finally:
+        cur.close()
+
+    source_message_ids: list[int] = []
+    target_message_ids: list[int] = []
+    seen_source_ids: set[int] = set()
+    seen_target_ids: set[int] = set()
+    for row in rows:
+        source_message_id = int(row["source_message_id"])
+        target_message_id = int(row["target_message_id"])
+        if source_message_id not in seen_source_ids:
+            seen_source_ids.add(source_message_id)
+            source_message_ids.append(source_message_id)
+        if target_message_id not in seen_target_ids:
+            seen_target_ids.add(target_message_id)
+            target_message_ids.append(target_message_id)
+
+    return {
+        "requested_source_message_count": normalized_limit,
+        "selected_source_message_count": len(source_message_ids),
+        "selected_target_message_count": len(target_message_ids),
+        "first_source_message_id": min(source_message_ids, default=0),
+        "last_source_message_id": max(source_message_ids, default=0),
+        "source_message_ids": source_message_ids,
+        "target_message_ids": target_message_ids,
+    }
+
+
 def rewind_clone_mappings_for_deleted_target_messages(
     conn: sqlite3.Connection,
     *,

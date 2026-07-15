@@ -23,6 +23,7 @@ from tg_harvest.storage.clone_state_mappings import (
     load_clone_message_mapping,
     load_clone_message_mapping_summary,
     load_clone_run_progress,
+    load_clone_tail_delete_selection,
     record_clone_message_mapping,
     rewind_clone_mappings_for_deleted_target_messages,
 )
@@ -79,6 +80,7 @@ __all__ = [
     "load_clone_message_mapping",
     "load_clone_message_mapping_summary",
     "load_clone_run_progress",
+    "load_clone_tail_delete_selection",
     "load_clone_migration",
     "load_clone_plan",
     "load_clone_run",

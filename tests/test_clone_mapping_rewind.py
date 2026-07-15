@@ -9,6 +9,7 @@ from tg_harvest.storage.clone import (
     create_clone_run,
     ensure_clone_media_transfers,
     list_clone_timeline_replay_batch,
+    load_clone_tail_delete_selection,
     mark_clone_media_transfer_source_hop_sent,
     mark_clone_media_transfer_target_hop_sent,
     record_clone_message_mapping,
@@ -178,6 +179,163 @@ def test_rewind_deleted_target_messages_replays_from_the_first_deleted_source_it
         "first_rewound_source_message_id": 5,
     }
     assert [item["source_message_id"] for item in remaining] == [5, 6]
+
+
+def test_clone_tail_selection_counts_source_mappings_not_target_message_ids(tmp_path):
+    conn = _create_clone_context(tmp_path / "clone-tail-selection.db")
+    try:
+        target_ids = (101, 250, 900, 1200, 9000, 15000)
+        for source_message_id, target_message_id in enumerate(target_ids, start=1):
+            _insert_message(conn, message_id=source_message_id)
+            _record_mapping(
+                conn,
+                source_message_id=source_message_id,
+                target_message_id=target_message_id,
+            )
+
+        selection = load_clone_tail_delete_selection(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            source_message_limit=2,
+        )
+        rewind_clone_mappings_for_deleted_target_messages(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            target_message_ids=selection["target_message_ids"],
+        )
+        remaining = list_clone_timeline_replay_batch(
+            conn,
+            run_id="run-rewind",
+            chat_id=100,
+            limit=10,
+        )
+    finally:
+        conn.close()
+
+    assert selection == {
+        "requested_source_message_count": 2,
+        "selected_source_message_count": 2,
+        "selected_target_message_count": 2,
+        "first_source_message_id": 5,
+        "last_source_message_id": 6,
+        "source_message_ids": [6, 5],
+        "target_message_ids": [15000, 9000],
+    }
+    assert [item["source_message_id"] for item in remaining] == [5, 6]
+
+
+def test_clone_tail_selection_counts_long_text_once_and_deletes_all_chunks(tmp_path):
+    conn = _create_clone_context(tmp_path / "clone-tail-long-text.db")
+    try:
+        _insert_message(conn, message_id=1)
+        _insert_message(
+            conn,
+            message_id=2,
+            content="x" * (CLONE_TEXT_REPLAY_CHUNK_MAX_LEN + 1),
+        )
+        _record_mapping(
+            conn,
+            source_message_id=1,
+            target_message_id=101,
+        )
+        _record_mapping(
+            conn,
+            source_message_id=2,
+            target_message_id=201,
+            chunk_index=0,
+            chunk_count=2,
+        )
+        _record_mapping(
+            conn,
+            source_message_id=2,
+            target_message_id=202,
+            chunk_index=1,
+            chunk_count=2,
+        )
+
+        selection = load_clone_tail_delete_selection(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            source_message_limit=1,
+        )
+    finally:
+        conn.close()
+
+    assert selection["selected_source_message_count"] == 1
+    assert selection["selected_target_message_count"] == 2
+    assert selection["source_message_ids"] == [2]
+    assert selection["target_message_ids"] == [202, 201]
+
+
+def test_clone_tail_selection_rolls_6000_messages_back_to_source_4001(tmp_path):
+    conn = _create_clone_context(tmp_path / "clone-tail-6000.db")
+    try:
+        conn.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, content,
+                content_norm, msg_type, grouped_id, has_media
+            ) VALUES (100, ?, '', ?, ?, ?, 'TEXT', NULL, 0)
+            """,
+            (
+                (
+                    message_id,
+                    message_id,
+                    f"message-{message_id}",
+                    f"message-{message_id}",
+                )
+                for message_id in range(1, 6001)
+            ),
+        )
+        conn.executemany(
+            """
+            INSERT INTO admin_clone_message_map(
+                migration_id, run_id, plan_id,
+                source_chat_id, source_message_id, source_msg_date_ts,
+                target_chat_id, target_message_id,
+                chunk_index, chunk_count, mode, status,
+                created_at, updated_at
+            ) VALUES (
+                'migration-rewind', 'run-rewind', 'plan-rewind',
+                100, ?, ?, 777, ?, 0, 1, 'text_replay', 'done',
+                '2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00'
+            )
+            """,
+            ((message_id, message_id, message_id * 2) for message_id in range(1, 6001)),
+        )
+        conn.commit()
+
+        selection = load_clone_tail_delete_selection(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            source_message_limit=2000,
+        )
+        rewind_clone_mappings_for_deleted_target_messages(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            target_message_ids=selection["target_message_ids"],
+        )
+        first_remaining = list_clone_timeline_replay_batch(
+            conn,
+            run_id="run-rewind",
+            chat_id=100,
+            limit=1,
+        )
+    finally:
+        conn.close()
+
+    assert selection["selected_source_message_count"] == 2000
+    assert selection["selected_target_message_count"] == 2000
+    assert selection["first_source_message_id"] == 4001
+    assert selection["last_source_message_id"] == 6000
+    assert selection["source_message_ids"][:2] == [6000, 5999]
+    assert selection["target_message_ids"][:2] == [12000, 11998]
+    assert [item["source_message_id"] for item in first_remaining] == [4001]
 
 
 def test_rewind_one_text_chunk_replays_only_the_source_message_with_the_gap(tmp_path):
