@@ -662,9 +662,70 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("/admin/clone/migrate", source)
         self.assertIn("/admin/clone/runs/manage", source)
         self.assertIn("/admin/clone/runs/detail", source)
+        self.assertIn("/admin/clone/runs/messages/delete", source)
         self.assertIn("/admin/recovery", source)
+        self.assertIn("/admin/sync", source)
         self.assertIn("window.location.assign(getNextPath(elements));", source)
         self.assertIn("payload.error.trim()", source)
+
+    def test_search_unavailable_message_is_not_a_dead_anchor(self) -> None:
+        source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('document.createElement(hasLink ? "a" : "span")', source)
+        self.assertIn('a.setAttribute("aria-disabled", "true")', source)
+        self.assertNotIn('a.href = "#"', source)
+        self.assertIn('ctxLink.rel = "noopener noreferrer"', source)
+
+    def test_admin_navigation_links_share_button_styling(self) -> None:
+        template = (ROOT / "templates" / "admin_manage.html").read_text(
+            encoding="utf-8"
+        )
+        styles = (ROOT / "static" / "admin_manage.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertEqual(5, template.count('class="admin-nav-action"'))
+        self.assertIn(".admin-nav-action {", styles)
+        self.assertIn(".admin-nav-action:hover {", styles)
+
+    def test_admin_read_views_ignore_stale_async_responses(self) -> None:
+        manage = (ROOT / "static" / "admin_manage.js").read_text(encoding="utf-8")
+        channels = (ROOT / "static" / "admin_channels.js").read_text(
+            encoding="utf-8"
+        )
+        recovery = (ROOT / "static" / "admin_recovery.js").read_text(
+            encoding="utf-8"
+        )
+        sync = (ROOT / "static" / "admin_sync.js").read_text(encoding="utf-8")
+
+        self.assertIn("var requestSeq = ++statsRequestSeq;", manage)
+        self.assertIn("requestSeq !== statsRequestSeq", manage)
+        self.assertIn("function nextListRequestToken(key)", channels)
+        self.assertIn("isListRequestCurrent('channels', requestToken)", channels)
+        self.assertIn("isListRequestCurrent('missing', requestToken)", channels)
+        self.assertIn("isListRequestCurrent('restricted', requestToken)", channels)
+        self.assertIn("var requestSeq = ++recoveryState.loadRequestSeq;", recovery)
+        self.assertIn("requestSeq !== recoveryState.loadRequestSeq", recovery)
+        self.assertIn("var requestSeq = ++syncState.chatRequestSeq;", sync)
+        self.assertIn("requestSeq !== syncState.chatRequestSeq", sync)
+        self.assertIn("var requestSeq = ++syncState.storageRequestSeq;", sync)
+        self.assertIn("requestSeq !== syncState.storageRequestSeq", sync)
+
+    def test_clone_run_filters_do_not_reserve_an_empty_grid_column(self) -> None:
+        styles = (ROOT / "static" / "admin_clone.css").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            "grid-template-columns: minmax(260px, 1fr) 150px 160px;",
+            styles,
+        )
+
+    def test_context_rejects_invalid_identifiers_before_loading(self) -> None:
+        source = (ROOT / "static" / "context.js").read_text(encoding="utf-8")
+        self.assertIn('/^-?[1-9]\\d*$/.test', source)
+        self.assertIn('/^[1-9]\\d*$/.test', source)
+        self.assertIn("Number.isSafeInteger(parsedChatId)", source)
+        self.assertIn("Number.isSafeInteger(parsedMsgId)", source)
+        self.assertIn('document.getElementById("loadBeforeBtn").disabled = true', source)
+        self.assertIn('document.getElementById("loadAfterBtn").disabled = true', source)
 
     def test_page_templates_load_page_specific_stylesheets(self) -> None:
         context_template = (ROOT / "templates" / "context.html").read_text(encoding="utf-8")

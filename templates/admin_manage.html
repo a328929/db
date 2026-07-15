@@ -76,19 +76,19 @@
 
     <footer class="panel admin-panel" aria-label="底部操作区">
       <div id="admin-bottom-action-bar" aria-label="新增数据按钮容器">
-        <a id="admin-open-clone-link" href="/admin/clone" aria-label="克隆工作台">
+        <a id="admin-open-clone-link" class="admin-nav-action" href="/admin/clone" aria-label="克隆工作台">
           克隆工作台
         </a>
-        <a id="admin-open-sync-link" href="/admin/sync" aria-label="消息同步统计">
+        <a id="admin-open-sync-link" class="admin-nav-action" href="/admin/sync" aria-label="消息同步统计">
           消息同步统计
         </a>
-        <a id="admin-open-clone-runs-link" href="/admin/clone/runs/manage" aria-label="克隆记录列表">
+        <a id="admin-open-clone-runs-link" class="admin-nav-action" href="/admin/clone/runs/manage" aria-label="克隆记录列表">
           克隆记录列表
         </a>
-        <a id="admin-open-channel-manage-link" href="/admin/channels" aria-label="频道管理">
+        <a id="admin-open-channel-manage-link" class="admin-nav-action" href="/admin/channels" aria-label="频道管理">
           频道管理
         </a>
-        <a id="admin-open-recovery-link" href="/admin/recovery" aria-label="群组恢复监控">
+        <a id="admin-open-recovery-link" class="admin-nav-action" href="/admin/recovery" aria-label="群组恢复监控">
           群组恢复监控
         </a>
         <button id="admin-cleanup-empty-btn" type="button" aria-label="不可搜索数据清理">
@@ -119,6 +119,7 @@
         id="admin-target-input"
         name="admin-target-input"
         type="text"
+        maxlength="300"
         placeholder="请输入群组名称或链接"
         aria-label="群组名称或链接"
       />
@@ -145,6 +146,7 @@
         id="admin-cleanup-input"
         name="admin-cleanup-input"
         type="text"
+        maxlength="120"
         placeholder="请输入要清理的字段"
         aria-label="清理字段"
       />
@@ -172,6 +174,7 @@
         id="admin-password-input"
         name="admin-password-input"
         type="password"
+        autocomplete="current-password"
         placeholder="请输入管理员密码"
         aria-label="管理员密码"
       />

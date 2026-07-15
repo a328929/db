@@ -25,6 +25,8 @@
     livePollTimerId: null,
     liveRequestSeq: 0,
     liveActiveRequestSeq: 0,
+    storageRequestSeq: 0,
+    chatRequestSeq: 0,
     chatItems: [],
     chatListBusy: false,
     health: null,
@@ -1037,6 +1039,7 @@
   }
 
   async function loadSchedulerChats(elements) {
+    var requestSeq = ++syncState.chatRequestSeq;
     syncState.chatListBusy = true;
     setBusy(elements, syncState.busy);
     elements.chatList.textContent = '正在读取调度群组...';
@@ -1054,10 +1057,13 @@
       syncState.chatItems = normalizeSchedulerChatsPayload(
         await fetchJSON('/api/admin/sync/chats?' + params.toString(), { timeoutMs: SYNC_STATS_TIMEOUT_MS })
       );
+      if (requestSeq !== syncState.chatRequestSeq) return;
       renderSchedulerChats(elements);
     } catch (error) {
+      if (requestSeq !== syncState.chatRequestSeq) return;
       elements.chatList.textContent = '读取调度群组失败：' + error.message;
     } finally {
+      if (requestSeq !== syncState.chatRequestSeq) return;
       syncState.chatListBusy = false;
       setBusy(elements, syncState.busy);
     }
@@ -1353,15 +1359,19 @@
   }
 
   async function loadStorageHealth(elements) {
+    var requestSeq = ++syncState.storageRequestSeq;
     elements.storageHealthStatus.textContent = '正在读取数据库容量状态...';
     try {
-      syncState.storageHealth = normalizeStorageHealth(
+      var storageHealth = normalizeStorageHealth(
         await fetchJSON('/api/admin/storage-health', {
           timeoutMs: STORAGE_HEALTH_TIMEOUT_MS
         })
       );
+      if (requestSeq !== syncState.storageRequestSeq) return;
+      syncState.storageHealth = storageHealth;
       renderStorageHealth(elements);
     } catch (error) {
+      if (requestSeq !== syncState.storageRequestSeq) return;
       elements.storageHealthBanner.className = 'sync-health-banner is-warning';
       elements.storageHealthBanner.textContent = '读取数据库容量状态失败。';
       elements.storageHealthStatus.textContent = '读取数据库容量状态失败：' + error.message;

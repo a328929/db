@@ -33,6 +33,16 @@ def build_steps(*, include_tests: bool) -> list[QualityStep]:
             ),
         ),
         QualityStep(
+            name="Audit Python dependencies",
+            command=(
+                sys.executable,
+                "-m",
+                "pip_audit",
+                "-r",
+                "requirements.txt",
+            ),
+        ),
+        QualityStep(
             name="Compile Python sources",
             command=(sys.executable, "-m", "compileall", "-q", *PYTHON_TARGETS),
         ),

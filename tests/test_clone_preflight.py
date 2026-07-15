@@ -441,6 +441,30 @@ def test_list_clone_source_chats_defaults_to_display_name_order():
     ]
 
 
+def test_list_clone_source_chats_sorts_message_count_descending():
+    conn = _new_conn()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO chats(
+                chat_id, chat_title, chat_username, chat_type, message_count,
+                first_seen_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, "Small", "", "Megagroup", 2, "", ""),
+                (201, "Large", "", "Megagroup", 20, "", ""),
+                (202, "Medium", "", "Megagroup", 10, "", ""),
+            ],
+        )
+        items = list_clone_source_chats(conn, sort="message_count_desc")
+    finally:
+        conn.close()
+
+    assert [item["message_count"] for item in items] == [20, 10, 5, 2]
+
+
 def test_clone_run_create_update_and_list_roundtrip():
     conn = _new_conn()
     try:

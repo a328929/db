@@ -27,6 +27,11 @@
     missing: 0,
     restricted: 0
   };
+  var listRequestTokens = {
+    channels: 0,
+    missing: 0,
+    restricted: 0
+  };
 
   var channelState = {
     items: [],
@@ -224,6 +229,15 @@
   function nextListRenderToken(key) {
     listRenderTokens[key] = (listRenderTokens[key] || 0) + 1;
     return listRenderTokens[key];
+  }
+
+  function nextListRequestToken(key) {
+    listRequestTokens[key] = (listRequestTokens[key] || 0) + 1;
+    return listRequestTokens[key];
+  }
+
+  function isListRequestCurrent(key, token) {
+    return listRequestTokens[key] === token;
   }
 
   function stopListRendering(key, container) {
@@ -542,16 +556,19 @@
   }
 
   async function loadChannels(elements) {
+    var requestToken = nextListRequestToken('channels');
     stopListRendering('channels', elements.channelList);
     elements.channelCount.textContent = '正在读取列表...';
     try {
       var data = await fetchJSON(
         '/api/admin/channels?sort=' + encodeURIComponent(elements.sortSelect.value)
       );
+      if (!isListRequestCurrent('channels', requestToken)) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       channelState.items = Array.isArray(data.channels) ? data.channels : [];
       renderChannels(elements, channelState.items);
     } catch (error) {
+      if (!isListRequestCurrent('channels', requestToken)) return;
       stopListRendering('channels', elements.channelList);
       elements.channelCount.textContent = '读取列表失败：' + error.message;
     }
@@ -631,13 +648,16 @@
   }
 
   async function loadMissingChannels(elements) {
+    var requestToken = nextListRequestToken('missing');
     stopListRendering('missing', elements.missingList);
     elements.missingStatus.textContent = '正在读取扫描结果...';
     try {
       var data = await fetchJSON('/api/admin/channels/missing');
+      if (!isListRequestCurrent('missing', requestToken)) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       renderMissingChannels(elements, data.items || []);
     } catch (error) {
+      if (!isListRequestCurrent('missing', requestToken)) return;
       stopListRendering('missing', elements.missingList);
       elements.missingStatus.textContent = '读取扫描结果失败：' + error.message;
     }
@@ -888,15 +908,18 @@
   }
 
   async function loadRestrictedChannels(elements) {
+    var requestToken = nextListRequestToken('restricted');
     stopListRendering('restricted', elements.restrictedList);
     elements.restrictedStatus.textContent = '正在读取扫描结果...';
     try {
       var data = await fetchJSON('/api/admin/channels/restricted');
+      if (!isListRequestCurrent('restricted', requestToken)) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       restrictedState.items = Array.isArray(data.items) ? data.items : [];
       updateRestrictedFilterOptions(elements);
       renderRestrictedChannels(elements);
     } catch (error) {
+      if (!isListRequestCurrent('restricted', requestToken)) return;
       stopListRendering('restricted', elements.restrictedList);
       elements.restrictedStatus.textContent = '读取扫描结果失败：' + error.message;
     }

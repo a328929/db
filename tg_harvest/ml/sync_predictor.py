@@ -283,6 +283,10 @@ def _load_torch() -> tuple[Any | None, Any | None, str]:
         return None, None, f"{type(exc).__name__}: {exc}"
 
 
+def _safe_torch_load(torch: Any, path: Path) -> Any:
+    return torch.load(path, map_location="cpu", weights_only=True)
+
+
 def _make_model_class(torch: Any, nn: Any):
     class TemporalBatchPredictor(nn.Module):
         def __init__(self) -> None:
@@ -1198,14 +1202,7 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
         previous_artifact = Path(artifact_path)
         if previous_artifact.exists():
             with suppress(Exception):
-                try:
-                    checkpoint = torch.load(
-                        previous_artifact,
-                        map_location="cpu",
-                        weights_only=False,
-                    )
-                except TypeError:
-                    checkpoint = torch.load(previous_artifact, map_location="cpu")
+                checkpoint = _safe_torch_load(torch, previous_artifact)
                 if isinstance(checkpoint, dict) and checkpoint.get("model_state"):
                     _load_compatible_model_state(model, checkpoint["model_state"])
 
@@ -1358,13 +1355,14 @@ def _load_checkpoint_model(conn: sqlite3.Connection) -> tuple[Any, Any, dict[str
             if cached is not None:
                 return cached[0], cached[1], model_row, ""
         try:
-            checkpoint = torch.load(
-                path,
-                map_location="cpu",
-                weights_only=False,
+            checkpoint = _safe_torch_load(torch, path)
+        except Exception as exc:
+            return (
+                None,
+                None,
+                model_row,
+                f"artifact_load_failed: {type(exc).__name__}",
             )
-        except TypeError:
-            checkpoint = torch.load(path, map_location="cpu")
         if not isinstance(checkpoint, dict) or not checkpoint.get("model_state"):
             return None, None, model_row, "invalid_artifact"
         if str(checkpoint.get("model_version") or "") != MODEL_VERSION:

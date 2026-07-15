@@ -306,9 +306,7 @@
   min-width: 140px;
 }
 
-#admin-open-clone-link,
-#admin-open-channel-manage-link,
-#admin-open-recovery-link {
+.admin-nav-action {
   min-height: 42px;
   min-width: 140px;
   border: 1px solid var(--border);
@@ -325,9 +323,7 @@
   justify-content: center;
 }
 
-#admin-open-clone-link:hover,
-#admin-open-channel-manage-link:hover,
-#admin-open-recovery-link:hover {
+.admin-nav-action:hover {
   background: #f7fbff;
   border-color: var(--border-strong);
   box-shadow: var(--shadow-soft);
@@ -425,7 +421,7 @@
   }
 
   #admin-bottom-action-bar button,
-  #admin-open-channel-manage-link,
+  .admin-nav-action,
   .admin-actions .btn {
     width: 100%;
   }

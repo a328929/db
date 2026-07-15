@@ -76,6 +76,9 @@ def list_clone_source_chats(
         "message_count_asc": (
             "c.message_count ASC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
         ),
+        "message_count_desc": (
+            "c.message_count DESC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"
+        ),
         "updated_desc": (
             "CASE WHEN last_message_ts IS NULL THEN 1 ELSE 0 END ASC, "
             "last_message_ts DESC, c.chat_title COLLATE NOCASE ASC, c.chat_id ASC"

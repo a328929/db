@@ -8,14 +8,23 @@
       chatId: root ? root.dataset.chatId : "",
       msgId: new URLSearchParams(window.location.search).get("msg_id")
   };
-  if (!config.chatId || !config.msgId) {
-      document.getElementById("statusLine").textContent = "缺少必要的群组或消息参数。";
+  const parsedChatId = Number(config.chatId);
+  const parsedMsgId = Number(config.msgId);
+  if (
+      !/^-?[1-9]\d*$/.test(String(config.chatId || ""))
+      || !/^[1-9]\d*$/.test(String(config.msgId || ""))
+      || !Number.isSafeInteger(parsedChatId)
+      || !Number.isSafeInteger(parsedMsgId)
+  ) {
+      document.getElementById("statusLine").textContent = "缺少或无法识别群组、消息参数。";
+      document.getElementById("loadBeforeBtn").disabled = true;
+      document.getElementById("loadAfterBtn").disabled = true;
       return;
   }
 
   const state = {
-      chatId: parseInt(config.chatId, 10),
-      targetMsgId: parseInt(config.msgId, 10),
+      chatId: parsedChatId,
+      targetMsgId: parsedMsgId,
       oldestMsgId: null,
       newestMsgId: null,
       isLoading: false,

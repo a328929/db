@@ -231,8 +231,8 @@
     const wrap = document.createElement("div");
     wrap.className = "result-links-wrap";
 
-    const a = document.createElement("a");
     const hasLink = !!(item.link && String(item.link).trim());
+    const a = document.createElement(hasLink ? "a" : "span");
     a.className = "result-link" + (hasLink ? "" : " disabled");
     a.textContent = hasLink ? "查看原消息" : "无可用链接";
     a.setAttribute("aria-label", hasLink ? "查看原消息（新标签页打开）" : "无可用链接");
@@ -241,8 +241,7 @@
       a.target = "_blank";
       a.rel = "noopener noreferrer";
     } else {
-      a.href = "#";
-      a.addEventListener("click", (e) => e.preventDefault(), { once: true });
+      a.setAttribute("aria-disabled", "true");
     }
     wrap.appendChild(a);
 
@@ -252,6 +251,7 @@
     ctxLink.setAttribute("aria-label", "在本地数据库中查看该消息的聊天上下文");
     ctxLink.href = `/chat/${item.chat_id}?msg_id=${item.message_id}`;
     ctxLink.target = "_blank";
+    ctxLink.rel = "noopener noreferrer";
 
     wrap.appendChild(ctxLink);
 

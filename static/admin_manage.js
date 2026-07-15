@@ -36,6 +36,7 @@
   var JOB_POLL_RETRY_BASE_MS = 3000;
   var JOB_POLL_MAX_COUNT = 28800;
   var JOB_POLL_MAX_DURATION_MS = 86400000;
+  var statsRequestSeq = 0;
 
   var jobPollState = {
     jobId: '',
@@ -298,10 +299,17 @@
 
   async function loadStatsByCurrentSelection(elements, errorPrefix) {
     var selectedChatId = elements.scopeSelect.value;
+    var requestSeq = ++statsRequestSeq;
     try {
       var data = await fetchStatsBySelection(selectedChatId);
+      if (requestSeq !== statsRequestSeq) {
+        return false;
+      }
       applyStatsToHeader(elements, data, selectedChatId);
     } catch (error) {
+      if (requestSeq !== statsRequestSeq) {
+        return false;
+      }
       appendLog(elements, String(errorPrefix || '读取统计信息失败') + '：' + error.message);
       return false;
     }

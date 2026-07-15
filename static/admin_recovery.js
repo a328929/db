@@ -28,7 +28,8 @@
     overview: {},
     filterValue: 'pending',
     busy: false,
-    renderToken: 0
+    renderToken: 0,
+    loadRequestSeq: 0
   };
 
   var jobPollState = {
@@ -518,16 +519,19 @@
   }
 
   async function loadRecoveryData(elements) {
+    var requestSeq = ++recoveryState.loadRequestSeq;
     nextCandidateRenderToken(elements);
     elements.status.textContent = '正在读取恢复状态...';
     try {
       var data = await fetchJSON('/api/admin/recovery');
+      if (requestSeq !== recoveryState.loadRequestSeq) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       recoveryState.items = Array.isArray(data.items) ? data.items : [];
       recoveryState.overview = data.overview || {};
       renderOverview(elements);
       renderCandidates(elements);
     } catch (error) {
+      if (requestSeq !== recoveryState.loadRequestSeq) return;
       elements.status.textContent = '读取恢复状态失败：' + error.message;
       elements.listStatus.textContent = '读取恢复候选失败：' + error.message;
     }

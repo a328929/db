@@ -4,12 +4,14 @@
   var DEFAULT_NEXT_PATH = '/admin/manage';
   var ALLOWED_NEXT_PATHS = [
     '/admin/manage',
+    '/admin/sync',
     '/admin/channels',
     '/admin/clone',
     '/admin/clone/create',
     '/admin/clone/migrate',
     '/admin/clone/runs/manage',
     '/admin/clone/runs/detail',
+    '/admin/clone/runs/messages/delete',
     '/admin/recovery'
   ];
 

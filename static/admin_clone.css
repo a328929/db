@@ -896,7 +896,7 @@
 
 .clone-runs-filter-grid {
   display: grid;
-  grid-template-columns: minmax(260px, 1fr) 150px 160px 120px;
+  grid-template-columns: minmax(260px, 1fr) 150px 160px;
   gap: 12px;
   align-items: end;
 }
