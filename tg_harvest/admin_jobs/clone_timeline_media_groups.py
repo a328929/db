@@ -3,6 +3,7 @@ from typing import Any
 
 from tg_harvest.admin_jobs.clone_job_state import _clean_text
 from tg_harvest.admin_jobs.clone_media_copy import (
+    CloneMediaDeliverySafetyError,
     clone_sent_message_ids,
     clone_source_message_for_api_id,
     record_clone_media_mapping,
@@ -199,6 +200,8 @@ def handle_media_group_item(
                 # resume. Escalate to the job boundary instead of recording it
                 # as an ordinary per-item Telegram failure.
                 raise
+            except CloneMediaDeliverySafetyError:
+                raise
             except Exception as exc:
                 failed += 1
                 message = admin_error_message(exc)
@@ -247,6 +250,8 @@ def handle_media_group_item(
 
         try:
             result = copy_media_to_target(chunk_message_ids)
+        except CloneMediaDeliverySafetyError:
+            raise
         except Exception as exc:
             admin_job_append_log_fn(
                 state.job_id,
@@ -337,6 +342,8 @@ def handle_media_group_item(
                 f"reason={_clean_text(resolved_group.get('album_reason'))}",
             )
     except CloneMappingPersistenceError:
+        raise
+    except CloneMediaDeliverySafetyError:
         raise
     except Exception as exc:
         message = admin_error_message(exc)

@@ -30,6 +30,7 @@ from tg_harvest.admin_jobs.sessions import (
     _start_job_heartbeat,
     bind_client_event_loop,
 )
+from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
 from tg_harvest.domain.clone_plan import (
     CLONE_FORWARD_PRIVACY_MODE,
     CLONE_MEDIA_STRATEGY_RELAY_COPY_WITHOUT_ATTRIBUTION,
@@ -100,7 +101,7 @@ def _source_forwarding_permission(entity: Any) -> str:
 
 
 def _relay_safety_state(entity: Any) -> str:
-    """Only a private broadcast channel is safe for temporary source media."""
+    """Require a dedicated private broadcast channel with no extra viewers."""
     if entity is None:
         return "unknown"
     username = _clean_text(getattr(entity, "username", ""))
@@ -109,10 +110,26 @@ def _relay_safety_state(entity: Any) -> str:
     if bool(getattr(entity, "megagroup", False)):
         return "unsafe_group"
     if getattr(entity, "broadcast", None) is True:
+        participants_count = safe_int(getattr(entity, "participants_count", None), -1)
+        if participants_count < 0:
+            return "unknown_participants"
+        if participants_count > 2:
+            return "unsafe_extra_participants"
         return "private_channel"
     if getattr(entity, "broadcast", None) is False:
         return "unsafe_group"
     return "unknown"
+
+
+def _relay_cleanup_permission(entity: Any) -> str:
+    if entity is None:
+        return "unknown"
+    if bool(getattr(entity, "creator", False)):
+        return "ok"
+    admin_rights = getattr(entity, "admin_rights", None)
+    if admin_rights is None:
+        return "blocked"
+    return "ok" if bool(getattr(admin_rights, "delete_messages", False)) else "blocked"
 
 
 def _resolve_access(
@@ -174,7 +191,9 @@ def _base_account_result(
         "relay_access": "not_configured",
         "relay_error": "",
         "relay_send_permission": "unknown",
+        "relay_cleanup_permission": "unknown",
         "relay_safety": "not_configured",
+        "relay_participant_count": None,
         "source_latest_message": {},
         "source_latest_error": "",
     }
@@ -252,7 +271,11 @@ def _check_account_access(
             result["relay_access"] = relay_access
             result["relay_error"] = relay_error
             result["relay_send_permission"] = _target_send_permission(relay_entity)
+            result["relay_cleanup_permission"] = _relay_cleanup_permission(relay_entity)
             result["relay_safety"] = _relay_safety_state(relay_entity)
+            result["relay_participant_count"] = getattr(
+                relay_entity, "participants_count", None
+            )
         return result
     except Exception as exc:
         logging.exception(
@@ -313,10 +336,9 @@ def _account_can_migrate_media(account: dict[str, Any]) -> bool:
     )
 
 
-def _relay_usable(account: dict[str, Any]) -> bool:
+def _relay_readable(account: dict[str, Any]) -> bool:
     return (
         account.get("relay_access") == "ok"
-        and account.get("relay_send_permission") == "ok"
         and account.get("relay_safety") == "private_channel"
     )
 
@@ -325,12 +347,14 @@ def _account_can_relay_from_source(account: dict[str, Any]) -> bool:
     return (
         account.get("source_access") == "ok"
         and account.get("source_forwarding_permission") != "blocked"
-        and _relay_usable(account)
+        and _relay_readable(account)
+        and account.get("relay_send_permission") == "ok"
+        and account.get("relay_cleanup_permission") == "ok"
     )
 
 
 def _account_can_relay_to_target(account: dict[str, Any]) -> bool:
-    return _target_usable(account) and _relay_usable(account)
+    return _target_usable(account) and _relay_readable(account)
 
 
 def _configured_relay(cfg: Any | None = None) -> dict[str, Any]:
@@ -358,10 +382,13 @@ def _relay_account_diagnostics(accounts: list[dict[str, Any]]) -> str:
         relay_access = _clean_text(account.get("relay_access")) or "unknown"
         send_permission = _clean_text(account.get("relay_send_permission")) or "unknown"
         relay_safety = _clean_text(account.get("relay_safety")) or "unknown"
+        cleanup_permission = (
+            _clean_text(account.get("relay_cleanup_permission")) or "unknown"
+        )
         relay_error = _clean_text(account.get("relay_error"))
         detail = (
             f"{account_name}: access={relay_access}, send={send_permission}, "
-            f"safety={relay_safety}"
+            f"cleanup={cleanup_permission}, safety={relay_safety}"
         )
         if relay_error:
             detail += f", error={relay_error}"
@@ -392,13 +419,29 @@ def _build_deep_preflight_outcome(
     target_write_account = _first_account(accounts, _target_usable)
     migration_account = _first_account(accounts, _account_can_migrate_media)
     relay = _configured_relay(cfg)
+    relay_chat_identity = (
+        stored_chat_id_from_entity_id(int(relay["chat_id"])) if relay else 0
+    )
+    source_chat_identity = stored_chat_id_from_entity_id(
+        safe_int(run.get("source_chat_id"))
+    )
+    target_chat_identity = stored_chat_id_from_entity_id(
+        safe_int(run.get("target_chat_id"))
+    )
+    relay_is_distinct = bool(
+        relay
+        and relay_chat_identity
+        and relay_chat_identity not in {source_chat_identity, target_chat_identity}
+    )
     relay_source_account = (
         _first_account(accounts, _account_can_relay_from_source) if relay else ""
     )
     relay_target_account = (
         _first_account(accounts, _account_can_relay_to_target) if relay else ""
     )
-    relay_ready = bool(relay and relay_source_account and relay_target_account)
+    relay_ready = bool(
+        relay_is_distinct and relay_source_account and relay_target_account
+    )
     local_snapshot = source_snapshot if isinstance(source_snapshot, dict) else {}
     local_latest_message_id = safe_int(local_snapshot.get("latest_message_id"))
     remote_latest_message = _first_latest_message(accounts)
@@ -479,19 +522,27 @@ def _build_deep_preflight_outcome(
                 "才能让两个账号桥接媒体和相册迁移。"
             )
 
+    if relay and not relay_is_distinct:
+        blocking_issues.append(
+            "固定中转频道不能与源群或克隆目标相同；请配置独立的专用私有广播频道。"
+        )
+
     if relay and any(
         _clean_text(account.get("relay_safety")).startswith("unsafe_")
         for account in accounts
     ):
         blocking_issues.append(
-            "固定中转目标不是私有广播频道，拒绝暂存源媒体以避免向第三方暴露内容。"
+            "固定中转目标不是私有广播频道，或频道中存在额外成员；"
+            "拒绝暂存源媒体以避免向第三方暴露内容。"
         )
     elif relay and any(
-        account.get("relay_access") == "ok" and account.get("relay_safety") == "unknown"
+        account.get("relay_access") == "ok"
+        and _clean_text(account.get("relay_safety")).startswith("unknown")
         for account in accounts
     ):
         blocking_issues.append(
-            "无法验证固定中转频道的私有广播属性，拒绝执行中转媒体迁移。"
+            "无法验证固定中转频道的私有广播属性或成员数量，"
+            "拒绝执行中转媒体迁移。"
         )
 
     if secondary_session_status == "not_configured":

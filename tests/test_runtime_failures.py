@@ -77,6 +77,11 @@ from tg_harvest.ingest.store import (
     batch_upsert,
     load_grouped_ids_for_messages,
 )
+from tg_harvest.storage.clone import (
+    create_clone_migration,
+    create_clone_plan,
+    create_clone_run,
+)
 from tg_harvest.storage.connection import detect_sqlite_features
 from tg_harvest.storage.schema import create_schema, refresh_chat_message_counts
 
@@ -4329,6 +4334,128 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertIsNotNone(old_snapshot)
         assert old_snapshot is not None
         self.assertEqual("error", old_snapshot["status"])
+
+    def test_interrupted_clone_job_marks_migration_record_error(self) -> None:
+        job = _admin_job_create(
+            "clone_timeline_migration",
+            target_chat_id=100,
+            target_label="clone",
+        )
+        job_id = str(job["job_id"])
+        _admin_job_set_status(job_id, "running")
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                INSERT INTO chats(
+                    chat_id, chat_title, chat_type, message_count,
+                    first_seen_at, last_seen_at
+                ) VALUES (100, 'Source', 'Megagroup', 1, '2026-01-01', '2026-01-01')
+                """
+            )
+            create_clone_run(
+                conn,
+                run_id="run-interrupted",
+                job_id="structure-job",
+                source_chat={
+                    "chat_id": 100,
+                    "chat_title": "Source",
+                    "chat_type": "Megagroup",
+                    "message_count": 1,
+                },
+                target_title="Target",
+                target_kind="megagroup",
+                target_owner_session="secondary",
+            )
+            conn.execute(
+                """
+                UPDATE admin_clone_runs
+                SET status = 'done', phase = 'done'
+                WHERE run_id = 'run-interrupted'
+                """
+            )
+            create_clone_plan(
+                conn,
+                plan_id="plan-interrupted",
+                run_id="run-interrupted",
+                job_id="plan-job",
+                status="done",
+            )
+            create_clone_migration(
+                conn,
+                migration_id="migration-interrupted",
+                run_id="run-interrupted",
+                plan_id="plan-interrupted",
+                job_id=job_id,
+                status="running",
+                phase="replaying_timeline",
+            )
+            conn.execute(
+                """
+                UPDATE admin_jobs
+                SET heartbeat_at = '2000-01-01T00:00:00+00:00',
+                    updated_at = '2000-01-01T00:00:00+00:00'
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(1, _admin_recover_interrupted_jobs())
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            migration = conn.execute(
+                """
+                SELECT status, phase, error_message, completed_at
+                FROM admin_clone_migrations
+                WHERE migration_id = 'migration-interrupted'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual("error", migration["status"])
+        self.assertEqual("interrupted", migration["phase"])
+        self.assertIn("服务进程重启或退出", migration["error_message"])
+        self.assertTrue(migration["completed_at"])
+
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE admin_clone_migrations
+                SET status = 'running', phase = 'replaying_timeline',
+                    error_message = '', completed_at = NULL
+                WHERE migration_id = 'migration-interrupted'
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            reconciled = conn.execute(
+                """
+                SELECT status, phase, error_message
+                FROM admin_clone_migrations
+                WHERE migration_id = 'migration-interrupted'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual("error", reconciled["status"])
+        self.assertEqual("interrupted", reconciled["phase"])
+        self.assertIn("所属后台任务已失败", reconciled["error_message"])
 
 class AdminJobLogHandlerTests(unittest.TestCase):
     def test_handler_skips_passthrough_when_disabled(self) -> None:

@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+import time
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
@@ -7,28 +8,50 @@ from types import SimpleNamespace
 from typing import Any
 
 from tg_harvest.admin_jobs.clone_forwarding import (
+    CloneForwardOutcomeAmbiguousError,
     clone_delete_copied_relay_messages,
     clone_forward_without_source_attribution,
 )
 from tg_harvest.admin_jobs.clone_timeline_store import CloneMappingPersistenceError
 from tg_harvest.admin_jobs.common import call_with_conn, resolve_chat_entity
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
+from tg_harvest.admin_jobs.sessions import bind_client_event_loop
+from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
 from tg_harvest.domain.clone_plan import (
     clone_plan_media_relay,
     clone_plan_media_relay_chat_id,
 )
 from tg_harvest.domain.coerce import clean_text as clean_clone_media_text
 from tg_harvest.domain.coerce import optional_int
+from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 from tg_harvest.storage.clone import (
     CLONE_MEDIA_TRANSFER_DIRECT,
     CLONE_MEDIA_TRANSFER_RELAY,
     ensure_clone_media_transfers,
+    list_pending_clone_relay_cleanup,
     mark_clone_media_transfer_cleanup_done,
     mark_clone_media_transfer_source_hop_sent,
+    mark_clone_media_transfer_target_hop_observed,
     mark_clone_media_transfer_target_hop_sent,
     record_clone_media_transfer_error,
     record_clone_message_mapping,
 )
+
+CLONE_TARGET_CONFIRM_ATTEMPTS = 3
+CLONE_TARGET_CONFIRM_DELAY_SECONDS = 0.25
+CLONE_RELAY_CLEANUP_BATCH_SIZE = 100
+
+
+class CloneMediaDeliverySafetyError(RuntimeError):
+    """Stop migration when delivery or cleanup cannot be safely confirmed."""
+
+
+class CloneTargetDeliveryUnconfirmedError(CloneMediaDeliverySafetyError):
+    pass
+
+
+class CloneRelayCleanupError(CloneMediaDeliverySafetyError):
+    pass
 
 
 @dataclass(frozen=True)
@@ -134,6 +157,100 @@ def _store_target_ids(
     )
 
 
+def _store_observed_target_ids(
+    context: CloneMediaTransferContext,
+    source_message_ids: list[int],
+    target_message_ids: list[int | None],
+) -> None:
+    target_ids_by_source = {
+        source_message_id: int(target_message_id)
+        for source_message_id, target_message_id in zip(
+            source_message_ids,
+            target_message_ids,
+            strict=True,
+        )
+        if target_message_id is not None and int(target_message_id) > 0
+    }
+    if not target_ids_by_source:
+        return
+    call_with_conn(
+        context.get_conn_fn,
+        mark_clone_media_transfer_target_hop_observed,
+        run_id=context.run_id,
+        source_chat_id=context.source_chat_id,
+        target_message_ids_by_source=target_ids_by_source,
+    )
+
+
+def _message_items(result: Any) -> list[Any]:
+    if result is None:
+        return []
+    if isinstance(result, (list, tuple)):
+        return list(result)
+    try:
+        return list(result)
+    except TypeError:
+        return [result]
+
+
+def confirm_clone_target_messages(
+    client: Any,
+    target_entity: Any,
+    message_ids: list[int],
+    *,
+    context: str,
+) -> None:
+    """Require the target account to read back every Telegram-returned message."""
+    normalized_ids = [int(message_id) for message_id in message_ids if message_id]
+    if not normalized_ids:
+        raise CloneTargetDeliveryUnconfirmedError(f"{context}没有可确认的目标消息 ID")
+
+    get_messages = getattr(client, "get_messages", None)
+    if not callable(get_messages):
+        # Lightweight test clients and compatibility adapters may only expose
+        # forwarding. Real Telethon clients always provide get_messages.
+        return
+
+    last_error: Exception | None = None
+    visible_ids: set[int] = set()
+    for attempt in range(CLONE_TARGET_CONFIRM_ATTEMPTS):
+        try:
+            def _load_target_messages() -> Any:
+                with bind_client_event_loop(client):
+                    return get_messages(target_entity, ids=normalized_ids)
+
+            result = call_with_bounded_retry(
+                _load_target_messages,
+                scope="clone-target-delivery-confirmation",
+            )
+            visible_ids = {
+                int(message_id)
+                for message_id in (
+                    optional_int(getattr(item, "id", None))
+                    for item in _message_items(result)
+                )
+                if message_id is not None and int(message_id) > 0
+            }
+            if all(message_id in visible_ids for message_id in normalized_ids):
+                return
+            last_error = None
+        except Exception as exc:
+            last_error = exc
+
+        if attempt + 1 < CLONE_TARGET_CONFIRM_ATTEMPTS:
+            time.sleep(CLONE_TARGET_CONFIRM_DELAY_SECONDS)
+
+    missing_ids = [
+        message_id for message_id in normalized_ids if message_id not in visible_ids
+    ]
+    detail = f"；读取错误：{last_error}" if last_error is not None else ""
+    raise CloneTargetDeliveryUnconfirmedError(
+        f"{context}已返回目标消息 ID，但第二账号无法从克隆群回读消息 "
+        f"{missing_ids}。任务已停止且不会盲目重发；请确认第二账号仍在正确的"
+        f"克隆群，并同时具有发消息、查看消息和查看历史权限{detail}"
+    )
+
+
 def _has_complete_sent_message_ids(
     message_ids: list[int | None],
     *,
@@ -144,14 +261,14 @@ def _has_complete_sent_message_ids(
     )
 
 
-def _store_returned_target_ids(
+def _store_returned_target_ids_as_observed(
     context: CloneMediaTransferContext,
     source_message_ids: list[int],
     target_message_ids: list[int | None],
 ) -> None:
     matched_count = min(len(source_message_ids), len(target_message_ids))
     if matched_count:
-        _store_target_ids(
+        _store_observed_target_ids(
             context,
             source_message_ids[:matched_count],
             target_message_ids[:matched_count],
@@ -176,7 +293,45 @@ def _forward_target_pending(
     source_message_ids: list[int],
     transfers: list[dict],
     context: CloneMediaTransferContext,
+    forward_message_ids: list[int] | None = None,
+    confirmation_context: str = "媒体复制目标确认",
 ) -> list[dict]:
+    observed_positions = [
+        index
+        for index, transfer in enumerate(transfers)
+        if transfer.get("target_hop_status") != "sent"
+        and optional_int(transfer.get("target_message_id")) is not None
+    ]
+    if observed_positions:
+        observed_target_ids = [
+            int(transfers[index]["target_message_id"])
+            for index in observed_positions
+        ]
+        try:
+            confirm_clone_target_messages(
+                client,
+                target_entity,
+                observed_target_ids,
+                context=confirmation_context,
+            )
+            _store_target_ids(
+                context,
+                [source_message_ids[index] for index in observed_positions],
+                observed_target_ids,
+            )
+            transfers = _prepare_transfers(
+                context,
+                source_message_ids,
+                strategy=transfers[0]["transfer_strategy"],
+            )
+        except Exception as exc:
+            _record_transfer_error(
+                context,
+                [source_message_ids[index] for index in observed_positions],
+                exc,
+            )
+            raise
+
     pending_positions = [
         index
         for index, transfer in enumerate(transfers)
@@ -187,11 +342,13 @@ def _forward_target_pending(
         return transfers
 
     pending_source_ids = [source_message_ids[index] for index in pending_positions]
+    effective_forward_ids = forward_message_ids or source_message_ids
+    pending_forward_ids = [effective_forward_ids[index] for index in pending_positions]
     pending_random_ids = [
         int(transfers[index]["target_random_id"]) for index in pending_positions
     ]
     forward_messages: int | list[int] = (
-        pending_source_ids[0] if len(pending_source_ids) == 1 else pending_source_ids
+        pending_forward_ids[0] if len(pending_forward_ids) == 1 else pending_forward_ids
     )
     try:
         result = clone_forward_without_source_attribution(
@@ -202,11 +359,19 @@ def _forward_target_pending(
             random_ids=pending_random_ids,
         )
     except Exception as exc:
+        if isinstance(exc, CloneForwardOutcomeAmbiguousError):
+            safety_error = CloneMediaDeliverySafetyError(str(exc))
+            _record_transfer_error(context, pending_source_ids, safety_error)
+            raise safety_error from exc
         _record_transfer_error(context, pending_source_ids, exc)
         raise
 
     returned_ids = clone_sent_message_ids(result)
-    _store_returned_target_ids(context, pending_source_ids, returned_ids)
+    _store_returned_target_ids_as_observed(
+        context,
+        pending_source_ids,
+        returned_ids,
+    )
     if not _has_complete_sent_message_ids(
         returned_ids,
         expected_count=len(pending_source_ids),
@@ -214,6 +379,18 @@ def _forward_target_pending(
         exc = RuntimeError("目标媒体复制后未完整返回有效消息 ID")
         _record_transfer_error(context, pending_source_ids, exc)
         raise exc
+    try:
+        confirmed_ids = [int(message_id) for message_id in returned_ids if message_id]
+        confirm_clone_target_messages(
+            client,
+            target_entity,
+            confirmed_ids,
+            context=confirmation_context,
+        )
+        _store_target_ids(context, pending_source_ids, returned_ids)
+    except Exception as exc:
+        _record_transfer_error(context, pending_source_ids, exc)
+        raise
     return _prepare_transfers(
         context,
         source_message_ids,
@@ -232,6 +409,93 @@ def resolve_clone_relay_chat(client: Any, plan: dict[str, Any]) -> Any:
         clean_clone_media_text(relay.get("username")),
         allow_username_fallback=False,
     )
+
+
+def validate_clone_relay_execution(
+    *,
+    relay_entity_for_source: Any,
+    relay_entity_for_target: Any,
+    relay_chat_id: int,
+    source_chat_id: int,
+    target_chat_id: int,
+) -> None:
+    expected_id = stored_chat_id_from_entity_id(relay_chat_id)
+    protected_ids = {
+        stored_chat_id_from_entity_id(source_chat_id),
+        stored_chat_id_from_entity_id(target_chat_id),
+    }
+    if expected_id in protected_ids:
+        raise RuntimeError("固定中转频道不能与源群或克隆目标相同，请重新执行在线深度预检")
+
+    for entity in (relay_entity_for_source, relay_entity_for_target):
+        entity_id = optional_int(getattr(entity, "id", None))
+        if entity_id is None or stored_chat_id_from_entity_id(entity_id) != expected_id:
+            raise RuntimeError("两个账号解析到的中转频道身份不一致，已停止迁移")
+        if clean_clone_media_text(getattr(entity, "username", "")):
+            raise RuntimeError("固定中转频道已变为公开频道，已停止迁移")
+        if not bool(getattr(entity, "broadcast", False)) or bool(
+            getattr(entity, "megagroup", False)
+        ):
+            raise RuntimeError("固定中转目标不再是私有广播频道，已停止迁移")
+        participant_count = optional_int(getattr(entity, "participants_count", None))
+        if participant_count is None:
+            raise RuntimeError("无法确认固定中转频道成员数量，请重新执行在线深度预检")
+        if participant_count > 2:
+            raise RuntimeError("固定中转频道存在额外成员，拒绝暂存源媒体")
+
+    source_is_creator = bool(getattr(relay_entity_for_source, "creator", False))
+    source_admin_rights = getattr(relay_entity_for_source, "admin_rights", None)
+    if not source_is_creator and not bool(
+        getattr(source_admin_rights, "delete_messages", False)
+    ):
+        raise RuntimeError("源侧账号缺少中转频道删除消息权限，无法保证临时媒体清理")
+
+
+def cleanup_pending_clone_relay_messages(
+    *,
+    source_client: Any,
+    relay_entity_for_source: Any,
+    transfer_context: CloneMediaTransferContext,
+    log_step: Any | None = None,
+) -> int:
+    transfers = call_with_conn(
+        transfer_context.get_conn_fn,
+        list_pending_clone_relay_cleanup,
+        run_id=transfer_context.run_id,
+        source_chat_id=transfer_context.source_chat_id,
+        relay_chat_id=transfer_context.relay_chat_id,
+    )
+    cleaned = 0
+    for index in range(0, len(transfers), CLONE_RELAY_CLEANUP_BATCH_SIZE):
+        batch = transfers[index : index + CLONE_RELAY_CLEANUP_BATCH_SIZE]
+        cleanup_ids = [int(transfer["relay_message_id"]) for transfer in batch]
+        cleanup_source_ids = [int(transfer["source_message_id"]) for transfer in batch]
+        try:
+            clone_delete_copied_relay_messages(
+                source_client,
+                relay_entity_for_source,
+                cleanup_ids,
+            )
+            call_with_conn(
+                transfer_context.get_conn_fn,
+                mark_clone_media_transfer_cleanup_done,
+                run_id=transfer_context.run_id,
+                source_chat_id=transfer_context.source_chat_id,
+                source_message_ids=cleanup_source_ids,
+            )
+        except Exception as exc:
+            error = CloneRelayCleanupError(
+                "克隆消息已送达目标，但中转临时消息清理失败；任务已停止，"
+                "请保留当前记录并重新发起迁移以重试清理："
+                f"{exc}"
+            )
+            _record_transfer_error(transfer_context, cleanup_source_ids, error)
+            raise error from exc
+        cleaned += len(batch)
+
+    if cleaned and callable(log_step):
+        log_step(f"已确认清理 {cleaned} 条中转临时消息")
+    return cleaned
 
 
 def copy_clone_media_direct_without_source(
@@ -255,6 +519,7 @@ def copy_clone_media_direct_without_source(
         source_message_ids=source_message_ids,
         transfers=transfers,
         context=transfer_context,
+        confirmation_context="媒体复制到克隆群确认",
     )
     return _copy_result(
         _transfer_target_ids(transfers),
@@ -311,6 +576,14 @@ def copy_clone_media_via_relay_without_source(
                 random_ids=pending_random_ids,
             )
         except Exception as exc:
+            if isinstance(exc, CloneForwardOutcomeAmbiguousError):
+                safety_error = CloneMediaDeliverySafetyError(str(exc))
+                _record_transfer_error(
+                    transfer_context,
+                    pending_source_ids,
+                    safety_error,
+                )
+                raise safety_error from exc
             _record_transfer_error(transfer_context, pending_source_ids, exc)
             raise
 
@@ -351,91 +624,29 @@ def copy_clone_media_via_relay_without_source(
     if any(message_id is None for message_id in relay_message_ids):
         raise RuntimeError("中转媒体状态不完整，不能执行第二跳")
 
-    target_pending_positions = [
-        index
-        for index, transfer in enumerate(transfers)
-        if transfer.get("target_hop_status") != "sent"
+    if callable(log_step) and any(
+        transfer.get("target_hop_status") != "sent"
         or transfer.get("target_message_id") is None
-    ]
-    if target_pending_positions:
-        pending_source_ids = [
-            source_message_ids[index] for index in target_pending_positions
-        ]
-        pending_relay_ids = [
-            int(relay_message_ids[index]) for index in target_pending_positions
-        ]
-        pending_random_ids = [
-            int(transfers[index]["target_random_id"])
-            for index in target_pending_positions
-        ]
-        if callable(log_step):
-            log_step("媒体桥接第二跳：中转频道 -> 克隆群")
-        second_hop_messages: int | list[int] = (
-            pending_relay_ids[0] if len(pending_relay_ids) == 1 else pending_relay_ids
-        )
-        try:
-            target_result = clone_forward_without_source_attribution(
-                target_client,
-                target_entity,
-                second_hop_messages,
-                from_peer=relay_entity_for_target,
-                random_ids=pending_random_ids,
-            )
-        except Exception as exc:
-            _record_transfer_error(transfer_context, pending_source_ids, exc)
-            raise
-
-        target_sent_ids = clone_sent_message_ids(target_result)
-        _store_returned_target_ids(
-            transfer_context,
-            pending_source_ids,
-            target_sent_ids,
-        )
-        if not _has_complete_sent_message_ids(
-            target_sent_ids,
-            expected_count=len(pending_source_ids),
-        ):
-            exc = RuntimeError("中转媒体复制到目标后未完整返回有效消息 ID")
-            _record_transfer_error(transfer_context, pending_source_ids, exc)
-            raise exc
-        transfers = _prepare_transfers(
-            transfer_context,
-            source_message_ids,
-            strategy=CLONE_MEDIA_TRANSFER_RELAY,
-        )
-
-    cleanup_transfers = [
-        transfer
         for transfer in transfers
-        if transfer.get("target_hop_status") == "sent"
-        and transfer.get("cleanup_status") != "done"
-        and transfer.get("relay_message_id") is not None
-    ]
-    if cleanup_transfers:
-        cleanup_ids = [
-            int(transfer["relay_message_id"]) for transfer in cleanup_transfers
-        ]
-        cleanup_source_ids = [
-            int(transfer["source_message_id"]) for transfer in cleanup_transfers
-        ]
-        try:
-            clone_delete_copied_relay_messages(
-                source_client,
-                relay_entity_for_source,
-                cleanup_ids,
-            )
-            call_with_conn(
-                transfer_context.get_conn_fn,
-                mark_clone_media_transfer_cleanup_done,
-                run_id=transfer_context.run_id,
-                source_chat_id=transfer_context.source_chat_id,
-                source_message_ids=cleanup_source_ids,
-            )
-            if callable(log_step):
-                log_step("已清理已确认送达的中转临时消息")
-        except Exception as exc:
-            _record_transfer_error(transfer_context, cleanup_source_ids, exc)
-            logging.warning("清理中转媒体失败，将在后续恢复时重试: %s", exc)
+    ):
+        log_step("媒体桥接第二跳：中转频道 -> 克隆群")
+    transfers = _forward_target_pending(
+        client=target_client,
+        target_entity=target_entity,
+        source_peer=relay_entity_for_target,
+        source_message_ids=source_message_ids,
+        transfers=transfers,
+        context=transfer_context,
+        forward_message_ids=[int(message_id) for message_id in relay_message_ids],
+        confirmation_context="中转第二跳（第二账号 -> 克隆群）确认",
+    )
+
+    cleanup_pending_clone_relay_messages(
+        source_client=source_client,
+        relay_entity_for_source=relay_entity_for_source,
+        transfer_context=transfer_context,
+        log_step=log_step,
+    )
 
     return _copy_result(
         _transfer_target_ids(transfers),

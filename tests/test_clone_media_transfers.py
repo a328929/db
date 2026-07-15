@@ -8,6 +8,7 @@ from tg_harvest.admin_jobs.clone_media_copy import (
     CloneMediaTransferContext,
     copy_clone_media_direct_without_source,
     copy_clone_media_via_relay_without_source,
+    validate_clone_relay_execution,
 )
 from tg_harvest.storage.clone import (
     create_clone_migration,
@@ -432,6 +433,150 @@ def test_relay_delivery_resumes_second_hop_without_repeating_first_hop(tmp_path)
     assert resumed_source_client.delete_calls == [
         ("relay", [7100, 7101], {"revoke": True})
     ]
+
+
+def test_relay_delivery_stops_when_second_account_cannot_read_target_message(
+    tmp_path,
+    monkeypatch,
+):
+    class _InvisibleTargetClient(_ForwardClient):
+        def get_messages(self, _target, *, ids):
+            items = ids if isinstance(ids, list) else [ids]
+            return [None for _ in items]
+
+    class _VisibleTargetClient(_ForwardClient):
+        def get_messages(self, _target, *, ids):
+            items = ids if isinstance(ids, list) else [ids]
+            return [SimpleNamespace(id=int(message_id)) for message_id in items]
+
+    monkeypatch.setattr(
+        "tg_harvest.admin_jobs.clone_media_copy.time.sleep",
+        lambda *_args: None,
+    )
+    db_path = tmp_path / "relay-target-unconfirmed.db"
+    context = _create_context(db_path, relay_chat_id=999)
+    source_client = _ForwardClient(first_id=7100)
+    invisible_target = _InvisibleTargetClient(first_id=8100)
+
+    with pytest.raises(RuntimeError, match="第二账号无法从克隆群回读"):
+        copy_clone_media_via_relay_without_source(
+            source_client=source_client,
+            target_client=invisible_target,
+            relay_entity_for_source="relay",
+            relay_entity_for_target="relay",
+            target_entity="target",
+            message_ids=21,
+            source_entity="source",
+            transfer_context=context,
+        )
+
+    conn = _connect(db_path)
+    try:
+        transfer = conn.execute(
+            """
+            SELECT target_hop_status, target_message_id, cleanup_status
+            FROM admin_clone_media_transfers
+            WHERE run_id = 'run-1' AND source_message_id = 21
+            """
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert dict(transfer) == {
+        "target_hop_status": "unconfirmed",
+        "target_message_id": 8100,
+        "cleanup_status": "pending",
+    }
+    assert source_client.delete_calls == []
+
+    resumed_source = _ForwardClient(first_id=7200)
+    visible_target = _VisibleTargetClient(first_id=9000)
+    result = copy_clone_media_via_relay_without_source(
+        source_client=resumed_source,
+        target_client=visible_target,
+        relay_entity_for_source="relay",
+        relay_entity_for_target="relay",
+        target_entity="target",
+        message_ids=21,
+        source_entity="source",
+        transfer_context=context,
+    )
+
+    assert result.id == 8100
+    assert resumed_source.forward_calls == []
+    assert visible_target.forward_calls == []
+    assert resumed_source.delete_calls == [("relay", [7100], {"revoke": True})]
+
+
+def test_relay_cleanup_failure_is_fatal_and_retried_without_reforwarding(tmp_path):
+    class _CleanupFailClient(_ForwardClient):
+        def delete_messages(self, target, message_ids, **kwargs):
+            self.delete_calls.append((target, message_ids, kwargs))
+            raise RuntimeError("delete permission denied")
+
+    context = _create_context(tmp_path / "relay-cleanup-retry.db", relay_chat_id=999)
+    failing_source = _CleanupFailClient(first_id=7100)
+    target_client = _ForwardClient(first_id=8100)
+
+    with pytest.raises(RuntimeError, match="中转临时消息清理失败"):
+        copy_clone_media_via_relay_without_source(
+            source_client=failing_source,
+            target_client=target_client,
+            relay_entity_for_source="relay",
+            relay_entity_for_target="relay",
+            target_entity="target",
+            message_ids=21,
+            source_entity="source",
+            transfer_context=context,
+        )
+
+    resumed_source = _ForwardClient(first_id=7200)
+    resumed_target = _ForwardClient(first_id=9000)
+    result = copy_clone_media_via_relay_without_source(
+        source_client=resumed_source,
+        target_client=resumed_target,
+        relay_entity_for_source="relay",
+        relay_entity_for_target="relay",
+        target_entity="target",
+        message_ids=21,
+        source_entity="source",
+        transfer_context=context,
+    )
+
+    assert result.id == 8100
+    assert resumed_source.forward_calls == []
+    assert resumed_target.forward_calls == []
+    assert resumed_source.delete_calls == [("relay", [7100], {"revoke": True})]
+
+
+def test_relay_execution_rejects_source_identity_and_extra_participants():
+    relay = SimpleNamespace(
+        id=999,
+        username="",
+        broadcast=True,
+        megagroup=False,
+        participants_count=2,
+        creator=True,
+    )
+
+    with pytest.raises(RuntimeError, match="不能与源群或克隆目标相同"):
+        validate_clone_relay_execution(
+            relay_entity_for_source=relay,
+            relay_entity_for_target=relay,
+            relay_chat_id=999,
+            source_chat_id=999,
+            target_chat_id=777,
+        )
+
+    relay.participants_count = 3
+    with pytest.raises(RuntimeError, match="存在额外成员"):
+        validate_clone_relay_execution(
+            relay_entity_for_source=relay,
+            relay_entity_for_target=relay,
+            relay_chat_id=999,
+            source_chat_id=100,
+            target_chat_id=777,
+        )
 
 
 def test_relay_delivery_replans_unsent_target_hop_for_new_target_account(tmp_path):

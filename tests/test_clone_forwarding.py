@@ -1,7 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from tg_harvest.admin_jobs.clone_forwarding import (
+    CloneForwardOutcomeAmbiguousError,
     clone_forward_without_source_attribution,
 )
 
@@ -72,6 +75,25 @@ def test_clone_forward_reuses_persisted_random_ids_when_available():
     assert client.request.random_id == [101, 102]
     assert client.request.drop_author is True
     assert client.request.silent is True
+
+
+def test_clone_forward_turns_duplicate_random_id_into_ambiguous_outcome():
+    class RandomIdDuplicateError(RuntimeError):
+        pass
+
+    class _DuplicateClient(_DurableForwardClient):
+        def __call__(self, request):
+            self.request = request
+            raise RandomIdDuplicateError("random ID was already used")
+
+    with pytest.raises(CloneForwardOutcomeAmbiguousError, match="避免重复消息"):
+        clone_forward_without_source_attribution(
+            _DuplicateClient(),
+            "target",
+            11,
+            from_peer="source",
+            random_ids=[101],
+        )
 
 
 def test_clone_forward_messages_calls_are_centralized():

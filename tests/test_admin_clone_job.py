@@ -298,6 +298,7 @@ class _DeepPreflightClient:
                 creator=True,
                 broadcast=True,
                 megagroup=False,
+                participants_count=2,
                 username="public_relay" if self.relay_public else "",
                 default_banned_rights=SimpleNamespace(send_messages=False),
             )
@@ -2193,7 +2194,15 @@ class _RelayMediaClient:
         if normalized in {999, -100999, -999}:
             if not self.relay_ok:
                 raise ValueError("Could not find the input entity")
-            return SimpleNamespace(id=999, title="Relay Channel")
+            return SimpleNamespace(
+                id=999,
+                title="Relay Channel",
+                creator=True,
+                broadcast=True,
+                megagroup=False,
+                username="",
+                participants_count=2,
+            )
         raise ValueError("Could not find the input entity")
 
     def get_messages(self, _entity, **kwargs):
@@ -2365,7 +2374,18 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
 
     assert source_client.forward_calls == [
         (
-            (SimpleNamespace(id=999, title="Relay Channel"), 1),
+            (
+                SimpleNamespace(
+                    id=999,
+                    title="Relay Channel",
+                    creator=True,
+                    broadcast=True,
+                    megagroup=False,
+                    username="",
+                    participants_count=2,
+                ),
+                1,
+            ),
                 {
                     "from_peer": SimpleNamespace(id=100, title="Source Group"),
                     "drop_author": True,
@@ -2377,7 +2397,15 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
         (
             (SimpleNamespace(id=777, title="Source Backup"), 9201),
                 {
-                    "from_peer": SimpleNamespace(id=999, title="Relay Channel"),
+                    "from_peer": SimpleNamespace(
+                        id=999,
+                        title="Relay Channel",
+                        creator=True,
+                        broadcast=True,
+                        megagroup=False,
+                        username="",
+                        participants_count=2,
+                    ),
                     "drop_author": True,
                     "silent": True,
             },
@@ -2385,7 +2413,18 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
     ]
     assert source_client.delete_calls == [
         (
-            (SimpleNamespace(id=999, title="Relay Channel"), [9201]),
+            (
+                SimpleNamespace(
+                    id=999,
+                    title="Relay Channel",
+                    creator=True,
+                    broadcast=True,
+                    megagroup=False,
+                    username="",
+                    participants_count=2,
+                ),
+                [9201],
+            ),
             {"revoke": True},
         )
     ]

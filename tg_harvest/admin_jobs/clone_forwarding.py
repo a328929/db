@@ -3,6 +3,10 @@ from typing import Any
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 
 
+class CloneForwardOutcomeAmbiguousError(RuntimeError):
+    """Telegram may have accepted the forward but no recoverable response remains."""
+
+
 def _message_id_list(messages: Any) -> tuple[list[int], bool]:
     if isinstance(messages, (list, tuple)):
         return [int(message_id) for message_id in messages], False
@@ -36,7 +40,25 @@ def _forward_with_random_ids(
             drop_author=True,
             random_id=[int(random_id) for random_id in random_ids],
         )
-        result = client(request)
+        previous_raise_last_error = getattr(client, "_raise_last_call_error", None)
+        if previous_raise_last_error is not None:
+            client._raise_last_call_error = True
+        try:
+            result = client(request)
+        except Exception as exc:
+            error_text = f"{type(exc).__name__}: {exc}".lower()
+            if "randomidduplicate" in error_text or (
+                "random id" in error_text
+                and ("duplicate" in error_text or "already used" in error_text)
+            ):
+                raise CloneForwardOutcomeAmbiguousError(
+                    "Telegram 报告该随机 ID 已被使用，说明此前转发可能已经成功，"
+                    "但本地没有保存对应消息 ID；任务已停止以避免重复消息"
+                ) from exc
+            raise
+        finally:
+            if previous_raise_last_error is not None:
+                client._raise_last_call_error = previous_raise_last_error
         resolve_messages = getattr(client, "_get_response_message", None)
         if not callable(resolve_messages):
             raise RuntimeError("当前 Telegram 客户端不支持可恢复媒体转发")

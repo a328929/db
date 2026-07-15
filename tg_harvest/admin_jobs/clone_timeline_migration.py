@@ -12,11 +12,16 @@ from tg_harvest.admin_jobs.clone_execution import (
 )
 from tg_harvest.admin_jobs.clone_job_state import _clean_text
 from tg_harvest.admin_jobs.clone_media_copy import (
+    CloneMediaDeliverySafetyError,
     CloneMediaTransferContext,
+    CloneTargetDeliveryUnconfirmedError,
+    cleanup_pending_clone_relay_messages,
+    confirm_clone_target_messages,
     copy_clone_media_direct_without_source,
     copy_clone_media_via_relay_without_source,
     record_clone_media_mapping,
     resolve_clone_relay_chat,
+    validate_clone_relay_execution,
 )
 from tg_harvest.admin_jobs.clone_media_resolver import clone_api_resolve_media_message
 from tg_harvest.admin_jobs.clone_timeline_media_groups import handle_media_group_item
@@ -475,6 +480,16 @@ def _admin_clone_timeline_migration_job_runner(
             if state.using_relay and target_client is not None
             else None
         )
+        if state.using_relay:
+            if relay_entity_for_source is None or relay_entity_for_target is None:
+                raise RuntimeError("固定中转频道桥接实体尚未初始化")
+            validate_clone_relay_execution(
+                relay_entity_for_source=relay_entity_for_source,
+                relay_entity_for_target=relay_entity_for_target,
+                relay_chat_id=clone_plan_media_relay_chat_id(plan),
+                source_chat_id=source_chat_id,
+                target_chat_id=target_chat_id,
+            )
         media_transfer_context = CloneMediaTransferContext(
             get_conn_fn=get_conn_fn,
             migration_id=migration_id,
@@ -488,6 +503,15 @@ def _admin_clone_timeline_migration_job_runner(
                 clone_plan_media_relay_chat_id(plan) if state.using_relay else 0
             ),
         )
+        if state.using_relay:
+            if source_client is None or relay_entity_for_source is None:
+                raise RuntimeError("固定中转频道清理连接尚未初始化")
+            cleanup_pending_clone_relay_messages(
+                source_client=source_client,
+                relay_entity_for_source=relay_entity_for_source,
+                transfer_context=media_transfer_context,
+                log_step=lambda message: admin_job_append_log_fn(job_id, message),
+            )
 
         def copy_media_to_target(message_ids: int | list[int]) -> Any:
             if (
@@ -598,6 +622,7 @@ def _admin_clone_timeline_migration_job_runner(
                         ):
                             continue
                         delivery_random_id: int | None = None
+                        target_message_id: int | None = None
                         try:
                             delivery = prepare_text_mapping_delivery(
                                 get_conn_fn=get_conn_fn,
@@ -619,14 +644,40 @@ def _admin_clone_timeline_migration_job_runner(
                                 )
                             if text_client is None or text_target_entity is None:
                                 raise RuntimeError("文本迁移账号或目标实体尚未初始化")
-                            target_message_id = send_clone_text_chunk(
+                            target_message_id = int(
+                                delivery.get("target_message_id") or 0
+                            ) or None
+                            if target_message_id is None:
+                                target_message_id = send_clone_text_chunk(
+                                    text_client,
+                                    text_target_entity,
+                                    chunk,
+                                    random_id=delivery_random_id,
+                                )
+                                if target_message_id is None or target_message_id <= 0:
+                                    raise RuntimeError(
+                                        "时间线文本发送后未返回有效目标消息 ID"
+                                    )
+                                record_text_mapping(
+                                    get_conn_fn=get_conn_fn,
+                                    migration_id=migration_id,
+                                    run_id=run_id,
+                                    plan_id=plan_id,
+                                    source_message=source_message,
+                                    target_chat_id=target_chat_id,
+                                    target_message_id=target_message_id,
+                                    chunk_index=chunk_index,
+                                    chunk_count=chunk_count,
+                                    status="pending_confirmation",
+                                    delivery_random_id=delivery_random_id,
+                                    delivery_account=text_account,
+                                )
+                            confirm_clone_target_messages(
                                 text_client,
                                 text_target_entity,
-                                chunk,
-                                random_id=delivery_random_id,
+                                [int(target_message_id)],
+                                context="第二账号文本发送到克隆群确认",
                             )
-                            if target_message_id is None or target_message_id <= 0:
-                                raise RuntimeError("时间线文本发送后未返回有效目标消息 ID")
                         except CloneMappingPersistenceError:
                             raise
                         except Exception as exc:
@@ -639,7 +690,7 @@ def _admin_clone_timeline_migration_job_runner(
                                 plan_id=plan_id,
                                 source_message=source_message,
                                 target_chat_id=target_chat_id,
-                                target_message_id=None,
+                                target_message_id=target_message_id,
                                 chunk_index=chunk_index,
                                 chunk_count=chunk_count,
                                 status="error",
@@ -651,6 +702,8 @@ def _admin_clone_timeline_migration_job_runner(
                                 job_id,
                                 f"时间线文本发送失败：source_message_id={source_message_id}，{message}",
                             )
+                            if isinstance(exc, CloneTargetDeliveryUnconfirmedError):
+                                raise
                             break
                         record_text_mapping(
                             get_conn_fn=get_conn_fn,
@@ -706,6 +759,8 @@ def _admin_clone_timeline_migration_job_runner(
                             result,
                             "时间线单条媒体复制",
                         )
+                    except CloneMediaDeliverySafetyError:
+                        raise
                     except Exception as exc:
                         state.counters.media_failed += 1
                         state.counters.processed += 1

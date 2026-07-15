@@ -437,6 +437,83 @@ def mark_clone_media_transfer_target_hop_sent(
         cur.close()
 
 
+def mark_clone_media_transfer_target_hop_observed(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    source_chat_id: int,
+    target_message_ids_by_source: dict[int, int],
+) -> None:
+    """Persist Telegram's returned IDs before independently confirming delivery."""
+    if not target_message_ids_by_source:
+        return
+    now = _now_iso()
+    cur = conn.cursor()
+    try:
+        for source_message_id, target_message_id in target_message_ids_by_source.items():
+            cur.execute(
+                """
+                UPDATE admin_clone_media_transfers
+                SET target_message_id = ?, target_hop_status = 'unconfirmed',
+                    error_message = '', updated_at = ?
+                WHERE run_id = ? AND source_chat_id = ? AND source_message_id = ?
+                  AND target_hop_status != 'sent'
+                """,
+                (
+                    int(target_message_id),
+                    now,
+                    _clean_text(run_id),
+                    int(source_chat_id),
+                    int(source_message_id),
+                ),
+            )
+            if cur.rowcount != 1:
+                raise RuntimeError("目标媒体待确认状态写入失败")
+        conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        cur.close()
+
+
+def list_pending_clone_relay_cleanup(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    source_chat_id: int,
+    relay_chat_id: int,
+) -> list[dict]:
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM admin_clone_media_transfers
+            WHERE run_id = ?
+              AND source_chat_id = ?
+              AND transfer_strategy = 'relay'
+              AND relay_chat_id = ?
+              AND target_hop_status = 'sent'
+              AND cleanup_status != 'done'
+              AND relay_message_id IS NOT NULL
+            ORDER BY source_message_id ASC
+            """,
+            (
+                _clean_text(run_id),
+                int(source_chat_id),
+                int(relay_chat_id),
+            ),
+        )
+        return [
+            item
+            for item in (_transfer_from_row(row) for row in cur.fetchall())
+            if item is not None
+        ]
+    finally:
+        cur.close()
+
+
 def mark_clone_media_transfer_cleanup_done(
     conn: sqlite3.Connection,
     *,

@@ -99,3 +99,104 @@ def test_preflight_selects_a_writable_owner_over_an_accessible_channel_member():
     assert outcome["text_strategy"] == "database_replay"
     assert not any("没有账号拥有" in item for item in outcome["blocking_issues"])
     assert any("primary" in item for item in outcome["warnings"])
+
+
+def test_relay_target_account_only_needs_read_access_to_relay():
+    accounts = [
+        {
+            "account": "primary",
+            "session_status": "ok",
+            "source_access": "ok",
+            "source_forwarding_permission": "ok",
+            "target_access": "missing",
+            "target_send_permission": "unknown",
+            "relay_access": "ok",
+            "relay_send_permission": "ok",
+            "relay_cleanup_permission": "ok",
+            "relay_safety": "private_channel",
+            "source_latest_message": {"message_id": 10},
+            "source_latest_error": "",
+        },
+        {
+            "account": "secondary",
+            "session_status": "ok",
+            "source_access": "missing",
+            "source_forwarding_permission": "unknown",
+            "target_access": "ok",
+            "target_send_permission": "ok",
+            "relay_access": "ok",
+            "relay_send_permission": "blocked",
+            "relay_cleanup_permission": "blocked",
+            "relay_safety": "private_channel",
+            "source_latest_message": {},
+            "source_latest_error": "",
+        },
+    ]
+
+    outcome = _build_deep_preflight_outcome(
+        run={"run_id": "run-1", "source_chat_id": 100, "target_chat_id": 777},
+        accounts=accounts,
+        network_access_checked=True,
+        source_snapshot={"latest_message_id": 10, "message_count": 10},
+        cfg=SimpleNamespace(
+            clone_relay_chat_id=999,
+            clone_relay_chat_username="",
+        ),
+    )
+
+    relay = outcome["capabilities"]["media_relay"]
+    assert relay["enabled"] is True
+    assert relay["source_account"] == "primary"
+    assert relay["target_account"] == "secondary"
+
+
+def test_preflight_blocks_relay_that_matches_source_or_has_extra_viewers():
+    base_account = {
+        "session_status": "ok",
+        "source_forwarding_permission": "ok",
+        "relay_access": "ok",
+        "relay_send_permission": "ok",
+        "relay_cleanup_permission": "ok",
+        "relay_safety": "private_channel",
+        "source_latest_error": "",
+    }
+    accounts = [
+        {
+            **base_account,
+            "account": "primary",
+            "source_access": "ok",
+            "target_access": "missing",
+            "target_send_permission": "unknown",
+            "source_latest_message": {"message_id": 10},
+        },
+        {
+            **base_account,
+            "account": "secondary",
+            "source_access": "missing",
+            "target_access": "ok",
+            "target_send_permission": "ok",
+            "source_latest_message": {},
+        },
+    ]
+    cfg = SimpleNamespace(clone_relay_chat_id=999, clone_relay_chat_username="")
+
+    same_chat = _build_deep_preflight_outcome(
+        run={"run_id": "run-1", "source_chat_id": 999, "target_chat_id": 777},
+        accounts=accounts,
+        network_access_checked=True,
+        source_snapshot={"latest_message_id": 10, "message_count": 10},
+        cfg=cfg,
+    )
+    assert any("不能与源群或克隆目标相同" in item for item in same_chat["blocking_issues"])
+    assert same_chat["capabilities"]["media_relay"]["enabled"] is False
+
+    accounts[0]["relay_safety"] = "unsafe_extra_participants"
+    accounts[1]["relay_safety"] = "unsafe_extra_participants"
+    extra_viewers = _build_deep_preflight_outcome(
+        run={"run_id": "run-1", "source_chat_id": 100, "target_chat_id": 777},
+        accounts=accounts,
+        network_access_checked=True,
+        source_snapshot={"latest_message_id": 10, "message_count": 10},
+        cfg=cfg,
+    )
+    assert any("额外成员" in item for item in extra_viewers["blocking_issues"])

@@ -1,6 +1,7 @@
 import contextvars
 import logging
 import os
+import sqlite3
 import threading
 import uuid
 from contextlib import closing
@@ -707,12 +708,108 @@ def _admin_recover_interrupted_jobs_locked(*, include_foreign_owner: bool) -> in
         if not is_stale and not owner_is_confirmed_dead:
             continue
         _admin_job_set_status(job_id, "error")
+        _admin_mark_interrupted_clone_records(job_id, now=now)
         _admin_job_append_log(
             job_id,
             "任务因服务进程重启或退出而中断；已标记为失败，请按需要重新发起。",
         )
         recovered += 1
+    _admin_reconcile_terminal_clone_records(now=now)
     return recovered
+
+
+def _admin_mark_interrupted_clone_records(job_id: str, *, now: datetime) -> None:
+    """Keep clone-specific records consistent with a recovered admin job."""
+    message = "任务因服务进程重启或退出而中断，请重新发起以恢复未完成步骤"
+    now_text = now.isoformat()
+    with closing(_admin_connect()) as conn:
+        cur = conn.cursor()
+        try:
+            cur.execute(
+                """
+                UPDATE admin_clone_migrations
+                SET status = 'error', phase = 'interrupted', error_message = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE job_id = ? AND status IN ('queued', 'running')
+                """,
+                (message, now_text, now_text, str(job_id)),
+            )
+            cur.execute(
+                """
+                UPDATE admin_clone_plans
+                SET status = 'error', error_message = ?, updated_at = ?, completed_at = ?
+                WHERE job_id = ? AND status IN ('queued', 'running')
+                """,
+                (message, now_text, now_text, str(job_id)),
+            )
+            cur.execute(
+                """
+                UPDATE admin_clone_runs
+                SET status = 'error', phase = 'interrupted', error_message = ?,
+                    updated_at = ?, completed_at = ?
+                WHERE job_id = ? AND status IN ('queued', 'running')
+                """,
+                (message, now_text, now_text, str(job_id)),
+            )
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "no such table" not in str(exc).lower():
+                raise
+        finally:
+            cur.close()
+
+
+def _admin_reconcile_terminal_clone_records(*, now: datetime) -> None:
+    """Heal clone rows left active after their owning job already failed."""
+    message = "所属后台任务已失败或中断，请重新发起以恢复未完成步骤"
+    now_text = now.isoformat()
+    updates = (
+        """
+        UPDATE admin_clone_migrations
+        SET status = 'error', phase = 'interrupted', error_message = ?,
+            updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_migrations.job_id
+                AND j.status = 'error'
+          )
+        """,
+        """
+        UPDATE admin_clone_plans
+        SET status = 'error', error_message = ?, updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_plans.job_id
+                AND j.status = 'error'
+          )
+        """,
+        """
+        UPDATE admin_clone_runs
+        SET status = 'error', phase = 'interrupted', error_message = ?,
+            updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_runs.job_id
+                AND j.status = 'error'
+          )
+        """,
+    )
+    with closing(_admin_connect()) as conn:
+        cur = conn.cursor()
+        try:
+            for sql in updates:
+                cur.execute(sql, (message, now_text, now_text))
+            conn.commit()
+        except sqlite3.OperationalError as exc:
+            conn.rollback()
+            if "no such table" not in str(exc).lower():
+                raise
+        finally:
+            cur.close()
 
 
 def _admin_recover_interrupted_jobs() -> int:
