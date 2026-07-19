@@ -159,6 +159,70 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         self.assertEqual(MembershipScope.NONE_JOINED, scopes[3])
         self.assertEqual(MembershipScope.UNOBSERVABLE, scopes[4])
 
+    def test_refresh_chat_states_does_not_rewrite_unchanged_rows(self) -> None:
+        self._refresh_states()
+        self.conn.execute("CREATE TABLE sync_state_update_audit(chat_id INTEGER)")
+        self.conn.execute(
+            """
+            CREATE TRIGGER audit_sync_state_update
+            AFTER UPDATE ON sync_chat_state
+            BEGIN
+                INSERT INTO sync_state_update_audit(chat_id) VALUES (new.chat_id);
+            END
+            """
+        )
+        self.conn.commit()
+
+        refresh_chat_states(
+            self.conn,
+            chat_rows=self.chat_rows,
+            joined_by_account={"primary": {1}, "secondary": {1, 2}},
+            cached_by_account={"primary": set(), "secondary": {3}},
+            account_keys=["primary", "secondary"],
+            now_text="2026-07-03 00:05:00",
+        )
+
+        updates = self.conn.execute(
+            "SELECT chat_id FROM sync_state_update_audit"
+        ).fetchall()
+        self.assertEqual([], updates)
+
+    def test_refresh_chat_states_handles_large_active_chat_sets(self) -> None:
+        setlimit = getattr(self.conn, "setlimit", None)
+        if setlimit is None or not hasattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER"):
+            self.skipTest("SQLite variable limit API is unavailable")
+
+        chat_rows = [
+            {
+                "chat_id": chat_id,
+                "chat_title": f"Chat {chat_id}",
+                "chat_username": "",
+                "last_message_id": 0,
+            }
+            for chat_id in range(10, 1010)
+        ]
+        previous_limit = setlimit(
+            sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,
+            999,
+        )
+        try:
+            result = refresh_chat_states(
+                self.conn,
+                chat_rows=chat_rows,
+                joined_by_account={},
+                cached_by_account={},
+                account_keys=[],
+                now_text="2026-07-03 00:05:00",
+            )
+        finally:
+            setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
+        self.assertEqual(1000, result["active_chat_count"])
+        self.assertEqual(
+            1000,
+            self.conn.execute("SELECT COUNT(*) FROM sync_chat_state").fetchone()[0],
+        )
+
     def test_pending_merge_generation_and_dirty_generation_survives_in_flight(self) -> None:
         self._refresh_states()
         cfg = _cfg()

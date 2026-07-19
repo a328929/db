@@ -527,6 +527,15 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_clone_media_transfers_recovery",
+        "CREATE INDEX idx_clone_media_transfers_recovery "
+        "ON admin_clone_media_transfers(run_id, target_hop_status, cleanup_status)",
+    )
+
+
 def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
@@ -593,4 +602,5 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_clone_run_indexes(cur)
     _create_admin_clone_plan_indexes(cur)
     _create_admin_clone_migration_indexes(cur)
+    _create_admin_clone_media_transfer_indexes(cur)
     _create_sync_scheduler_indexes(cur)

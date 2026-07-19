@@ -245,6 +245,96 @@ def test_recovery_storage_saves_candidates_and_recovers_chats():
         conn.close()
 
 
+def test_recover_multiple_chats_is_atomic_when_one_insert_fails():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _create_recovery_schema(conn)
+    try:
+        replace_recovery_chat_scan_results(
+            conn,
+            [
+                SessionChatRecoveryRow(chat_id=1, chat_title="One"),
+                SessionChatRecoveryRow(chat_id=2, chat_title="Two"),
+            ],
+            scan_job_id="scan-atomic",
+            scanned_at="2026-04-01T00:00:00+00:00",
+        )
+        conn.execute(
+            """
+            CREATE TRIGGER fail_second_recovery_chat
+            BEFORE INSERT ON chats
+            WHEN new.chat_id = 2
+            BEGIN
+                SELECT RAISE(ABORT, 'second chat failed');
+            END
+            """
+        )
+        conn.commit()
+
+        try:
+            recover_chats_from_candidates(
+                conn,
+                chat_ids=[1, 2],
+                job_id="restore-atomic",
+                recovered_at="2026-04-02T00:00:00+00:00",
+            )
+        except sqlite3.IntegrityError as exc:
+            assert "second chat failed" in str(exc)
+        else:
+            raise AssertionError("expected the second recovery insert to fail")
+
+        assert conn.execute("SELECT COUNT(*) FROM chats").fetchone()[0] == 0
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM admin_recovery_chats WHERE recovered_at IS NOT NULL"
+            ).fetchone()[0]
+            == 0
+        )
+    finally:
+        conn.close()
+
+
+def test_recover_many_candidates_handles_large_chat_id_sets():
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    _create_recovery_schema(conn)
+    try:
+        candidates = [
+            SessionChatRecoveryRow(chat_id=chat_id, chat_title=f"Chat {chat_id}")
+            for chat_id in range(1, 1001)
+        ]
+        replace_recovery_chat_scan_results(
+            conn,
+            candidates,
+            scan_job_id="scan-large",
+            scanned_at="2026-04-01T00:00:00+00:00",
+        )
+        setlimit = getattr(conn, "setlimit", None)
+        if setlimit is None or not hasattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER"):
+            return
+        previous_limit = setlimit(
+            sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,
+            999,
+        )
+        try:
+            result = recover_chats_from_candidates(
+                conn,
+                chat_ids=range(1, 1001),
+                job_id="restore-large",
+                recovered_at="2026-04-02T00:00:00+00:00",
+            )
+        finally:
+            setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
+        assert result == {
+            "candidate_count": 1000,
+            "recovered_count": 1000,
+            "skipped_count": 0,
+        }
+    finally:
+        conn.close()
+
+
 class _RestrictionReason:
     def __init__(self, *, platform="", reason="", text=""):
         self.platform = platform

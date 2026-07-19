@@ -9,6 +9,7 @@ from tg_harvest.domain.chat_inventory import (
     _optional_int,
     chat_identity_candidates,
     load_known_chat_identities,
+    normalize_chat_type_category,
 )
 from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
@@ -166,6 +167,93 @@ def _has_current_chat_identity(
     return not known_chat_identities.isdisjoint(
         chat_identity_candidates(chat_id, chat_type)
     )
+
+
+def _load_database_chat_summaries(
+    cur: sqlite3.Cursor,
+) -> tuple[dict[int, dict], dict[tuple[str, int], list[dict]]]:
+    """Index local chat summaries by every supported Telegram ID shape.
+
+    Scanner rows normally use the positive IDs stored by the harvester, but
+    older scan records can contain a signed or ``-100`` entity ID.  Joining on
+    the raw integer would then report an existing chat as having no messages
+    and would pass the wrong ID to the management actions.
+    """
+    cur.execute(
+        """
+        SELECT
+            c.chat_id,
+            c.chat_type,
+            c.message_count,
+            lm.msg_date_text AS last_message_at,
+            lm.msg_date_ts AS last_message_ts
+        FROM chats c
+        LEFT JOIN messages lm
+          ON lm.chat_id = c.chat_id
+         AND lm.message_id = (
+                SELECT m.message_id
+                FROM messages m
+                WHERE m.chat_id = c.chat_id
+                ORDER BY m.msg_date_ts DESC, m.message_id DESC
+                LIMIT 1
+            )
+        """
+    )
+    summaries_by_chat_id: dict[int, dict] = {}
+    summaries_by_identity: dict[tuple[str, int], list[dict]] = {}
+    for row in cur.fetchall():
+        summary = {
+            "chat_id": int(row["chat_id"]),
+            "chat_type": str(row["chat_type"] or ""),
+            "message_count": _row_int(row, "message_count"),
+            "last_message_at": str(row["last_message_at"] or ""),
+            "last_message_ts": _optional_int(row["last_message_ts"]),
+        }
+        summaries_by_chat_id[summary["chat_id"]] = summary
+        for identity in chat_identity_candidates(
+            summary["chat_id"], summary["chat_type"]
+        ):
+            summaries_by_identity.setdefault(identity, []).append(summary)
+    return summaries_by_chat_id, summaries_by_identity
+
+
+def _find_database_chat_summary(
+    summaries_by_chat_id: dict[int, dict],
+    summaries_by_identity: dict[tuple[str, int], list[dict]],
+    *,
+    chat_id: Any,
+    chat_type: Any,
+) -> tuple[dict | None, bool]:
+    try:
+        scanned_chat_id = int(chat_id)
+    except (TypeError, ValueError):
+        return None, False
+    candidates = chat_identity_candidates(chat_id, chat_type)
+    if not candidates:
+        return None, False
+
+    exact = summaries_by_chat_id.get(scanned_chat_id)
+    if exact is not None and not candidates.isdisjoint(
+        chat_identity_candidates(exact["chat_id"], exact["chat_type"])
+    ):
+        return exact, False
+
+    normalized_type = normalize_chat_type_category(chat_type)
+    ordered = sorted(
+        candidates,
+        key=lambda identity: (
+            0 if normalized_type and identity[0] == normalized_type else 1,
+            identity[0],
+            identity[1],
+        ),
+    )
+    matches: dict[int, dict] = {}
+    for identity in ordered:
+        for summary in summaries_by_identity.get(identity, []):
+            matches[int(summary["chat_id"])] = summary
+    if len(matches) == 1:
+        return next(iter(matches.values())), False
+    return None, len(matches) > 1
 
 
 @synchronized_write
@@ -379,6 +467,9 @@ def replace_restricted_chat_scan_results(
 def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
     cur = conn.cursor()
     try:
+        summaries_by_chat_id, summaries_by_identity = (
+            _load_database_chat_summaries(cur)
+        )
         cur.execute(
             """
             SELECT
@@ -392,27 +483,11 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                 a.restriction_text,
                 a.risk_flags,
                 a.membership_scope,
-                COALESCE(
-                    NULLIF(a.last_message_at, ''),
-                    lm.msg_date_text,
-                    ''
-                ) AS last_message_at,
-                COALESCE(
-                    a.last_message_ts,
-                    lm.msg_date_ts
-                ) AS last_message_ts,
+                a.last_message_at,
+                a.last_message_ts,
                 a.scan_job_id,
                 a.scanned_at
             FROM admin_restricted_chats a
-            LEFT JOIN messages lm
-              ON lm.chat_id = a.chat_id
-             AND lm.message_id = (
-                    SELECT m.message_id
-                    FROM messages m
-                    WHERE m.chat_id = a.chat_id
-                    ORDER BY m.msg_date_ts DESC, m.message_id DESC
-                    LIMIT 1
-                )
             ORDER BY
                 CASE a.membership_scope
                     WHEN 'joined' THEN 0
@@ -425,7 +500,35 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
         )
         rows = []
         for row in cur.fetchall():
-            chat_id = int(row["chat_id"])
+            scanned_chat_id = int(row["chat_id"])
+            database_summary, database_match_ambiguous = (
+                _find_database_chat_summary(
+                    summaries_by_chat_id,
+                    summaries_by_identity,
+                    chat_id=scanned_chat_id,
+                    chat_type=row["chat_type"],
+                )
+            )
+            in_database = database_summary is not None
+            # Prefer the canonical ID and summary whenever the scan row maps
+            # to exactly one local chat.  This keeps delete/probe actions on
+            # the same key used by messages, chats, and sync state.
+            chat_id = (
+                int(database_summary["chat_id"])
+                if database_summary is not None
+                else scanned_chat_id
+            )
+            database_message_count = (
+                int(database_summary["message_count"])
+                if database_summary is not None
+                else 0
+            )
+            last_message_at = str(row["last_message_at"] or "")
+            if not last_message_at and database_summary is not None:
+                last_message_at = str(database_summary["last_message_at"] or "")
+            last_message_ts = _optional_int(row["last_message_ts"])
+            if last_message_ts is None and database_summary is not None:
+                last_message_ts = database_summary["last_message_ts"]
             rows.append(
                 {
                     "chat_id": chat_id,
@@ -438,8 +541,11 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "restriction_text": str(row["restriction_text"] or ""),
                     "risk_flags": str(row["risk_flags"] or ""),
                     "membership_scope": str(row["membership_scope"] or "joined"),
-                    "last_message_at": str(row["last_message_at"] or ""),
-                    "last_message_ts": _optional_int(row["last_message_ts"]),
+                    "in_database": int(in_database),
+                    "database_match_ambiguous": int(database_match_ambiguous),
+                    "message_count": database_message_count if in_database else 0,
+                    "last_message_at": last_message_at,
+                    "last_message_ts": last_message_ts,
                     "scan_job_id": str(row["scan_job_id"] or ""),
                     "scanned_at": str(row["scanned_at"] or ""),
                 }

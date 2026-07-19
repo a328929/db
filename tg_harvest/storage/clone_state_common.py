@@ -7,7 +7,12 @@ from tg_harvest.storage.clone_common import (
     _optional_int,
     _safe_int,
 )
-from tg_harvest.storage.row_access import row_int as _row_int
+from tg_harvest.storage.row_access import (
+    row_int as _row_int,
+)
+from tg_harvest.storage.row_access import (
+    scan_row_value as _scan_row_value,
+)
 
 
 def _append_optional_fields(
@@ -36,7 +41,7 @@ def _build_clone_run_filters(
         where_sql_parts.append("source_chat_id = ?")
         params.append(int(source_chat_id))
     if normalized_status:
-        if normalized_status in {"done", "running", "queued", "error"}:
+        if normalized_status in {"done", "running", "queued", "deleting", "error"}:
             where_sql_parts.append("status = ?")
             params.append(normalized_status)
         else:
@@ -169,6 +174,9 @@ def _clone_run_from_row(row: sqlite3.Row | None) -> dict | None:
     return {
         "run_id": str(row["run_id"] or ""),
         "job_id": str(row["job_id"] or ""),
+        # The field is added lazily for pre-token clone databases.  Use the
+        # tolerant accessor so a direct read during migration remains usable.
+        "deletion_job_id": str(_scan_row_value(row, "deletion_job_id", "") or ""),
         "source_chat_id": _row_int(row, "source_chat_id"),
         "source_title": str(row["source_title"] or ""),
         "source_chat_username": str(row["source_chat_username"] or ""),

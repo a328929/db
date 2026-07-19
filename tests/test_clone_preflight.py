@@ -612,6 +612,40 @@ def test_delete_clone_run_removes_local_children_without_touching_target():
         conn.close()
 
 
+def test_delete_clone_run_preserves_callers_uncommitted_transaction():
+    conn = _new_conn()
+    try:
+        source = build_clone_preflight_report(
+            conn,
+            chat_id=100,
+            cfg=SimpleNamespace(session_name="main", secondary_session_name="clone"),
+        )["source"]
+        create_clone_run(
+            conn,
+            run_id="run-delete",
+            job_id="job-delete",
+            source_chat=source,
+            target_title="Source Backup",
+            target_kind="megagroup",
+            target_owner_session="clone",
+            plan={},
+        )
+        conn.execute(
+            "UPDATE chats SET chat_title = 'pending caller change' WHERE chat_id = 100"
+        )
+        assert conn.in_transaction
+
+        assert delete_clone_run(conn, run_id="run-delete") is True
+
+        assert conn.execute(
+            "SELECT chat_title FROM chats WHERE chat_id = 100"
+        ).fetchone()[0] == "pending caller change"
+        assert load_clone_run(conn, "run-delete") is None
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_clone_run_error_status_does_not_create_target_identity():
     conn = _new_conn()
     try:

@@ -18,6 +18,7 @@ from tg_harvest.ingest.runner import (
     _harvest_messages_for_entity,
     _process_entity,
 )
+from tg_harvest.ingest.store import BatchUpsertResult
 
 
 class _FakeCountResult:
@@ -67,6 +68,12 @@ class _BadMediaMessage(_FakeMessage):
             performer=None,
             emoji=None,
         )
+
+
+class _GroupedMessage(_FakeMessage):
+    def __init__(self, message_id: int, grouped_id: int) -> None:
+        super().__init__(message_id)
+        self.grouped_id = grouped_id
 
 
 class _FakeClient:
@@ -184,6 +191,23 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
         )
         self.assertEqual([[11, 12], [13]], [call[0] for call in batch_calls])
         self.assertEqual(3, counters.written)
+
+    def test_unchanged_grouped_rescan_does_not_report_touched_group(self) -> None:
+        client = _FakeClient([_message_stream(_GroupedMessage(11, 9001))])
+
+        with patch(
+            "tg_harvest.ingest.runner.get_last_message_id", return_value=10
+        ), patch(
+            "tg_harvest.ingest.runner.batch_upsert",
+            return_value=BatchUpsertResult(),
+        ), patch("tg_harvest.ingest.runner.CFG.log_every", 1000):
+            counters, touched_groups, first_sync = _harvest_messages_for_entity(
+                self.conn, client, object(), 42
+            )
+
+        self.assertFalse(first_sync)
+        self.assertEqual(0, counters.written)
+        self.assertEqual(set(), touched_groups)
 
     def test_retry_exhaustion_raises_instead_of_succeeding_silently(self) -> None:
         client = _FakeClient(

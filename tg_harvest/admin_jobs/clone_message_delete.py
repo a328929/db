@@ -5,7 +5,10 @@ from contextlib import suppress
 from typing import Any
 
 from tg_harvest.admin_jobs.clone_execution import clone_cfg_for_account
-from tg_harvest.admin_jobs.clone_target_access import clone_run_target_input_channel
+from tg_harvest.admin_jobs.clone_target_access import (
+    clone_run_target_conflicts_with_source,
+    clone_run_target_input_channel,
+)
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
@@ -120,6 +123,8 @@ def _admin_clone_message_delete_job_runner(
         target_chat_id = int(clone_run.get("target_chat_id") or 0)
         if target_chat_id <= 0:
             raise RuntimeError("目标副本尚未创建，不能删除局部消息")
+        if clone_run_target_conflicts_with_source(clone_run):
+            raise RuntimeError("目标副本 ID 与源群 ID 冲突，已拒绝删除消息")
 
         delay_ms = _delete_delay_ms(delete_delay_ms)
         update_admin_job_progress(

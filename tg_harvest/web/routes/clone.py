@@ -395,7 +395,10 @@ def _active_clone_job_snapshot(
             continue
         if str(record.get("status") or "").strip().lower() not in {
             "queued",
+            "pending",
             "running",
+            "stopping",
+            "deleting",
         }:
             continue
         job_id = str(record.get("job_id") or "").strip()
@@ -405,7 +408,25 @@ def _active_clone_job_snapshot(
         snapshot = deps.admin_job_get_snapshot_fn(job_id)
         if str((snapshot or {}).get("status") or "").strip().lower() in {
             "queued",
+            "pending",
             "running",
+            "stopping",
+            "deleting",
+        }:
+            return snapshot
+    # Deletion jobs are intentionally not stored in the historical plan or
+    # migration job columns.  New clone rows persist their owner token so a
+    # refresh can still surface an in-flight deletion and prevent a duplicate
+    # request; legacy rows simply have no token and fall through.
+    deletion_job_id = str(clone_run.get("deletion_job_id") or "").strip()
+    if deletion_job_id and deletion_job_id not in seen_job_ids:
+        snapshot = deps.admin_job_get_snapshot_fn(deletion_job_id)
+        if str((snapshot or {}).get("status") or "").strip().lower() in {
+            "queued",
+            "pending",
+            "running",
+            "stopping",
+            "deleting",
         }:
             return snapshot
     return None
@@ -662,7 +683,32 @@ def _clone_workbench_focus(
             )
 
     for item in candidates:
+        if item["run_status"] == "deleting":
+            return focus(
+                "active",
+                "create",
+                "副本正在删除",
+                "目标副本和本地克隆链路正在清理，完成前不能启动新的迁移任务。",
+                item["run"],
+                "查看删除进度",
+                _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
+            )
+
+    for item in candidates:
         if item["run_status"] == "error":
+            if item["run"].get("deletion_job_id"):
+                return focus(
+                    "attention",
+                    "create",
+                    "副本删除未完成",
+                    "删除任务已中断或失败，可查看记录后重新提交删除请求。",
+                    item["run"],
+                    "处理删除失败",
+                    _clone_workbench_href(
+                        "/admin/clone/runs/detail",
+                        item["run"],
+                    ),
+                )
             return focus(
                 "attention",
                 "create",
@@ -752,6 +798,7 @@ def _clone_workbench_summary(deps: _CloneRouteDeps, conn) -> dict[str, int]:
             int(deps.count_clone_runs_fn(conn, status=status))
             for status in ("queued", "running")
         ),
+        "deleting": int(deps.count_clone_runs_fn(conn, status="deleting")),
         "created": int(deps.count_clone_runs_fn(conn, status="done")),
         "failed": int(deps.count_clone_runs_fn(conn, status="error")),
     }

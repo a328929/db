@@ -4,10 +4,17 @@ from tg_harvest.domain.coerce import safe_int
 
 
 def scan_row_value(row: Any, key: str, default: Any = "") -> Any:
+    if row is None:
+        return default
     if isinstance(row, dict):
         value = row.get(key, default)
     else:
-        value = getattr(row, key, default)
+        # sqlite3.Row exposes named values through ``__getitem__`` rather
+        # than attributes.  Keep dataclass/object scans working as well.
+        try:
+            value = row[key]
+        except (IndexError, KeyError, TypeError):
+            value = getattr(row, key, default)
     return default if value is None else value
 
 

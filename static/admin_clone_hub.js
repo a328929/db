@@ -104,6 +104,7 @@
     [
       ['全部记录', summary.total],
       ['创建中', summary.creating],
+      ['删除中', summary.deleting],
       ['已创建', summary.created],
       ['创建失败', summary.failed]
     ].forEach(function (item) {

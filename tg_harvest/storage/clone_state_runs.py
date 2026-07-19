@@ -122,6 +122,7 @@ def update_clone_run(
     run_id: str,
     status: str | None = None,
     phase: str | None = None,
+    deletion_job_id: Any = None,
     target_chat_id: Any = None,
     target_access_hash: Any = None,
     target_title: Any = None,
@@ -140,6 +141,9 @@ def update_clone_run(
         {
             "status": _clean_text(status) if status is not None else None,
             "phase": _clean_text(phase) if phase is not None else None,
+            "deletion_job_id": _clean_text(deletion_job_id)
+            if deletion_job_id is not None
+            else None,
             "target_chat_id": _optional_int(target_chat_id)
             if target_chat_id is not None
             else None,

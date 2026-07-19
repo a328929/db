@@ -1,6 +1,9 @@
 import unittest
 
-from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
+from tg_harvest.domain.chat_ids import (
+    candidate_chat_entity_ids,
+    stored_chat_id_from_entity_id,
+)
 from tg_harvest.web.telegram_links import (
     build_telegram_app_link,
     build_telegram_chat_app_link,
@@ -211,6 +214,11 @@ class TelegramLinkBuilderTests(unittest.TestCase):
 
 
 class ChatIdCandidateTests(unittest.TestCase):
+    def test_stored_chat_id_only_strips_negative_channel_marker(self) -> None:
+        self.assertEqual(123, stored_chat_id_from_entity_id(-100123))
+        self.assertEqual(100123, stored_chat_id_from_entity_id(100123))
+        self.assertEqual(123, stored_chat_id_from_entity_id(-123))
+
     def test_positive_chat_id_candidates_include_channel_peer_forms(self) -> None:
         self.assertEqual([123, -100123, -123], candidate_chat_entity_ids(123))
 

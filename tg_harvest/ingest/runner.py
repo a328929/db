@@ -36,8 +36,10 @@ from tg_harvest.ingest.parse import (
     setup_logging,
 )
 from tg_harvest.ingest.store import (
+    BatchUpsertResult,
     batch_upsert,
     get_last_message_id,
+    unique_message_key_count,
     upsert_chat,
 )
 from tg_harvest.runtime.paths import secure_session_artifacts
@@ -87,12 +89,16 @@ def _write_message_batch(
     msg_rows: list[tuple],
     media_rows: list[tuple],
     *,
-    write_batch_fn: Callable[[list[tuple], list[tuple]], None] | None = None,
-) -> None:
+    write_batch_fn: Callable[[list[tuple], list[tuple]], Any] | None = None,
+) -> BatchUpsertResult:
     if write_batch_fn is not None:
-        write_batch_fn(list(msg_rows), list(media_rows))
-        return
-    batch_upsert(conn, msg_rows, media_rows)
+        result = write_batch_fn(list(msg_rows), list(media_rows))
+    else:
+        result = batch_upsert(conn, msg_rows, media_rows)
+    return BatchUpsertResult.from_callback(
+        result,
+        fallback_change_count=unique_message_key_count(msg_rows),
+    )
 
 
 def get_existing_chat_ids(conn: sqlite3.Connection) -> list[int]:
@@ -241,7 +247,7 @@ def _harvest_messages_for_entity(
     entity: Any,
     chat_id: int,
     *,
-    write_batch_fn: Callable[[list[tuple], list[tuple]], None] | None = None,
+    write_batch_fn: Callable[[list[tuple], list[tuple]], Any] | None = None,
     progress_total: int | None = None,
     progress_prefix: str = "正在采集",
 ) -> tuple[HarvestCounters, set[int], bool]:
@@ -311,22 +317,20 @@ def _harvest_messages_for_entity(
                 if not p:
                     continue
 
-                if p.grouped_id:
-                    touched_groups.add(p.grouped_id)
-
                 m_row, med_row = _prepare_db_rows(entity, chat_id, p)
                 msg_rows.append(m_row)
                 if med_row:
                     media_rows.append(med_row)
 
                 if len(msg_rows) >= CFG.batch_size:
-                    _write_message_batch(
+                    batch_result = _write_message_batch(
                         conn,
                         msg_rows,
                         media_rows,
                         write_batch_fn=write_batch_fn,
                     )
-                    counters.written += len(msg_rows)
+                    touched_groups.update(batch_result.affected_grouped_ids)
+                    counters.written += batch_result.persisted_change_count
                     resume_from_id = max(resume_from_id, _last_message_id_in_rows(msg_rows))
                     msg_rows, media_rows = [], []
                     logging.info(f"批量写入完成：已写入={counters.written}")
@@ -451,13 +455,14 @@ def _harvest_messages_for_entity(
         raise RuntimeError(f"采集未完成即退出 (chat_id={chat_id})")
 
     if msg_rows:
-        _write_message_batch(
+        batch_result = _write_message_batch(
             conn,
             msg_rows,
             media_rows,
             write_batch_fn=write_batch_fn,
         )
-        counters.written += len(msg_rows)
+        touched_groups.update(batch_result.affected_grouped_ids)
+        counters.written += batch_result.persisted_change_count
         resume_from_id = max(resume_from_id, _last_message_id_in_rows(msg_rows))
 
     _log_harvest_progress(

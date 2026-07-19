@@ -665,11 +665,21 @@
 
   function buildRestrictedNote(item) {
     var parts = [];
+    if (Number(item.database_match_ambiguous || 0) === 1) {
+      parts.push('数据库存在多个等价 chat_id，删除和调度诊断已禁用');
+    }
     if (item.restriction_text) parts.push(item.restriction_text);
     if (item.restriction_platforms) parts.push('平台：' + item.restriction_platforms);
     if (item.restriction_reasons) parts.push('原因：' + item.restriction_reasons);
     if (item.risk_flags) parts.push('标记：' + item.risk_flags);
     return parts.join(' | ');
+  }
+
+  function restrictedDatabaseLabel(item) {
+    if (Number(item && item.database_match_ambiguous || 0) === 1) {
+      return 'ID 冲突';
+    }
+    return Number(item && item.in_database || 0) === 1 ? '已入库' : '未入库';
   }
 
   function restrictedMembershipLabel(scope) {
@@ -895,11 +905,12 @@
             { label: '原因', value: item.restriction_reasons || '' },
             { label: '标记', value: item.risk_flags || '' },
             { label: '账号状态', value: restrictedMembershipLabel(item.membership_scope) },
+            { label: '数据库', value: restrictedDatabaseLabel(item) },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements, {
-            allowDelete: true,
-            allowProbe: true
+            allowDelete: Number(item.in_database || 0) === 1,
+            allowProbe: Number(item.in_database || 0) === 1
           }),
           note: buildRestrictedNote(item)
         });
@@ -1075,6 +1086,12 @@
     setElementDisabled(elements.refreshRestrictedBtn, disabled);
     setElementDisabled(elements.restrictedFilterSelect, disabled);
     setElementDisabled(elements.restrictedListToggleBtn, disabled);
+    [elements.channelList, elements.missingList, elements.restrictedList].forEach(function (list) {
+      if (!list || typeof list.querySelectorAll !== 'function') return;
+      list.querySelectorAll('button').forEach(function (button) {
+        setElementDisabled(button, disabled);
+      });
+    });
     if (elements.logContainer && typeof elements.logContainer.setAttribute === 'function') {
       elements.logContainer.setAttribute('aria-busy', disabled ? 'true' : 'false');
     }

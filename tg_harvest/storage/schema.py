@@ -4,6 +4,8 @@ import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
 
+from tg_harvest.domain.coerce import optional_int, safe_int
+
 from . import connection as _db_runtime
 from . import fts as _fts
 from . import indexes as _indexes
@@ -15,6 +17,8 @@ from .search_text_state import (
     search_text_present_expression,
 )
 from .search_text_state import table_has_column as _table_has_column
+
+_CHAT_SUMMARY_BATCH_SIZE = 500
 
 # =========================
 # Schema 初始化
@@ -310,6 +314,7 @@ def _create_admin_clone_runs_table(cur: sqlite3.Cursor, strict_suffix: str):
     CREATE TABLE IF NOT EXISTS admin_clone_runs (
         run_id                   TEXT PRIMARY KEY,
         job_id                   TEXT NOT NULL UNIQUE,
+        deletion_job_id         TEXT NOT NULL DEFAULT '',
         source_chat_id           INTEGER NOT NULL,
         source_title             TEXT NOT NULL,
         source_chat_username     TEXT,
@@ -475,12 +480,6 @@ def _create_admin_clone_media_transfers_table(
         FOREIGN KEY(plan_id) REFERENCES admin_clone_plans(plan_id) ON DELETE SET NULL
     ){strict_suffix}
     """)
-    cur.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_clone_media_transfers_recovery
-        ON admin_clone_media_transfers(run_id, target_hop_status, cleanup_status)
-        """
-    )
 
 
 def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
@@ -885,6 +884,7 @@ def _ensure_admin_clone_runs_schema(cur: sqlite3.Cursor) -> None:
         "admin_clone_runs",
         [
             ("job_id", "job_id TEXT"),
+            ("deletion_job_id", "deletion_job_id TEXT NOT NULL DEFAULT ''"),
             ("source_chat_id", "source_chat_id INTEGER NOT NULL DEFAULT 0"),
             ("source_title", "source_title TEXT NOT NULL DEFAULT ''"),
             ("source_chat_username", "source_chat_username TEXT"),
@@ -1019,6 +1019,62 @@ def _ensure_admin_clone_message_map_schema(cur: sqlite3.Cursor) -> None:
             ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
             ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
+    )
+
+
+def _ensure_admin_clone_media_transfers_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_clone_media_transfers",
+        [
+            ("migration_id", "migration_id TEXT NOT NULL DEFAULT ''"),
+            ("run_id", "run_id TEXT NOT NULL DEFAULT ''"),
+            ("plan_id", "plan_id TEXT"),
+            ("source_chat_id", "source_chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("source_message_id", "source_message_id INTEGER NOT NULL DEFAULT 0"),
+            ("target_chat_id", "target_chat_id INTEGER NOT NULL DEFAULT 0"),
+            ("transfer_strategy", "transfer_strategy TEXT NOT NULL DEFAULT ''"),
+            ("relay_chat_id", "relay_chat_id INTEGER"),
+            ("source_account", "source_account TEXT NOT NULL DEFAULT ''"),
+            ("target_account", "target_account TEXT NOT NULL DEFAULT ''"),
+            ("source_random_id", "source_random_id INTEGER"),
+            (
+                "target_random_id",
+                "target_random_id INTEGER NOT NULL DEFAULT 0",
+            ),
+            ("relay_message_id", "relay_message_id INTEGER"),
+            ("target_message_id", "target_message_id INTEGER"),
+            (
+                "source_hop_status",
+                "source_hop_status TEXT NOT NULL DEFAULT 'not_required'",
+            ),
+            (
+                "target_hop_status",
+                "target_hop_status TEXT NOT NULL DEFAULT 'pending'",
+            ),
+            (
+                "cleanup_status",
+                "cleanup_status TEXT NOT NULL DEFAULT 'not_required'",
+            ),
+            ("error_message", "error_message TEXT NOT NULL DEFAULT ''"),
+            ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+            ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+    cur.execute(
+        """
+        UPDATE admin_clone_media_transfers
+        SET target_random_id = COALESCE(NULLIF(random(), 0), 1)
+        WHERE target_random_id IS NULL OR target_random_id = 0
+        """
+    )
+    cur.execute(
+        """
+        UPDATE admin_clone_media_transfers
+        SET source_random_id = COALESCE(NULLIF(random(), 0), 1)
+        WHERE transfer_strategy = 'relay'
+          AND (source_random_id IS NULL OR source_random_id = 0)
+        """
     )
 
 
@@ -1171,34 +1227,13 @@ def _ensure_chat_summary_columns(cur: sqlite3.Cursor) -> None:
         )
 
 
-def _count_chat_message_summary_mismatches(cur: sqlite3.Cursor) -> int:
-    cur.execute(
-        """
-        SELECT COUNT(*) AS c
-        FROM chats c
-        WHERE COALESCE(c.message_count, 0) <> COALESCE((
-                SELECT COUNT(*)
-                FROM messages m
-                WHERE m.chat_id = c.chat_id
-            ), 0)
-           OR COALESCE(c.last_message_created_at, '') <> COALESCE((
-                SELECT MAX(m.created_at)
-                FROM messages m
-                WHERE m.chat_id = c.chat_id
-            ), '')
-        """
-    )
-    return int(cur.fetchone()["c"] or 0)
-
-
 def _heal_chat_message_summaries_if_needed(cur: sqlite3.Cursor) -> None:
-    mismatch_count = _count_chat_message_summary_mismatches(cur)
+    mismatch_count = _refresh_chat_message_counts(cur, chat_ids=None)
     if mismatch_count <= 0:
         return
     logging.warning(
-        f"检测到 chats 消息摘要与 messages 实际数据不一致，开始修复 {mismatch_count} 个群聊摘要"
+        f"检测到 chats 消息摘要与 messages 实际数据不一致，已修复 {mismatch_count} 个群聊摘要"
     )
-    _refresh_chat_message_counts(cur, chat_ids=None)
 
 
 def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
@@ -1219,49 +1254,71 @@ def _ensure_message_media_schema(cur: sqlite3.Cursor) -> None:
 
 def _refresh_chat_message_counts(
     cur: sqlite3.Cursor, chat_ids: Sequence[int] | None = None
-) -> None:
+) -> int:
     if chat_ids is None:
-        cur.execute(
-            """
-            UPDATE chats
-            SET
-                message_count = COALESCE((
-                    SELECT COUNT(*)
-                    FROM messages
-                    WHERE messages.chat_id = chats.chat_id
-                ), 0),
-                last_message_created_at = COALESCE((
-                    SELECT MAX(created_at)
-                    FROM messages
-                    WHERE messages.chat_id = chats.chat_id
-                ), '')
-            """
+        batches: Iterable[Sequence[int] | None] = (None,)
+    else:
+        normalized_chat_ids = sorted({int(chat_id) for chat_id in chat_ids})
+        if not normalized_chat_ids:
+            return 0
+        batches = (
+            normalized_chat_ids[start : start + _CHAT_SUMMARY_BATCH_SIZE]
+            for start in range(0, len(normalized_chat_ids), _CHAT_SUMMARY_BATCH_SIZE)
         )
-        return
 
-    normalized_chat_ids = sorted({int(chat_id) for chat_id in chat_ids})
-    if not normalized_chat_ids:
-        return
+    # Aggregate once, then update only rows whose denormalized values differ.
+    # The previous correlated UPDATE evaluated COUNT/MAX repeatedly for every
+    # chat, which was especially costly during startup healing on large DBs.
+    update_count = 0
+    for batch in batches:
+        if batch is None:
+            scope_sql = "1 = 1"
+            scope_params: Sequence[int] = ()
+        else:
+            placeholders = ",".join("?" for _ in batch)
+            scope_sql = f"c.chat_id IN ({placeholders})"
+            scope_params = batch
+        cur.execute(
+            f"""
+            SELECT
+                c.chat_id,
+                COUNT(m.chat_id) AS actual_message_count,
+                COALESCE(MAX(m.created_at), '') AS actual_last_message_created_at,
+                COALESCE(c.message_count, 0) AS stored_message_count,
+                COALESCE(c.last_message_created_at, '') AS stored_last_message_created_at
+            FROM chats AS c
+            LEFT JOIN messages AS m ON m.chat_id = c.chat_id
+            WHERE {scope_sql}
+            GROUP BY c.chat_id
+            """,
+            scope_params,
+        )
+        updates = []
+        for row in cur.fetchall():
+            # Use positional access here: callers may pass a default SQLite
+            # connection whose rows are tuples rather than ``sqlite3.Row``.
+            actual_count = safe_int(row[1])
+            actual_latest = str(row[2] or "")
+            stored_count = optional_int(row[3])
+            stored_latest = str(row[4] or "")
+            if (
+                stored_count is None
+                or actual_count != stored_count
+                or actual_latest != stored_latest
+            ):
+                updates.append((actual_count, actual_latest, safe_int(row[0])))
 
-    placeholders = ",".join(["?"] * len(normalized_chat_ids))
-    cur.execute(
-        f"""
-        UPDATE chats
-        SET
-            message_count = COALESCE((
-                SELECT COUNT(*)
-                FROM messages
-                WHERE messages.chat_id = chats.chat_id
-            ), 0),
-            last_message_created_at = COALESCE((
-                SELECT MAX(created_at)
-                FROM messages
-                WHERE messages.chat_id = chats.chat_id
-            ), '')
-        WHERE chat_id IN ({placeholders})
-        """,
-        normalized_chat_ids,
-    )
+        if updates:
+            cur.executemany(
+                """
+                UPDATE chats
+                SET message_count = ?, last_message_created_at = ?
+                WHERE chat_id = ?
+                """,
+                updates,
+            )
+            update_count += len(updates)
+    return update_count
 
 
 def _optimize_query_planner_stats(cur: sqlite3.Cursor) -> None:
@@ -1297,6 +1354,7 @@ def create_schema(
         _ensure_admin_clone_plans_schema(cur)
         _ensure_admin_clone_migrations_schema(cur)
         _ensure_admin_clone_message_map_schema(cur)
+        _ensure_admin_clone_media_transfers_schema(cur)
         _ensure_sync_scheduler_schema(cur)
         _ensure_chat_summary_columns(cur)
         _indexes._create_indexes(cur)

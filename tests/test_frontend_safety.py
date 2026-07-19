@@ -964,6 +964,18 @@ class FrontendSafetyTests(unittest.TestCase):
         recovery_source = (ROOT / "static" / "admin_recovery.js").read_text(
             encoding="utf-8"
         )
+        clone_runs_source = (ROOT / "static" / "admin_clone_runs.js").read_text(
+            encoding="utf-8"
+        )
+        clone_detail_source = (
+            ROOT / "static" / "admin_clone_run_detail.js"
+        ).read_text(encoding="utf-8")
+        clone_hub_source = (ROOT / "static" / "admin_clone_hub.js").read_text(
+            encoding="utf-8"
+        )
+        clone_runs_template = (ROOT / "templates" / "admin_clone_runs.html").read_text(
+            encoding="utf-8"
+        )
 
         self.assertIn("function getChannelActionLabel(item)", channels_source)
         self.assertIn(
@@ -981,8 +993,19 @@ class FrontendSafetyTests(unittest.TestCase):
         restricted_start = channels_source.index("function renderRestrictedChannels")
         restricted_end = channels_source.index("async function loadRestrictedChannels")
         restricted_render_source = channels_source[restricted_start:restricted_end]
-        self.assertIn("allowDelete: true", restricted_render_source)
-        self.assertIn("allowProbe: true", restricted_render_source)
+        self.assertIn(
+            "allowDelete: Number(item.in_database || 0) === 1",
+            restricted_render_source,
+        )
+        self.assertIn(
+            "allowProbe: Number(item.in_database || 0) === 1",
+            restricted_render_source,
+        )
+        self.assertIn("list.querySelectorAll('button')", channels_source)
+        self.assertIn("normalized === 'deleting'", clone_runs_source)
+        self.assertIn("['删除中', summary.deleting]", clone_hub_source)
+        self.assertIn('<option value="deleting">删除中</option>', clone_runs_template)
+        self.assertIn("正在删除目标副本及本地克隆链路", clone_detail_source)
         delete_start = channels_source.index("async function handleDeleteChannelData")
         delete_end = channels_source.index("function startJobPolling")
         delete_source = channels_source[delete_start:delete_end]

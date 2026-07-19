@@ -39,6 +39,23 @@ ON CONFLICT(chat_id, grouped_id) DO UPDATE SET
     dedupe_eligible=excluded.dedupe_eligible,
     guard_reason=excluded.guard_reason,
     updated_at=datetime('now')
+WHERE media_groups.first_message_id IS NOT excluded.first_message_id
+   OR media_groups.first_msg_date_ts IS NOT excluded.first_msg_date_ts
+   OR media_groups.last_message_id IS NOT excluded.last_message_id
+   OR media_groups.last_msg_date_ts IS NOT excluded.last_msg_date_ts
+   OR media_groups.item_count IS NOT excluded.item_count
+   OR media_groups.active_items IS NOT excluded.active_items
+   OR media_groups.types_csv IS NOT excluded.types_csv
+   OR media_groups.captions_concat IS NOT excluded.captions_concat
+   OR media_groups.caption_norm IS NOT excluded.caption_norm
+   OR media_groups.pure_hash IS NOT excluded.pure_hash
+   OR media_groups.media_sig_hash IS NOT excluded.media_sig_hash
+   OR media_groups.dedupe_hash IS NOT excluded.dedupe_hash
+   OR media_groups.is_promo IS NOT excluded.is_promo
+   OR media_groups.promo_score IS NOT excluded.promo_score
+   OR media_groups.promo_reasons IS NOT excluded.promo_reasons
+   OR media_groups.dedupe_eligible IS NOT excluded.dedupe_eligible
+   OR media_groups.guard_reason IS NOT excluded.guard_reason
 """
 
 
@@ -62,11 +79,8 @@ def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> list[int]:
 
 
 def _delete_media_groups(
-    cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int] | None = None
+    cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int]
 ):
-    if grouped_ids is None:
-        cur.execute("DELETE FROM media_groups WHERE chat_id=?", (chat_id,))
-        return
     if not grouped_ids:
         return
     for part in chunked(grouped_ids, 500):
@@ -196,10 +210,28 @@ def _rebuild_media_groups_for_ids(
     if not grouped_ids:
         return
     for part in chunked(sorted(set(grouped_ids)), 500):
-        _delete_media_groups(cur, chat_id, grouped_ids=part)
         rows = _query_media_group_rows(cur, chat_id, part)
         up_rows = _build_media_group_upsert_rows(rows, chat_id, cfg)
         _upsert_media_group_rows(cur, up_rows)
+        present_ids = {int(row[1]) for row in up_rows}
+        missing_ids = [grouped_id for grouped_id in part if grouped_id not in present_ids]
+        _delete_media_groups(cur, chat_id, grouped_ids=missing_ids)
+
+
+def _delete_stale_media_groups_for_chat(cur: sqlite3.Cursor, chat_id: int) -> None:
+    cur.execute(
+        """
+        DELETE FROM media_groups
+        WHERE chat_id = ?
+          AND NOT EXISTS (
+              SELECT 1
+              FROM messages m
+              WHERE m.chat_id = media_groups.chat_id
+                AND m.grouped_id = media_groups.grouped_id
+          )
+        """,
+        (int(chat_id),),
+    )
 
 
 def _resolve_refresh_grouped_ids(
@@ -218,11 +250,23 @@ def _execute_media_group_refresh(
     full_refresh: bool,
 ):
     if full_refresh:
-        _delete_media_groups(cur, chat_id, grouped_ids=None)
         _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+        _delete_stale_media_groups_for_chat(cur, chat_id)
         return
     if target_ids:
         _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
+
+
+def _refresh_media_groups_for_cursor(
+    cur: sqlite3.Cursor,
+    chat_id: int,
+    cfg: AppConfig,
+    grouped_ids: set[int] | None = None,
+) -> tuple[int, str]:
+    """Refresh media groups on an already-open transaction."""
+    target_ids, full_refresh = _resolve_refresh_grouped_ids(cur, chat_id, grouped_ids)
+    _execute_media_group_refresh(cur, chat_id, cfg, target_ids, full_refresh)
+    return len(target_ids), "full" if full_refresh else "partial"
 
 
 @synchronized_write
@@ -233,22 +277,25 @@ def refresh_media_groups_for_chat(
     grouped_ids: set[int] | None = None,
 ):
     """
-    grouped_ids=None: 全量刷新（删除 chat 全部聚合，再按 messages 全量重建）
-    grouped_ids=set(...): 按组刷新（仅删除并重建指定 grouped_id）
+    grouped_ids=None: 在一次写事务中按 messages 全量同步，并清除孤立聚合。
+    grouped_ids=set(...): 只同步指定 grouped_id，删除已不存在的目标聚合。
     """
     started_at = time.perf_counter()
     cur = conn.cursor()
     try:
-        target_ids, full_refresh = _resolve_refresh_grouped_ids(
-            cur, chat_id, grouped_ids
-        )
-        target_count = len(target_ids)
-        mode_label = "full" if full_refresh else "partial"
+        requested_mode = "full" if grouped_ids is None else "partial"
         logging.info(
-            f"media_groups 刷新开始: chat_id={chat_id} mode={mode_label} grouped_ids={target_count}"
+            "media_groups 刷新开始: chat_id=%s mode=%s",
+            chat_id,
+            requested_mode,
         )
         cur.execute("BEGIN IMMEDIATE")
-        _execute_media_group_refresh(cur, chat_id, cfg, target_ids, full_refresh)
+        target_count, mode_label = _refresh_media_groups_for_cursor(
+            cur,
+            chat_id,
+            cfg,
+            grouped_ids,
+        )
         conn.commit()
         elapsed = time.perf_counter() - started_at
         logging.info(

@@ -366,6 +366,56 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertEqual(2, int(row["message_count"]))
         self.assertEqual("2026-06-28 11:55:00", row["last_message_created_at"])
 
+    def test_refresh_chat_message_counts_repairs_legacy_non_numeric_summary(self) -> None:
+        # Older non-STRICT databases could contain arbitrary text in the
+        # denormalized integer summary column.  Startup healing must repair it
+        # instead of failing while converting the value in Python.
+        self.conn.execute(
+            """
+            CREATE TABLE chats (
+                chat_id INTEGER PRIMARY KEY,
+                message_count TEXT,
+                last_message_created_at TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE TABLE messages (
+                chat_id INTEGER NOT NULL,
+                created_at TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO chats(chat_id, message_count, last_message_created_at) VALUES (1, 'broken', '')"
+        )
+        self.conn.execute(
+            "INSERT INTO chats(chat_id, message_count, last_message_created_at) VALUES (2, 'broken', '')"
+        )
+        self.conn.executemany(
+            "INSERT INTO messages(chat_id, created_at) VALUES (1, ?)",
+            [("2026-06-28 11:40:00",), ("2026-06-28 11:55:00",)],
+        )
+        self.conn.commit()
+
+        from tg_harvest.storage.schema import _refresh_chat_message_counts
+
+        # Legacy callers can provide a default tuple-row connection.
+        self.conn.row_factory = None
+        cur = self.conn.cursor()
+        self.assertEqual(2, _refresh_chat_message_counts(cur))
+        row = self.conn.execute(
+            "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
+        ).fetchone()
+        self.assertEqual(2, int(row[0]))
+        self.assertEqual("2026-06-28 11:55:00", row[1])
+        empty_row = self.conn.execute(
+            "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 2"
+        ).fetchone()
+        self.assertEqual(0, int(empty_row[0]))
+        self.assertEqual("", empty_row[1])
+
     def test_sync_live_messages_query_uses_created_at_index_without_temp_sort(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()
@@ -645,6 +695,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         admin_clone_run_columns = {row[1] for row in cur.fetchall()}
         self.assertIn("run_id", admin_clone_run_columns)
         self.assertIn("job_id", admin_clone_run_columns)
+        self.assertIn("deletion_job_id", admin_clone_run_columns)
         self.assertIn("source_chat_id", admin_clone_run_columns)
         self.assertIn("source_title", admin_clone_run_columns)
         self.assertIn("target_chat_id", admin_clone_run_columns)
@@ -760,6 +811,94 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         table_sql = str(cur.fetchone()["sql"])
         self.assertIn("WITHOUT ROWID", table_sql.upper())
+
+    def test_create_schema_upgrades_legacy_clone_media_transfer_table(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE admin_clone_media_transfers (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT NOT NULL DEFAULT '',
+                source_message_id INTEGER NOT NULL DEFAULT 0
+            )
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO admin_clone_media_transfers(run_id, source_message_id) VALUES ('legacy', 1)"
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        columns = {
+            row[1]
+            for row in self.conn.execute(
+                "PRAGMA table_info(admin_clone_media_transfers)"
+            ).fetchall()
+        }
+        self.assertTrue(
+            {
+                "migration_id",
+                "plan_id",
+                "source_chat_id",
+                "target_chat_id",
+                "transfer_strategy",
+                "target_random_id",
+                "source_hop_status",
+                "target_hop_status",
+                "cleanup_status",
+                "created_at",
+                "updated_at",
+            }.issubset(columns)
+        )
+        index_row = self.conn.execute(
+            """
+            SELECT sql
+            FROM sqlite_master
+            WHERE type = 'index' AND name = 'idx_clone_media_transfers_recovery'
+            """
+        ).fetchone()
+        self.assertIsNotNone(index_row)
+        self.assertIn("target_hop_status", str(index_row["sql"]))
+        migrated = self.conn.execute(
+            """
+            SELECT target_random_id, source_hop_status, target_hop_status,
+                   cleanup_status, created_at, updated_at
+            FROM admin_clone_media_transfers
+            WHERE run_id = 'legacy'
+            """
+        ).fetchone()
+        self.assertNotEqual(0, int(migrated["target_random_id"]))
+        self.assertEqual("not_required", migrated["source_hop_status"])
+        self.assertEqual("pending", migrated["target_hop_status"])
+        self.assertEqual("not_required", migrated["cleanup_status"])
+        self.assertTrue(migrated["created_at"])
+        self.assertTrue(migrated["updated_at"])
+
+    def test_create_schema_adds_clone_deletion_owner_to_legacy_runs(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE admin_clone_runs (
+                run_id TEXT PRIMARY KEY,
+                job_id TEXT
+            )
+            """
+        )
+        self.conn.execute(
+            "INSERT INTO admin_clone_runs(run_id, job_id) VALUES ('legacy-run', 'legacy-job')"
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, detect_sqlite_features(self.conn))
+
+        row = self.conn.execute(
+            """
+            SELECT deletion_job_id
+            FROM admin_clone_runs
+            WHERE run_id = 'legacy-run'
+            """
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual("", row["deletion_job_id"])
 
     def test_create_schema_replaces_stale_named_index_definitions(self) -> None:
         feats = detect_sqlite_features(self.conn)

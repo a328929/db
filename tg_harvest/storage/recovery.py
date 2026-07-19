@@ -11,7 +11,7 @@ from tg_harvest.domain.chat_titles import (
     chat_title_or_fallback as _chat_title_or_fallback,
 )
 from tg_harvest.domain.coerce import clean_username, enabled_int, safe_int
-from tg_harvest.ingest.store import upsert_chat
+from tg_harvest.ingest.store import UPSERT_CHAT_SQL
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.row_access import (
     row_int as _row_int,
@@ -277,14 +277,25 @@ def recover_chats_from_candidates(
     )
     cur = conn.cursor()
     try:
-        params: list[Any] = []
         where_sql = "1 = 1"
         if normalized_chat_ids is not None:
             if not normalized_chat_ids:
                 return {"candidate_count": 0, "recovered_count": 0, "skipped_count": 0}
-            placeholders = ",".join(["?"] * len(normalized_chat_ids))
-            where_sql = f"a.chat_id IN ({placeholders})"
-            params.extend(normalized_chat_ids)
+            cur.execute("DROP TABLE IF EXISTS temp_recovery_chat_ids")
+            cur.execute(
+                "CREATE TEMP TABLE temp_recovery_chat_ids "
+                "(chat_id INTEGER PRIMARY KEY)"
+            )
+            cur.executemany(
+                "INSERT INTO temp_recovery_chat_ids(chat_id) VALUES (?)",
+                [(chat_id,) for chat_id in normalized_chat_ids],
+            )
+            where_sql = (
+                "EXISTS ("
+                "SELECT 1 FROM temp_recovery_chat_ids selected "
+                "WHERE selected.chat_id = a.chat_id"
+                ")"
+            )
 
         cur.execute(
             f"""
@@ -299,27 +310,29 @@ def recover_chats_from_candidates(
             LEFT JOIN chats c ON c.chat_id = a.chat_id
             WHERE {where_sql}
             ORDER BY a.chat_title COLLATE NOCASE ASC, a.chat_id ASC
-            """,
-            params,
+            """
         )
         rows = cur.fetchall()
         recover_rows = [row for row in rows if row["existing_chat_id"] is None]
 
-        for row in recover_rows:
-            upsert_chat(conn, _candidate_upsert_chat_row(row))
-
         if recover_rows:
+            cur.executemany(
+                UPSERT_CHAT_SQL,
+                [_candidate_upsert_chat_row(row) for row in recover_rows],
+            )
             _refresh_chat_message_counts(
                 cur,
                 [_row_int(row, "chat_id") for row in recover_rows],
             )
 
-        update_params: list[Any] = [str(recovered_at or ""), str(job_id or "")]
         update_where_sql = "1 = 1"
         if normalized_chat_ids is not None:
-            placeholders = ",".join(["?"] * len(normalized_chat_ids))
-            update_where_sql = f"chat_id IN ({placeholders})"
-            update_params.extend(normalized_chat_ids)
+            update_where_sql = (
+                "EXISTS ("
+                "SELECT 1 FROM temp_recovery_chat_ids selected "
+                "WHERE selected.chat_id = admin_recovery_chats.chat_id"
+                ")"
+            )
         cur.execute(
             f"""
             UPDATE admin_recovery_chats
@@ -328,8 +341,10 @@ def recover_chats_from_candidates(
             WHERE {update_where_sql}
               AND chat_id IN (SELECT chat_id FROM chats)
             """,
-            update_params,
+            [str(recovered_at or ""), str(job_id or "")],
         )
+        if normalized_chat_ids is not None:
+            cur.execute("DROP TABLE IF EXISTS temp_recovery_chat_ids")
         conn.commit()
         return {
             "candidate_count": len(rows),
@@ -341,4 +356,6 @@ def recover_chats_from_candidates(
             conn.rollback()
         raise
     finally:
+        with suppress(Exception):
+            cur.execute("DROP TABLE IF EXISTS temp_recovery_chat_ids")
         cur.close()

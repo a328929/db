@@ -258,6 +258,7 @@
     var normalized = String(status || '').trim().toLowerCase();
     if (normalized === 'queued') return '排队中';
     if (normalized === 'running') return '创建中';
+    if (normalized === 'deleting') return '删除中';
     if (normalized === 'done') return '已创建';
     if (normalized === 'error') return '失败';
     return normalized || '未知';

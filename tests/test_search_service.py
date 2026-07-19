@@ -7,8 +7,11 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tg_harvest.search.cache import (
+    _COUNT_CACHE_MAX_ENTRIES,
     _format_data_version,
+    _get_cached_count,
     _make_count_cache_key,
+    _put_cached_count,
     _read_database_fingerprint,
 )
 from tg_harvest.search.params import MAX_SEARCH_PAGE, SearchParams, _parse_search_params
@@ -64,6 +67,27 @@ class SearchServiceFastCountTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
+
+    def test_count_cache_evicts_least_recently_used_entry(self) -> None:
+        original_max = _COUNT_CACHE_MAX_ENTRIES
+        try:
+            # Keep this test independent of the process-wide cache size.
+            import tg_harvest.search.cache as search_cache
+
+            search_cache._COUNT_CACHE.clear()
+            search_cache._COUNT_CACHE_MAX_ENTRIES = 2
+            keys = [("test", index) for index in range(3)]
+            _put_cached_count(keys[0], (1, False, 1))
+            _put_cached_count(keys[1], (2, False, 1))
+            self.assertEqual((1, False, 1), _get_cached_count(keys[0]))
+            _put_cached_count(keys[2], (3, False, 1))
+            self.assertIsNone(_get_cached_count(keys[1]))
+            self.assertEqual((1, False, 1), _get_cached_count(keys[0]))
+        finally:
+            import tg_harvest.search.cache as search_cache
+
+            search_cache._COUNT_CACHE_MAX_ENTRIES = original_max
+            search_cache._COUNT_CACHE.clear()
 
     def test_fast_count_uses_chat_summary_for_all_scope(self) -> None:
         params = SearchParams(
@@ -702,6 +726,34 @@ class SearchServiceFastCountTests(unittest.TestCase):
             self.assertNotEqual(first_key, second_key)
         finally:
             Path(db_path).unlink(missing_ok=True)
+
+    def test_count_cache_key_changes_after_same_connection_memory_write(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.execute("CREATE TABLE sample (id INTEGER PRIMARY KEY, value TEXT)")
+        conn.commit()
+        try:
+            first_key = _make_count_cache_key(
+                conn,
+                count_sql="SELECT COUNT(*) AS c FROM sample LIMIT ?",
+                sql_params=[],
+                count_limit=1000,
+                page_size=100,
+            )
+
+            conn.execute("INSERT INTO sample(value) VALUES ('changed')")
+            conn.commit()
+
+            second_key = _make_count_cache_key(
+                conn,
+                count_sql="SELECT COUNT(*) AS c FROM sample LIMIT ?",
+                sql_params=[],
+                count_limit=1000,
+                page_size=100,
+            )
+        finally:
+            conn.close()
+
+        self.assertNotEqual(first_key, second_key)
 
     def test_file_database_fingerprint_ignores_connection_local_data_version(self) -> None:
         fd, db_path = tempfile.mkstemp(suffix=".sqlite3")

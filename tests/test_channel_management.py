@@ -264,6 +264,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual("This channel can't be displayed.", rows[0]["restriction_text"])
         self.assertEqual("restricted", rows[0]["risk_flags"])
         self.assertEqual("joined", rows[0]["membership_scope"])
+        self.assertEqual(0, rows[0]["in_database"])
         self.assertEqual("2026-04-04 10:00:00", rows[0]["last_message_at"])
         self.assertEqual(1775296800, rows[0]["last_message_ts"])
 
@@ -284,7 +285,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
                     membership_scope="public_unjoined",
                 ),
                 RestrictedChatInventoryRow(
-                    chat_id=10,
+                    chat_id=1,
                     chat_title="Alpha Joined",
                     chat_type="Channel",
                     membership_scope="joined",
@@ -300,6 +301,109 @@ class ChannelManagementStorageTests(unittest.TestCase):
             ["Alpha Joined", "Zulu Joined", "Alpha Public"],
             [row["chat_title"] for row in rows],
         )
+        self.assertEqual(
+            [1, 0, 0],
+            [row["in_database"] for row in rows],
+        )
+        self.assertEqual(
+            [2, 0, 0],
+            [row["message_count"] for row in rows],
+        )
+
+    def test_list_restricted_chat_scan_results_normalizes_signed_entity_id(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO admin_restricted_chats(
+                chat_id, chat_title, chat_type, membership_scope, scanned_at
+            ) VALUES (-1002, 'Legacy Signed Channel', 'Channel', 'joined', ?)
+            """,
+            ("2026-04-06T00:00:00+00:00",),
+        )
+        self.conn.commit()
+
+        rows = list_restricted_chat_scan_results(self.conn)
+
+        row = next(item for item in rows if item["chat_title"] == "Legacy Signed Channel")
+        self.assertEqual(2, row["chat_id"])
+        self.assertEqual(1, row["in_database"])
+        self.assertEqual(20, row["message_count"])
+        self.assertEqual("2026-03-10 00:00:00", row["last_message_at"])
+
+    def test_list_restricted_chat_scan_results_maps_to_signed_database_id(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO chats(
+                chat_id, chat_title, chat_type, message_count, last_seen_at
+            ) VALUES (-10044, 'Signed Stored Channel', 'Channel', 7, ?)
+            """,
+            ("2026-04-07 00:00:00",),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type
+            ) VALUES (-10044, 1, '2026-04-07 01:00:00', 1775523600, 'TEXT')
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO admin_restricted_chats(
+                chat_id, chat_title, chat_type, membership_scope, scanned_at
+            ) VALUES (44, 'Positive Scan Id', 'Channel', 'joined', ?)
+            """,
+            ("2026-04-07T00:00:00+00:00",),
+        )
+        self.conn.commit()
+
+        row = list_restricted_chat_scan_results(self.conn)[0]
+
+        self.assertEqual(-10044, row["chat_id"])
+        self.assertEqual(1, row["in_database"])
+        self.assertEqual(7, row["message_count"])
+        self.assertEqual("2026-04-07 01:00:00", row["last_message_at"])
+
+    def test_list_restricted_chat_scan_results_prefers_exact_id_and_blocks_ambiguous_alias(
+        self,
+    ) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO chats(
+                chat_id, chat_title, chat_type, message_count, last_seen_at
+            ) VALUES (-1002, 'Duplicate Signed Channel', 'Channel', 7, ?)
+            """,
+            ("2026-04-08 00:00:00",),
+        )
+        self.conn.execute(
+            """
+            INSERT INTO admin_restricted_chats(
+                chat_id, chat_title, chat_type, membership_scope, scanned_at
+            ) VALUES (2, 'Exact Positive Scan', 'Channel', 'joined', ?)
+            """,
+            ("2026-04-08T00:00:00+00:00",),
+        )
+        self.conn.commit()
+
+        exact = list_restricted_chat_scan_results(self.conn)[0]
+        self.assertEqual(2, exact["chat_id"])
+        self.assertEqual(20, exact["message_count"])
+        self.assertEqual(0, exact["database_match_ambiguous"])
+
+        self.conn.execute("DELETE FROM admin_restricted_chats")
+        self.conn.execute(
+            """
+            INSERT INTO admin_restricted_chats(
+                chat_id, chat_title, chat_type, membership_scope, scanned_at
+            ) VALUES (-2, 'Ambiguous Alias Scan', 'Channel', 'joined', ?)
+            """,
+            ("2026-04-08T01:00:00+00:00",),
+        )
+        self.conn.commit()
+
+        ambiguous = list_restricted_chat_scan_results(self.conn)[0]
+        self.assertEqual(-2, ambiguous["chat_id"])
+        self.assertEqual(0, ambiguous["in_database"])
+        self.assertEqual(1, ambiguous["database_match_ambiguous"])
+        self.assertEqual(0, ambiguous["message_count"])
 
 
 if __name__ == "__main__":

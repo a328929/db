@@ -74,6 +74,7 @@ from tg_harvest.ingest.runner import (
     _format_harvest_progress_message,
 )
 from tg_harvest.ingest.store import (
+    BatchUpsertResult,
     batch_upsert,
     load_grouped_ids_for_messages,
 )
@@ -309,6 +310,73 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         finally:
             release.set()
             coordinator._thread.join(timeout=1.0)
+
+    def test_write_coordinator_uses_exact_batch_changes_for_finalization(self) -> None:
+        counters = HarvestCounters(seen=1, written=1)
+        with patch(
+            "tg_harvest.admin_jobs.update_writer.batch_upsert",
+            return_value=BatchUpsertResult(),
+        ), patch(
+            "tg_harvest.ingest.runner._finalize_entity_processing"
+        ) as finalize_mock:
+            coordinator = ChatUpdateWriteCoordinator(
+                job_id="job-unchanged",
+                get_conn_fn=lambda: _FakeConn([]),
+            )
+            try:
+                coordinator.register_chat(1)
+                coordinator.submit_batch(chat_id=1, msg_rows=[(1, 10)], media_rows=[])
+                coordinator.submit_finalize(
+                    chat_id=1,
+                    chat_title="Chat 1",
+                    counters=counters,
+                    touched_groups=set(),
+                    first_sync=False,
+                    total_started_at=0.0,
+                    skip_postprocess_if_unchanged=True,
+                    enable_dedupe=False,
+                )
+                coordinator.wait_for_chat(1)
+            finally:
+                coordinator.close()
+
+        self.assertEqual(0, counters.written)
+        self.assertEqual(set(), finalize_mock.call_args.kwargs["touched_groups"])
+        self.assertTrue(
+            finalize_mock.call_args.kwargs["skip_postprocess_if_unchanged"]
+        )
+
+    def test_write_coordinator_accepts_legacy_none_batch_result(self) -> None:
+        counters = HarvestCounters(seen=1, written=1)
+        with patch(
+            "tg_harvest.admin_jobs.update_writer.batch_upsert",
+            return_value=None,
+        ), patch(
+            "tg_harvest.ingest.runner._finalize_entity_processing"
+        ) as finalize_mock:
+            coordinator = ChatUpdateWriteCoordinator(
+                job_id="job-legacy-writer",
+                get_conn_fn=lambda: _FakeConn([]),
+            )
+            try:
+                coordinator.register_chat(1)
+                coordinator.submit_batch(chat_id=1, msg_rows=[(1, 10)], media_rows=[])
+                coordinator.submit_finalize(
+                    chat_id=1,
+                    chat_title="Chat 1",
+                    counters=counters,
+                    touched_groups={7001},
+                    first_sync=False,
+                    total_started_at=0.0,
+                    skip_postprocess_if_unchanged=True,
+                    enable_dedupe=False,
+                )
+                coordinator.wait_for_chat(1)
+            finally:
+                coordinator.close()
+
+        self.assertEqual(1, counters.written)
+        self.assertEqual({7001}, finalize_mock.call_args.kwargs["touched_groups"])
 
     def test_all_chat_update_returns_false_when_any_worker_fails(self) -> None:
         rows = [
@@ -4457,6 +4525,108 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertEqual("interrupted", reconciled["phase"])
         self.assertIn("所属后台任务已失败", reconciled["error_message"])
 
+    def test_interrupted_clone_delete_job_marks_run_error(self) -> None:
+        job = _admin_job_create(
+            "clone_target_delete",
+            target_chat_id=777,
+            target_label="delete clone",
+        )
+        job_id = str(job["job_id"])
+        _admin_job_set_status(job_id, "running")
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute(
+                """
+                INSERT INTO chats(
+                    chat_id, chat_title, chat_type, message_count,
+                    first_seen_at, last_seen_at
+                ) VALUES (100, 'Source', 'Megagroup', 1, '2026-01-01', '2026-01-01')
+                """
+            )
+            create_clone_run(
+                conn,
+                run_id="run-delete-interrupted",
+                job_id="structure-job",
+                source_chat={
+                    "chat_id": 100,
+                    "chat_title": "Source",
+                    "chat_type": "Megagroup",
+                    "message_count": 1,
+                },
+                target_title="Target",
+                target_kind="megagroup",
+                target_owner_session="secondary",
+            )
+            conn.execute(
+                """
+                UPDATE admin_clone_runs
+                SET status = 'deleting', phase = 'deleting', deletion_job_id = ?
+                WHERE run_id = 'run-delete-interrupted'
+                """,
+                (job_id,),
+            )
+            conn.execute(
+                """
+                UPDATE admin_jobs
+                SET heartbeat_at = '2000-01-01T00:00:00+00:00',
+                    updated_at = '2000-01-01T00:00:00+00:00'
+                WHERE job_id = ?
+                """,
+                (job_id,),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(1, _admin_recover_interrupted_jobs())
+
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            interrupted = conn.execute(
+                """
+                SELECT status, phase, error_message, deletion_job_id
+                FROM admin_clone_runs
+                WHERE run_id = 'run-delete-interrupted'
+                """
+            ).fetchone()
+            self.assertEqual("error", interrupted["status"])
+            self.assertEqual("interrupted", interrupted["phase"])
+            self.assertIn("服务进程重启或退出", interrupted["error_message"])
+            self.assertEqual(job_id, interrupted["deletion_job_id"])
+
+            conn.execute(
+                """
+                UPDATE admin_clone_runs
+                SET status = 'deleting', phase = 'deleting', error_message = ''
+                WHERE run_id = 'run-delete-interrupted'
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            reconciled = conn.execute(
+                """
+                SELECT status, phase, error_message
+                FROM admin_clone_runs
+                WHERE run_id = 'run-delete-interrupted'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual("error", reconciled["status"])
+        self.assertEqual("interrupted", reconciled["phase"])
+        self.assertIn("所属后台任务已失败", reconciled["error_message"])
+
+
 class AdminJobLogHandlerTests(unittest.TestCase):
     def test_handler_skips_passthrough_when_disabled(self) -> None:
         messages = []
@@ -4539,6 +4709,33 @@ class WriteConsistencyTests(unittest.TestCase):
         cur = self.conn.cursor()
         cur.execute("SELECT message_count FROM chats WHERE chat_id = 1")
         self.assertEqual(1, int(cur.fetchone()["message_count"]))
+
+    def test_refresh_chat_message_counts_chunks_large_chat_id_sets(self) -> None:
+        setlimit = getattr(self.conn, "setlimit", None)
+        if setlimit is None or not hasattr(sqlite3, "SQLITE_LIMIT_VARIABLE_NUMBER"):
+            self.skipTest("SQLite variable limit API is unavailable")
+
+        chat_ids = list(range(2, 1002))
+        self.conn.executemany(
+            "INSERT INTO chats(chat_id, chat_title, message_count) VALUES (?, ?, 1)",
+            [(chat_id, f"Chat {chat_id}") for chat_id in chat_ids],
+        )
+        self.conn.commit()
+        previous_limit = setlimit(
+            sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER,
+            999,
+        )
+        try:
+            refresh_chat_message_counts(self.conn, chat_ids)
+        finally:
+            setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
+
+        self.assertEqual(
+            0,
+            self.conn.execute(
+                "SELECT COUNT(*) FROM chats WHERE chat_id > 1 AND message_count <> 0"
+            ).fetchone()[0],
+        )
 
     def test_dedupe_promotional_duplicates_uses_global_write_lock(self) -> None:
         lock = _RecordingLock()
@@ -4673,6 +4870,177 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         self.assertEqual(0, int(cur.fetchone()["c"]))
 
+    def test_batch_upsert_treats_string_zero_as_non_media(self) -> None:
+        media_message = (
+            1,
+            902,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "photo caption",
+            "photo caption",
+            "pure-photo-902",
+            "dedupe-photo-902",
+            "PHOTO",
+            None,
+            1,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            13,
+        )
+        media_row = (
+            1,
+            902,
+            "PHOTO",
+            "file-902",
+            "photo-902.jpg",
+            ".jpg",
+            "image/jpeg",
+            123,
+            640,
+            480,
+            None,
+            None,
+            "media-fp-902",
+            "{}",
+        )
+        batch_upsert(self.conn, [media_message], [media_row])
+
+        text_message = list(media_message)
+        text_message[5] = "edited text"
+        text_message[6] = "edited text"
+        text_message[8] = "dedupe-text-902"
+        text_message[9] = "TEXT"
+        # SQLite accepts this representation for an INTEGER column, while
+        # Python's bool("0") is true unless the ingest layer normalizes it.
+        text_message[11] = "0"
+        batch_upsert(self.conn, [tuple(text_message)], [])
+
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 902"
+            ).fetchone()
+        )
+
+    def test_batch_upsert_uses_final_duplicate_message_flag_for_media_cleanup(self) -> None:
+        media_message = (
+            1,
+            903,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "photo caption",
+            "photo caption",
+            "pure-photo-903",
+            "dedupe-photo-903",
+            "PHOTO",
+            None,
+            1,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            13,
+        )
+        media_row = (
+            1,
+            903,
+            "PHOTO",
+            "file-903",
+            "photo-903.jpg",
+            ".jpg",
+            "image/jpeg",
+            123,
+            640,
+            480,
+            None,
+            None,
+            "media-fp-903",
+            "{}",
+        )
+        batch_upsert(self.conn, [media_message], [media_row])
+
+        text_message = list(media_message)
+        text_message[5] = "edited text"
+        text_message[6] = "edited text"
+        text_message[8] = "dedupe-text-903"
+        text_message[9] = "TEXT"
+        text_message[11] = 0
+        result = batch_upsert(
+            self.conn,
+            [media_message, tuple(text_message)],
+            [media_row],
+        )
+
+        self.assertEqual(1, result.persisted_change_count)
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 903"
+            ).fetchone()
+        )
+
+    def test_batch_upsert_stale_media_uses_last_duplicate_message_row(self) -> None:
+        media_message = (
+            1,
+            901,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "photo caption",
+            "photo caption",
+            "pure-photo-901",
+            "dedupe-photo-901",
+            "PHOTO",
+            None,
+            1,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            13,
+        )
+        media_row = (
+            1,
+            901,
+            "PHOTO",
+            "file-901",
+            "photo-901.jpg",
+            ".jpg",
+            "image/jpeg",
+            123,
+            640,
+            480,
+            None,
+            None,
+            "media-fp-901",
+            "{}",
+        )
+        text_message = list(media_message)
+        text_message[5] = "temporary text"
+        text_message[6] = "temporary text"
+        text_message[8] = "dedupe-text-901"
+        text_message[9] = "TEXT"
+        text_message[11] = 0
+
+        batch_upsert(self.conn, [media_message], [media_row])
+        result = batch_upsert(
+            self.conn,
+            [tuple(text_message), media_message],
+            [],
+        )
+
+        self.assertEqual(0, result.persisted_change_count)
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 901"
+            ).fetchone()
+        )
+
     def test_batch_upsert_rolls_back_message_rows_when_later_media_write_fails(self) -> None:
         message_row = (
             1,
@@ -4706,6 +5074,122 @@ class WriteConsistencyTests(unittest.TestCase):
             (1, 905),
         ).fetchone()
         self.assertIsNone(row)
+
+    def test_batch_upsert_preserves_caller_owned_transaction(self) -> None:
+        message_row = (
+            1,
+            906,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "nested transaction",
+            "nested transaction",
+            "pure-nested",
+            "dedupe-nested",
+            "TEXT",
+            None,
+            0,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            17,
+        )
+        self.conn.execute(
+            "UPDATE chats SET chat_title = 'caller change' WHERE chat_id = 1"
+        )
+
+        result = batch_upsert(self.conn, [message_row], [])
+
+        self.assertEqual(1, result.persisted_change_count)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 906"
+            ).fetchone()
+        )
+        # The caller still owns the transaction, so one rollback undoes both
+        # its change and the nested batch.
+        self.conn.rollback()
+        self.assertEqual(
+            "Chat 1",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 906"
+            ).fetchone()
+        )
+
+    def test_batch_upsert_failure_preserves_caller_transaction(self) -> None:
+        message_row = (
+            1,
+            907,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "nested failure",
+            "nested failure",
+            "pure-nested-failure",
+            "dedupe-nested-failure",
+            "TEXT",
+            None,
+            0,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            15,
+        )
+        media_row = (
+            1,
+            907,
+            "PHOTO",
+            "file-907",
+            "photo-907.jpg",
+            ".jpg",
+            "image/jpeg",
+            123,
+            640,
+            480,
+            None,
+            None,
+            "media-fp-907",
+            "{}",
+        )
+        self.conn.execute(
+            "UPDATE chats SET chat_title = 'caller failure change' WHERE chat_id = 1"
+        )
+
+        with patch(
+            "tg_harvest.ingest.store._batch_upsert_media",
+            side_effect=sqlite3.OperationalError("media write failed"),
+        ), self.assertRaises(sqlite3.OperationalError):
+            batch_upsert(self.conn, [message_row], [media_row])
+
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(
+            "caller failure change",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 907"
+            ).fetchone()
+        )
+        self.conn.commit()
+        self.assertEqual(
+            "caller failure change",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
 
     def test_batch_upsert_refreshes_chat_message_summary(self) -> None:
         refresh_chat_message_counts(self.conn, [1])
@@ -4761,6 +5245,439 @@ class WriteConsistencyTests(unittest.TestCase):
         chat_row = cur.fetchone()
         self.assertEqual(3, int(chat_row["message_count"]))
         self.assertTrue(str(chat_row["last_message_created_at"] or ""))
+
+    def test_batch_upsert_skips_identical_message_rows(self) -> None:
+        stored = self.conn.execute(
+            """
+            SELECT
+                chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+                content, content_norm, pure_hash, dedupe_hash, msg_type,
+                grouped_id, has_media, is_promo, promo_score, promo_reasons,
+                dedupe_eligible, guard_reason, text_len
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        ).fetchone()
+        message_row = tuple(stored)
+        self.conn.execute("CREATE TABLE message_update_audit(id INTEGER PRIMARY KEY)")
+        self.conn.execute(
+            """
+            CREATE TRIGGER audit_message_update
+            AFTER UPDATE ON messages
+            BEGIN
+                INSERT INTO message_update_audit(id) VALUES (NULL);
+            END
+            """
+        )
+        self.conn.commit()
+        sequence_before = int(
+            self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'messages'"
+            ).fetchone()[0]
+        )
+
+        batch_upsert(self.conn, [message_row], [])
+
+        sequence_after = int(
+            self.conn.execute(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'messages'"
+            ).fetchone()[0]
+        )
+        audit_count = int(
+            self.conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0]
+        )
+        self.assertEqual(sequence_before, sequence_after)
+        self.assertEqual(0, audit_count)
+
+        edited_row = list(message_row)
+        edited_row[5] = "edited"
+        edited_row[6] = "edited"
+        edited_row[17] = len("edited")
+        batch_upsert(self.conn, [tuple(edited_row)], [])
+
+        audit_count = int(
+            self.conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0]
+        )
+        content = self.conn.execute(
+            "SELECT content FROM messages WHERE chat_id = 1 AND message_id = 10"
+        ).fetchone()[0]
+        self.assertEqual(1, audit_count)
+        self.assertEqual("edited", content)
+
+    def test_batch_upsert_reports_old_and_new_grouped_ids(self) -> None:
+        stored = self.conn.execute(
+            """
+            SELECT
+                chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+                content, content_norm, pure_hash, dedupe_hash, msg_type,
+                grouped_id, has_media, is_promo, promo_score, promo_reasons,
+                dedupe_eligible, guard_reason, text_len
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        ).fetchone()
+        first_row = list(stored)
+        first_row[10] = 77
+        first_result = batch_upsert(self.conn, [tuple(first_row)], [])
+        self.assertEqual({77}, first_result.affected_grouped_ids)
+
+        second_row = list(first_row)
+        second_row[10] = 88
+        second_result = batch_upsert(self.conn, [tuple(second_row)], [])
+        self.assertEqual({77, 88}, second_result.affected_grouped_ids)
+
+    def test_batch_upsert_reports_exact_media_changes(self) -> None:
+        message_row = (
+            1,
+            20,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "album caption",
+            "album caption",
+            "pure-album",
+            "dedupe-album",
+            "PHOTO",
+            700,
+            1,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            13,
+        )
+        media_row = (
+            1,
+            20,
+            "PHOTO",
+            "file-20",
+            "album.jpg",
+            ".jpg",
+            "image/jpeg",
+            10,
+            100,
+            100,
+            None,
+            700,
+            "fp-1",
+            "{}",
+        )
+
+        first = batch_upsert(self.conn, [message_row], [media_row])
+        unchanged = batch_upsert(self.conn, [message_row], [media_row])
+        self.assertEqual({700}, first.affected_grouped_ids)
+        self.assertEqual(1, first.persisted_change_count)
+        self.assertEqual(set(), unchanged.affected_grouped_ids)
+        self.assertEqual(0, unchanged.persisted_change_count)
+
+        self.conn.execute(
+            "UPDATE message_media SET grouped_id = NULL "
+            "WHERE chat_id = 1 AND message_id = 20"
+        )
+        self.conn.commit()
+        changed_media = list(media_row)
+        changed_media[11] = None
+        changed_media[12] = "fp-2"
+        changed = batch_upsert(self.conn, [], [tuple(changed_media)])
+        self.assertEqual({700}, changed.affected_grouped_ids)
+        self.assertEqual(1, changed.persisted_change_count)
+
+    def test_batch_upsert_reports_group_changes_when_album_message_moves_or_leaves(self) -> None:
+        message_row = (
+            1,
+            21,
+            "2026-01-01 00:00:00",
+            1,
+            1,
+            "album caption",
+            "album caption",
+            "pure-album-21",
+            "dedupe-album-21",
+            "PHOTO",
+            701,
+            1,
+            0,
+            0,
+            "[]",
+            0,
+            "",
+            13,
+        )
+        batch_upsert(self.conn, [message_row], [])
+
+        moved = list(message_row)
+        moved[10] = 702
+        moved_result = batch_upsert(self.conn, [tuple(moved)], [])
+        self.assertEqual({701, 702}, moved_result.affected_grouped_ids)
+
+        left = list(moved)
+        left[9] = "TEXT"
+        left[10] = None
+        left[11] = 0
+        left_result = batch_upsert(self.conn, [tuple(left)], [])
+        self.assertEqual({702}, left_result.affected_grouped_ids)
+
+    def test_batch_upsert_repairs_an_absent_fts_document_without_message_update(self) -> None:
+        fts_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
+        ).fetchone()
+        if fts_table is None:
+            self.skipTest("SQLite build does not provide FTS5")
+
+        stored = self.conn.execute(
+            """
+            SELECT
+                chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+                content, content_norm, pure_hash, dedupe_hash, msg_type,
+                grouped_id, has_media, is_promo, promo_score, promo_reasons,
+                dedupe_eligible, guard_reason, text_len, pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        ).fetchone()
+        message_row = tuple(stored[index] for index in range(18))
+        self.conn.execute(
+            "INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', ?, ?)",
+            (int(stored[18]), str(stored[6] or stored[5] or "")),
+        )
+        self.conn.commit()
+
+        batch_upsert(self.conn, [message_row], [])
+
+        matches = self.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ("hello",),
+        ).fetchall()
+        self.assertEqual([int(stored[18])], [int(row[0]) for row in matches])
+
+    def test_batch_upsert_repairs_fts_when_docsize_shadow_row_is_missing(self) -> None:
+        fts_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
+        ).fetchone()
+        if fts_table is None:
+            self.skipTest("SQLite build does not provide FTS5")
+
+        stored = self.conn.execute(
+            """
+            SELECT
+                chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+                content, content_norm, pure_hash, dedupe_hash, msg_type,
+                grouped_id, has_media, is_promo, promo_score, promo_reasons,
+                dedupe_eligible, guard_reason, text_len, pk
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        ).fetchone()
+        message_row = tuple(stored[index] for index in range(18))
+        self.conn.execute(
+            "DELETE FROM messages_fts_docsize WHERE id = ?", (int(stored[18]),)
+        )
+        self.conn.commit()
+
+        result = batch_upsert(self.conn, [message_row], [])
+
+        self.assertEqual(1, result.persisted_change_count)
+        matches = self.conn.execute(
+            "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+            ("hello",),
+        ).fetchall()
+        self.assertEqual([int(stored[18])], [int(row[0]) for row in matches])
+
+    def test_batch_upsert_does_not_refresh_with_stale_fts_update_trigger(self) -> None:
+        fts_table = self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'"
+        ).fetchone()
+        if fts_table is None:
+            self.skipTest("SQLite build does not provide FTS5")
+
+        self.conn.execute(
+            """
+            UPDATE messages
+            SET content = 'raw-only-text', content_norm = 'normalized-text'
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        )
+        self.conn.execute("DROP TRIGGER trg_messages_fts_update")
+        self.conn.execute(
+            """
+            CREATE TRIGGER trg_messages_fts_update
+            AFTER UPDATE OF content, content_norm ON messages BEGIN
+                INSERT INTO messages_fts(messages_fts, rowid, content)
+                VALUES ('delete', old.pk, COALESCE(old.content, ''));
+                INSERT INTO messages_fts(rowid, content)
+                VALUES (new.pk, COALESCE(new.content, ''));
+            END
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO message_search_terms_meta(key, value)
+            VALUES ('fts_index_status', 'incomplete')
+            ON CONFLICT(key) DO UPDATE SET value = excluded.value
+            """
+        )
+        self.conn.execute("CREATE TABLE message_update_audit(id INTEGER PRIMARY KEY)")
+        self.conn.execute(
+            """
+            CREATE TRIGGER audit_message_update
+            AFTER UPDATE ON messages BEGIN
+                INSERT INTO message_update_audit(id) VALUES (NULL);
+            END
+            """
+        )
+        self.conn.commit()
+        stored = self.conn.execute(
+            """
+            SELECT
+                chat_id, message_id, msg_date_text, msg_date_ts, sender_id,
+                content, content_norm, pure_hash, dedupe_hash, msg_type,
+                grouped_id, has_media, is_promo, promo_score, promo_reasons,
+                dedupe_eligible, guard_reason, text_len
+            FROM messages
+            WHERE chat_id = 1 AND message_id = 10
+            """
+        ).fetchone()
+
+        result = batch_upsert(self.conn, [tuple(stored)], [])
+
+        self.assertEqual(0, result.persisted_change_count)
+        self.assertEqual(
+            0,
+            self.conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0],
+        )
+        self.assertEqual(
+            [],
+            self.conn.execute(
+                "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'raw'"
+            ).fetchall(),
+        )
+        self.assertEqual(
+            1,
+            len(
+                self.conn.execute(
+                    "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'normalized'"
+                ).fetchall()
+            ),
+        )
+
+    def test_batch_upsert_does_not_force_updates_when_fts_is_unsupported(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            detected = detect_sqlite_features(conn)
+            create_schema(
+                conn,
+                SimpleNamespace(
+                    supports_strict=detected.supports_strict,
+                    supports_fts5=False,
+                ),
+            )
+            conn.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+            conn.commit()
+            message_row = (
+                1,
+                10,
+                "2026-01-01 00:00:00",
+                1,
+                1,
+                "hello",
+                "hello",
+                "pure",
+                "dedupe",
+                "TEXT",
+                None,
+                0,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                5,
+            )
+            batch_upsert(conn, [message_row], [])
+            conn.execute("CREATE TABLE message_update_audit(id INTEGER PRIMARY KEY)")
+            conn.execute(
+                """
+                CREATE TRIGGER audit_message_update
+                AFTER UPDATE ON messages
+                BEGIN
+                    INSERT INTO message_update_audit(id) VALUES (NULL);
+                END
+                """
+            )
+            conn.commit()
+
+            batch_upsert(conn, [message_row], [])
+            self.assertEqual(
+                0,
+                conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0],
+            )
+        finally:
+            conn.close()
+
+    def test_batch_upsert_ignores_stale_fts_tables_when_runtime_support_is_disabled(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            detected = detect_sqlite_features(conn)
+            if not detected.supports_fts5:
+                self.skipTest("SQLite build does not provide FTS5")
+            create_schema(conn, detected)
+            conn.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
+            conn.commit()
+            message_row = (
+                1,
+                10,
+                "2026-01-01 00:00:00",
+                1,
+                1,
+                "hello",
+                "hello",
+                "pure",
+                "dedupe",
+                "TEXT",
+                None,
+                0,
+                0,
+                0,
+                "[]",
+                0,
+                "",
+                5,
+            )
+            batch_upsert(conn, [message_row], [])
+            conn.commit()
+
+            create_schema(
+                conn,
+                SimpleNamespace(
+                    supports_strict=detected.supports_strict,
+                    supports_fts5=False,
+                ),
+            )
+            conn.execute("CREATE TABLE message_update_audit(id INTEGER PRIMARY KEY)")
+            conn.execute(
+                """
+                CREATE TRIGGER audit_message_update
+                AFTER UPDATE ON messages
+                BEGIN
+                    INSERT INTO message_update_audit(id) VALUES (NULL);
+                END
+                """
+            )
+            conn.commit()
+
+            result = batch_upsert(conn, [message_row], [])
+            self.assertEqual(0, result.persisted_change_count)
+            self.assertEqual(
+                0,
+                conn.execute(
+                    "SELECT COUNT(*) FROM message_update_audit"
+                ).fetchone()[0],
+            )
+        finally:
+            conn.close()
 
     def test_batch_upsert_deletes_stale_media_in_key_batches(self) -> None:
         media_messages = [
@@ -4859,6 +5776,12 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         cur = self.conn.cursor()
         try:
+            cur.execute(
+                """
+                INSERT INTO admin_recovery_chats(chat_id, chat_title, scanned_at)
+                VALUES (1, 'Chat 1 recovery candidate', '2026-01-01 00:00:00')
+                """
+            )
             cur.execute("DROP TRIGGER IF EXISTS trg_message_terms_delete")
             cur.execute(
                 "SELECT pk FROM messages WHERE chat_id = 1 AND message_id = 10"
@@ -4895,6 +5818,8 @@ class WriteConsistencyTests(unittest.TestCase):
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
         self.assertEqual(0, int(cur.fetchone()["c"]))
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
+        self.assertEqual(0, int(cur.fetchone()["c"]))
+        cur.execute("SELECT COUNT(*) AS c FROM admin_recovery_chats WHERE chat_id = 1")
         self.assertEqual(0, int(cur.fetchone()["c"]))
 
     def test_delete_chat_data_bulk_path_keeps_fts_clean_and_restores_triggers(self) -> None:
@@ -4939,6 +5864,95 @@ class WriteConsistencyTests(unittest.TestCase):
         finally:
             cur.close()
 
+    def test_delete_chat_data_preserves_caller_transaction_and_fts_on_rollback(self) -> None:
+        if self.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='messages_fts'"
+        ).fetchone() is None:
+            self.skipTest("SQLite build does not provide FTS5")
+
+        self.conn.execute(
+            "UPDATE chats SET chat_title = 'caller delete change' WHERE chat_id = 1"
+        )
+        with patch("tg_harvest.admin_jobs.runners.DELETE_CHAT_FAST_PATH_THRESHOLD", 1):
+            deleted = _delete_chat_data(self.conn, 1)
+
+        self.assertEqual(1, deleted)
+        self.assertTrue(self.conn.in_transaction)
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 10"
+            ).fetchone()
+        )
+        self.conn.rollback()
+
+        self.assertEqual(
+            "Chat 1",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 10"
+            ).fetchone()
+        )
+        self.assertEqual(
+            [1],
+            [
+                int(row["rowid"])
+                for row in self.conn.execute(
+                    "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
+                    ("hello",),
+                ).fetchall()
+            ],
+        )
+        trigger_names = {
+            row["name"]
+            for row in self.conn.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type='trigger'
+                  AND name IN ('trg_messages_fts_delete', 'trg_message_terms_delete')
+                """
+            ).fetchall()
+        }
+        self.assertEqual(
+            {"trg_messages_fts_delete", "trg_message_terms_delete"}, trigger_names
+        )
+
+    def test_delete_chat_data_failure_keeps_outer_transaction_and_triggers(self) -> None:
+        self.conn.execute(
+            "UPDATE chats SET chat_title = 'caller failed delete' WHERE chat_id = 1"
+        )
+        with patch(
+            "tg_harvest.admin_jobs.runners.DELETE_CHAT_FAST_PATH_THRESHOLD", 1
+        ), patch(
+            "tg_harvest.admin_jobs.runners._delete_from_optional_chat_table",
+            side_effect=RuntimeError("forced delete failure"),
+        ), self.assertRaises(RuntimeError):
+            _delete_chat_data(self.conn, 1)
+
+        self.assertTrue(self.conn.in_transaction)
+        self.assertEqual(
+            "caller failed delete",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM messages WHERE chat_id = 1 AND message_id = 10"
+            ).fetchone()
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name = ?",
+                ("trg_messages_fts_delete",),
+            ).fetchone()
+        )
+        self.conn.rollback()
+
     def test_delete_empty_chats_only_removes_chats_with_no_messages(self) -> None:
         self.conn.execute(
             """
@@ -4950,6 +5964,12 @@ class WriteConsistencyTests(unittest.TestCase):
             """
             INSERT INTO chats(chat_id, chat_title, message_count)
             VALUES (3, 'Stale Count', 0)
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO chats(chat_id, chat_title, message_count)
+            VALUES (4, 'Stale Positive Count', 99)
             """
         )
         self.conn.execute(
@@ -4967,23 +5987,70 @@ class WriteConsistencyTests(unittest.TestCase):
             VALUES (2, 77, 0, 0)
             """
         )
+        self.conn.executemany(
+            """
+            INSERT INTO admin_recovery_chats(chat_id, chat_title, scanned_at)
+            VALUES (?, ?, '2026-01-01 00:00:00')
+            """,
+            [
+                (2, "Empty recovery candidate"),
+                (3, "Retained recovery candidate"),
+            ],
+        )
         self.conn.commit()
 
         stats = _delete_empty_chats_data(self.conn)
 
-        self.assertEqual(1, stats["deleted_chats"])
+        self.assertEqual(2, stats["deleted_chats"])
         cur = self.conn.cursor()
         try:
             cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 2")
             self.assertEqual(0, int(cur.fetchone()["c"]))
             cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 3")
             self.assertEqual(1, int(cur.fetchone()["c"]))
+            cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 4")
+            self.assertEqual(0, int(cur.fetchone()["c"]))
             cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 3")
             self.assertEqual(1, int(cur.fetchone()["c"]))
             cur.execute("SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 2")
             self.assertEqual(0, int(cur.fetchone()["c"]))
+            cur.execute(
+                "SELECT chat_id FROM admin_recovery_chats ORDER BY chat_id ASC"
+            )
+            self.assertEqual([3], [int(row["chat_id"]) for row in cur.fetchall()])
         finally:
             cur.close()
+
+    def test_delete_empty_chats_preserves_caller_transaction(self) -> None:
+        self.conn.execute(
+            "INSERT INTO chats(chat_id, chat_title, message_count) VALUES (2, 'Empty', 0)"
+        )
+        self.conn.commit()
+        self.conn.execute(
+            "UPDATE chats SET chat_title = 'caller empty change' WHERE chat_id = 1"
+        )
+
+        stats = _delete_empty_chats_data(self.conn)
+
+        self.assertEqual(1, stats["deleted_chats"])
+        self.assertTrue(self.conn.in_transaction)
+        self.assertIsNone(
+            self.conn.execute(
+                "SELECT 1 FROM chats WHERE chat_id = 2"
+            ).fetchone()
+        )
+        self.conn.rollback()
+        self.assertEqual(
+            "Chat 1",
+            self.conn.execute(
+                "SELECT chat_title FROM chats WHERE chat_id = 1"
+            ).fetchone()[0],
+        )
+        self.assertIsNotNone(
+            self.conn.execute(
+                "SELECT 1 FROM chats WHERE chat_id = 2"
+            ).fetchone()
+        )
 
 
 class _SQLiteSideEffectLogHandler(logging.Handler):

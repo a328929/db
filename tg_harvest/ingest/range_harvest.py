@@ -22,7 +22,8 @@ from tg_harvest.ingest.flood_wait import (
     short_retry_sleep_seconds,
 )
 from tg_harvest.ingest.parse import HarvestCounters, MessageParseError, MessageParser
-from tg_harvest.ingest.runner import _last_message_id_in_rows, _prepare_db_rows
+from tg_harvest.ingest.runner import _prepare_db_rows
+from tg_harvest.ingest.store import BatchUpsertResult, unique_message_key_count
 
 
 @dataclass(frozen=True)
@@ -190,14 +191,16 @@ def _flush_range_batch(
     media_rows: list[tuple],
     counters: HarvestCounters,
     *,
-    write_batch_fn: Callable[[list[tuple], list[tuple]], None],
-) -> int:
+    write_batch_fn: Callable[[list[tuple], list[tuple]], Any],
+) -> BatchUpsertResult:
     if not msg_rows:
-        return 0
-    write_batch_fn(list(msg_rows), list(media_rows))
-    batch_count = len(msg_rows)
-    counters.written += batch_count
-    return _last_message_id_in_rows(msg_rows)
+        return BatchUpsertResult()
+    result = BatchUpsertResult.from_callback(
+        write_batch_fn(list(msg_rows), list(media_rows)),
+        fallback_change_count=unique_message_key_count(msg_rows),
+    )
+    counters.written += result.persisted_change_count
+    return result
 
 
 def _parse_range_message(entity: Any, chat_id: int, message: Any) -> tuple[tuple, tuple | None]:
@@ -228,7 +231,7 @@ def harvest_message_id_range(
     entity: Any,
     chat_id: int,
     message_range: MessageIdRange,
-    write_batch_fn: Callable[[list[tuple], list[tuple]], None],
+    write_batch_fn: Callable[[list[tuple], list[tuple]], Any],
     account_label: str = "",
     max_retries: int = 3,
 ) -> tuple[HarvestCounters, set[int]]:
@@ -261,29 +264,28 @@ def harvest_message_id_range(
                 last_processed_id = min(last_processed_id, current_id)
                 counters.seen += 1
                 msg_row, media_row = _parse_range_message(entity, chat_id, message)
-                grouped_id = msg_row[10] if len(msg_row) > 10 else None
-                if grouped_id is not None:
-                    touched_groups.add(int(grouped_id))
                 msg_rows.append(msg_row)
                 if media_row:
                     media_rows.append(media_row)
 
                 if len(msg_rows) >= CFG.batch_size:
-                    _flush_range_batch(
+                    batch_result = _flush_range_batch(
                         msg_rows,
                         media_rows,
                         counters,
                         write_batch_fn=write_batch_fn,
                     )
+                    touched_groups.update(batch_result.affected_grouped_ids)
                     next_offset_id = last_processed_id
                     msg_rows, media_rows = [], []
 
-            _flush_range_batch(
+            batch_result = _flush_range_batch(
                 msg_rows,
                 media_rows,
                 counters,
                 write_batch_fn=write_batch_fn,
             )
+            touched_groups.update(batch_result.affected_grouped_ids)
             return counters, touched_groups
         except RuntimeError as exc:
             if isinstance(exc, AccountFloodWaitError):

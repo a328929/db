@@ -39,12 +39,12 @@ def _merge_counters(target: HarvestCounters, source: HarvestCounters) -> None:
 
 
 def _collect_touched_groups(msg_rows: list[tuple]) -> set[int]:
-    touched_groups: set[int] = set()
-    for row in msg_rows:
-        grouped_id = row[10] if len(row) > 10 else None
-        if grouped_id is not None:
-            touched_groups.add(int(grouped_id))
-    return touched_groups
+    """Best-effort fallback used only when a range harvest aborts."""
+    return {
+        int(row[10])
+        for row in msg_rows
+        if len(row) > 10 and row[10] is not None
+    }
 
 
 def _partial_counters(submitted_message_count: int) -> HarvestCounters:

@@ -757,7 +757,13 @@ class CloneRoutesTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
-            {"total": 1, "creating": 0, "created": 1, "failed": 0},
+            {
+                "total": 1,
+                "creating": 0,
+                "deleting": 0,
+                "created": 1,
+                "failed": 0,
+            },
             payload["summary"],
         )
         self.assertEqual("migrate", payload["focus"]["step"])
@@ -995,6 +1001,24 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("关联克隆任务仍在执行，不能删除本地记录", payload["error"])
         self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
         self.assertEqual([], self.deleted_clone_run_ids)
+        self.assertEqual([], self.started_target_delete_jobs)
+
+    def test_clone_run_delete_rejects_active_deletion_owner_token(self) -> None:
+        self.clone_runs[0]["status"] = "deleting"
+        self.clone_runs[0]["deletion_job_id"] = "job-delete-active"
+        self.job_statuses["job-delete-active"] = "running"
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.delete(
+                "/api/admin/clone/runs/run-existing",
+                json={"confirm": "DELETE-CLONE-RUN:run-existing"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(409, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("job-delete-active", payload["active_job"]["job_id"])
         self.assertEqual([], self.started_target_delete_jobs)
 
     def test_clone_run_message_delete_starts_second_account_job(self) -> None:

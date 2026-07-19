@@ -580,7 +580,13 @@ def refresh_chat_states(
 ) -> dict[str, Any]:
     now = str(now_text or utc_now_text())
     cur = conn.cursor()
-    active_chat_ids = [int(row["chat_id"]) for row in chat_rows if int(row["chat_id"]) > 0]
+    active_chat_ids = sorted(
+        {
+            int(row["chat_id"])
+            for row in chat_rows
+            if int(row["chat_id"]) > 0
+        }
+    )
     try:
         cur.execute("BEGIN IMMEDIATE")
         for row in chat_rows:
@@ -633,24 +639,43 @@ def refresh_chat_states(
                     chat_username = excluded.chat_username,
                     membership_scope = excluded.membership_scope,
                     status = CASE
-                        WHEN sync_chat_state.status IN ('pending', 'updating', 'backoff')
+                        WHEN COALESCE(sync_chat_state.status, '') IN ('pending', 'updating', 'backoff')
                             THEN sync_chat_state.status
                         ELSE excluded.status
                     END,
                     local_last_id = excluded.local_last_id,
                     priority_score = CASE
-                        WHEN sync_chat_state.status IN ('pending', 'updating')
+                        WHEN COALESCE(sync_chat_state.status, '') IN ('pending', 'updating')
                             THEN sync_chat_state.priority_score
                         ELSE excluded.priority_score
                     END,
                     source_accounts = excluded.source_accounts,
                     next_probe_at = CASE
-                        WHEN sync_chat_state.next_probe_at = '' AND excluded.next_probe_at <> ''
+                        WHEN COALESCE(sync_chat_state.next_probe_at, '') = ''
+                             AND excluded.next_probe_at <> ''
                             THEN excluded.next_probe_at
                         ELSE sync_chat_state.next_probe_at
                     END,
                     is_active = 1,
                     updated_at = excluded.updated_at
+                WHERE sync_chat_state.chat_title IS NOT excluded.chat_title
+                   OR sync_chat_state.chat_username IS NOT excluded.chat_username
+                   OR sync_chat_state.membership_scope IS NOT excluded.membership_scope
+                   OR (
+                        COALESCE(sync_chat_state.status, '') NOT IN ('pending', 'updating', 'backoff')
+                        AND sync_chat_state.status IS NOT excluded.status
+                   )
+                   OR sync_chat_state.local_last_id IS NOT excluded.local_last_id
+                   OR (
+                        COALESCE(sync_chat_state.status, '') NOT IN ('pending', 'updating')
+                        AND sync_chat_state.priority_score IS NOT excluded.priority_score
+                   )
+                   OR sync_chat_state.source_accounts IS NOT excluded.source_accounts
+                   OR (
+                        COALESCE(sync_chat_state.next_probe_at, '') = ''
+                        AND excluded.next_probe_at <> ''
+                   )
+                   OR sync_chat_state.is_active IS NOT 1
                 """,
                 (
                     chat_id,
@@ -668,9 +693,17 @@ def refresh_chat_states(
             )
 
         if active_chat_ids:
-            placeholders = ",".join(["?"] * len(active_chat_ids))
+            cur.execute("DROP TABLE IF EXISTS temp_sync_active_chat_ids")
             cur.execute(
-                f"""
+                "CREATE TEMP TABLE temp_sync_active_chat_ids "
+                "(chat_id INTEGER PRIMARY KEY)"
+            )
+            cur.executemany(
+                "INSERT INTO temp_sync_active_chat_ids(chat_id) VALUES (?)",
+                [(chat_id,) for chat_id in active_chat_ids],
+            )
+            cur.execute(
+                """
                 UPDATE sync_chat_state
                 SET
                     status = 'deleted',
@@ -679,17 +712,32 @@ def refresh_chat_states(
                     next_probe_at = '',
                     next_update_at = '',
                     updated_at = ?
-                WHERE chat_id NOT IN ({placeholders})
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM temp_sync_active_chat_ids active
+                    WHERE active.chat_id = sync_chat_state.chat_id
+                )
+                  AND (
+                        status IS NOT 'deleted'
+                     OR is_active IS NOT 0
+                     OR priority_score IS NOT 0
+                     OR next_probe_at IS NOT ''
+                     OR next_update_at IS NOT ''
+                  )
                 """,
-                [now, *active_chat_ids],
+                (now,),
             )
             cur.execute(
-                f"""
+                """
                 DELETE FROM sync_pending_updates
-                WHERE chat_id NOT IN ({placeholders})
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM temp_sync_active_chat_ids active
+                    WHERE active.chat_id = sync_pending_updates.chat_id
+                )
                 """,
-                active_chat_ids,
             )
+            cur.execute("DROP TABLE IF EXISTS temp_sync_active_chat_ids")
         else:
             cur.execute(
                 """
@@ -701,6 +749,11 @@ def refresh_chat_states(
                     next_probe_at = '',
                     next_update_at = '',
                     updated_at = ?
+                WHERE status IS NOT 'deleted'
+                   OR is_active IS NOT 0
+                   OR priority_score IS NOT 0
+                   OR next_probe_at IS NOT ''
+                   OR next_update_at IS NOT ''
                 """,
                 (now,),
             )
@@ -716,6 +769,8 @@ def refresh_chat_states(
         logging.exception("刷新同步调度群组状态发生未知错误，事务已回滚")
         raise
     finally:
+        with suppress(Exception):
+            cur.execute("DROP TABLE IF EXISTS temp_sync_active_chat_ids")
         cur.close()
 
 

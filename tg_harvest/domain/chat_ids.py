@@ -2,9 +2,10 @@
 
 def stored_chat_id_from_entity_id(entity_id: int) -> int:
     """Return the positive chat id shape used by the local database."""
-    value = abs(int(entity_id))
+    original = int(entity_id)
+    value = abs(original)
     raw = str(value)
-    if raw.startswith("100") and len(raw) > 3:
+    if original < 0 and raw.startswith("100") and len(raw) > 3:
         return int(raw[3:])
     return value
 

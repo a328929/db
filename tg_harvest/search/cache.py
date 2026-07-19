@@ -2,12 +2,13 @@ import hashlib
 import os
 import sqlite3
 import threading
+from collections import OrderedDict
 from typing import Any
 
 from tg_harvest.domain.coerce import safe_int
 
 _COUNT_CACHE_LOCK = threading.Lock()
-_COUNT_CACHE: dict[tuple[Any, ...], tuple[int, bool, int]] = {}
+_COUNT_CACHE: OrderedDict[tuple[Any, ...], tuple[int, bool, int]] = OrderedDict()
 _COUNT_CACHE_MAX_ENTRIES = 256
 
 
@@ -41,7 +42,11 @@ def _read_database_fingerprint(conn: sqlite3.Connection) -> tuple[Any, ...]:
         break
 
     if not main_path:
-        return ("memory", _read_data_version(conn))
+        # ``PRAGMA data_version`` only changes for commits made by another
+        # connection.  In-memory databases are commonly mutated and queried
+        # through the same connection, so include its monotonic change counter
+        # to prevent a local commit from reusing a stale count.
+        return ("memory", _read_data_version(conn), int(conn.total_changes))
 
     main_path = os.path.abspath(main_path)
     stats: list[tuple[str, int | None, int | None]] = []
@@ -86,7 +91,10 @@ def _get_cached_count(
     cache_key: tuple[Any, ...],
 ) -> tuple[int, bool, int] | None:
     with _COUNT_CACHE_LOCK:
-        return _COUNT_CACHE.get(cache_key)
+        value = _COUNT_CACHE.get(cache_key)
+        if value is not None:
+            _COUNT_CACHE.move_to_end(cache_key)
+        return value
 
 
 def _put_cached_count(
@@ -94,6 +102,6 @@ def _put_cached_count(
 ) -> None:
     with _COUNT_CACHE_LOCK:
         _COUNT_CACHE[cache_key] = value
+        _COUNT_CACHE.move_to_end(cache_key)
         if len(_COUNT_CACHE) > _COUNT_CACHE_MAX_ENTRIES:
-            oldest_key = next(iter(_COUNT_CACHE))
-            _COUNT_CACHE.pop(oldest_key, None)
+            _COUNT_CACHE.popitem(last=False)

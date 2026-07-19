@@ -43,12 +43,12 @@ def _entity_chat_title(
 
 
 def _collect_touched_groups(msg_rows: list[tuple]) -> set[int]:
-    touched_groups: set[int] = set()
-    for row in msg_rows:
-        grouped_id = row[10] if len(row) > 10 else None
-        if grouped_id is not None:
-            touched_groups.add(int(grouped_id))
-    return touched_groups
+    """Best-effort fallback used only when a harvest aborts mid-stream."""
+    return {
+        int(row[10])
+        for row in msg_rows
+        if len(row) > 10 and row[10] is not None
+    }
 
 
 def _partial_counters(submitted_message_count: int) -> HarvestCounters:
@@ -105,6 +105,8 @@ def stream_entity_harvest_to_writer(
             chat_id=chat_id,
             chat_title=chat_title,
             counters=_partial_counters(submitted_message_count),
+            # The writer normally carries exact group changes in its state;
+            # this fallback also protects lightweight/legacy coordinators.
             touched_groups=submitted_touched_groups,
             first_sync=False,
             total_started_at=total_started_at,

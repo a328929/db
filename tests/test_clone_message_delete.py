@@ -66,6 +66,7 @@ def _run_job(
     client,
     selection,
     *,
+    clone_run=None,
     tail_selection_result=None,
     rewind_side_effect=None,
 ):
@@ -111,7 +112,7 @@ def _run_job(
     ):
         _admin_clone_message_delete_job_runner(
             "job-message-delete",
-            clone_run=_clone_run(),
+            clone_run=clone_run or _clone_run(),
             selection=selection,
             delete_delay_ms=0,
             cfg=_cfg(),
@@ -127,6 +128,30 @@ def _run_job(
         load_tail_selection,
         rewind_mappings,
     )
+
+
+def test_clone_message_delete_never_targets_source_identity():
+    run = _clone_run()
+    run["source_chat_id"] = -100777
+    run["source_chat_type"] = "Megagroup"
+
+    (
+        statuses,
+        logs,
+        create_client,
+        _update_progress,
+        load_tail_selection,
+        _rewind_mappings,
+    ) = _run_job(
+        client=None,
+        selection=parse_clone_message_delete_selection("5"),
+        clone_run=run,
+    )
+
+    assert statuses == ["running", "error"]
+    assert not create_client.called
+    assert not load_tail_selection.called
+    assert any("与源群 ID 冲突" in message for message in logs)
 
 
 def test_clone_message_delete_selection_parses_latest_and_forward_range():

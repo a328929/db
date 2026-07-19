@@ -229,6 +229,151 @@ def test_clone_structure_job_failure_does_not_persist_target_identity(tmp_path):
     assert "boom" in run["error_message"]
 
 
+def test_clone_structure_keeps_done_state_when_completion_reporting_fails(tmp_path):
+    db_path = tmp_path / "clone-job-reporting-error.db"
+    _create_job_db(db_path)
+    status_updates = []
+
+    class Client:
+        def __call__(self, request):
+            return SimpleNamespace(
+                chats=[SimpleNamespace(id=779, access_hash=456, title=request.title)]
+            )
+
+    def append_log(_job_id, message):
+        if "目标结构创建完成" in str(message):
+            raise RuntimeError("log backend unavailable")
+
+    with (
+        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
+        patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=Client()),
+        patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone._cleanup_isolated_worker_session"),
+    ):
+        _admin_clone_structure_job_runner(
+            "job-clone",
+            source_chat_id=100,
+            target_title="Source Backup",
+            target_kind="megagroup",
+            clone_run_id="job-clone",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: status_updates.append(status)
+            or True,
+            admin_job_append_log_fn=append_log,
+        )
+
+    conn = _connect(db_path)
+    try:
+        run = load_clone_run(conn, "job-clone")
+    finally:
+        conn.close()
+
+    assert run is not None
+    assert run["status"] == "done"
+    assert run["target_chat_id"] == 779
+    assert status_updates[-1] == "done"
+
+
+def test_clone_structure_failure_reporting_cannot_leave_job_running(tmp_path):
+    db_path = tmp_path / "clone-job-error-reporting.db"
+    _create_job_db(db_path)
+    status_updates = []
+
+    class FailingClient:
+        def __call__(self, _request):
+            raise RuntimeError("creation failed")
+
+    with (
+        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
+        patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=FailingClient()),
+        patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone._cleanup_isolated_worker_session"),
+    ):
+        _admin_clone_structure_job_runner(
+            "job-clone",
+            source_chat_id=100,
+            target_title="Source Backup",
+            target_kind="megagroup",
+            clone_run_id="job-clone",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: status_updates.append(status)
+            or True,
+            admin_job_append_log_fn=lambda *_args: (_ for _ in ()).throw(
+                RuntimeError("log backend unavailable")
+            ),
+        )
+
+    assert status_updates[-1] == "error"
+
+
+def test_clone_structure_keeps_target_identity_when_final_db_write_fails(tmp_path):
+    db_path = tmp_path / "clone-job-persist-error.db"
+    _create_job_db(db_path)
+
+    class Client:
+        def __call__(self, request):
+            return SimpleNamespace(
+                chats=[
+                    SimpleNamespace(
+                        id=778,
+                        access_hash=654321,
+                        title=request.title,
+                        username="created_backup",
+                    )
+                ]
+            )
+
+    real_update_clone_run = update_clone_run
+
+    def fail_done_update(conn, **kwargs):
+        if kwargs.get("status") == "done":
+            raise sqlite3.OperationalError("database write failed")
+        return real_update_clone_run(conn, **kwargs)
+
+    with (
+        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
+        patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=Client()),
+        patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone._cleanup_isolated_worker_session"),
+        patch("tg_harvest.admin_jobs.clone.update_clone_run", side_effect=fail_done_update),
+    ):
+        _admin_clone_structure_job_runner(
+            "job-clone",
+            source_chat_id=100,
+            target_title="Source Backup",
+            target_kind="megagroup",
+            clone_run_id="job-clone",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda *_args: True,
+            admin_job_append_log_fn=lambda *_args: None,
+        )
+
+    conn = _connect(db_path)
+    try:
+        run = load_clone_run(conn, "job-clone")
+    finally:
+        conn.close()
+
+    assert run is not None
+    assert run["status"] == "error"
+    assert run["target_chat_id"] == 778
+    assert run["target_access_hash"] == "654321"
+    assert run["target_username"] == "created_backup"
+    assert "database write failed" in run["error_message"]
+
+
 def _create_deep_plan(path, *, with_target=True):
     conn = _connect(path)
     try:

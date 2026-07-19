@@ -3179,8 +3179,7 @@ def _prepare_empty_chat_targets(cur: Any) -> int:
         INSERT INTO temp_delete_empty_chats(chat_id)
         SELECT c.chat_id
         FROM chats c
-        WHERE COALESCE(c.message_count, 0) = 0
-          AND NOT EXISTS (
+        WHERE NOT EXISTS (
               SELECT 1
               FROM messages m
               WHERE m.chat_id = c.chat_id
@@ -3243,8 +3242,57 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
     cur = conn.cursor()
     fts_enabled = False
     triggers_dropped = False
+    owns_transaction = not conn.in_transaction
+    savepoint_name = f"delete_chat_data_{id(cur):x}"
+    transaction_started = False
+
+    def rollback_scope() -> None:
+        nonlocal transaction_started, triggers_dropped
+        if not transaction_started:
+            return
+        if owns_transaction:
+            with suppress(Exception):
+                conn.rollback()
+            if triggers_dropped:
+                try:
+                    _restore_message_delete_triggers_after_bulk_delete(
+                        cur,
+                        fts_enabled=fts_enabled,
+                    )
+                    triggers_dropped = False
+                    conn.commit()
+                except Exception:
+                    logging.exception("删除群组失败后的删除触发器恢复失败")
+        else:
+            try:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+                # Rolling back the savepoint restores any trigger definitions
+                # dropped by the fast path; do not recreate or commit them in
+                # the caller's transaction.
+                triggers_dropped = False
+            except Exception:
+                logging.exception("删除群组失败后的 SAVEPOINT 回滚失败")
+                if triggers_dropped:
+                    try:
+                        _restore_message_delete_triggers_after_bulk_delete(
+                            cur,
+                            fts_enabled=fts_enabled,
+                        )
+                        triggers_dropped = False
+                    except Exception:
+                        logging.exception("删除群组失败后的触发器兜底恢复失败")
+            try:
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            except Exception:
+                logging.exception("删除群组失败后的 SAVEPOINT 释放失败")
+        transaction_started = False
+
     try:
-        cur.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            cur.execute("BEGIN IMMEDIATE")
+        else:
+            cur.execute(f"SAVEPOINT {savepoint_name}")
+        transaction_started = True
         deleted_messages = _prepare_delete_chat_message_targets(cur, chat_id)
         trigger_optimization_required = (
             int(deleted_messages) >= DELETE_CHAT_FAST_PATH_THRESHOLD
@@ -3260,6 +3308,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
                 _delete_fts_entries_for_chat_targets(cur)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
+        _delete_from_optional_chat_table(cur, "admin_recovery_chats", chat_id)
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
         _delete_from_optional_message_pk_targets_table(
             cur, "message_search_terms", "temp_delete_chat_messages"
@@ -3280,18 +3329,14 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
             )
             triggers_dropped = False
         cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
-        conn.commit()
+        if owns_transaction:
+            conn.commit()
+        else:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        transaction_started = False
         return deleted_messages
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
-        if triggers_dropped:
-            with suppress(Exception):
-                _restore_message_delete_triggers_after_bulk_delete(
-                    cur,
-                    fts_enabled=fts_enabled,
-                )
-                conn.commit()
+        rollback_scope()
         raise
     finally:
         with suppress(Exception):
@@ -3302,12 +3347,38 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
 @synchronized_write
 def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
     cur = conn.cursor()
+    owns_transaction = not conn.in_transaction
+    savepoint_name = f"delete_empty_chats_{id(cur):x}"
+    transaction_started = False
+
+    def rollback_scope() -> None:
+        nonlocal transaction_started
+        if not transaction_started:
+            return
+        if owns_transaction:
+            with suppress(Exception):
+                conn.rollback()
+        else:
+            with suppress(Exception):
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            with suppress(Exception):
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        transaction_started = False
+
     try:
-        cur.execute("BEGIN IMMEDIATE")
+        if owns_transaction:
+            cur.execute("BEGIN IMMEDIATE")
+        else:
+            cur.execute(f"SAVEPOINT {savepoint_name}")
+        transaction_started = True
         target_count = _prepare_empty_chat_targets(cur)
         if target_count <= 0:
             cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
-            conn.commit()
+            if owns_transaction:
+                conn.commit()
+            else:
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+            transaction_started = False
             return {
                 "deleted_chats": 0,
                 "deleted_messages": 0,
@@ -3320,6 +3391,9 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         )
         _delete_from_optional_chat_targets_table(
             cur, "admin_restricted_chats", "temp_delete_empty_chats"
+        )
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_recovery_chats", "temp_delete_empty_chats"
         )
         _clear_sync_scheduler_state_for_chat_targets(cur, "temp_delete_empty_chats")
         cur.execute(
@@ -3363,7 +3437,11 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         )
         deleted_chats = int(cur.rowcount or 0)
         cur.execute("DROP TABLE IF EXISTS temp_delete_empty_chats")
-        conn.commit()
+        if owns_transaction:
+            conn.commit()
+        else:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        transaction_started = False
         return {
             "deleted_chats": deleted_chats,
             "deleted_messages": deleted_messages,
@@ -3371,8 +3449,7 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
             "deleted_media_groups": deleted_media_groups,
         }
     except Exception:
-        with suppress(Exception):
-            conn.rollback()
+        rollback_scope()
         raise
     finally:
         with suppress(Exception):

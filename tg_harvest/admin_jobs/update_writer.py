@@ -5,7 +5,12 @@ from queue import Full, Queue
 from typing import Any
 
 from tg_harvest.admin_jobs.core import job_context, job_log_passthrough_enabled
-from tg_harvest.ingest.store import batch_upsert, upsert_chat
+from tg_harvest.ingest.store import (
+    BatchUpsertResult,
+    batch_upsert,
+    unique_message_key_count,
+    upsert_chat,
+)
 
 CLOSE_JOIN_TIMEOUT_SEC = 5.0
 
@@ -53,6 +58,9 @@ class ChatUpdateWriteCoordinator:
             self._states[int(chat_id)] = {
                 "done": threading.Event(),
                 "error": None,
+                "touched_groups": set(),
+                "persisted_change_count": 0,
+                "exact_change_tracking": True,
             }
 
     def submit_chat_start(
@@ -186,14 +194,60 @@ class ChatUpdateWriteCoordinator:
                             ),
                         )
                     elif kind == "batch":
-                        batch_upsert(conn, item["msg_rows"], item["media_rows"])
+                        result = batch_upsert(
+                            conn,
+                            item["msg_rows"],
+                            item["media_rows"],
+                        )
+                        if isinstance(result, BatchUpsertResult):
+                            touched_groups = result.affected_grouped_ids
+                            persisted_change_count = result.persisted_change_count
+                        else:
+                            # Keep compatibility with test doubles and older
+                            # callbacks while the real store reports exact
+                            # persisted changes.
+                            normalized = BatchUpsertResult.from_callback(
+                                result,
+                                fallback_change_count=unique_message_key_count(
+                                    item["msg_rows"]
+                                ),
+                            )
+                            touched_groups = normalized.affected_grouped_ids
+                            persisted_change_count = normalized.persisted_change_count
+                            with self._states_lock:
+                                state = self._states.get(chat_id)
+                                if state is not None:
+                                    state["exact_change_tracking"] = False
+                        with self._states_lock:
+                            state = self._states.get(chat_id)
+                            if state is not None:
+                                state["persisted_change_count"] += int(
+                                    persisted_change_count
+                                )
+                                if touched_groups:
+                                    state["touched_groups"].update(touched_groups)
                     elif kind == "finalize":
+                        touched_groups = set(item["touched_groups"])
+                        exact_change_tracking = False
+                        persisted_change_count = None
+                        with self._states_lock:
+                            state = self._states.get(chat_id)
+                            if state is not None:
+                                touched_groups.update(state["touched_groups"])
+                                exact_change_tracking = bool(
+                                    state.get("exact_change_tracking", False)
+                                )
+                                persisted_change_count = int(
+                                    state.get("persisted_change_count", 0)
+                                )
+                        if exact_change_tracking and persisted_change_count is not None:
+                            item["counters"].written = persisted_change_count
                         _finalize_entity_processing(
                             conn,
                             chat_id=chat_id,
                             chat_title=str(item["chat_title"]),
                             counters=item["counters"],
-                            touched_groups=set(item["touched_groups"]),
+                            touched_groups=touched_groups,
                             first_sync=bool(item["first_sync"]),
                             total_started_at=float(item["total_started_at"]),
                             skip_postprocess_if_unchanged=bool(

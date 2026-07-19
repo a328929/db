@@ -179,6 +179,7 @@
 
 .clone-workbench-summary {
   margin-top: 18px;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
 }
 
 .clone-workbench-flow {

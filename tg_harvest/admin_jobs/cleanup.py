@@ -1,3 +1,4 @@
+import logging
 import time
 from collections import defaultdict
 from collections.abc import Callable, Iterable
@@ -6,9 +7,12 @@ from typing import Any
 
 from tg_harvest.config import CFG
 from tg_harvest.domain.normalize import normalize_search_term
-from tg_harvest.ingest.media_groups import refresh_media_groups_for_chat
+from tg_harvest.ingest.media_groups import _refresh_media_groups_for_cursor
 from tg_harvest.storage.connection import synchronized_write
-from tg_harvest.storage.schema import refresh_chat_message_counts
+from tg_harvest.storage.schema import (
+    _refresh_chat_message_counts,
+    refresh_chat_message_counts,
+)
 from tg_harvest.storage.search_text_state import (
     indexed_messages_from_clause,
     indexed_unsearchable_message_predicate,
@@ -16,6 +20,9 @@ from tg_harvest.storage.search_text_state import (
 
 CLEANUP_DELETE_BATCH_SIZE = 2000
 MEDIA_GROUP_SYNC_BATCH_SIZE = 500
+# Keep every DELETE statement below SQLite's common 999-variable limit. The
+# outer cleanup batch can remain larger; it is split inside one transaction.
+CLEANUP_SQL_BATCH_SIZE = 400
 LIKE_ESCAPE_CHAR = "\\"
 
 
@@ -108,7 +115,23 @@ def _collect_cleanup_affected_state(cur) -> tuple[set[int], dict[int, set[int]]]
     affected_chats: set[int] = set()
     affected_groups_by_chat: dict[int, set[int]] = defaultdict(set)
 
-    cur.execute("SELECT DISTINCT chat_id, grouped_id FROM temp_cleanup_targets")
+    # ``messages.grouped_id`` is the canonical source for rebuilding an
+    # aggregate, but old/partially migrated rows can retain a different
+    # grouped_id in ``message_media``.  Include both values so deleting the
+    # message also removes any stale aggregate keyed by the media metadata.
+    cur.execute(
+        """
+        SELECT DISTINCT t.chat_id, t.grouped_id
+        FROM temp_cleanup_targets AS t
+        UNION
+        SELECT DISTINCT t.chat_id, mm.grouped_id
+        FROM temp_cleanup_targets AS t
+        JOIN message_media AS mm
+          ON mm.chat_id = t.chat_id
+         AND mm.message_id = t.message_id
+        WHERE mm.grouped_id IS NOT NULL
+        """
+    )
     for row in cur.fetchall():
         chat_id = int(row[0])
         affected_chats.add(chat_id)
@@ -124,131 +147,119 @@ def _chunked(values: list[int], size: int):
         yield values[start : start + size]
 
 
-def _load_remaining_grouped_ids(cur, chat_id: int, grouped_ids: set[int]) -> set[int]:
-    normalized_ids = sorted({int(grouped_id) for grouped_id in grouped_ids})
-    if not normalized_ids:
-        return set()
-
-    remaining_ids: set[int] = set()
-    for part in _chunked(normalized_ids, MEDIA_GROUP_SYNC_BATCH_SIZE):
-        placeholders = ",".join(["?"] * len(part))
-        cur.execute(
-            f"""
-            SELECT DISTINCT grouped_id
-            FROM messages
-            WHERE chat_id = ?
-              AND grouped_id IN ({placeholders})
-            """,
-            [int(chat_id), *part],
-        )
-        remaining_ids.update(
-            int(row[0] if not hasattr(row, "keys") else row["grouped_id"])
-            for row in cur.fetchall()
-            if (row[0] if not hasattr(row, "keys") else row["grouped_id"]) is not None
-        )
-    return remaining_ids
-
-
-@synchronized_write
-def _delete_empty_media_groups(
-    conn,
-    chat_id: int,
-    grouped_ids: set[int],
-) -> int:
-    normalized_ids = sorted({int(grouped_id) for grouped_id in grouped_ids})
-    if not normalized_ids:
-        return 0
-
-    cur = conn.cursor()
-    try:
-        deleted = 0
-        cur.execute("BEGIN IMMEDIATE")
-        for part in _chunked(normalized_ids, MEDIA_GROUP_SYNC_BATCH_SIZE):
-            placeholders = ",".join(["?"] * len(part))
-            cur.execute(
-                f"""
-                DELETE FROM media_groups
-                WHERE chat_id = ?
-                  AND grouped_id IN ({placeholders})
-                """,
-                [int(chat_id), *part],
-            )
-            deleted += int(cur.rowcount or 0)
-        conn.commit()
-        return deleted
-    except Exception:
-        with suppress(Exception):
-            conn.rollback()
-        raise
-    finally:
-        cur.close()
-
-
-def _split_remaining_and_deleted_groups(
-    conn,
-    chat_id: int,
-    grouped_ids: set[int],
-) -> tuple[set[int], set[int]]:
-    cur = conn.cursor()
-    try:
-        remaining_ids = _load_remaining_grouped_ids(cur, chat_id, grouped_ids)
-    finally:
-        cur.close()
-    deleted_ids = {int(grouped_id) for grouped_id in grouped_ids} - remaining_ids
-    return remaining_ids, deleted_ids
-
-
-def _load_chats_without_messages(conn, chat_ids: Iterable[int]) -> set[int]:
+def _load_chats_without_messages_from_cursor(
+    cur, chat_ids: Iterable[int]
+) -> set[int]:
     normalized_ids = sorted({int(chat_id) for chat_id in chat_ids})
     if not normalized_ids:
         return set()
 
     empty_chat_ids: set[int] = set()
-    cur = conn.cursor()
-    try:
-        for part in _chunked(normalized_ids, MEDIA_GROUP_SYNC_BATCH_SIZE):
-            placeholders = ",".join(["?"] * len(part))
-            cur.execute(
-                f"""
-                SELECT c.chat_id
-                FROM chats c
-                WHERE c.chat_id IN ({placeholders})
-                  AND NOT EXISTS (
-                      SELECT 1
-                      FROM messages m
-                      WHERE m.chat_id = c.chat_id
-                  )
-                """,
-                part,
-            )
-            empty_chat_ids.update(int(row[0]) for row in cur.fetchall())
-    finally:
-        cur.close()
+    for part in _chunked(normalized_ids, MEDIA_GROUP_SYNC_BATCH_SIZE):
+        placeholders = ",".join(["?"] * len(part))
+        cur.execute(
+            f"""
+            SELECT c.chat_id
+            FROM chats c
+            WHERE c.chat_id IN ({placeholders})
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM messages m
+                  WHERE m.chat_id = c.chat_id
+              )
+            """,
+            part,
+        )
+        empty_chat_ids.update(int(row[0]) for row in cur.fetchall())
     return empty_chat_ids
 
 
 @synchronized_write
-def _delete_media_groups_for_chats(conn, chat_ids: Iterable[int]) -> int:
-    normalized_ids = sorted({int(chat_id) for chat_id in chat_ids})
-    if not normalized_ids:
-        return 0
+def _refresh_cleanup_denormalized_state_locked(
+    conn,
+    affected_chats: Iterable[int],
+    affected_groups_by_chat: dict[int, set[int]],
+) -> tuple[int, int, int]:
+    normalized_chats = sorted({int(chat_id) for chat_id in affected_chats})
+    if not normalized_chats:
+        return 0, 0, 0
 
     cur = conn.cursor()
     try:
-        deleted = 0
         cur.execute("BEGIN IMMEDIATE")
-        for part in _chunked(normalized_ids, MEDIA_GROUP_SYNC_BATCH_SIZE):
-            placeholders = ",".join(["?"] * len(part))
-            cur.execute(
-                f"""
-                DELETE FROM media_groups
-                WHERE chat_id IN ({placeholders})
-                """,
-                part,
+        emptied_chats = _load_chats_without_messages_from_cursor(cur, normalized_chats)
+        affected_group_count = sum(
+            len(affected_groups_by_chat.get(chat_id, set()))
+            for chat_id in normalized_chats
+        )
+        deleted_group_count = 0
+        rebuilt_group_count = 0
+
+        for chat_id in normalized_chats:
+            if chat_id in emptied_chats:
+                cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))
+                deleted_group_count += int(cur.rowcount or 0)
+                continue
+
+            grouped_ids = sorted(
+                {
+                    int(grouped_id)
+                    for grouped_id in affected_groups_by_chat.get(chat_id, set())
+                }
             )
-            deleted += int(cur.rowcount or 0)
+            for grouped_id_part in _chunked(
+                grouped_ids, MEDIA_GROUP_SYNC_BATCH_SIZE
+            ):
+                placeholders = ",".join("?" for _ in grouped_id_part)
+                cur.execute(
+                    f"""
+                    SELECT COUNT(DISTINCT grouped_id)
+                    FROM messages
+                    WHERE chat_id = ? AND grouped_id IN ({placeholders})
+                    """,
+                    [chat_id, *grouped_id_part],
+                )
+                remaining_group_count = int(cur.fetchone()[0] or 0)
+                if remaining_group_count == 0:
+                    cur.execute(
+                        f"""
+                        DELETE FROM media_groups
+                        WHERE chat_id = ? AND grouped_id IN ({placeholders})
+                        """,
+                        [chat_id, *grouped_id_part],
+                    )
+                    deleted_group_count += int(cur.rowcount or 0)
+                    continue
+                rebuilt_group_count += remaining_group_count
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM media_groups
+                    WHERE chat_id = ? AND grouped_id IN ({placeholders})
+                    """,
+                    [chat_id, *grouped_id_part],
+                )
+                before_count = int(cur.fetchone()[0] or 0)
+                _refresh_media_groups_for_cursor(
+                    cur,
+                    chat_id,
+                    CFG,
+                    grouped_ids=set(grouped_id_part),
+                )
+                cur.execute(
+                    f"""
+                    SELECT COUNT(*)
+                    FROM media_groups
+                    WHERE chat_id = ? AND grouped_id IN ({placeholders})
+                    """,
+                    [chat_id, *grouped_id_part],
+                )
+                after_count = int(cur.fetchone()[0] or 0)
+                deleted_group_count += max(0, before_count - after_count)
+
+        _refresh_chat_message_counts(cur, normalized_chats)
         conn.commit()
-        return deleted
+        return affected_group_count, deleted_group_count, rebuilt_group_count
     except Exception:
         with suppress(Exception):
             conn.rollback()
@@ -269,50 +280,40 @@ def _refresh_cleanup_denormalized_state(
         return
 
     started_at = time.perf_counter()
-    affected_group_count = 0
-    deleted_group_count = 0
-    rebuilt_group_count = 0
-    admin_job_append_log_fn(job_id, "正在同步清理关联媒体组信息...")
-    emptied_chats = _load_chats_without_messages(conn, normalized_chats)
-    if emptied_chats:
-        deleted_group_count += _delete_media_groups_for_chats(conn, emptied_chats)
-
-    for chat_id in normalized_chats:
-        grouped_ids = affected_groups_by_chat.get(chat_id, set())
-        if not grouped_ids:
-            continue
-
-        affected_group_count += len(grouped_ids)
-        if chat_id in emptied_chats:
-            continue
-
-        remaining_grouped_ids, deleted_grouped_ids = _split_remaining_and_deleted_groups(
-            conn,
-            chat_id,
-            grouped_ids,
-        )
-        if deleted_grouped_ids:
-            _delete_empty_media_groups(conn, chat_id, deleted_grouped_ids)
-            deleted_group_count += len(deleted_grouped_ids)
-        if remaining_grouped_ids:
-            refresh_media_groups_for_chat(
+    try:
+        admin_job_append_log_fn(job_id, "正在同步清理关联媒体组信息...")
+    except Exception:
+        logging.exception("记录清理关联数据同步进度失败: job_id=%s", job_id)
+    try:
+        affected_group_count, deleted_group_count, rebuilt_group_count = (
+            _refresh_cleanup_denormalized_state_locked(
                 conn,
-                chat_id,
-                cfg=CFG,
-                grouped_ids=remaining_grouped_ids,
+                normalized_chats,
+                affected_groups_by_chat,
             )
-            rebuilt_group_count += len(remaining_grouped_ids)
-
-    refresh_chat_message_counts(conn, normalized_chats)
+        )
+    except Exception:
+        # Physical deletion is committed in batches. If a media-group trigger
+        # or rebuild fails during the final transaction, repair chat summaries
+        # independently so the next admin view still reports the real count.
+        logging.exception("清理关联媒体组收尾失败，尝试单独修复群聊摘要: job_id=%s", job_id)
+        try:
+            refresh_chat_message_counts(conn, normalized_chats)
+        except Exception:
+            logging.exception("清理收尾单独修复群聊摘要也失败: job_id=%s", job_id)
+        raise
     elapsed = time.perf_counter() - started_at
-    admin_job_append_log_fn(
-        job_id,
-        "关联数据同步完成："
-        f"涉及媒体组 {affected_group_count} 个，"
-        f"直接移除空组 {deleted_group_count} 个，"
-        f"重建 {rebuilt_group_count} 个，"
-        f"耗时 {elapsed:.2f}s",
-    )
+    try:
+        admin_job_append_log_fn(
+            job_id,
+            "关联数据同步完成："
+            f"涉及媒体组 {affected_group_count} 个，"
+            f"直接移除空组 {deleted_group_count} 个，"
+            f"重建 {rebuilt_group_count} 个，"
+            f"耗时 {elapsed:.2f}s",
+        )
+    except Exception:
+        logging.exception("记录清理关联数据同步结果失败: job_id=%s", job_id)
 
 
 @synchronized_write
@@ -320,22 +321,27 @@ def _delete_cleanup_batch(conn, cur, pks: list[int]) -> int:
     if not pks:
         return 0
 
-    placeholders = ",".join(["?"] * len(pks))
     try:
-        cur.execute(
-            f"""
-            DELETE FROM message_media
-            WHERE (chat_id, message_id) IN (
-                SELECT chat_id, message_id
-                FROM messages
-                WHERE pk IN ({placeholders})
+        count = 0
+        for part in _chunked(pks, CLEANUP_SQL_BATCH_SIZE):
+            placeholders = ",".join("?" for _ in part)
+            cur.execute(
+                f"""
+                DELETE FROM message_media
+                WHERE (chat_id, message_id) IN (
+                    SELECT chat_id, message_id
+                    FROM messages
+                    WHERE pk IN ({placeholders})
+                )
+                """,
+                part,
             )
-            """,
-            pks,
-        )
-        cur.execute(f"DELETE FROM messages WHERE pk IN ({placeholders})", pks)
-        count = int(cur.rowcount or 0)
-        cur.execute(f"DELETE FROM temp_cleanup_targets WHERE pk IN ({placeholders})", pks)
+            cur.execute(f"DELETE FROM messages WHERE pk IN ({placeholders})", part)
+            count += int(cur.rowcount or 0)
+            cur.execute(
+                f"DELETE FROM temp_cleanup_targets WHERE pk IN ({placeholders})",
+                part,
+            )
         conn.commit()
         return count
     except Exception:
@@ -353,25 +359,44 @@ def _execute_cleanup_deletion_batches(
 ):
     deleted = 0
     affected_chats, affected_groups_by_chat = _collect_cleanup_affected_state(cur)
+    deletion_error: Exception | None = None
+    try:
+        while True:
+            cur.execute(
+                f"SELECT pk FROM temp_cleanup_targets LIMIT {CLEANUP_DELETE_BATCH_SIZE}"
+            )
+            rows = cur.fetchall()
+            if not rows:
+                break
 
-    while True:
-        cur.execute(f"SELECT pk FROM temp_cleanup_targets LIMIT {CLEANUP_DELETE_BATCH_SIZE}")
-        rows = cur.fetchall()
-        if not rows:
-            break
-
-        pks = [r[0] for r in rows]
-        count = _delete_cleanup_batch(conn, cur, pks)
-        deleted += count
-        admin_job_append_log_fn(job_id, f"进度：已清理 {deleted}/{target_count}")
-        time.sleep(0.02)
-
-    _refresh_cleanup_denormalized_state(
-        conn,
-        job_id,
-        affected_chats,
-        affected_groups_by_chat,
-        admin_job_append_log_fn,
-    )
+            pks = [r[0] for r in rows]
+            count = _delete_cleanup_batch(conn, cur, pks)
+            deleted += count
+            try:
+                admin_job_append_log_fn(
+                    job_id, f"进度：已清理 {deleted}/{target_count}"
+                )
+            except Exception:
+                logging.exception("记录清理任务进度失败: job_id=%s", job_id)
+            time.sleep(0.02)
+    except Exception as exc:
+        deletion_error = exc
+        raise
+    finally:
+        try:
+            _refresh_cleanup_denormalized_state(
+                conn,
+                job_id,
+                affected_chats,
+                affected_groups_by_chat,
+                admin_job_append_log_fn,
+            )
+        except Exception:
+            if deletion_error is None:
+                raise
+            logging.exception(
+                "清理异常收尾时同步关联数据失败，保留原始清理异常: job_id=%s",
+                job_id,
+            )
 
     return deleted

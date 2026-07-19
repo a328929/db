@@ -603,7 +603,13 @@
     if (status === 'queued' || status === 'running') {
       return '目标副本仍在创建中；创建完成后可执行在线预检。';
     }
+    if (status === 'deleting') {
+      return '正在删除目标副本及本地克隆链路，删除完成前不能继续迁移。';
+    }
     if (status === 'error') {
+      if (String(run.deletion_job_id || '').trim()) {
+        return '目标副本删除任务未完成；可查看任务日志并重新提交删除请求。';
+      }
       return '目标副本创建失败；请先查看失败样本，必要时删除失败记录后重新创建。';
     }
     if (!run.target_chat_id) {
@@ -728,6 +734,13 @@
     var plan = state.detail.plan || {};
     var migration = state.detail.migration || {};
     var candidates = [
+      {
+        record: {
+          status: run.status,
+          job_id: run.deletion_job_id
+        },
+        label: '目标副本删除'
+      },
       { record: migration, label: '迁移' },
       { record: plan, label: '在线预检' },
       { record: run, label: '目标副本创建' }
@@ -736,7 +749,7 @@
       var candidate = candidates[index];
       var status = String((candidate.record && candidate.record.status) || '').trim().toLowerCase();
       var jobId = String((candidate.record && candidate.record.job_id) || '').trim();
-      if ((status !== 'queued' && status !== 'running') || !jobId) continue;
+      if ((status !== 'queued' && status !== 'running' && status !== 'deleting') || !jobId) continue;
       try {
         var payload = await fetchJSON('/api/admin/jobs/' + encodeURIComponent(jobId));
         var job = payload && payload.job ? payload.job : null;
@@ -885,7 +898,13 @@
     if (runStatus === 'queued' || runStatus === 'running') {
       return '这条记录还在创建克隆群。先等待创建完成，再继续克隆消息。';
     }
+    if (runStatus === 'deleting') {
+      return '这条记录正在删除目标副本及本地克隆链路，请等待删除任务完成。';
+    }
     if (runStatus === 'error') {
+      if (String(run.deletion_job_id || '').trim()) {
+        return '目标副本删除任务已中断或失败。查看任务日志后，可以重新提交删除请求。';
+      }
       return '这条记录在创建阶段失败了。先看失败样本和错误信息；如果目标副本没建出来，通常需要回到“创建空副本”重新创建。';
     }
     if (!run.target_chat_id) {
@@ -1281,6 +1300,7 @@
     var normalized = String(status || '').trim().toLowerCase();
     if (normalized === 'queued') return '排队中';
     if (normalized === 'running') return '执行中';
+    if (normalized === 'deleting') return '删除中';
     if (normalized === 'done') return '已创建';
     if (normalized === 'error') return '失败';
     return normalized || '未知';
@@ -1425,22 +1445,32 @@
         elements.operationStatus.textContent = '目标副本正在创建' + (total ? '：' + current + total : '...');
         return;
       }
+      if (jobType === 'clone_target_delete') {
+        elements.operationStatus.textContent = '目标副本正在删除' + (total ? '：' + current + total : '...');
+        return;
+      }
       elements.timelineStatus.textContent = snapshot.stop_requested
         ? '已收到停止请求，正在完成当前批次...'
         : '正在迁移：' + current + total + ' 条消息。';
     },
     getDoneMessage: function (_jobState, snapshot) {
-      return String((snapshot && snapshot.job_type) || '') === 'clone_deep_preflight'
-        ? '在线预检已完成。'
-        : '继续迁移任务已完成。';
+      var jobType = String((snapshot && snapshot.job_type) || '');
+      if (jobType === 'clone_deep_preflight') return '在线预检已完成。';
+      if (jobType === 'clone_target_delete') return '目标副本删除任务已完成。';
+      return '继续迁移任务已完成。';
     },
     getErrorMessage: function (_jobState, snapshot) {
-      return String((snapshot && snapshot.job_type) || '') === 'clone_deep_preflight'
-        ? '在线预检失败，请查看日志后重新执行。'
-        : '继续迁移失败，请查看日志和失败样本后重试。';
+      var jobType = String((snapshot && snapshot.job_type) || '');
+      if (jobType === 'clone_deep_preflight') return '在线预检失败，请查看日志后重新执行。';
+      if (jobType === 'clone_target_delete') return '目标副本删除失败，请查看日志后重试。';
+      return '继续迁移失败，请查看日志和失败样本后重试。';
     },
-    onDone: async function () {
+    onDone: async function (snapshot, _jobState) {
       var elements = getElements();
+      if (String((snapshot && snapshot.job_type) || '') === 'clone_target_delete') {
+        window.location.assign('/admin/clone/runs/manage');
+        return;
+      }
       if (elements) await loadDetail(elements);
     },
     onError: async function () {

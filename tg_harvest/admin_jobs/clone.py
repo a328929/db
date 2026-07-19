@@ -159,16 +159,91 @@ def _try_mark_clone_run_failed(
     get_conn_fn: Callable[[], Any],
     run_id: str,
     message: str,
+    created_target_fields: dict[str, Any] | None = None,
 ) -> None:
-    _try_update_record(
-        get_conn_fn=get_conn_fn,
-        update_fn=update_clone_run,
-        run_id=run_id,
+    update_fields = dict(created_target_fields or {})
+    update_fields.update(
         status="error",
         phase="error",
         error_message=message,
         completed_at=_admin_now_iso(),
     )
+    _try_update_record(
+        get_conn_fn=get_conn_fn,
+        update_fn=update_clone_run,
+        run_id=run_id,
+        **update_fields,
+    )
+
+
+def _safe_clone_job_log(
+    append_log_fn: Callable[[str, str], Any], job_id: str, message: str
+) -> None:
+    """状态收尾日志不能覆盖克隆结果。"""
+    try:
+        append_log_fn(job_id, message)
+    except Exception:
+        logging.exception("记录结构克隆任务日志失败: job_id=%s", job_id)
+
+
+def _safe_clone_job_progress(
+    job_id: str, current: int, *, total: int, stage: str
+) -> None:
+    try:
+        update_admin_job_progress(job_id, current, total=total, stage=stage)
+    except Exception:
+        logging.exception("更新结构克隆任务进度失败: job_id=%s stage=%s", job_id, stage)
+
+
+def _safe_clone_job_status(
+    set_status_fn: Callable[[str, str], bool], job_id: str, status: str
+) -> None:
+    try:
+        if not set_status_fn(job_id, status):
+            logging.warning(
+                "结构克隆任务状态回调未确认成功: job_id=%s status=%s",
+                job_id,
+                status,
+            )
+    except Exception:
+        logging.exception(
+            "更新结构克隆任务状态失败: job_id=%s status=%s", job_id, status
+        )
+
+
+def _report_clone_completion(
+    *,
+    job_id: str,
+    created_chat: Any,
+    append_log_fn: Callable[[str, str], Any],
+    set_status_fn: Callable[[str, str], bool],
+) -> None:
+    """Run every completion callback, then surface telemetry failure once."""
+    first_error: Exception | None = None
+
+    for message in (
+        f"目标结构创建完成：{_created_chat_label(created_chat)}",
+        "第一版已停止在结构克隆阶段：未迁移历史消息、媒体、成员、评论、反应或原始时间。",
+    ):
+        try:
+            append_log_fn(job_id, message)
+        except Exception as exc:
+            first_error = first_error or exc
+            logging.exception("记录结构克隆完成日志失败: job_id=%s", job_id)
+    try:
+        update_admin_job_progress(job_id, 4, total=4, stage="done")
+    except Exception as exc:
+        first_error = first_error or exc
+        logging.exception("更新结构克隆完成进度失败: job_id=%s", job_id)
+    try:
+        if not set_status_fn(job_id, "done"):
+            raise RuntimeError("结构克隆任务完成状态回调未确认成功")
+    except Exception as exc:
+        first_error = first_error or exc
+        logging.exception("更新结构克隆完成状态失败: job_id=%s", job_id)
+
+    if first_error is not None:
+        raise first_error
 
 
 def _admin_clone_structure_job_runner(
@@ -187,6 +262,9 @@ def _admin_clone_structure_job_runner(
     client = None
     worker_id = f"{job_id}_clone_structure"
     run_id = str(clone_run_id or job_id)
+    created_chat = None
+    created_target_fields: dict[str, Any] = {}
+    clone_run_persisted = False
     try:
         mark_admin_job_running(
             job_id,
@@ -274,6 +352,17 @@ def _admin_clone_structure_job_runner(
         if created_chat is None or target_chat_id is None:
             raise RuntimeError("Telegram 创建响应缺少目标群组实体，无法写入克隆运行记录")
         target_created_at = _admin_now_iso()
+        created_target_fields = {
+            "target_chat_id": target_chat_id,
+            "target_access_hash": _created_chat_access_hash(created_chat),
+            "target_title": _created_chat_title(created_chat, clone_title),
+            "target_kind": clone_kind,
+            "target_username": _created_chat_username(created_chat),
+            "target_owner_session": str(
+                getattr(secondary_cfg, "session_name", "") or ""
+            ),
+            "target_created_at": target_created_at,
+        }
         _update_required_record(
             get_conn_fn=get_conn_fn,
             update_fn=update_clone_run,
@@ -281,47 +370,53 @@ def _admin_clone_structure_job_runner(
             run_id=run_id,
             status="done",
             phase="done",
-            target_chat_id=target_chat_id,
-            target_access_hash=_created_chat_access_hash(created_chat),
-            target_title=_created_chat_title(created_chat, clone_title),
-            target_kind=clone_kind,
-            target_username=_created_chat_username(created_chat),
-            target_owner_session=str(getattr(secondary_cfg, "session_name", "") or ""),
-            target_created_at=target_created_at,
             completed_at=target_created_at,
             error_message="",
+            **created_target_fields,
         )
-        admin_job_append_log_fn(
-            job_id,
-            f"目标结构创建完成：{_created_chat_label(created_chat)}",
+        clone_run_persisted = True
+        _report_clone_completion(
+            job_id=job_id,
+            created_chat=created_chat,
+            append_log_fn=admin_job_append_log_fn,
+            set_status_fn=admin_job_set_status_fn,
         )
-        admin_job_append_log_fn(
-            job_id,
-            "第一版已停止在结构克隆阶段：未迁移历史消息、媒体、成员、评论、反应或原始时间。",
-        )
-        update_admin_job_progress(
-            job_id,
-            4,
-            total=4,
-            stage="done",
-        )
-        admin_job_set_status_fn(job_id, "done")
     except Exception as exc:
         logging.exception("结构克隆任务失败: job_id=%s", job_id)
         message = admin_error_message(exc)
-        _try_mark_clone_run_failed(
-            get_conn_fn=get_conn_fn,
-            run_id=run_id,
-            message=message,
-        )
-        admin_job_append_log_fn(job_id, f"结构克隆失败：{message}")
-        update_admin_job_progress(
-            job_id,
-            0,
-            total=4,
-            stage="error",
-        )
-        admin_job_set_status_fn(job_id, "error")
+        if clone_run_persisted:
+            # The remote target and the local `done` record are authoritative;
+            # telemetry failures must not make a completed clone resumable as an
+            # error or leave its admin job in `running`.
+            logging.error(
+                "结构克隆已成功落库，但后续状态汇报失败: job_id=%s target=%s",
+                job_id,
+                _created_chat_label(created_chat),
+            )
+            _safe_clone_job_progress(job_id, 4, total=4, stage="done")
+            _safe_clone_job_status(admin_job_set_status_fn, job_id, "done")
+        else:
+            _try_mark_clone_run_failed(
+                get_conn_fn=get_conn_fn,
+                run_id=run_id,
+                message=message,
+                created_target_fields=created_target_fields,
+            )
+            if created_chat is not None:
+                logging.error(
+                    "结构克隆失败但 Telegram 目标可能已创建: job_id=%s target=%s",
+                    job_id,
+                    _created_chat_label(created_chat),
+                )
+                _safe_clone_job_log(
+                    admin_job_append_log_fn,
+                    job_id,
+                    "Telegram 可能已创建目标结构，已保留可恢复的目标标识："
+                    f"{_created_chat_label(created_chat)}",
+                )
+            _safe_clone_job_log(admin_job_append_log_fn, job_id, f"结构克隆失败：{message}")
+            _safe_clone_job_progress(job_id, 0, total=4, stage="error")
+            _safe_clone_job_status(admin_job_set_status_fn, job_id, "error")
     finally:
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
         if client:
