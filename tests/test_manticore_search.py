@@ -384,6 +384,31 @@ class ManticoreServiceTests(unittest.TestCase):
         self.assertIn('MATCH(\'"福利"\')', client.sql[0])
         self.assertIn("ORDER BY msg_date_ts DESC", client.sql[0])
 
+    def test_page_query_reuses_manticore_total_when_count_is_deferred(self):
+        client = _FakeManticoreClient(
+            [
+                {
+                    "hits": {
+                        "total": 12,
+                        "total_relation": "eq",
+                        "hits": [{"_id": self.pk, "_source": {}}],
+                    }
+                }
+            ]
+        )
+        payload = manticore_search_payload_service(
+            self.conn,
+            self._params(skip_count=True),
+            client=client,
+            page_size=100,
+            max_count=50000000,
+            max_matches=1000000,
+            map_search_items_fn=lambda rows: rows,
+        )
+
+        self.assertEqual(12, payload["total"])
+        self.assertEqual(1, len(client.sql))
+
     def test_count_only_returns_total_without_expensive_group_facets(self):
         client = _FakeManticoreClient(
             [
@@ -402,6 +427,68 @@ class ManticoreServiceTests(unittest.TestCase):
         self.assertEqual(4, payload["total"])
         self.assertEqual([], payload["chat_facets"])
 
+    def test_relevance_sort_uses_manticore_weight_for_each_message_type(self):
+        expected_type_codes = {
+            "text": 1,
+            "image": 2,
+            "video": 3,
+            "audio": 4,
+        }
+        for search_type, type_code in expected_type_codes.items():
+            with self.subTest(search_type=search_type):
+                client = _FakeManticoreClient(
+                    [{"hits": {"total": 0, "total_relation": "eq", "hits": []}}]
+                )
+                payload = manticore_search_payload_service(
+                    self.conn,
+                    self._params(
+                        search_type=search_type,
+                        sort_by_req="relevance",
+                    ),
+                    client=client,
+                    page_size=100,
+                    max_count=50000000,
+                    max_matches=1000000,
+                    map_search_items_fn=lambda rows: rows,
+                )
+
+                self.assertEqual("relevance", payload["effective_sort"])
+                self.assertIn("ORDER BY WEIGHT() DESC", client.sql[0])
+                self.assertIn(f"type_code = {type_code}", client.sql[0])
+
+    def test_relevance_sort_respects_ascending_order(self):
+        client = _FakeManticoreClient(
+            [{"hits": {"total": 0, "total_relation": "eq", "hits": []}}]
+        )
+        payload = manticore_search_payload_service(
+            self.conn,
+            self._params(sort_by_req="relevance", order_req="asc"),
+            client=client,
+            page_size=100,
+            max_count=50000000,
+            max_matches=1000000,
+            map_search_items_fn=lambda rows: rows,
+        )
+
+        self.assertEqual("asc", payload["effective_order"])
+        self.assertIn("ORDER BY WEIGHT() ASC", client.sql[0])
+
+    def test_non_relevance_page_sort_does_not_compute_bm25_scores(self):
+        client = _FakeManticoreClient(
+            [{"hits": {"total": 0, "total_relation": "eq", "hits": []}}]
+        )
+        manticore_search_payload_service(
+            self.conn,
+            self._params(sort_by_req="time"),
+            client=client,
+            page_size=100,
+            max_count=50000000,
+            max_matches=1000000,
+            map_search_items_fn=lambda rows: rows,
+        )
+
+        self.assertIn("OPTION ranker=none", client.sql[0])
+
     def test_empty_query_browses_with_sqlite_ordering_indexes(self):
         payload = sqlite_browse_payload_service(
             self.conn,
@@ -413,6 +500,17 @@ class ManticoreServiceTests(unittest.TestCase):
 
         self.assertEqual("sqlite_browse", payload["search_backend"])
         self.assertEqual([self.pk], [row["pk"] for row in payload["items"]])
+
+    def test_empty_query_relevance_sort_falls_back_to_time(self):
+        payload = sqlite_browse_payload_service(
+            self.conn,
+            self._params(raw_query="", text_query="", sort_by_req="relevance"),
+            page_size=100,
+            max_count=50000000,
+            map_search_items_fn=lambda rows: [dict(row) for row in rows],
+        )
+
+        self.assertEqual("time", payload["effective_sort"])
 
     def test_empty_query_count_uses_the_browse_path(self):
         payload = sqlite_browse_payload_service(

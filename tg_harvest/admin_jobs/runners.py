@@ -59,6 +59,7 @@ from tg_harvest.ingest.range_harvest import probe_history_access, read_latest_me
 from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
+from tg_harvest.search.manticore_sync import schedule_manticore_sync
 from tg_harvest.storage.connection import synchronized_write
 
 DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
@@ -3235,6 +3236,8 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         else:
             cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
         transaction_started = False
+        if deleted_messages > 0:
+            schedule_manticore_sync()
         return deleted_messages
     except Exception:
         rollback_scope()

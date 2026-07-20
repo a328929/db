@@ -55,6 +55,8 @@ def _sort(params: SearchParams) -> tuple[str, str, str]:
     search_type = str(params.search_type or "all").lower()
     requested = str(params.sort_by_req or "time").lower()
     direction = "ASC" if str(params.order_req or "desc").lower() == "asc" else "DESC"
+    if requested == "relevance":
+        requested = "time"
     if search_type in {"all", "text"} and requested in {"size", "duration"}:
         requested = "time"
     if search_type == "image" and requested == "duration":

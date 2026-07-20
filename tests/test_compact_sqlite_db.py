@@ -278,6 +278,87 @@ class CompactSqliteDbTests(unittest.TestCase):
                 ).fetchone()
                 self.assertEqual(("torch", "/tmp/model.pt"), model)
 
+    def test_compaction_does_not_requeue_copied_messages(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            root = Path(tmpdir)
+            source_path = root / "source.db"
+            target_path = root / "compact.db"
+            self._seed_source(source_path)
+            with sqlite3.connect(source_path) as source_conn:
+                source_conn.execute(
+                    """
+                    INSERT INTO messages(
+                        chat_id, message_id, msg_date_text, msg_date_ts,
+                        content, content_norm, msg_type
+                    ) VALUES (1, 10, 'date', 100, 'raw', 'normalized', 'PHOTO')
+                    """
+                )
+                source_conn.execute(
+                    """
+                    INSERT INTO message_media(
+                        chat_id, message_id, media_kind, file_size
+                    ) VALUES (1, 10, 'photo', 123)
+                    """
+                )
+                # Simulate a source whose search queue has already drained.
+                source_conn.execute("DELETE FROM manticore_search_outbox")
+                source_conn.commit()
+
+            original_copy_table = compact_sqlite_db._copy_table
+            pending_during_data_copy: list[int] = []
+
+            def copy_and_observe(conn, table, *, batch_size):
+                original_copy_table(conn, table, batch_size=batch_size)
+                if table in {"messages", "message_media"}:
+                    pending_during_data_copy.append(
+                        conn.execute(
+                            "SELECT COUNT(*) FROM manticore_search_outbox"
+                        ).fetchone()[0]
+                    )
+
+            with patch.object(
+                compact_sqlite_db,
+                "_copy_table",
+                side_effect=copy_and_observe,
+            ), patch.object(
+                sys,
+                "argv",
+                [
+                    "compact_sqlite_db.py",
+                    "--source",
+                    str(source_path),
+                    "--target",
+                    str(target_path),
+                    "--min-free-gb",
+                    "0",
+                    "--batch-size",
+                    "1",
+                ],
+            ):
+                self.assertEqual(0, compact_sqlite_db.main())
+
+            self.assertEqual([0, 0], pending_during_data_copy)
+            with sqlite3.connect(target_path) as target_conn:
+                self.assertEqual(
+                    0,
+                    target_conn.execute(
+                        "SELECT COUNT(*) FROM manticore_search_outbox"
+                    ).fetchone()[0],
+                )
+                target_conn.execute(
+                    "UPDATE messages SET content_norm = 'changed' WHERE message_id = 10"
+                )
+                target_conn.commit()
+                self.assertEqual(
+                    ("upsert", 1),
+                    target_conn.execute(
+                        """
+                        SELECT operation, revision
+                        FROM manticore_search_outbox
+                        """
+                    ).fetchone(),
+                )
+
     def _seed_source(self, path: Path) -> None:
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row

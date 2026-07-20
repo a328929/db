@@ -381,6 +381,7 @@ def _fail(message: str) -> NoReturn:
 def main() -> int:
     from tg_harvest.config import CFG
     from tg_harvest.storage.connection import detect_sqlite_features
+    from tg_harvest.storage.manticore_outbox import configure_manticore_outbox_triggers
     from tg_harvest.storage.schema import create_schema
 
     parser = argparse.ArgumentParser(
@@ -462,6 +463,15 @@ def main() -> int:
         _create_source_snapshot(source, source_snapshot)
         conn = _open_target(work_target)
         create_schema(conn, detect_sqlite_features(conn))
+        # The target is populated from a consistent source snapshot.  Keep the
+        # source outbox and its revisions authoritative instead of generating
+        # a second queue entry for every copied message/media row.
+        trigger_cur = conn.cursor()
+        try:
+            configure_manticore_outbox_triggers(trigger_cur, enabled=False)
+            conn.commit()
+        finally:
+            trigger_cur.close()
         conn.execute(
             "ATTACH DATABASE ? AS src",
             (_sqlite_uri(source_snapshot, mode="ro"),),
@@ -469,6 +479,12 @@ def main() -> int:
         for table in _TABLES_IN_COPY_ORDER:
             _copy_table(conn, table, batch_size=batch_size)
         conn.execute("DETACH DATABASE src")
+        trigger_cur = conn.cursor()
+        try:
+            configure_manticore_outbox_triggers(trigger_cur, enabled=True)
+            conn.commit()
+        finally:
+            trigger_cur.close()
         _finalize_target_pragmas(conn)
         if not args.no_verify:
             conn.execute(

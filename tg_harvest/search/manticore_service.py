@@ -97,6 +97,8 @@ def _sort_spec(params: SearchParams) -> tuple[str, str, str]:
     search_type = str(params.search_type or "all").lower()
     requested = str(params.sort_by_req or "time").lower()
     order = "ASC" if str(params.order_req or "desc").lower() == "asc" else "DESC"
+    if requested == "relevance":
+        return "WEIGHT()", "relevance", order
     if search_type in {"all", "text"} and requested in {"size", "duration"}:
         requested = "time"
     if search_type == "image" and requested == "duration":
@@ -127,11 +129,12 @@ def _query_ids(
     limit: int,
     offset: int,
     max_matches: int,
+    ranker: str,
 ) -> tuple[list[int], int, bool]:
     payload = client.execute_select(
         f"SELECT id FROM {client.table} WHERE {where_sql} "
         f"ORDER BY {order_sql} LIMIT {max(0, int(offset))}, {max(1, int(limit))} "
-        f"OPTION max_matches={max(1, int(max_matches))}"
+        f"OPTION ranker={ranker}, max_matches={max(1, int(max_matches))}"
     )
     hits, total, capped = _extract_hits(payload)
     ids = [int(hit.get("_id") or 0) for hit in hits]
@@ -143,7 +146,7 @@ def _query_count(
 ) -> tuple[int, bool]:
     payload = client.execute_select(
         f"SELECT id FROM {client.table} WHERE {where_sql} LIMIT 0 "
-        f"OPTION cutoff={max(1, int(max_matches))},"
+        f"OPTION ranker=none, cutoff={max(1, int(max_matches))},"
         f"max_matches={max(1, int(max_matches))}"
     )
     _hits, total, capped = _extract_hits(payload)
@@ -205,7 +208,12 @@ def manticore_search_payload_service(
     match_query = compile_manticore_match(expression)
     where_sql = _build_where_sql(params, match_query)
     order_field, effective_sort, effective_order = _sort_spec(params)
-    if effective_sort in {"size", "duration"}:
+    if effective_sort == "relevance":
+        order_sql = (
+            f"WEIGHT() {effective_order}, msg_date_ts DESC, "
+            "message_id DESC, id DESC"
+        )
+    elif effective_sort in {"size", "duration"}:
         order_sql = (
             f"{order_field} {effective_order}, chat_id {effective_order}, "
             f"message_id {effective_order}"
@@ -240,13 +248,15 @@ def manticore_search_payload_service(
             limit=page_size,
             offset=offset,
             max_matches=effective_max,
+            ranker="bm25" if effective_sort == "relevance" else "none",
         )
-        if not params.skip_count:
-            total = min(observed_total, effective_max)
-            total_is_capped = observed_capped or observed_total >= effective_max
-        elif page == 1 and not ids:
-            total = 0
-        elif page > 1 and not ids:
+        # Manticore includes the match total in the page query response.  Do
+        # not issue a second count-only request just because the caller asked
+        # to defer counting; that would rescan the same expression.  The
+        # relation flag still preserves the capped/at-least semantics.
+        total = min(observed_total, effective_max)
+        total_is_capped = observed_capped or observed_total >= effective_max
+        if params.skip_count and page > 1 and not ids:
             total, total_is_capped = _query_count(
                 client, where_sql=where_sql, max_matches=effective_max
             )
@@ -260,6 +270,7 @@ def manticore_search_payload_service(
                     limit=page_size,
                     offset=(effective_page - 1) * page_size,
                     max_matches=effective_max,
+                    ranker="bm25" if effective_sort == "relevance" else "none",
                 )
 
     total_pages = (

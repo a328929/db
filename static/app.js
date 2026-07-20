@@ -78,25 +78,29 @@
     if (resetPage) state.page = 1;
   }
 
-  function _decideSortAvailability(typeValue, currentSortValue) {
+  function _decideSortAvailability(typeValue, queryValue, currentSortValue) {
     const disableSize = typeValue === "all" || typeValue === "text";
     const disableDuration = typeValue === "all" || typeValue === "text" || typeValue === "image";
+    const disableRelevance = !(queryValue || "").trim();
 
     let shouldFallback = false;
     if (disableSize && currentSortValue === "size") shouldFallback = true;
     if (disableDuration && currentSortValue === "duration") shouldFallback = true;
+    if (disableRelevance && currentSortValue === "relevance") shouldFallback = true;
 
     return {
       disableSize,
       disableDuration,
+      disableRelevance,
       shouldFallback,
       fallbackValue: "time",
     };
   }
 
-  function _applySortAvailabilityUI(sizeOption, durationOption, sortSelect, decision) {
+  function _applySortAvailabilityUI(sizeOption, durationOption, relevanceOption, sortSelect, decision) {
     if (sizeOption) sizeOption.disabled = decision.disableSize;
     if (durationOption) durationOption.disabled = decision.disableDuration;
+    if (relevanceOption) relevanceOption.disabled = decision.disableRelevance;
 
     // 附加逻辑：当前排序不可用时切回时间
     if (decision.shouldFallback) {
@@ -106,12 +110,14 @@
 
   function updateSortAvailability() {
     const typeValue = els.typeSelect.value;
+    const queryValue = els.queryInput.value;
     const currentSortValue = els.sortSelect.value;
     const sizeOption = els.sortSelect.querySelector('option[value="size"]');
     const durationOption = els.sortSelect.querySelector('option[value="duration"]');
+    const relevanceOption = els.sortSelect.querySelector('option[value="relevance"]');
 
-    const decision = _decideSortAvailability(typeValue, currentSortValue);
-    _applySortAvailabilityUI(sizeOption, durationOption, els.sortSelect, decision);
+    const decision = _decideSortAvailability(typeValue, queryValue, currentSortValue);
+    _applySortAvailabilityUI(sizeOption, durationOption, relevanceOption, els.sortSelect, decision);
   }
 
   async function _fetchMetaData() {
@@ -508,8 +514,6 @@
       query: state.query,
       chat_id: state.chat_id,
       search_type: state.search_type,
-      sort_by: state.sort_by,
-      order: state.order,
       start_date: state.start_date,
       end_date: state.end_date,
       data_version: String(dataVersion || ""),
@@ -651,9 +655,20 @@
 
       if (searchId !== currentSearchId) return;
 
-      if (!data.items || data.items.length === 0) {
+      if ((!data.items || data.items.length === 0) && Number(data.total || 0) <= 0) {
         data.total = 0;
         data.total_pages = 0;
+        _setCachedCount(data);
+        _handleSearchSuccess(data, false);
+        return;
+      }
+
+      // Manticore returns the match total with the page query itself.  Reuse
+      // it directly; only the SQLite browse path needs a deferred count call.
+      const hasManticoreCount =
+        data.search_backend === "manticore" && Number.isFinite(Number(data.total)) &&
+        Number(data.total) >= 0;
+      if (hasManticoreCount) {
         _setCachedCount(data);
         _handleSearchSuccess(data, false);
         return;
@@ -694,6 +709,7 @@
     });
 
     els.queryInput.addEventListener("input", () => {
+      updateSortAvailability();
       _markSearchCriteriaDirty();
     });
 

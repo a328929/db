@@ -6,6 +6,7 @@ from contextlib import suppress
 from datetime import UTC, datetime
 
 from tg_harvest.domain.normalize import make_hash
+from tg_harvest.search.manticore_sync import schedule_manticore_sync
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.schema import _refresh_chat_message_counts
 
@@ -518,6 +519,7 @@ def dedupe_promotional_duplicates(
             target_count,
         )
         conn.commit()
+        schedule_manticore_sync()
         total_elapsed = time.perf_counter() - started_at
         logging.info(analysis_log_message)
         logging.info(

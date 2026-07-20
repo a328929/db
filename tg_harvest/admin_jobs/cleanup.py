@@ -8,6 +8,7 @@ from typing import Any
 from tg_harvest.config import CFG
 from tg_harvest.domain.normalize import normalize_search_term
 from tg_harvest.ingest.media_groups import _refresh_media_groups_for_cursor
+from tg_harvest.search.manticore_sync import schedule_manticore_sync
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.schema import (
     _refresh_chat_message_counts,
@@ -335,6 +336,8 @@ def _delete_cleanup_batch(conn, cur, pks: list[int]) -> int:
                 part,
             )
         conn.commit()
+        if count > 0:
+            schedule_manticore_sync()
         return count
     except Exception:
         with suppress(Exception):
