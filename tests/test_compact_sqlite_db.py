@@ -277,18 +277,6 @@ class CompactSqliteDbTests(unittest.TestCase):
                     ("temporal_batch_predictor",),
                 ).fetchone()
                 self.assertEqual(("torch", "/tmp/model.pt"), model)
-                for key in (
-                    "cjk_terms_rebuild_state",
-                    "cjk_terms_backfill_mode",
-                    "cjk_terms_backfill_last_pk",
-                ):
-                    self.assertIsNone(
-                        target_conn.execute(
-                            "SELECT 1 FROM message_search_terms_meta WHERE key = ?",
-                            (key,),
-                        ).fetchone(),
-                        key,
-                    )
 
     def _seed_source(self, path: Path) -> None:
         conn = sqlite3.connect(path)
@@ -297,7 +285,6 @@ class CompactSqliteDbTests(unittest.TestCase):
             create_schema(
                 conn,
                 detect_sqlite_features(conn),
-                skip_fts_auto_heal=1,
             )
             conn.execute(
                 "INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')"
@@ -336,17 +323,6 @@ class CompactSqliteDbTests(unittest.TestCase):
                     model_key, backend, artifact_path, state_json
                 ) VALUES ('temporal_batch_predictor', 'torch', '/tmp/model.pt', '{"epoch": 3}')
                 """
-            )
-            conn.executemany(
-                """
-                INSERT INTO message_search_terms_meta(key, value)
-                VALUES (?, ?)
-                """,
-                [
-                    ("cjk_terms_rebuild_state", "full"),
-                    ("cjk_terms_backfill_mode", "legacy"),
-                    ("cjk_terms_backfill_last_pk", "1"),
-                ],
             )
             conn.commit()
         finally:

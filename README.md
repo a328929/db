@@ -54,18 +54,43 @@ bash start_web.sh
 - `TG_TARGET_GROUP`: 默认采集目标
 - `TG_SQLITE_CACHE_MB`: SQLite cache 大小
 - `TG_SQLITE_MMAP_MB`: SQLite mmap 大小
+- `TG_MANTICORE_URL`: Manticore HTTP 地址，默认 `http://127.0.0.1:9308`
+- `TG_MANTICORE_TABLE`: 搜索表名，默认 `tg_messages`
+- `TG_MANTICORE_BEARER_TOKEN`: 可选 HTTP Bearer Token，只从环境读取
+- `TG_MANTICORE_SYNC_BATCH_SIZE`: outbox 单批同步数量，默认 `1000`
+- `TG_MANTICORE_SYNC_INTERVAL_SECONDS`: 空闲时同步轮询秒数，默认 `2`
+- `TG_MANTICORE_MAX_MATCHES`: 单次搜索精确匹配上限，默认 `1000000`
 - `TG_ADMIN_PASSWORD`: 管理页密码，必须显式设置；未设置时后台登录会被拒绝
 - `FLASK_SECRET_KEY`: Flask session 签名密钥，建议显式设置以避免重启后登录态失效
 - `TG_REQUIRE_SECURE_CONFIG`: 设置为 `1` 时启用生产安全配置校验；缺少 `TG_ADMIN_PASSWORD` 或 `FLASK_SECRET_KEY` 会拒绝启动
 - `TG_SESSION_COOKIE_SECURE`: 控制后台 session cookie 是否只在 HTTPS 发送；生产安全配置启用时默认开启，可在反代终止 TLS 的本地明文链路中显式设为 `0`
-- `TG_SKIP_FTS_AUTO_HEAL`: 设置为 `1` 时跳过启动期 FTS 全量修复，仅恢复增量同步触发器；磁盘紧张的大库恢复场景可临时使用
 
 ## 运行说明
 
 - Web 服务默认监听 `8890` 端口。
-- 应用首次请求或直接运行 `python3 -m tg_harvest web` 时会自动初始化数据库结构与 FTS 索引。
+- 应用首次请求或直接运行 `python3 -m tg_harvest web` 时会自动初始化数据库结构与 Manticore 增量同步。
 - 搜索结果支持全量分页返回，不会把总结果数硬裁到 5000/10000。
 - 后台管理页面需要先访问 `/admin/login` 完成登录；后台写操作使用登录态绑定的 CSRF token 防护。公网部署时建议放在 HTTPS、内网/VPN 或反向代理鉴权之后，并设置 `TG_REQUIRE_SECURE_CONFIG=1`。
+
+## Manticore 搜索后端
+
+Manticore 只保存正文倒排索引和搜索属性，完整展示内容仍从 SQLite 回表读取。
+消息及媒体的新增、修改、删除通过 SQLite `manticore_search_outbox` 在同一事务排队，
+后台同步失败不会阻塞采集，未确认的 revision 也不会被误删。Manticore 服务需要允许
+纯否定查询（`not_terms_only_allowed = 1`），才能完整支持现有 `-关键词` 语法。
+
+部署 Manticore 服务后依次执行：
+
+```bash
+python3 tools/manticore_search.py init
+python3 tools/manticore_search.py rebuild --reset --batch-size 5000
+python3 tools/manticore_search.py status
+```
+
+`rebuild --reset` 会清空配置的 Manticore 表，但不会删除 SQLite 消息。回填并追平
+outbox 前，持久化状态门禁会阻止未完成的索引接管查询。所有包含关键词的查询都由
+Manticore 执行；无关键词的时间线和媒体排序使用 SQLite 普通 B-tree 索引。SQLite
+不再创建或维护全文和中文短词索引。
 
 ## 开发检查
 
@@ -113,8 +138,8 @@ python3 scripts/diagnose_telegram.py
 
 ## 容量规划与维护窗口
 
-`/admin/sync` 会展示数据库容量、WAL/SHM、空闲页、消息与媒体组摘要、CJK
-短词索引队列、FTS 就绪状态，以及最近记录的维护活动。该状态只读取文件属性、
+`/admin/sync` 会展示数据库容量、WAL/SHM、空闲页、消息与媒体组摘要、Manticore
+就绪状态、增量同步积压，以及最近记录的维护活动。该状态只读取文件属性、
 SQLite PRAGMA、少量元数据和已缓存或统计的计数；它不会在 Web 请求中运行
 `dbstat`、`integrity_check` 或全库扫描。因此，页面中的“健康”只表示容量和维护
 风险信号，不等同于完整性校验。
@@ -126,11 +151,10 @@ SQLite PRAGMA、少量元数据和已缓存或统计的计数；它不会在 Web
 | `TG_DB_HEALTH_SIZE_WARNING_BYTES` / `TG_DB_HEALTH_SIZE_CRITICAL_BYTES` | 20 GiB / 50 GiB | 主库大小预警与严重阈值 |
 | `TG_DB_HEALTH_WAL_WARNING_BYTES` / `TG_DB_HEALTH_WAL_CRITICAL_BYTES` | 512 MiB / 2 GiB | WAL 文件大小预警与严重阈值 |
 | `TG_DB_HEALTH_DISK_FREE_WARNING_BYTES` / `TG_DB_HEALTH_DISK_FREE_CRITICAL_BYTES` | 10 GiB / 3 GiB | 数据库所在磁盘剩余空间阈值 |
-| `TG_DB_HEALTH_CJK_QUEUE_WARNING` / `TG_DB_HEALTH_CJK_QUEUE_CRITICAL` | 10,000 / 100,000 | 中文短词索引待维护队列阈值 |
 
 容量预警不执行自动压缩、checkpoint 或索引重建。看到 WAL 持续增长时，先排查
-长时间读取连接和后台大任务；看到 CJK 队列积压或 FTS 未就绪时，先确认维护线程
-和磁盘空间。进行 `compact_sqlite_db.py` 前，应安排低峰维护窗口并预留至少两份
+长时间读取连接和后台大任务；看到 Manticore 队列积压或索引未就绪时，先确认同步线程
+和搜索服务。进行 `compact_sqlite_db.py` 前，应安排低峰维护窗口并预留至少两份
 当前主库与 sidecar 文件的空间，再加 64 MiB 构建余量。紧凑构建工具会做其自身的
 离线校验，完成后再按部署流程切换数据库文件。
 

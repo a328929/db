@@ -4,6 +4,7 @@ from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
+from tg_harvest.search.manticore_sync import schedule_manticore_sync
 from tg_harvest.storage.connection import synchronized_write
 
 UPSERT_CHAT_SQL = """
@@ -99,7 +100,6 @@ _MESSAGE_VALUE_COLUMNS = (
     "text_len",
 )
 _GROUPED_ID_VALUE_INDEX = _MESSAGE_VALUE_COLUMNS.index("grouped_id")
-_FTS_DOCSIZE_TABLE = "messages_fts_docsize"
 
 _MEDIA_VALUE_COLUMNS = (
     "media_kind",
@@ -196,184 +196,6 @@ class BatchUpsertResult:
                 # the entire result.
                 continue
         return cls(frozenset(grouped_id_values), max(0, int(fallback_change_count)))
-
-
-def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
-    cur.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ? LIMIT 1",
-        (table_name,),
-    )
-    return cur.fetchone() is not None
-
-
-def _fts_runtime_available(cur: sqlite3.Cursor) -> bool:
-    """Check that the FTS virtual table and its live sync triggers exist."""
-    cur.execute(
-        """
-        SELECT type, name, sql
-        FROM sqlite_master
-        WHERE (type = 'table' AND name IN ('messages_fts', 'messages_fts_docsize'))
-           OR (type = 'trigger' AND name IN (
-                  'trg_messages_fts_insert',
-                  'trg_messages_fts_delete',
-                  'trg_messages_fts_update'
-              ))
-        """
-    )
-    tables: set[str] = set()
-    triggers: dict[str, str] = {}
-    for row in cur.fetchall():
-        object_type = str(row["type"] if isinstance(row, sqlite3.Row) else row[0])
-        object_name = str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
-        if object_type == "table":
-            tables.add(object_name)
-        elif object_type == "trigger":
-            trigger_sql = row["sql"] if isinstance(row, sqlite3.Row) else row[2]
-            triggers[object_name] = str(trigger_sql or "").lower()
-    required_markers = {
-        "trg_messages_fts_insert": ("nullif(new.content_norm, '')", "new.content"),
-        "trg_messages_fts_delete": (
-            "'delete'",
-            "old.pk",
-            "nullif(old.content_norm, '')",
-            "old.content",
-        ),
-        "trg_messages_fts_update": (
-            "'delete'",
-            "old.pk",
-            "new.pk",
-            "nullif(old.content_norm, '')",
-            "old.content",
-            "nullif(new.content_norm, '')",
-            "new.content",
-        ),
-    }
-    return {"messages_fts", _FTS_DOCSIZE_TABLE}.issubset(tables) and all(
-        name in triggers
-        and all(marker in triggers[name] for marker in markers)
-        for name, markers in required_markers.items()
-    )
-
-
-def _search_indexes_need_trigger_refresh(
-    cur: sqlite3.Cursor, *, fts_runtime_available: bool | None = None
-) -> bool:
-    """Return whether startup deliberately left a search index incomplete."""
-    if not _table_exists(cur, "message_search_terms_meta"):
-        return False
-    cur.execute(
-        """
-        SELECT key, value
-        FROM message_search_terms_meta
-        WHERE key IN ('fts_index_status', 'cjk_terms_version', 'cjk_terms_rebuild_state')
-        """
-    )
-    values = {
-        str(row["key"]): str(row["value"] or "")
-        for row in cur.fetchall()
-    }
-    if fts_runtime_available is None:
-        fts_runtime_available = _fts_runtime_available(cur)
-    fts_incomplete = (
-        values.get("fts_index_status") not in (None, "", "ready")
-        and fts_runtime_available
-    )
-    return (
-        fts_incomplete
-        or values.get("cjk_terms_version") not in (None, "", "3")
-        or bool(values.get("cjk_terms_rebuild_state"))
-    )
-
-
-def _load_message_keys_missing_fts(
-    cur: sqlite3.Cursor,
-    keys: list[tuple[int, int]],
-    *,
-    fts_runtime_available: bool | None = None,
-) -> set[tuple[int, int]]:
-    if fts_runtime_available is None:
-        fts_runtime_available = _fts_runtime_available(cur)
-    if not keys or not fts_runtime_available:
-        return set()
-    missing: set[tuple[int, int]] = set()
-    for start in range(0, len(keys), _MESSAGE_LOOKUP_BATCH_SIZE):
-        part = keys[start : start + _MESSAGE_LOOKUP_BATCH_SIZE]
-        placeholders = ",".join("(?, ?)" for _ in part)
-        params: list[int] = []
-        for chat_id, message_id in part:
-            params.extend((chat_id, message_id))
-        cur.execute(
-            f"""
-            WITH target_messages(chat_id, message_id) AS (VALUES {placeholders})
-            SELECT m.chat_id, m.message_id
-            FROM messages AS m
-            JOIN target_messages AS t
-              ON t.chat_id = m.chat_id AND t.message_id = m.message_id
-            LEFT JOIN {_FTS_DOCSIZE_TABLE} AS d ON d.id = m.pk
-            WHERE d.id IS NULL
-            """,
-            params,
-        )
-        missing.update((int(row["chat_id"]), int(row["message_id"])) for row in cur.fetchall())
-    return missing
-
-
-def _seed_missing_fts_rows(
-    cur: sqlite3.Cursor,
-    keys: set[tuple[int, int]],
-    *,
-    fts_runtime_available: bool | None = None,
-) -> set[tuple[int, int]]:
-    """Restore absent external-content rows before an UPDATE trigger runs."""
-    if fts_runtime_available is None:
-        fts_runtime_available = _fts_runtime_available(cur)
-    if not keys or not fts_runtime_available:
-        return set()
-    normalized = sorted(keys)
-    seeded_rows: list[tuple[int, str]] = []
-    seeded_keys: set[tuple[int, int]] = set()
-    for start in range(0, len(normalized), _MESSAGE_LOOKUP_BATCH_SIZE):
-        part = normalized[start : start + _MESSAGE_LOOKUP_BATCH_SIZE]
-        placeholders = ",".join("(?, ?)" for _ in part)
-        params: list[int] = []
-        for chat_id, message_id in part:
-            params.extend((chat_id, message_id))
-        cur.execute(
-            f"""
-            WITH target_messages(chat_id, message_id) AS (VALUES {placeholders})
-            SELECT m.chat_id, m.message_id, m.pk,
-                   COALESCE(NULLIF(m.content_norm, ''), m.content, '') AS search_text
-            FROM messages AS m
-            JOIN target_messages AS t
-              ON t.chat_id = m.chat_id AND t.message_id = m.message_id
-            """,
-            params,
-        )
-        for row in cur.fetchall():
-            seeded_rows.append((int(row["pk"]), str(row["search_text"] or "")))
-            seeded_keys.add((int(row["chat_id"]), int(row["message_id"])))
-    if seeded_rows:
-        cur.executemany(
-            # A partially damaged FTS5 index can retain the content row while
-            # losing its shadow ``docsize`` row.  ``OR REPLACE`` makes this
-            # repair idempotent for both the usual missing-row case and that
-            # half-written state, while rebuilding the row's postings from the
-            # canonical message content.
-            "INSERT OR REPLACE INTO messages_fts(rowid, content) VALUES (?, ?)",
-            seeded_rows,
-        )
-    if _table_exists(cur, "message_search_terms_rebuild_queue"):
-        cur.executemany(
-            """
-            INSERT INTO message_search_terms_rebuild_queue(pk, reason, queued_at)
-            VALUES (?, 'index_repair', datetime('now'))
-            ON CONFLICT(pk) DO UPDATE SET
-                reason = excluded.reason,
-                queued_at = excluded.queued_at
-            """,
-            [(pk, ) for pk, _search_text in seeded_rows],
-        )
-    return seeded_keys
 
 
 def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
@@ -591,35 +413,15 @@ def _prepare_message_upserts(
     dict[int, int],
     set[int],
     set[tuple[int, int]],
-    set[tuple[int, int]],
 ]:
     normalized_rows = _normalize_rows_by_key(msg_rows)
     keys = sorted(normalized_rows)
     if not keys:
-        return [], {}, set(), set(), set()
+        return [], {}, set(), set()
 
     existing_values = _load_existing_message_values(cur, keys)
     original_keys = set(existing_values)
     affected_grouped_ids: set[int] = set()
-    missing_fts_keys: set[tuple[int, int]] = set()
-    seeded_fts_keys: set[tuple[int, int]] = set()
-    refresh_incomplete_indexes = False
-    if original_keys:
-        fts_runtime_available = _fts_runtime_available(cur)
-        missing_fts_keys = _load_message_keys_missing_fts(
-            cur,
-            sorted(original_keys),
-            fts_runtime_available=fts_runtime_available,
-        )
-        seeded_fts_keys = _seed_missing_fts_rows(
-            cur,
-            missing_fts_keys,
-            fts_runtime_available=fts_runtime_available,
-        )
-        refresh_incomplete_indexes = _search_indexes_need_trigger_refresh(
-            cur,
-            fts_runtime_available=fts_runtime_available,
-        )
     rows_to_write: list[tuple] = []
     new_keys: set[tuple[int, int]] = set()
     changed_keys: set[tuple[int, int]] = set()
@@ -628,14 +430,7 @@ def _prepare_message_upserts(
         values = tuple(row[2 : 2 + len(_MESSAGE_VALUE_COLUMNS)])
         previous_values = existing_values.get(key)
         values_changed = previous_values != values
-        force_index_refresh = (
-            refresh_incomplete_indexes
-            and key in original_keys
-            and key not in missing_fts_keys
-        )
-        if (
-            values_changed or force_index_refresh
-        ):
+        if values_changed:
             if previous_values is not None:
                 previous_grouped_id = previous_values[_GROUPED_ID_VALUE_INDEX]
                 if previous_grouped_id is not None:
@@ -654,7 +449,6 @@ def _prepare_message_upserts(
         _count_message_keys_by_chat(sorted(new_keys)),
         affected_grouped_ids,
         changed_keys,
-        seeded_fts_keys,
     )
 
 
@@ -795,7 +589,6 @@ def batch_upsert(
                 new_counts_by_chat,
                 message_grouped_ids,
                 changed_message_keys,
-                seeded_fts_keys,
             ) = _prepare_message_upserts(cur, msg_rows)
             media_rows_to_write, media_grouped_ids, changed_media_keys = (
                 _prepare_media_upserts(cur, media_rows)
@@ -814,7 +607,6 @@ def batch_upsert(
                     changed_message_keys
                     | changed_media_keys
                     | deleted_media_keys
-                    | seeded_fts_keys
                 ),
             )
             if owns_transaction:
@@ -822,6 +614,8 @@ def batch_upsert(
             else:
                 cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
             transaction_started = False
+            if result.persisted_change_count > 0:
+                schedule_manticore_sync()
             return result
         except sqlite3.Error:
             rollback_batch()

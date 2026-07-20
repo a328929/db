@@ -35,7 +35,10 @@ def register_all_routes(
         app,
         logger=services.logger,
         get_conn_fn=services.get_conn_fn,
-        from_sql=services.from_sql,
+        from_sql="FROM messages m "
+        "LEFT JOIN chats c ON c.chat_id = m.chat_id "
+        "LEFT JOIN message_media mm ON mm.chat_id = m.chat_id "
+        "AND mm.message_id = m.message_id",
         map_search_items_fn=services.map_search_items_fn,
     )
 
@@ -53,8 +56,6 @@ def register_all_routes(
         app,
         logger=services.logger,
         get_conn_fn=services.get_conn_fn,
-        has_fts_fn=services.has_fts_fn,
-        from_sql=services.from_sql,
         page_size=services.page_size,
         max_count=services.max_count,
         map_search_items_fn=services.map_search_items_fn,

@@ -30,7 +30,7 @@ def _connect(path):
 def _create_context(path, *, relay_chat_id=0):
     conn = _connect(path)
     try:
-        create_schema(conn, detect_sqlite_features(conn), skip_fts_auto_heal=1)
+        create_schema(conn, detect_sqlite_features(conn))
         conn.execute(
             """
             INSERT INTO chats(

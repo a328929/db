@@ -7,8 +7,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from tg_harvest.storage import fts as _fts
-from tg_harvest.storage import search_terms as _search_terms
+from tg_harvest.storage.manticore_outbox import (
+    META_TABLE,
+    OUTBOX_TABLE,
+    get_manticore_meta,
+    manticore_index_is_ready,
+)
 
 _COMPACTION_HEADROOM_BYTES = 64 * 1024 * 1024
 _WAL_GROWTH_MIN_BYTES = 4 * 1024 * 1024
@@ -18,15 +22,7 @@ _WAL_OBSERVATIONS_LOCK = threading.Lock()
 _COUNTED_TABLES = frozenset(
     {
         "media_groups",
-        "message_search_terms",
     }
-)
-_CJK_META_KEYS = (
-    "cjk_terms_rebuild_state",
-    "cjk_terms_last_maintenance_at",
-    "cjk_terms_last_maintenance_result",
-    "cjk_terms_last_rebuild_at",
-    "cjk_terms_queue_length",
 )
 _MAINTENANCE_JOB_TYPES = (
     "cleanup",
@@ -142,34 +138,6 @@ def _message_count(cur: sqlite3.Cursor, table_names: set[str]) -> int | None:
     return max(0, int((row[0] if row else 0) or 0))
 
 
-def _read_cjk_maintenance(
-    cur: sqlite3.Cursor, table_names: set[str]
-) -> dict[str, str]:
-    if "message_search_terms_meta" not in table_names:
-        return {
-            "rebuild_state": "",
-            "last_maintenance_at": "",
-            "last_maintenance_result": "",
-            "last_rebuild_at": "",
-            "queue_length": "",
-        }
-    placeholders = ", ".join("?" for _ in _CJK_META_KEYS)
-    cur.execute(
-        f"SELECT key, value FROM message_search_terms_meta WHERE key IN ({placeholders})",
-        _CJK_META_KEYS,
-    )
-    values = {str(row[0] or ""): str(row[1] or "") for row in cur.fetchall()}
-    return {
-        "rebuild_state": values.get("cjk_terms_rebuild_state", ""),
-        "last_maintenance_at": values.get("cjk_terms_last_maintenance_at", ""),
-        "last_maintenance_result": values.get(
-            "cjk_terms_last_maintenance_result", ""
-        ),
-        "last_rebuild_at": values.get("cjk_terms_last_rebuild_at", ""),
-        "queue_length": values.get("cjk_terms_queue_length", ""),
-    }
-
-
 def _read_last_maintenance_job(
     cur: sqlite3.Cursor, table_names: set[str]
 ) -> dict[str, str] | None:
@@ -203,13 +171,6 @@ def _configured_threshold(cfg: Any | None, name: str, default: int) -> int:
         return int(default)
 
 
-def _metadata_nonnegative_int(value: Any) -> int | None:
-    try:
-        return max(0, int(str(value or "").strip()))
-    except (TypeError, ValueError):
-        return None
-
-
 def _health_thresholds(cfg: Any | None) -> dict[str, int]:
     size_warning = _configured_threshold(
         cfg, "db_health_size_warning_bytes", 20 * 1024 * 1024 * 1024
@@ -220,7 +181,6 @@ def _health_thresholds(cfg: Any | None) -> dict[str, int]:
     disk_warning = _configured_threshold(
         cfg, "db_health_disk_free_warning_bytes", 10 * 1024 * 1024 * 1024
     )
-    cjk_warning = _configured_threshold(cfg, "db_health_cjk_queue_warning", 10000)
     return {
         "size_warning_bytes": size_warning,
         "size_critical_bytes": _configured_threshold(
@@ -233,10 +193,6 @@ def _health_thresholds(cfg: Any | None) -> dict[str, int]:
         "disk_free_warning_bytes": disk_warning,
         "disk_free_critical_bytes": _configured_threshold(
             cfg, "db_health_disk_free_critical_bytes", 3 * 1024 * 1024 * 1024
-        ),
-        "cjk_queue_warning": cjk_warning,
-        "cjk_queue_critical": _configured_threshold(
-            cfg, "db_health_cjk_queue_critical", 100000
         ),
     }
 
@@ -307,35 +263,57 @@ def build_database_health_payload(
             if "media_groups" in table_names
             else (0, "table_missing")
         )
-        cjk_term_count, cjk_term_count_source = (
-            _metadata_table_count(
-                cur,
-                table_name="message_search_terms",
-            )
-            if "message_search_terms" in table_names
-            else (0, "table_missing")
-        )
-        cjk_maintenance = _read_cjk_maintenance(cur, table_names)
-        cjk_queue_length = _metadata_nonnegative_int(
-            cjk_maintenance["queue_length"]
-        )
-        cjk_queue_count_source = "maintenance_meta"
-        if cjk_queue_length is None:
-            cjk_queue_length = _sqlite_stat_row_estimate(
-                cur, "message_search_terms_rebuild_queue"
-            )
-            cjk_queue_count_source = (
-                "sqlite_stat1" if cjk_queue_length is not None else "unavailable"
-            )
-        if "message_search_terms_rebuild_queue" not in table_names:
-            cjk_queue_length = 0
-            cjk_queue_count_source = "table_missing"
+        if OUTBOX_TABLE in table_names:
+            cur.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}")
+            manticore_outbox_pending = max(0, int(cur.fetchone()[0] or 0))
+            cur.execute(f"PRAGMA table_info({OUTBOX_TABLE})")
+            outbox_columns = {str(row[1]) for row in cur.fetchall()}
+            if {"attempts", "queued_at", "last_error"}.issubset(outbox_columns):
+                cur.execute(
+                    f"SELECT COUNT(*), COALESCE(MAX(attempts), 0), "
+                    f"COALESCE(MIN(queued_at), ''), COALESCE(MAX(last_error), '') "
+                    f"FROM {OUTBOX_TABLE} WHERE attempts > 0"
+                )
+                failed_row = cur.fetchone()
+                manticore_outbox_failed = max(0, int(failed_row[0] or 0))
+                manticore_outbox_max_attempts = max(0, int(failed_row[1] or 0))
+                manticore_outbox_oldest_failed_at = str(failed_row[2] or "")
+                manticore_outbox_last_error = str(failed_row[3] or "")
+            else:
+                manticore_outbox_failed = 0
+                manticore_outbox_max_attempts = 0
+                manticore_outbox_oldest_failed_at = ""
+                manticore_outbox_last_error = ""
+        else:
+            manticore_outbox_pending = 0
+            manticore_outbox_failed = 0
+            manticore_outbox_max_attempts = 0
+            manticore_outbox_oldest_failed_at = ""
+            manticore_outbox_last_error = ""
         last_maintenance_job = _read_last_maintenance_job(cur, table_names)
     finally:
         cur.close()
 
-    fts_ready = _fts.fts_index_is_marked_ready(conn)
-    cjk_terms_current = _search_terms.message_search_terms_are_current(conn)
+    manticore_ready = (
+        META_TABLE in table_names
+        and manticore_index_is_ready(conn, getattr(cfg, "manticore_table", "tg_messages"))
+    )
+    manticore_table = getattr(cfg, "manticore_table", "tg_messages")
+    validation_keys = (
+        "last_validated_at",
+        "sqlite_document_count",
+        "manticore_document_count",
+        "outbox_pending",
+        "last_validation_error",
+    )
+    manticore_validation = {
+        ("last_error" if key == "last_validation_error" else key): (
+            get_manticore_meta(conn, f"manticore:{manticore_table}:{key}")
+            if META_TABLE in table_names
+            else ""
+        )
+        for key in validation_keys
+    }
     compaction_required_bytes = (
         (main_bytes + wal_bytes + shm_bytes) * 2 + _COMPACTION_HEADROOM_BYTES
         if path_exists
@@ -452,43 +430,32 @@ def build_database_health_payload(
             action="磁盘余量不足以安全压缩；先扩容或将目标库放到容量充足的磁盘。",
         )
 
-    if cjk_queue_length is not None:
-        if cjk_queue_length >= thresholds["cjk_queue_critical"]:
-            _append_reason(
-                reasons,
-                actions,
-                severity="critical",
-                code="cjk_queue_critical",
-                message="中文短词队列严重积压，短词检索可能明显滞后。",
-                action="检查搜索维护线程和后台任务占用，待队列清空后复查索引状态。",
-            )
-        elif cjk_queue_length >= thresholds["cjk_queue_warning"]:
-            _append_reason(
-                reasons,
-                actions,
-                severity="warning",
-                code="cjk_queue_warning",
-                message="中文短词队列积压，新增短词检索结果可能暂时不完整。",
-                action="观察后台短词维护是否持续排空队列，避免长时间并行大任务。",
-            )
-
-    if not fts_ready:
+    if not manticore_ready:
         _append_reason(
             reasons,
             actions,
             severity="critical",
-            code="fts_not_ready",
-            message="FTS 未就绪，全文检索可能退化或返回不完整结果。",
-            action="先确认磁盘余量，再恢复 FTS 索引维护；不要把在线状态视为完整性校验。",
+            code="manticore_not_ready",
+            message="Manticore 搜索索引尚未就绪，搜索服务不可用。",
+            action="检查 Manticore 服务、全量回填状态和同步队列。",
         )
-    elif not cjk_terms_current or cjk_maintenance["rebuild_state"]:
+    elif manticore_outbox_pending > 0:
         _append_reason(
             reasons,
             actions,
             severity="warning",
-            code="cjk_index_rebuilding",
-            message="中文短词索引尚未完成当前维护，短词搜索可能暂时不完整。",
-            action="等待中文短词维护完成；若持续不恢复，检查维护日志和队列状态。",
+            code="manticore_sync_pending",
+            message="Manticore 尚有增量消息等待同步。",
+            action="确认后台同步线程持续消费 Manticore 队列。",
+        )
+    if manticore_outbox_failed > 0:
+        _append_reason(
+            reasons,
+            actions,
+            severity="critical",
+            code="manticore_sync_failed",
+            message=f"Manticore 同步队列中有 {manticore_outbox_failed} 条任务失败重试。",
+            action="检查 Manticore 连接和最后错误，修复后等待队列自动重试。",
         )
 
     if not actions:
@@ -519,21 +486,23 @@ def build_database_health_payload(
         "counts": {
             "message_count": message_count,
             "media_group_count": media_group_count,
-            "cjk_term_count": cjk_term_count,
-            "cjk_queue_length": cjk_queue_length,
+            "manticore_outbox_pending": manticore_outbox_pending,
+            "manticore_outbox_failed": manticore_outbox_failed,
+            "manticore_outbox_max_attempts": manticore_outbox_max_attempts,
+            "manticore_outbox_oldest_failed_at": manticore_outbox_oldest_failed_at,
+            "manticore_outbox_last_error": manticore_outbox_last_error,
+            "manticore_validation": manticore_validation,
             "sources": {
                 "message_count": "chat_summary",
                 "media_group_count": media_group_count_source,
-                "cjk_term_count": cjk_term_count_source,
-                "cjk_queue_length": cjk_queue_count_source,
+                "manticore_outbox_pending": "exact",
+                "manticore_outbox_failed": "exact",
             },
         },
         "indexes": {
-            "fts_ready": fts_ready,
-            "cjk_terms_current": cjk_terms_current,
+            "manticore_ready": manticore_ready,
         },
         "maintenance": {
-            "cjk": cjk_maintenance,
             "last_recorded_job": last_maintenance_job,
         },
         "thresholds": thresholds,

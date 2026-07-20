@@ -7,18 +7,44 @@ from contextlib import suppress
 from tg_harvest.domain.coerce import optional_int, safe_int
 
 from . import connection as _db_runtime
-from . import fts as _fts
 from . import indexes as _indexes
-from . import search_terms as _search_terms
+from . import manticore_outbox as _manticore_outbox
 from .connection import SqliteFeatures
-from .search_text_state import (
-    SEARCH_TEXT_PRESENT_COLUMN,
-    search_text_present_column_sql,
-    search_text_present_expression,
-)
-from .search_text_state import table_has_column as _table_has_column
 
 _CHAT_SUMMARY_BATCH_SIZE = 500
+
+_LEGACY_SEARCH_TRIGGERS = (
+    "trg_messages_fts_insert",
+    "trg_messages_fts_delete",
+    "trg_messages_fts_update",
+    "trg_message_terms_queue_insert",
+    "trg_message_terms_queue_update",
+    "trg_message_terms_delete",
+    "trg_message_terms_queue_count_insert",
+    "trg_message_terms_queue_count_delete",
+)
+
+
+def _remove_legacy_search_objects(cur: sqlite3.Cursor) -> None:
+    for trigger_name in _LEGACY_SEARCH_TRIGGERS:
+        cur.execute(f"DROP TRIGGER IF EXISTS {trigger_name}")
+    for index_name in (
+        "idx_message_search_terms_pk",
+        "idx_message_search_terms_queue_order",
+    ):
+        cur.execute(f"DROP INDEX IF EXISTS {index_name}")
+    for table_name in (
+        "message_search_terms_rebuild_queue",
+        "message_search_terms",
+        "message_search_terms_meta",
+        "messages_fts",
+        "messages_fts_config",
+        "messages_fts_data",
+        "messages_fts_docsize",
+        "messages_fts_idx",
+        "messages_fts_content",
+    ):
+        cur.execute(f"DROP TABLE IF EXISTS {table_name}")
 
 # =========================
 # Schema 初始化
@@ -70,10 +96,6 @@ def _create_messages_table(cur: sqlite3.Cursor, strict_suffix: str):
         visual_hash          TEXT,
         visual_hash_algo     TEXT,
         visual_embed_ref     TEXT,
-        search_text_present  INTEGER GENERATED ALWAYS AS (
-            {search_text_present_expression()}
-        ) VIRTUAL,
-
         created_at           TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
 
@@ -175,42 +197,6 @@ def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str):
         action               TEXT NOT NULL,
         reason               TEXT NOT NULL,
         created_at           TEXT NOT NULL DEFAULT (datetime('now'))
-    ){strict_suffix}
-    """)
-
-
-def _create_message_search_terms_table(cur: sqlite3.Cursor, strict_suffix: str):
-    options = " WITHOUT ROWID"
-    if strict_suffix:
-        options = f"{strict_suffix}, WITHOUT ROWID"
-    cur.execute(f"""
-    CREATE TABLE IF NOT EXISTS message_search_terms (
-        pk      INTEGER NOT NULL,
-        term    TEXT NOT NULL,
-        PRIMARY KEY (term, pk),
-        FOREIGN KEY(pk) REFERENCES messages(pk) ON DELETE CASCADE
-    ){options}
-    """)
-
-
-def _create_message_search_terms_rebuild_queue_table(
-    cur: sqlite3.Cursor, strict_suffix: str
-):
-    cur.execute(f"""
-    CREATE TABLE IF NOT EXISTS message_search_terms_rebuild_queue (
-        pk         INTEGER PRIMARY KEY,
-        reason     TEXT,
-        queued_at  TEXT NOT NULL DEFAULT (datetime('now')),
-        FOREIGN KEY(pk) REFERENCES messages(pk) ON DELETE CASCADE
-    ){strict_suffix}
-    """)
-
-
-def _create_message_search_terms_meta_table(cur: sqlite3.Cursor, strict_suffix: str):
-    cur.execute(f"""
-    CREATE TABLE IF NOT EXISTS message_search_terms_meta (
-        key     TEXT PRIMARY KEY,
-        value   TEXT NOT NULL
     ){strict_suffix}
     """)
 
@@ -602,9 +588,6 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_message_media_table(cur, strict_suffix)
     _create_media_groups_table(cur, strict_suffix)
     _create_dedupe_tables(cur, strict_suffix)
-    _create_message_search_terms_table(cur, strict_suffix)
-    _create_message_search_terms_rebuild_queue_table(cur, strict_suffix)
-    _create_message_search_terms_meta_table(cur, strict_suffix)
     _create_admin_job_tables(cur, strict_suffix)
     _create_admin_missing_chats_table(cur, strict_suffix)
     _create_admin_restricted_chats_table(cur, strict_suffix)
@@ -615,10 +598,15 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_clone_message_map_table(cur, strict_suffix)
     _create_admin_clone_media_transfers_table(cur, strict_suffix)
     _create_sync_scheduler_tables(cur, strict_suffix)
+    _manticore_outbox.create_manticore_outbox_table(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
-    return _table_has_column(cur, table_name, column_name)
+    try:
+        cur.execute(f"PRAGMA table_xinfo({table_name})")
+    except sqlite3.Error:
+        cur.execute(f"PRAGMA table_info({table_name})")
+    return any(str(row[1]) == column_name for row in cur.fetchall())
 
 
 _DYNAMIC_DATETIME_DEFAULT_RE = re.compile(
@@ -709,7 +697,6 @@ def _ensure_messages_runtime_columns(cur: sqlite3.Cursor) -> None:
             ("visual_hash", "visual_hash TEXT"),
             ("visual_hash_algo", "visual_hash_algo TEXT"),
             ("visual_embed_ref", "visual_embed_ref TEXT"),
-            (SEARCH_TEXT_PRESENT_COLUMN, search_text_present_column_sql()),
             ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
             ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],
@@ -1245,7 +1232,22 @@ def _table_exists(cur: sqlite3.Cursor, table_name: str) -> bool:
 
 
 def _ensure_messages_schema(cur: sqlite3.Cursor) -> None:
+    _remove_legacy_search_columns(cur)
     _ensure_messages_runtime_columns(cur)
+
+
+def _remove_legacy_search_columns(cur: sqlite3.Cursor) -> None:
+    """Remove the SQLite-only helper state used by the retired search path."""
+    cur.execute("DROP INDEX IF EXISTS idx_messages_unsearchable_pk")
+    cur.execute("DROP INDEX IF EXISTS idx_messages_unsearchable_chat")
+    if not _column_exists(cur, "messages", "search_text_present"):
+        return
+    try:
+        cur.execute("ALTER TABLE messages DROP COLUMN search_text_present")
+    except sqlite3.OperationalError as exc:
+        raise RuntimeError(
+            "无法移除旧 search_text_present 列，请确认 SQLite 支持 DROP COLUMN"
+        ) from exc
 
 
 def _ensure_message_media_schema(cur: sqlite3.Cursor) -> None:
@@ -1333,13 +1335,10 @@ def _optimize_query_planner_stats(cur: sqlite3.Cursor) -> None:
 def create_schema(
     conn: sqlite3.Connection,
     feats: SqliteFeatures,
-    force_heal_fts: int = 0,
-    skip_fts_auto_heal: int = 0,
 ):
     cur = conn.cursor()
     try:
         strict_suffix = " STRICT" if feats.supports_strict else ""
-        skip_fts_heal = int(skip_fts_auto_heal) == 1 and int(force_heal_fts) != 1
         _create_tables(cur, strict_suffix)
         _ensure_chats_schema(cur)
         _ensure_messages_schema(cur)
@@ -1359,54 +1358,8 @@ def create_schema(
         _ensure_chat_summary_columns(cur)
         _indexes._create_indexes(cur)
         _heal_chat_message_summaries_if_needed(cur)
-        _search_terms._create_message_search_terms_queue_triggers(cur)
-
-        if feats.supports_fts5:
-            cur.execute(
-                "SELECT sql FROM sqlite_master WHERE type='table' AND name='messages_fts'"
-            )
-            row = cur.fetchone()
-            table_sql = (
-                (row["sql"] if isinstance(row, sqlite3.Row) else row[0]) if row else ""
-            )
-
-            # 如果 FTS 表不存在或分词器不匹配，重建整个 FTS 系统
-            if not table_sql or "trigram" not in table_sql.lower():
-                logging.info("正在初始化或重建 FTS5 Trigram 索引表...")
-                cur.execute("DROP TABLE IF EXISTS messages_fts")
-                if skip_fts_heal:
-                    _fts._create_fts_table(cur)
-                    _fts._create_fts_triggers(cur)
-                    _fts._write_fts_index_status(cur, ready=False)
-                    logging.warning("已跳过启动期 FTS 全量重建，仅恢复增量同步触发器")
-                else:
-                    _fts._create_fts_schema(cur) # 调用这个会同时创建表和触发器
-                    _fts._sync_fts_from_scratch(cur)
-            else:
-                fts_triggers_current = _fts._fts_triggers_are_current(cur)
-                # 确保触发器存在且内容为当前版本。
-                _fts._create_fts_triggers(cur)
-                if skip_fts_heal:
-                    try:
-                        fts_index_complete = _fts._fts_index_row_count_matches_messages(cur)
-                    except sqlite3.Error:
-                        fts_index_complete = False
-                    _fts._write_fts_index_status(cur, ready=fts_index_complete)
-                    if not fts_index_complete:
-                        logging.warning("已跳过启动期 FTS 完整性修复，仅恢复增量同步触发器")
-                else:
-                    _fts._heal_fts_if_needed(
-                        cur,
-                        force_heal=(force_heal_fts == 1 or not fts_triggers_current),
-                        rebuild_reason="FTS 触发器已升级" if not fts_triggers_current else "",
-                    )
-        else:
-            _fts._drop_fts_triggers(cur)
-            _fts._write_fts_index_status(cur, ready=False)
-
-        _search_terms._heal_message_search_terms_if_needed(
-            conn, force_heal=(force_heal_fts == 1)
-        )
+        _remove_legacy_search_objects(cur)
+        _manticore_outbox.configure_manticore_outbox_triggers(cur, enabled=True)
 
         _optimize_query_planner_stats(cur)
         conn.commit()

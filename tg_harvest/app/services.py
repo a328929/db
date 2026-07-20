@@ -111,8 +111,6 @@ class RouteRegistryServices:
     logger: Any
     get_conn_fn: Any
     build_meta_payload_fn: Any
-    has_fts_fn: Any
-    from_sql: str
     max_count: int
     map_search_items_fn: Any
     parse_search_params_fn: Any

@@ -45,7 +45,6 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         create_schema(
             self.conn,
             detect_sqlite_features(self.conn),
-            skip_fts_auto_heal=1,
         )
         self.conn.executemany(
             """

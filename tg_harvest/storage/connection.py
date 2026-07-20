@@ -35,7 +35,6 @@ class SqliteFeatures:
     version_str: str
     version_tuple: tuple[int, int, int]
     supports_strict: bool
-    supports_fts5: bool
 
 
 def parse_version(v: str) -> tuple[int, int, int]:
@@ -52,30 +51,13 @@ def _read_sqlite_version(cur: sqlite3.Cursor) -> str:
     return row["v"] if isinstance(row, sqlite3.Row) else row[0]
 
 
-def _detect_fts5_support(cur: sqlite3.Cursor) -> bool:
-    supports_fts5 = False
-    try:
-        cur.execute("PRAGMA compile_options;")
-        opts = {str(r[0]) for r in cur.fetchall()}
-        supports_fts5 = any("ENABLE_FTS5" in x for x in opts)
-    except sqlite3.Error:
-        try:
-            cur.execute("CREATE VIRTUAL TABLE IF NOT EXISTS __fts5_probe USING fts5(x)")
-            cur.execute("DROP TABLE IF EXISTS __fts5_probe")
-            supports_fts5 = True
-        except sqlite3.Error:
-            supports_fts5 = False
-    return supports_fts5
-
-
 def detect_sqlite_features(conn: sqlite3.Connection) -> SqliteFeatures:
     cur = conn.cursor()
     try:
         v = _read_sqlite_version(cur)
         vt = parse_version(v)
         supports_strict = vt >= (3, 37, 0)
-        supports_fts5 = _detect_fts5_support(cur)
-        return SqliteFeatures(v, vt, supports_strict, supports_fts5)
+        return SqliteFeatures(v, vt, supports_strict)
     finally:
         cur.close()
 
@@ -173,24 +155,11 @@ def connect_configured_db(*, cfg: Any | None = None) -> tuple[sqlite3.Connection
 def ensure_configured_db(
     *,
     cfg: Any | None = None,
-    force_heal_fts: int | None = None,
-    skip_fts_auto_heal: int | None = None,
 ) -> tuple[sqlite3.Connection, SqliteFeatures]:
     runtime_cfg = _resolve_runtime_cfg(cfg)
     conn, feats = connect_configured_db(cfg=runtime_cfg)
     from .schema import create_schema
 
-    create_schema(
-        conn,
-        feats,
-        force_heal_fts=int(
-            runtime_cfg.force_heal_fts if force_heal_fts is None else force_heal_fts
-        ),
-        skip_fts_auto_heal=int(
-            getattr(runtime_cfg, "skip_fts_auto_heal", 0)
-            if skip_fts_auto_heal is None
-            else skip_fts_auto_heal
-        ),
-    )
+    create_schema(conn, feats)
     _runtime_paths.secure_sqlite_artifacts(str(runtime_cfg.db_name))
     return conn, feats

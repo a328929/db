@@ -581,11 +581,12 @@
     var indexes = payload && payload.indexes && typeof payload.indexes === 'object'
       ? payload.indexes
       : {};
+    var validation = counts.manticore_validation
+      && typeof counts.manticore_validation === 'object'
+      ? counts.manticore_validation
+      : {};
     var maintenance = payload && payload.maintenance && typeof payload.maintenance === 'object'
       ? payload.maintenance
-      : {};
-    var cjkMaintenance = maintenance.cjk && typeof maintenance.cjk === 'object'
-      ? maintenance.cjk
       : {};
     var lastRecordedJob = maintenance.last_recorded_job
       && typeof maintenance.last_recorded_job === 'object'
@@ -613,23 +614,28 @@
       counts: {
         messageCount: nullableNumber(counts.message_count),
         mediaGroupCount: nullableNumber(counts.media_group_count),
-        cjkTermCount: nullableNumber(counts.cjk_term_count),
-        cjkQueueLength: nullableNumber(counts.cjk_queue_length),
+        manticoreOutboxPending: nullableNumber(counts.manticore_outbox_pending),
+        manticoreOutboxFailed: nullableNumber(counts.manticore_outbox_failed),
+        manticoreOutboxMaxAttempts: nullableNumber(counts.manticore_outbox_max_attempts),
+        manticoreOutboxOldestFailedAt: String(counts.manticore_outbox_oldest_failed_at || ''),
+        manticoreOutboxLastError: String(counts.manticore_outbox_last_error || ''),
+        manticoreValidation: {
+          lastValidatedAt: String(validation.last_validated_at || ''),
+          sqliteDocumentCount: nullableNumber(validation.sqlite_document_count),
+          manticoreDocumentCount: nullableNumber(validation.manticore_document_count),
+          outboxPending: nullableNumber(validation.outbox_pending),
+          lastError: String(validation.last_error || '')
+        },
         sources: {
           mediaGroupCount: String(sources.media_group_count || ''),
-          cjkTermCount: String(sources.cjk_term_count || ''),
-          cjkQueueLength: String(sources.cjk_queue_length || '')
+          manticoreOutboxPending: String(sources.manticore_outbox_pending || ''),
+          manticoreOutboxFailed: String(sources.manticore_outbox_failed || '')
         }
       },
       indexes: {
-        ftsReady: indexes.fts_ready === true,
-        cjkTermsCurrent: indexes.cjk_terms_current === true
+        manticoreReady: indexes.manticore_ready === true
       },
       maintenance: {
-        cjkRebuildState: String(cjkMaintenance.rebuild_state || ''),
-        lastCjkMaintenanceAt: String(cjkMaintenance.last_maintenance_at || ''),
-        lastCjkMaintenanceResult: String(cjkMaintenance.last_maintenance_result || ''),
-        lastCjkRebuildAt: String(cjkMaintenance.last_rebuild_at || ''),
         lastRecordedJob: lastRecordedJob ? {
           jobType: String(lastRecordedJob.job_type || ''),
           status: String(lastRecordedJob.status || ''),
@@ -688,9 +694,10 @@
       ['磁盘余量', formatByteSize(database.diskFreeBytes), database.canCompactSafely === false ? '不足以安全压缩' : '数据库所在磁盘'],
       ['消息', formatMetricCount(counts.messageCount), '来自群组消息汇总'],
       ['媒体组', formatMetricCount(counts.mediaGroupCount, counts.sources.mediaGroupCount), '媒体组索引'],
-      ['CJK 词条', formatMetricCount(counts.cjkTermCount, counts.sources.cjkTermCount), '短词辅助索引'],
-      ['CJK 队列', formatMetricCount(counts.cjkQueueLength, counts.sources.cjkQueueLength), '等待后台维护'],
-      ['FTS', health.indexes.ftsReady ? '就绪' : '未就绪', health.indexes.cjkTermsCurrent ? 'CJK 索引当前' : 'CJK 索引维护中']
+      ['Manticore 队列', formatMetricCount(counts.manticoreOutboxPending, counts.sources.manticoreOutboxPending), '等待后台同步'],
+      ['Manticore 失败', formatMetricCount(counts.manticoreOutboxFailed, counts.sources.manticoreOutboxFailed), counts.manticoreOutboxLastError || '无失败任务'],
+      ['索引文档', formatMetricCount(counts.manticoreValidation.manticoreDocumentCount), 'SQLite ' + formatMetricCount(counts.manticoreValidation.sqliteDocumentCount)],
+      ['Manticore', health.indexes.manticoreReady ? '就绪' : '未就绪', '全文搜索索引']
     ].forEach(function (metric) {
       elements.storageHealthMetrics.appendChild(
         createStorageMetric(metric[0], metric[1], metric[2])
@@ -720,16 +727,10 @@
     });
 
     var maintenanceParts = [];
-    if (health.maintenance.lastCjkMaintenanceAt) {
+    if (counts.manticoreValidation.lastValidatedAt) {
       maintenanceParts.push(
-        '最近短词维护 ' + formatDateTime(health.maintenance.lastCjkMaintenanceAt)
-        + (health.maintenance.lastCjkMaintenanceResult
-          ? '（' + health.maintenance.lastCjkMaintenanceResult + '）'
-          : '')
+        '最近索引校验 ' + formatDateTime(counts.manticoreValidation.lastValidatedAt)
       );
-    }
-    if (health.maintenance.lastCjkRebuildAt) {
-      maintenanceParts.push('最近短词重建 ' + formatDateTime(health.maintenance.lastCjkRebuildAt));
     }
     if (health.maintenance.lastRecordedJob) {
       maintenanceParts.push(

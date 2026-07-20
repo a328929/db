@@ -14,7 +14,6 @@ if str(ROOT) not in sys.path:
 
 _DEFAULT_COPY_BATCH_SIZE = 50000
 _DB_SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
-_SEARCH_TERM_INSERT_FLUSH_SIZE = 100000
 _SNAPSHOT_BUILD_HEADROOM_BYTES = 64 * 1024 * 1024
 
 _TABLES_IN_COPY_ORDER = (
@@ -24,7 +23,8 @@ _TABLES_IN_COPY_ORDER = (
     "media_groups",
     "dedupe_runs",
     "dedupe_actions",
-    "message_search_terms_meta",
+    "manticore_search_outbox",
+    "manticore_search_meta",
     "admin_jobs",
     "admin_job_logs",
     "admin_missing_chats",
@@ -42,7 +42,7 @@ _TABLES_IN_COPY_ORDER = (
 )
 
 _COUNT_VERIFIED_COPY_TABLES = tuple(
-    table for table in _TABLES_IN_COPY_ORDER if table != "message_search_terms_meta"
+    table for table in _TABLES_IN_COPY_ORDER
 )
 
 
@@ -174,18 +174,6 @@ def _source_expr(table: str, column: str) -> str:
     return quoted
 
 
-def _flush_search_term_inserts(
-    cur: sqlite3.Cursor, inserts: list[tuple[str, int]]
-) -> None:
-    if not inserts:
-        return
-    cur.executemany(
-        "INSERT OR IGNORE INTO message_search_terms(term, pk) VALUES (?, ?)",
-        inserts,
-    )
-    inserts.clear()
-
-
 def _copy_table(conn: sqlite3.Connection, table: str, *, batch_size: int) -> None:
     cur = conn.cursor()
     try:
@@ -238,162 +226,11 @@ def _copy_table(conn: sqlite3.Connection, table: str, *, batch_size: int) -> Non
         cur.close()
 
 
-def _drop_search_sync_triggers(conn: sqlite3.Connection) -> None:
-    cur = conn.cursor()
-    try:
-        for trigger_name in (
-            "trg_messages_fts_insert",
-            "trg_messages_fts_delete",
-            "trg_messages_fts_update",
-            "trg_message_terms_queue_insert",
-            "trg_message_terms_queue_update",
-            "trg_message_terms_delete",
-        ):
-            cur.execute(f"DROP TRIGGER IF EXISTS main.{trigger_name}")
-        conn.commit()
-    finally:
-        cur.close()
-
-
-def _rebuild_search_terms(conn: sqlite3.Connection, *, batch_size: int) -> None:
-    from tg_harvest.storage.search_terms import (
-        _create_message_search_terms_queue_triggers,
-        _finish_message_search_terms_rebuild,
-        extract_cjk_search_terms,
-    )
-    from tg_harvest.storage.search_text_state import search_text_expression
-
-    cur = conn.cursor()
-    try:
-        cur.execute("DELETE FROM message_search_terms")
-        cur.execute("SELECT COUNT(*) FROM messages")
-        total = int(cur.fetchone()[0] or 0)
-        progress = Progress("rebuild message_search_terms", total)
-        last_pk = 0
-        processed = 0
-        while True:
-            cur.execute(
-                f"""
-                SELECT pk, {search_text_expression()} AS search_text
-                FROM messages
-                WHERE pk > ?
-                ORDER BY pk ASC
-                LIMIT ?
-                """,
-                (last_pk, batch_size),
-            )
-            rows = cur.fetchall()
-            if not rows:
-                break
-
-            inserts: list[tuple[str, int]] = []
-            for row in rows:
-                pk = int(row["pk"])
-                last_pk = pk
-                for token in extract_cjk_search_terms(str(row["search_text"] or "")):
-                    inserts.append((token, pk))
-                    if len(inserts) >= _SEARCH_TERM_INSERT_FLUSH_SIZE:
-                        _flush_search_term_inserts(cur, inserts)
-            _flush_search_term_inserts(cur, inserts)
-            processed += len(rows)
-            conn.commit()
-            progress.update(processed)
-
-        _finish_message_search_terms_rebuild(cur)
-        conn.commit()
-        progress.done(processed)
-    finally:
-        cur.close()
-    conn.execute("DELETE FROM message_search_terms_rebuild_queue")
-    cur = conn.cursor()
-    try:
-        _create_message_search_terms_queue_triggers(cur)
-        conn.commit()
-    finally:
-        cur.close()
-
-
-def _rebuild_fts(conn: sqlite3.Connection, *, batch_size: int) -> None:
-    from tg_harvest.storage.fts import (
-        _create_fts_table,
-        _create_fts_triggers,
-        _drop_fts_triggers,
-        _write_fts_index_status,
-    )
-    from tg_harvest.storage.search_text_state import search_text_expression
-
-    cur = conn.cursor()
-    try:
-        _drop_fts_triggers(cur)
-        cur.execute("DROP TABLE IF EXISTS messages_fts")
-        _create_fts_table(cur)
-        _write_fts_index_status(cur, ready=False)
-        cur.execute("SELECT COUNT(*) FROM messages")
-        total = int(cur.fetchone()[0] or 0)
-        progress = Progress("rebuild messages_fts", total)
-        last_pk = 0
-        processed = 0
-        while True:
-            cur.execute(
-                """
-                SELECT pk
-                FROM messages
-                WHERE pk > ?
-                ORDER BY pk ASC
-                LIMIT ?
-                """,
-                (last_pk, batch_size),
-            )
-            pk_rows = cur.fetchall()
-            if not pk_rows:
-                break
-            next_last_pk = int(pk_rows[-1]["pk"])
-            cur.execute(
-                f"""
-                INSERT INTO messages_fts(rowid, content)
-                SELECT pk, {search_text_expression()}
-                FROM messages
-                WHERE pk > ? AND pk <= ?
-                ORDER BY pk ASC
-                """,
-                (last_pk, next_last_pk),
-            )
-            conn.commit()
-            processed += len(pk_rows)
-            last_pk = next_last_pk
-            progress.update(processed)
-
-        _write_fts_index_status(cur, ready=True)
-        _create_fts_triggers(cur)
-        conn.commit()
-        progress.done(processed)
-    finally:
-        cur.close()
-
-
 def _fetch_count(cur: sqlite3.Cursor, schema: str, table: str) -> int:
     if not _table_exists(cur, schema, table):
         return 0
     cur.execute(f"SELECT COUNT(*) FROM {_quote_ident(schema)}.{_quote_ident(table)}")
     return int(cur.fetchone()[0] or 0)
-
-
-def _fetch_meta_value(cur: sqlite3.Cursor, key: str) -> str:
-    if not _table_exists(cur, "main", "message_search_terms_meta"):
-        return ""
-    cur.execute(
-        """
-        SELECT value
-        FROM message_search_terms_meta
-        WHERE key = ?
-        LIMIT 1
-        """,
-        (key,),
-    )
-    row = cur.fetchone()
-    if row is None:
-        return ""
-    return str(row["value"] if isinstance(row, sqlite3.Row) else row[0] or "")
 
 
 def _ensure_integrity_check_ok(conn: sqlite3.Connection) -> None:
@@ -427,8 +264,6 @@ def _ensure_foreign_key_check_ok(conn: sqlite3.Connection) -> None:
 
 
 def _verify_counts(conn: sqlite3.Connection, *, strict: bool) -> None:
-    from tg_harvest.storage.search_terms import message_search_terms_are_current
-
     cur = conn.cursor()
     failures: list[str] = []
     try:
@@ -440,31 +275,6 @@ def _verify_counts(conn: sqlite3.Connection, *, strict: bool) -> None:
             print(f"  {table}: src={src_count} dst={dst_count} {status}")
             if status != "ok":
                 failures.append(f"{table}: src={src_count} dst={dst_count}")
-
-        messages_count = _fetch_count(cur, "main", "messages")
-        fts_docsize_count = _fetch_count(cur, "main", "messages_fts_docsize")
-        fts_status = "ok" if messages_count == fts_docsize_count else "mismatch"
-        print(
-            "  messages_fts_docsize: "
-            f"messages={messages_count} fts_docsize={fts_docsize_count} {fts_status}"
-        )
-        if fts_status != "ok":
-            failures.append(
-                "messages_fts_docsize: "
-                f"messages={messages_count} fts_docsize={fts_docsize_count}"
-            )
-
-        cjk_version = _fetch_meta_value(cur, "cjk_terms_version")
-        cjk_status = "ok" if message_search_terms_are_current(conn) else "mismatch"
-        print(f"  cjk_terms_version: value={cjk_version or '<missing>'} {cjk_status}")
-        if cjk_status != "ok":
-            failures.append(f"cjk_terms_version={cjk_version or '<missing>'}")
-
-        fts_ready = _fetch_meta_value(cur, "fts_index_status")
-        fts_ready_status = "ok" if fts_ready == "ready" else "mismatch"
-        print(f"  fts_index_status: value={fts_ready or '<missing>'} {fts_ready_status}")
-        if fts_ready_status != "ok":
-            failures.append(f"fts_index_status={fts_ready or '<missing>'}")
     finally:
         cur.close()
 
@@ -651,12 +461,7 @@ def main() -> int:
         print(f"creating consistent source snapshot: {source_snapshot}")
         _create_source_snapshot(source, source_snapshot)
         conn = _open_target(work_target)
-        create_schema(
-            conn,
-            detect_sqlite_features(conn),
-            skip_fts_auto_heal=1,
-        )
-        _drop_search_sync_triggers(conn)
+        create_schema(conn, detect_sqlite_features(conn))
         conn.execute(
             "ATTACH DATABASE ? AS src",
             (_sqlite_uri(source_snapshot, mode="ro"),),
@@ -664,8 +469,6 @@ def main() -> int:
         for table in _TABLES_IN_COPY_ORDER:
             _copy_table(conn, table, batch_size=batch_size)
         conn.execute("DETACH DATABASE src")
-        _rebuild_search_terms(conn, batch_size=batch_size)
-        _rebuild_fts(conn, batch_size=batch_size)
         _finalize_target_pragmas(conn)
         if not args.no_verify:
             conn.execute(

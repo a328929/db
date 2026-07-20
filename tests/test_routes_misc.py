@@ -379,8 +379,6 @@ class SearchRoutesValidationTests(unittest.TestCase):
             self.app,
             logger=_LoggerStub(),
             get_conn_fn=lambda: _ConnStub(),
-            has_fts_fn=lambda _conn: False,
-            from_sql="FROM messages m",
             page_size=100,
             max_count=50000000,
             map_search_items_fn=lambda rows, detail_level="lite": rows,

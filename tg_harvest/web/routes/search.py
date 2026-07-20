@@ -1,8 +1,6 @@
-import sqlite3
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
 from contextlib import closing
 from typing import Any
 
@@ -68,8 +66,6 @@ def register_search_routes(
     *,
     logger,
     get_conn_fn,
-    has_fts_fn: Callable[[sqlite3.Connection], bool],
-    from_sql: str,
     page_size: int,
     max_count: int,
     map_search_items_fn,
@@ -100,8 +96,6 @@ def register_search_routes(
                 payload = search_payload_service_fn(
                     conn,
                     params,
-                    fts_enabled=has_fts_fn(conn),
-                    from_sql=from_sql,
                     page_size=page_size,
                     max_count=max_count,
                     map_search_items_fn=lambda rows: map_search_items_fn(
@@ -112,7 +106,5 @@ def register_search_routes(
         except (ValueError, TypeError) as exc:
             message = str(exc).strip() or "参数格式错误"
             return json_error(message, 400)
-        except sqlite3.Error:
-            return logged_json_error(logger, "查询失败", "查询失败")
         except Exception:
             return logged_json_error(logger, "系统异常", "系统异常")

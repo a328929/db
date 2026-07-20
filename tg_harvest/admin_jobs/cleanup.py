@@ -13,10 +13,6 @@ from tg_harvest.storage.schema import (
     _refresh_chat_message_counts,
     refresh_chat_message_counts,
 )
-from tg_harvest.storage.search_text_state import (
-    indexed_messages_from_clause,
-    indexed_unsearchable_message_predicate,
-)
 
 CLEANUP_DELETE_BATCH_SIZE = 2000
 MEDIA_GROUP_SYNC_BATCH_SIZE = 500
@@ -73,18 +69,14 @@ def _build_cleanup_targets_table(
         # 搜索统一只看 messages.content_norm/content。执行任务前会先把
         # message_media.file_name 回填到这两个字段，因此这里删除的就是
         # 最终仍没有任何可搜索文本的消息。
-        unsearchable_predicate = indexed_unsearchable_message_predicate(cur, alias="m")
-        messages_from_sql = indexed_messages_from_clause(
-            cur,
-            alias="m",
-            chat_scoped="m.chat_id = ?" in scope_filter_sql,
-        )
         cur.execute(
             f"""
             INSERT INTO temp_cleanup_targets
             SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
-            FROM {messages_from_sql}
-            WHERE {unsearchable_predicate}
+            FROM messages AS m
+            WHERE NULLIF(
+                COALESCE(NULLIF(TRIM(m.content_norm), ''), TRIM(m.content), '')
+            , '') IS NULL
               {scope_filter_sql}
             """,
             scope_filter_params,

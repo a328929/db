@@ -120,6 +120,23 @@ def _load_raw_config_values() -> dict:
         "sqlite_cache_mb": _env_int("TG_SQLITE_CACHE_MB", 512),
         # 数据库内存映射大小，单位为兆。数值零表示关闭。
         "sqlite_mmap_mb": _env_int("TG_SQLITE_MMAP_MB", 1024),
+        "manticore_url": _env_str(
+            "TG_MANTICORE_URL", "http://127.0.0.1:9308"
+        ),
+        "manticore_table": _env_str("TG_MANTICORE_TABLE", "tg_messages"),
+        "manticore_bearer_token": _env_str("TG_MANTICORE_BEARER_TOKEN", ""),
+        "manticore_timeout_seconds": _env_float(
+            "TG_MANTICORE_TIMEOUT_SECONDS", 5.0
+        ),
+        "manticore_sync_batch_size": _env_int(
+            "TG_MANTICORE_SYNC_BATCH_SIZE", 1000
+        ),
+        "manticore_sync_interval_seconds": _env_float(
+            "TG_MANTICORE_SYNC_INTERVAL_SECONDS", 2.0
+        ),
+        "manticore_max_matches": _env_int(
+            "TG_MANTICORE_MAX_MATCHES", 1000000
+        ),
         # 管理页数据库容量健康阈值，单位均为字节。阈值只影响只读告警，不会触发维护操作。
         "db_health_size_warning_bytes": _env_int(
             "TG_DB_HEALTH_SIZE_WARNING_BYTES", 20 * 1024 * 1024 * 1024
@@ -139,12 +156,6 @@ def _load_raw_config_values() -> dict:
         ),
         "db_health_disk_free_critical_bytes": _env_int(
             "TG_DB_HEALTH_DISK_FREE_CRITICAL_BYTES", 3 * 1024 * 1024 * 1024
-        ),
-        "db_health_cjk_queue_warning": _env_int(
-            "TG_DB_HEALTH_CJK_QUEUE_WARNING", 10000
-        ),
-        "db_health_cjk_queue_critical": _env_int(
-            "TG_DB_HEALTH_CJK_QUEUE_CRITICAL", 100000
         ),
         # 后台任务最大保留数量。
         "admin_job_max_count": _env_int("TG_ADMIN_JOB_MAX_COUNT", 100),
@@ -278,10 +289,6 @@ def _load_raw_config_values() -> dict:
         "ops_bot_notify_chat_id": _env_str("TG_OPS_BOT_NOTIFY_CHAT_ID", ""),
         # 运维机器人 HTTP 调用超时秒数。
         "ops_bot_timeout_seconds": _env_optional_float("TG_OPS_BOT_TIMEOUT_SECONDS"),
-        # 启动时是否强制修复全文索引。仅数值一表示开启。
-        "force_heal_fts": _env_int("TG_FORCE_HEAL_FTS", 0),
-        # 是否跳过启动期 FTS 全量修复。恢复大库且磁盘紧张时可临时开启。
-        "skip_fts_auto_heal": _env_int("TG_SKIP_FTS_AUTO_HEAL", 0),
         # 后台管理密码。未配置时拒绝后台登录。
         "admin_password": _env_str("TG_ADMIN_PASSWORD", ""),
         # 后台登录有效时间，单位为秒。
@@ -322,6 +329,22 @@ def _normalize_config_values(raw: dict) -> dict:
     )
     normalized["sqlite_cache_mb"] = max(16, int(normalized["sqlite_cache_mb"]))
     normalized["sqlite_mmap_mb"] = max(0, int(normalized["sqlite_mmap_mb"]))
+    normalized["manticore_url"] = str(normalized["manticore_url"] or "").rstrip("/")
+    normalized["manticore_table"] = str(
+        normalized["manticore_table"] or "tg_messages"
+    )
+    normalized["manticore_timeout_seconds"] = max(
+        0.2, float(normalized["manticore_timeout_seconds"])
+    )
+    normalized["manticore_sync_batch_size"] = max(
+        1, int(normalized["manticore_sync_batch_size"])
+    )
+    normalized["manticore_sync_interval_seconds"] = max(
+        0.2, float(normalized["manticore_sync_interval_seconds"])
+    )
+    normalized["manticore_max_matches"] = max(
+        1000, int(normalized["manticore_max_matches"])
+    )
     normalized["db_health_size_warning_bytes"] = max(
         1, int(normalized["db_health_size_warning_bytes"])
     )
@@ -342,13 +365,6 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["db_health_disk_free_critical_bytes"] = min(
         int(normalized["db_health_disk_free_warning_bytes"]),
         max(1, int(normalized["db_health_disk_free_critical_bytes"])),
-    )
-    normalized["db_health_cjk_queue_warning"] = max(
-        1, int(normalized["db_health_cjk_queue_warning"])
-    )
-    normalized["db_health_cjk_queue_critical"] = max(
-        int(normalized["db_health_cjk_queue_warning"]),
-        int(normalized["db_health_cjk_queue_critical"]),
     )
     normalized["admin_job_max_count"] = max(10, int(normalized["admin_job_max_count"]))
     normalized["admin_job_log_max_lines"] = max(
@@ -475,8 +491,6 @@ def _normalize_config_values(raw: dict) -> dict:
         normalized["ops_bot_timeout_seconds"] = max(
             0.5, float(normalized["ops_bot_timeout_seconds"])
         )
-    normalized["force_heal_fts"] = enabled_int(normalized["force_heal_fts"])
-    normalized["skip_fts_auto_heal"] = enabled_int(normalized["skip_fts_auto_heal"])
     normalized["admin_session_expiry"] = max(60, int(normalized["admin_session_expiry"]))
     return normalized
 
@@ -506,6 +520,15 @@ def _build_app_config(values: dict) -> "AppConfig":
         multi_account_range_chunk_size=values["multi_account_range_chunk_size"],
         sqlite_cache_mb=values["sqlite_cache_mb"],
         sqlite_mmap_mb=values["sqlite_mmap_mb"],
+        manticore_url=values["manticore_url"],
+        manticore_table=values["manticore_table"],
+        manticore_bearer_token=values["manticore_bearer_token"],
+        manticore_timeout_seconds=values["manticore_timeout_seconds"],
+        manticore_sync_batch_size=values["manticore_sync_batch_size"],
+        manticore_sync_interval_seconds=values[
+            "manticore_sync_interval_seconds"
+        ],
+        manticore_max_matches=values["manticore_max_matches"],
         db_health_size_warning_bytes=values["db_health_size_warning_bytes"],
         db_health_size_critical_bytes=values["db_health_size_critical_bytes"],
         db_health_wal_warning_bytes=values["db_health_wal_warning_bytes"],
@@ -516,8 +539,6 @@ def _build_app_config(values: dict) -> "AppConfig":
         db_health_disk_free_critical_bytes=values[
             "db_health_disk_free_critical_bytes"
         ],
-        db_health_cjk_queue_warning=values["db_health_cjk_queue_warning"],
-        db_health_cjk_queue_critical=values["db_health_cjk_queue_critical"],
         admin_job_max_count=values["admin_job_max_count"],
         admin_job_log_max_lines=values["admin_job_log_max_lines"],
         admin_update_concurrency=values["admin_update_concurrency"],
@@ -590,8 +611,6 @@ def _build_app_config(values: dict) -> "AppConfig":
         ops_bot_token=values["ops_bot_token"],
         ops_bot_notify_chat_id=values["ops_bot_notify_chat_id"],
         ops_bot_timeout_seconds=values["ops_bot_timeout_seconds"],
-        force_heal_fts=values["force_heal_fts"],
-        skip_fts_auto_heal=values["skip_fts_auto_heal"],
         admin_password=values["admin_password"],
         admin_session_expiry=values["admin_session_expiry"],
     )
@@ -631,6 +650,15 @@ class AppConfig:
     # 数据库
     sqlite_cache_mb: int
     sqlite_mmap_mb: int
+
+    # 搜索后端
+    manticore_url: str
+    manticore_table: str
+    manticore_bearer_token: str
+    manticore_timeout_seconds: float
+    manticore_sync_batch_size: int
+    manticore_sync_interval_seconds: float
+    manticore_max_matches: int
 
     # 后台任务
     admin_job_max_count: int
@@ -678,10 +706,6 @@ class AppConfig:
     ops_bot_notify_chat_id: str
     ops_bot_timeout_seconds: float
 
-    # 索引维护
-    force_heal_fts: int
-    skip_fts_auto_heal: int
-
     # 后台验证
     admin_password: str
     admin_session_expiry: int
@@ -693,8 +717,6 @@ class AppConfig:
     db_health_wal_critical_bytes: int = 2 * 1024 * 1024 * 1024
     db_health_disk_free_warning_bytes: int = 10 * 1024 * 1024 * 1024
     db_health_disk_free_critical_bytes: int = 3 * 1024 * 1024 * 1024
-    db_health_cjk_queue_warning: int = 10000
-    db_health_cjk_queue_critical: int = 100000
 
     @classmethod
     def load(cls) -> "AppConfig":

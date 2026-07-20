@@ -97,7 +97,7 @@ def _insert_admin_job(conn, job_id):
 def _create_clone_fixture(path, *, target_chat_id=777, target_access_hash="123"):
     conn = _connect(path)
     try:
-        create_schema(conn, detect_sqlite_features(conn), skip_fts_auto_heal=1)
+        create_schema(conn, detect_sqlite_features(conn))
         conn.execute(
             """
             INSERT INTO chats(

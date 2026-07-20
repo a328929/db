@@ -63,9 +63,8 @@ def _print_row_counts(cur: sqlite3.Cursor) -> None:
         "messages",
         "message_media",
         "media_groups",
-        "message_search_terms",
-        "message_search_terms_rebuild_queue",
-        "messages_fts_docsize",
+        "manticore_search_outbox",
+        "manticore_search_meta",
     ):
         try:
             count = _fetch_one_int(cur, f"SELECT COUNT(*) FROM {table}")

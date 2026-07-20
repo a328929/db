@@ -28,7 +28,7 @@ def _connect(path):
 
 def _create_clone_context(path):
     conn = _connect(path)
-    create_schema(conn, detect_sqlite_features(conn), skip_fts_auto_heal=1)
+    create_schema(conn, detect_sqlite_features(conn))
     conn.execute(
         """
         INSERT INTO chats(

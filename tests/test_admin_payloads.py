@@ -307,13 +307,12 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
             "db_health_wal_critical_bytes": 2 * 1024 * 1024 * 1024,
             "db_health_disk_free_warning_bytes": 10 * 1024 * 1024 * 1024,
             "db_health_disk_free_critical_bytes": 3 * 1024 * 1024 * 1024,
-            "db_health_cjk_queue_warning": 10,
-            "db_health_cjk_queue_critical": 100,
+            "manticore_table": "tg_messages",
         }
         values.update(overrides)
         return SimpleNamespace(**values)
 
-    def _open_health_db(self, db_path: Path, *, fts_status: str = "ready"):
+    def _open_health_db(self, db_path: Path, *, index_status: str = "ready"):
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         conn.executescript(
@@ -324,11 +323,9 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
             );
             CREATE TABLE messages(pk INTEGER PRIMARY KEY, content TEXT);
             CREATE TABLE media_groups(id INTEGER PRIMARY KEY);
-            CREATE TABLE message_search_terms(pk INTEGER, term TEXT);
-            CREATE TABLE message_search_terms_rebuild_queue(pk INTEGER PRIMARY KEY);
+            CREATE TABLE manticore_search_outbox(pk INTEGER PRIMARY KEY);
+            CREATE TABLE manticore_search_meta(key TEXT PRIMARY KEY, value TEXT);
             CREATE INDEX idx_health_media_groups ON media_groups(id);
-            CREATE INDEX idx_health_search_terms ON message_search_terms(term);
-            CREATE TABLE message_search_terms_meta(key TEXT PRIMARY KEY, value TEXT);
             CREATE TABLE admin_jobs(
                 job_type TEXT,
                 status TEXT,
@@ -342,22 +339,10 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
             [(1, 21), (2, 21)],
         )
         conn.executemany("INSERT INTO media_groups(id) VALUES (?)", [(1,), (2,)])
-        conn.executemany(
-            "INSERT INTO message_search_terms(pk, term) VALUES (?, ?)",
-            [(1, "中文"), (2, "短词")],
-        )
+        conn.execute("INSERT INTO manticore_search_outbox(pk) VALUES (1)")
         conn.execute(
-            "INSERT INTO message_search_terms_rebuild_queue(pk) VALUES (1)"
-        )
-        conn.executemany(
-            "INSERT INTO message_search_terms_meta(key, value) VALUES (?, ?)",
-            [
-                ("fts_index_status", fts_status),
-                ("cjk_terms_version", "3"),
-                ("cjk_terms_last_maintenance_at", "2026-07-11 10:00:00"),
-                ("cjk_terms_last_maintenance_result", "drained:500"),
-                ("cjk_terms_queue_length", "1"),
-            ],
+            "INSERT INTO manticore_search_meta(key, value) VALUES (?, ?)",
+            ("index_status:tg_messages", index_status),
         )
         conn.execute(
             """
@@ -389,13 +374,8 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         self.assertIn(payload["database"]["journal_mode"], {"delete", "wal"})
         self.assertEqual(42, payload["counts"]["message_count"])
         self.assertEqual(2, payload["counts"]["media_group_count"])
-        self.assertEqual(2, payload["counts"]["cjk_term_count"])
-        self.assertEqual(1, payload["counts"]["cjk_queue_length"])
-        self.assertTrue(payload["indexes"]["fts_ready"])
-        self.assertEqual(
-            "drained:500",
-            payload["maintenance"]["cjk"]["last_maintenance_result"],
-        )
+        self.assertEqual(1, payload["counts"]["manticore_outbox_pending"])
+        self.assertTrue(payload["indexes"]["manticore_ready"])
         self.assertEqual(
             "cleanup",
             payload["maintenance"]["last_recorded_job"]["job_type"],
@@ -447,14 +427,11 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
                 self.assertIn("database_size_warning", codes)
                 self.assertNotIn("database_size_critical", codes)
 
-                queue_cfg = self._cfg(
-                    str(db_path),
-                    db_health_cjk_queue_warning=1,
-                    db_health_cjk_queue_critical=2,
+                payload = build_admin_storage_health_payload(
+                    conn, cfg=self._cfg(str(db_path))
                 )
-                payload = build_admin_storage_health_payload(conn, cfg=queue_cfg)
                 self.assertIn(
-                    "cjk_queue_warning",
+                    "manticore_sync_pending",
                     {item["code"] for item in payload["reasons"]},
                 )
 
@@ -478,10 +455,10 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         )
         self.assertIn("磁盘余量不足以安全压缩；先扩容或清理非数据库文件。", payload["actions"])
 
-    def test_storage_health_flags_fts_not_ready_and_avoids_heavy_queries(self) -> None:
+    def test_storage_health_flags_manticore_not_ready_and_avoids_heavy_queries(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
-            db_path = Path(tmpdir) / "fts.db"
-            conn = self._open_health_db(db_path, fts_status="incomplete")
+            db_path = Path(tmpdir) / "search.db"
+            conn = self._open_health_db(db_path, index_status="incomplete")
             statements = []
             conn.set_trace_callback(lambda sql: statements.append(str(sql).lower()))
             try:
@@ -493,7 +470,9 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
                 conn.set_trace_callback(None)
                 conn.close()
 
-        self.assertIn("fts_not_ready", {item["code"] for item in payload["reasons"]})
+        self.assertIn(
+            "manticore_not_ready", {item["code"] for item in payload["reasons"]}
+        )
         self.assertFalse(any("dbstat" in statement for statement in statements))
         self.assertFalse(any("integrity_check" in statement for statement in statements))
         self.assertFalse(
@@ -530,8 +509,6 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
                 "db_health_wal_critical_bytes": 0,
                 "db_health_disk_free_warning_bytes": 100,
                 "db_health_disk_free_critical_bytes": 1000,
-                "db_health_cjk_queue_warning": 50,
-                "db_health_cjk_queue_critical": 1,
             }
         )
         normalized = _normalize_config_values(raw)
@@ -540,7 +517,6 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         self.assertEqual(1, normalized["db_health_wal_warning_bytes"])
         self.assertEqual(1, normalized["db_health_wal_critical_bytes"])
         self.assertEqual(100, normalized["db_health_disk_free_critical_bytes"])
-        self.assertEqual(50, normalized["db_health_cjk_queue_critical"])
 
 
 if __name__ == "__main__":

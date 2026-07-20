@@ -1,11 +1,6 @@
 import re
 import sqlite3
 
-from tg_harvest.storage.search_text_state import (
-    SEARCH_TEXT_PRESENT_COLUMN,
-    table_has_column,
-)
-
 
 def _normalize_index_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", str(sql or "").strip()).lower()
@@ -129,23 +124,6 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         "CREATE INDEX idx_messages_chat_created_at "
         "ON messages(chat_id, created_at DESC, pk DESC)"
     )
-
-    if table_has_column(cur, "messages", SEARCH_TEXT_PRESENT_COLUMN):
-        _ensure_index(
-            cur,
-            "idx_messages_unsearchable_pk",
-            "CREATE INDEX idx_messages_unsearchable_pk "
-            "ON messages(pk, chat_id, message_id, grouped_id) "
-            "WHERE search_text_present = 0"
-        )
-        _ensure_index(
-            cur,
-            "idx_messages_unsearchable_chat",
-            "CREATE INDEX idx_messages_unsearchable_chat "
-            "ON messages(chat_id, pk, message_id, grouped_id) "
-            "WHERE search_text_present = 0"
-        )
-
 
 def _create_chat_indexes(cur: sqlite3.Cursor):
     _ensure_index(
@@ -311,20 +289,6 @@ def _create_dedupe_indexes(cur: sqlite3.Cursor):
         "idx_dedupe_actions_chat_time",
         "CREATE INDEX idx_dedupe_actions_chat_time "
         "ON dedupe_actions(chat_id, created_at DESC)"
-    )
-
-
-def _create_message_search_term_indexes(cur: sqlite3.Cursor):
-    _ensure_index(
-        cur,
-        "idx_message_search_terms_pk",
-        "CREATE INDEX idx_message_search_terms_pk ON message_search_terms(pk)"
-    )
-    _ensure_index(
-        cur,
-        "idx_message_search_terms_queue_order",
-        "CREATE INDEX idx_message_search_terms_queue_order "
-        "ON message_search_terms_rebuild_queue(queued_at, pk)"
     )
 
 
@@ -594,7 +558,6 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_media_indexes(cur)
     _create_media_group_indexes(cur)
     _create_dedupe_indexes(cur)
-    _create_message_search_term_indexes(cur)
     _create_admin_job_indexes(cur)
     _create_admin_missing_chat_indexes(cur)
     _create_admin_restricted_chat_indexes(cur)

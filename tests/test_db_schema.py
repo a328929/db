@@ -1,20 +1,13 @@
+# ruff: noqa: F821
 import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
 
 import tg_harvest.app.factory as app_factory
-import tg_harvest.storage.fts as _fts
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.storage.access import has_fts
 from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
 from tg_harvest.storage.schema import create_schema
-from tg_harvest.storage.search_terms import (
-    drain_message_search_terms_rebuild_queue,
-    extract_cjk_bigrams,
-    extract_cjk_search_terms,
-    message_search_terms_are_current,
-)
 
 
 class DbSchemaMigrationTests(unittest.TestCase):
@@ -25,7 +18,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.conn.close()
 
-    def test_unsearchable_message_lookup_uses_partial_index(self) -> None:
+    def test_create_schema_removes_legacy_search_helper_column_and_indexes(self) -> None:
         cur = self.conn.cursor()
         cur.execute(
             """
@@ -46,26 +39,32 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 content TEXT,
                 content_norm TEXT,
                 msg_type TEXT NOT NULL DEFAULT 'TEXT',
+                search_text_present INTEGER GENERATED ALWAYS AS (
+                    CASE WHEN NULLIF(
+                        COALESCE(NULLIF(TRIM(content_norm), ''), TRIM(content), '')
+                    , '') IS NULL THEN 0 ELSE 1 END
+                ) VIRTUAL,
                 UNIQUE(chat_id, message_id)
             )
             """
         )
+        cur.execute(
+            "CREATE INDEX idx_messages_unsearchable_pk ON messages(pk) "
+            "WHERE search_text_present = 0"
+        )
+        cur.execute(
+            "CREATE INDEX idx_messages_unsearchable_chat ON messages(chat_id, pk) "
+            "WHERE search_text_present = 0"
+        )
         self.conn.commit()
 
         create_schema(self.conn, detect_sqlite_features(self.conn))
-        cur.execute(
-            """
-            EXPLAIN QUERY PLAN
-            SELECT pk FROM messages
-            INDEXED BY idx_messages_unsearchable_chat
-            WHERE search_text_present = 0 AND chat_id = 1
-            ORDER BY pk ASC
-            LIMIT 10
-            """
-        )
-        plan_text = " ".join(str(row[3]) for row in cur.fetchall())
+        columns = {str(row[1]) for row in cur.execute("PRAGMA table_xinfo(messages)")}
+        indexes = {str(row[1]) for row in cur.execute("PRAGMA index_list(messages)")}
 
-        self.assertIn("idx_messages_unsearchable_chat", plan_text)
+        self.assertNotIn("search_text_present", columns)
+        self.assertNotIn("idx_messages_unsearchable_pk", indexes)
+        self.assertNotIn("idx_messages_unsearchable_chat", indexes)
 
     def test_core_ordering_queries_use_index_without_temp_sort(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
@@ -115,16 +114,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 LIMIT 10
                 """,
                 "idx_media_sort_size_global",
-            ),
-            (
-                """
-                EXPLAIN QUERY PLAN
-                SELECT pk
-                FROM message_search_terms_rebuild_queue
-                ORDER BY queued_at ASC, pk ASC
-                LIMIT 10
-                """,
-                "idx_message_search_terms_queue_order",
             ),
             (
                 """
@@ -621,20 +610,15 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("dedupe_hash", dedupe_action_columns)
         self.assertIn("created_at", dedupe_action_columns)
 
-        cur.execute("PRAGMA table_info(message_search_terms)")
-        term_columns = {row[1] for row in cur.fetchall()}
-        self.assertIn("pk", term_columns)
-        self.assertIn("term", term_columns)
+        cur.execute("PRAGMA table_info(manticore_search_outbox)")
+        outbox_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("pk", outbox_columns)
+        self.assertIn("operation", outbox_columns)
 
-        cur.execute("PRAGMA table_info(message_search_terms_rebuild_queue)")
-        queue_columns = {row[1] for row in cur.fetchall()}
-        self.assertIn("pk", queue_columns)
-        self.assertIn("reason", queue_columns)
-
-        cur.execute("PRAGMA table_info(message_search_terms_meta)")
-        term_meta_columns = {row[1] for row in cur.fetchall()}
-        self.assertIn("key", term_meta_columns)
-        self.assertIn("value", term_meta_columns)
+        cur.execute("PRAGMA table_info(manticore_search_meta)")
+        search_meta_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("key", search_meta_columns)
+        self.assertIn("value", search_meta_columns)
 
         cur.execute("PRAGMA table_info(admin_jobs)")
         admin_job_columns = {row[1] for row in cur.fetchall()}
@@ -803,6 +787,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute("SELECT created_at FROM dedupe_actions WHERE batch_id = 'run-1'")
         self.assertTrue(cur.fetchone()["created_at"])
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_message_search_terms_table_is_without_rowid(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()
@@ -945,6 +930,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute("DELETE FROM messages WHERE chat_id = 1")
         self.conn.commit()
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_replaces_stale_fts_triggers(self) -> None:
         feats = detect_sqlite_features(self.conn)
         if not feats.supports_fts5:
@@ -984,6 +970,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_rebuilds_nonempty_incomplete_fts_index(self) -> None:
         feats = detect_sqlite_features(self.conn)
         if not feats.supports_fts5:
@@ -1029,6 +1016,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_replaces_stale_message_search_queue_triggers(self) -> None:
         feats = detect_sqlite_features(self.conn)
         create_schema(self.conn, feats)
@@ -1052,6 +1040,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         trigger_sql = str(cur.fetchone()["sql"])
         self.assertIn("ON CONFLICT(pk) DO UPDATE", trigger_sql)
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_cjk_queue_length_meta_tracks_enqueue_and_maintenance_drain(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
         cur = self.conn.cursor()
@@ -1082,8 +1071,6 @@ class DbSchemaMigrationTests(unittest.TestCase):
             db_name="/tmp/test.db",
             sqlite_cache_mb=128,
             sqlite_mmap_mb=256,
-            force_heal_fts=1,
-            skip_fts_auto_heal=1,
         )
         fake_conn = object()
         fake_feats = object()
@@ -1098,9 +1085,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIs(fake_conn, conn)
         self.assertIs(fake_feats, feats)
         connect_mock.assert_called_once_with("/tmp/test.db", cache_mb=128, mmap_mb=256)
-        create_mock.assert_called_once_with(
-            fake_conn, fake_feats, force_heal_fts=1, skip_fts_auto_heal=1
-        )
+        create_mock.assert_called_once_with(fake_conn, fake_feats)
 
     def test_runtime_web_connection_does_not_reset_journal_mode(self) -> None:
         fake_conn = object()
@@ -1122,6 +1107,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
             set_journal_mode=False,
         )
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_skip_fts_auto_heal_keeps_incremental_triggers(self) -> None:
         feats = detect_sqlite_features(self.conn)
         if not feats.supports_fts5:
@@ -1196,6 +1182,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
 
+    @unittest.skip("SQLite search indexes were removed")
     def test_fts_rebuild_triggers_cover_changes_between_batches(self) -> None:
         feats = detect_sqlite_features(self.conn)
         if not feats.supports_fts5:
@@ -1262,6 +1249,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         )
         self.assertEqual([], cur.fetchall())
 
+@unittest.skip("SQLite search indexes were removed")
 class StorageAccessFtsDetectionTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")
@@ -1390,6 +1378,7 @@ class SearchResultMapperTests(unittest.TestCase):
         conn.close()
 
 
+@unittest.skip("SQLite search indexes were removed")
 class MessageSearchTermExtractionTests(unittest.TestCase):
     def test_extract_cjk_bigrams_keeps_distinct_adjacent_cjk_pairs(self) -> None:
         self.assertEqual(
@@ -1410,6 +1399,7 @@ class MessageSearchTermExtractionTests(unittest.TestCase):
         )
 
 
+@unittest.skip("SQLite search indexes were removed")
 class MessageSearchTermQueueTests(unittest.TestCase):
     def setUp(self) -> None:
         self.conn = sqlite3.connect(":memory:")

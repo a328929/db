@@ -75,14 +75,15 @@ from tg_harvest.runtime.db_listener import (
     ensure_database_chat_listener_runtime,
     get_database_chat_listener_runtime,
 )
-from tg_harvest.search.maintenance import (
-    configure_message_search_maintenance,
-    schedule_message_search_maintenance,
+from tg_harvest.search.browse_service import sqlite_browse_payload_service
+from tg_harvest.search.manticore_client import ManticoreClient, ManticoreError
+from tg_harvest.search.manticore_service import manticore_search_payload_service
+from tg_harvest.search.manticore_sync import (
+    configure_manticore_sync,
+    validate_manticore_state,
 )
 from tg_harvest.search.params import _parse_search_params
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.search.service import _search_payload_service
-from tg_harvest.storage.access import FROM_SQL, has_fts
 from tg_harvest.storage.access import get_conn as runtime_get_conn
 from tg_harvest.storage.channel_management import (
     list_database_channels,
@@ -107,6 +108,7 @@ from tg_harvest.storage.clone import (
     load_latest_clone_plan,
 )
 from tg_harvest.storage.connection import connect_db, ensure_configured_db
+from tg_harvest.storage.manticore_outbox import manticore_index_is_ready
 from tg_harvest.storage.recovery import (
     build_recovery_overview,
     list_recovery_chat_candidates,
@@ -230,6 +232,33 @@ def get_conn() -> sqlite3.Connection:
     )
 
 
+def _build_manticore_client() -> ManticoreClient:
+    return ManticoreClient(
+        base_url=CFG.manticore_url,
+        table=CFG.manticore_table,
+        timeout_seconds=CFG.manticore_timeout_seconds,
+        bearer_token=CFG.manticore_bearer_token,
+    )
+
+
+def _configured_search_payload_service(
+    conn: sqlite3.Connection,
+    params,
+    **kwargs,
+):
+    if not str(params.text_query or "").strip():
+        return sqlite_browse_payload_service(conn, params, **kwargs)
+    if not manticore_index_is_ready(conn, CFG.manticore_table):
+        raise ManticoreError("Manticore index is not ready")
+    return manticore_search_payload_service(
+        conn,
+        params,
+        client=_build_manticore_client(),
+        max_matches=CFG.manticore_max_matches,
+        **kwargs,
+    )
+
+
 def _ensure_db() -> None:
     conn, _ = ensure_configured_db(cfg=CFG)
     conn.close()
@@ -239,8 +268,15 @@ def _ensure_db() -> None:
             "检测到 %s 个后台任务因进程重启中断，已统一标记为失败",
             recovered_jobs,
         )
-    configure_message_search_maintenance(get_conn)
-    schedule_message_search_maintenance()
+    configure_manticore_sync(
+        get_conn,
+        _build_manticore_client(),
+        batch_size=CFG.manticore_sync_batch_size,
+        idle_seconds=CFG.manticore_sync_interval_seconds,
+    )
+    # Validate the actual index before allowing text search to take over.
+    # A stale SQLite flag must not mask a truncated or missing Manticore table.
+    validate_manticore_state(get_conn, _build_manticore_client())
     ensure_database_chat_listener_runtime(cfg=CFG, get_conn_fn=get_conn)
 
 
@@ -466,12 +502,10 @@ def _build_route_services() -> RouteRegistryServices:
         logger=logger,
         get_conn_fn=get_conn,
         build_meta_payload_fn=_build_meta_payload,
-        has_fts_fn=has_fts,
-        from_sql=FROM_SQL,
         max_count=MAX_COUNT,
         map_search_items_fn=_map_search_items,
         parse_search_params_fn=_parse_search_params,
-        search_payload_service_fn=_search_payload_service,
+        search_payload_service_fn=_configured_search_payload_service,
         admin=admin_services,
         channels=channel_services,
         recovery=recovery_services,

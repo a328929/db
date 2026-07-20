@@ -13,8 +13,6 @@ from typing import Any
 
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 
-import tg_harvest.storage.fts as _fts
-import tg_harvest.storage.search_terms as _search_terms
 from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
@@ -62,7 +60,6 @@ from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
 from tg_harvest.storage.connection import synchronized_write
-from tg_harvest.storage.search_text_state import search_text_expression
 
 DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
 
@@ -3190,97 +3187,25 @@ def _prepare_empty_chat_targets(cur: Any) -> int:
     return int(cur.fetchone()[0] or 0)
 
 
-def _sqlite_object_exists(cur: Any, object_type: str, name: str) -> bool:
-    cur.execute(
-        """
-        SELECT 1
-        FROM sqlite_master
-        WHERE type = ? AND name = ?
-        LIMIT 1
-        """,
-        (object_type, name),
-    )
-    return cur.fetchone() is not None
-
-
-def _chat_delete_has_fts_index(cur: Any) -> bool:
-    return _sqlite_object_exists(cur, "table", "messages_fts")
-
-
-def _drop_message_delete_triggers_for_bulk_delete(
-    cur: Any, *, fts_enabled: bool
-) -> None:
-    if fts_enabled:
-        cur.execute("DROP TRIGGER IF EXISTS trg_messages_fts_delete")
-    cur.execute("DROP TRIGGER IF EXISTS trg_message_terms_delete")
-
-
-def _restore_message_delete_triggers_after_bulk_delete(
-    cur: Any, *, fts_enabled: bool
-) -> None:
-    if fts_enabled:
-        _fts._create_fts_triggers(cur)
-    _search_terms._create_message_search_terms_queue_triggers(cur)
-
-
-def _delete_fts_entries_for_chat_targets(cur: Any) -> None:
-    cur.execute(
-        f"""
-        INSERT INTO messages_fts(messages_fts, rowid, content)
-        SELECT
-            'delete',
-            m.pk,
-            {search_text_expression('m')}
-        FROM messages m
-        JOIN temp_delete_chat_messages t ON t.pk = m.pk
-        """
-    )
-
-
 @synchronized_write
 def _delete_chat_data(conn: Any, chat_id: int) -> int:
     cur = conn.cursor()
-    fts_enabled = False
-    triggers_dropped = False
     owns_transaction = not conn.in_transaction
     savepoint_name = f"delete_chat_data_{id(cur):x}"
     transaction_started = False
 
     def rollback_scope() -> None:
-        nonlocal transaction_started, triggers_dropped
+        nonlocal transaction_started
         if not transaction_started:
             return
         if owns_transaction:
             with suppress(Exception):
                 conn.rollback()
-            if triggers_dropped:
-                try:
-                    _restore_message_delete_triggers_after_bulk_delete(
-                        cur,
-                        fts_enabled=fts_enabled,
-                    )
-                    triggers_dropped = False
-                    conn.commit()
-                except Exception:
-                    logging.exception("删除群组失败后的删除触发器恢复失败")
         else:
             try:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
-                # Rolling back the savepoint restores any trigger definitions
-                # dropped by the fast path; do not recreate or commit them in
-                # the caller's transaction.
-                triggers_dropped = False
             except Exception:
                 logging.exception("删除群组失败后的 SAVEPOINT 回滚失败")
-                if triggers_dropped:
-                    try:
-                        _restore_message_delete_triggers_after_bulk_delete(
-                            cur,
-                            fts_enabled=fts_enabled,
-                        )
-                        triggers_dropped = False
-                    except Exception:
-                        logging.exception("删除群组失败后的触发器兜底恢复失败")
             try:
                 cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
             except Exception:
@@ -3294,40 +3219,16 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
             cur.execute(f"SAVEPOINT {savepoint_name}")
         transaction_started = True
         deleted_messages = _prepare_delete_chat_message_targets(cur, chat_id)
-        trigger_optimization_required = (
-            int(deleted_messages) >= DELETE_CHAT_FAST_PATH_THRESHOLD
-        )
-        fts_enabled = trigger_optimization_required and _chat_delete_has_fts_index(cur)
-        if trigger_optimization_required:
-            _drop_message_delete_triggers_for_bulk_delete(
-                cur,
-                fts_enabled=fts_enabled,
-            )
-            triggers_dropped = True
-            if fts_enabled:
-                _delete_fts_entries_for_chat_targets(cur)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_recovery_chats", chat_id)
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
-        _delete_from_optional_message_pk_targets_table(
-            cur, "message_search_terms", "temp_delete_chat_messages"
-        )
-        _delete_from_optional_message_pk_targets_table(
-            cur, "message_search_terms_rebuild_queue", "temp_delete_chat_messages"
-        )
         cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM dedupe_runs WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
-        if triggers_dropped:
-            _restore_message_delete_triggers_after_bulk_delete(
-                cur,
-                fts_enabled=fts_enabled,
-            )
-            triggers_dropped = False
         cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
         if owns_transaction:
             conn.commit()
