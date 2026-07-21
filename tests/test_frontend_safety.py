@@ -769,6 +769,15 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("function applyCountToRenderedResults(payload)", source)
         self.assertGreaterEqual(source.count("applyCountToRenderedResults(data);"), 2)
 
+    def test_search_results_are_batched_without_changing_accessible_content(self) -> None:
+        source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("document.createDocumentFragment()", source)
+        self.assertIn("fragment.appendChild(card)", source)
+        self.assertIn("els.results.appendChild(fragment)", source)
+        self.assertIn("item.title", source)
+        self.assertIn("payload.page_size || 50", source)
+        self.assertNotIn("每页 100 条", source)
+
     def test_search_form_changes_cancel_pending_background_count(self) -> None:
         source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertIn("function _markSearchCriteriaDirty()", source)

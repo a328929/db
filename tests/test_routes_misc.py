@@ -1,4 +1,6 @@
+import gzip
 import hashlib
+import json
 import os
 import sqlite3
 import tempfile
@@ -375,6 +377,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
         with search_routes_module._rate_lock:
             search_routes_module._search_rate_tracker.clear()
         self.app = Flask(__name__)
+        self.search_payload = {"ok": True, "items": []}
         register_search_routes(
             self.app,
             logger=_LoggerStub(),
@@ -383,7 +386,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
             max_count=50000000,
             map_search_items_fn=lambda rows, detail_level="lite": rows,
             parse_search_params_fn=lambda data: data,
-            search_payload_service_fn=lambda *_args, **_kwargs: {"ok": True, "items": []},
+            search_payload_service_fn=lambda *_args, **_kwargs: self.search_payload,
         )
         self.client = self.app.test_client()
 
@@ -398,6 +401,23 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
         self.assertEqual(400, response.status_code)
         self.assertEqual("请求 JSON 格式错误", response.get_json()["error"])
+
+    def test_search_compresses_large_json_for_gzip_clients(self) -> None:
+        self.search_payload = {
+            "ok": True,
+            "items": [{"title": "完整正文" * 1000}],
+        }
+        response = self.client.post(
+            "/api/search",
+            json={"query": "hello"},
+            headers={"Accept-Encoding": "gzip"},
+        )
+
+        self.assertEqual(200, response.status_code)
+        self.assertEqual("gzip", response.headers.get("Content-Encoding"))
+        self.assertIn("Accept-Encoding", response.headers.get("Vary", ""))
+        payload = json.loads(gzip.decompress(response.data).decode("utf-8"))
+        self.assertEqual("完整正文" * 1000, payload["items"][0]["title"])
 
     def test_search_rate_limit_ignores_background_count_requests(self) -> None:
         ip = "198.51.100.10"
@@ -448,6 +468,9 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
 
 class AppFactoryRuntimeInitTests(unittest.TestCase):
+    def test_search_page_size_is_limited_to_fifty_complete_messages(self) -> None:
+        self.assertEqual(50, app_factory.PAGE_SIZE)
+
     def test_create_app_requires_security_config_when_production_flag_is_enabled(self) -> None:
         with patch.dict(
             os.environ,

@@ -1,3 +1,4 @@
+import gzip
 import threading
 import time
 from collections import deque
@@ -15,6 +16,21 @@ SEARCH_COUNT_ONLY_RATE_LIMIT = 60
 SEARCH_WINDOW_SEC = 60
 _search_rate_tracker: dict[str, deque] = {}
 _rate_lock = threading.Lock()
+_SEARCH_GZIP_MIN_BYTES = 1024
+
+
+def _compress_search_response(response):
+    response.vary.add("Accept-Encoding")
+    if request.accept_encodings["gzip"] <= 0:
+        return response
+    if response.headers.get("Content-Encoding"):
+        return response
+    payload = response.get_data()
+    if len(payload) < _SEARCH_GZIP_MIN_BYTES:
+        return response
+    response.set_data(gzip.compress(payload, compresslevel=5, mtime=0))
+    response.headers["Content-Encoding"] = "gzip"
+    return response
 
 
 def _prune_expired_rate_limit_keys_locked(now: float) -> None:
@@ -102,7 +118,7 @@ def register_search_routes(
                         rows, detail_level=detail_level
                     ),
                 )
-            return jsonify(payload)
+            return _compress_search_response(jsonify(payload))
         except (ValueError, TypeError) as exc:
             message = str(exc).strip() or "参数格式错误"
             return json_error(message, 400)

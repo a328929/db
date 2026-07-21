@@ -122,7 +122,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 setup_logging()
 
 DB_PATH = Path(CFG.db_name)
-PAGE_SIZE = 100
+PAGE_SIZE = 50
 MAX_COUNT = 50000000
 
 ADMIN_HARVEST_TARGET_MAX_LEN = 300

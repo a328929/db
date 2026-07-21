@@ -308,10 +308,12 @@
   }
 
   function _renderResultList(items, effectiveSort) {
+    const fragment = document.createDocumentFragment();
     for (const item of items) {
       const card = _buildResultItemElement(item, effectiveSort);
-      els.results.appendChild(card);
+      fragment.appendChild(card);
     }
+    els.results.appendChild(fragment);
   }
 
   function renderResults(payload, isCounting = false) {
@@ -375,10 +377,11 @@
     const total = Number(payload.total || 0);
     const page = Number(payload.page || 1);
     const totalPages = Number(payload.total_pages || 0);
+    const pageSize = Number(payload.page_size || 50);
     if (payload.total_is_capped) {
-      return `超过 ${total} 条结果，当前第 ${page} / 至少 ${totalPages} 页（每页 100 条）`;
+      return `超过 ${total} 条结果，当前第 ${page} / 至少 ${totalPages} 页（每页 ${pageSize} 条）`;
     }
-    return `共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 100 条）`;
+    return `共 ${total} 条结果，当前第 ${page} / ${totalPages} 页（每页 ${pageSize} 条）`;
   }
 
   function createBtn(text, onClick, { disabled = false, ariaLabel = "" } = {}) {
