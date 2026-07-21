@@ -672,6 +672,10 @@
     if (item.restriction_platforms) parts.push('平台：' + item.restriction_platforms);
     if (item.restriction_reasons) parts.push('原因：' + item.restriction_reasons);
     if (item.risk_flags) parts.push('标记：' + item.risk_flags);
+    if (item.access_failure_message) parts.push('访问异常：' + item.access_failure_message);
+    if (Number(item.access_failure_count || 0) > 0) {
+      parts.push('累计失败：' + Number(item.access_failure_count) + ' 次');
+    }
     return parts.join(' | ');
   }
 
@@ -683,32 +687,43 @@
   }
 
   function restrictedMembershipLabel(scope) {
-    return normalizeRestrictedMembershipScope(scope) === 'public_unjoined'
-      ? '账号未加入'
-      : '账号已加入';
+    var normalized = normalizeRestrictedMembershipScope(scope);
+    if (normalized === 'public_unjoined') return '账号未加入';
+    if (normalized === 'access_unknown') return '访问状态异常';
+    return '账号已加入';
   }
 
   function normalizeRestrictedMembershipScope(scope) {
-    return String(scope || '') === 'public_unjoined' ? 'public_unjoined' : 'joined';
+    var normalized = String(scope || '');
+    if (normalized === 'public_unjoined') return 'public_unjoined';
+    if (normalized === 'access_unknown') return 'access_unknown';
+    return 'joined';
   }
 
   function orderRestrictedItemsByMembership(items) {
     var joinedItems = [];
     var publicUnjoinedItems = [];
+    var accessUnknownItems = [];
     (Array.isArray(items) ? items : []).forEach(function (item) {
-      if (normalizeRestrictedMembershipScope(item && item.membership_scope) === 'public_unjoined') {
+      var scope = normalizeRestrictedMembershipScope(item && item.membership_scope);
+      if (scope === 'public_unjoined') {
         publicUnjoinedItems.push(item);
+        return;
+      }
+      if (scope === 'access_unknown') {
+        accessUnknownItems.push(item);
         return;
       }
       joinedItems.push(item);
     });
-    return joinedItems.concat(publicUnjoinedItems);
+    return joinedItems.concat(publicUnjoinedItems, accessUnknownItems);
   }
 
   function countRestrictedItemsByMembership(items) {
     var counts = {
       joined: 0,
-      public_unjoined: 0
+      public_unjoined: 0,
+      access_unknown: 0
     };
     (Array.isArray(items) ? items : []).forEach(function (item) {
       var scope = normalizeRestrictedMembershipScope(item && item.membership_scope);
@@ -718,9 +733,14 @@
   }
 
   function restrictedMembershipGroupLabel(scope) {
-    return normalizeRestrictedMembershipScope(scope) === 'public_unjoined'
-      ? '数据库已入库、账号未加入的公开群组/频道'
-      : '已加入账号的群组/频道';
+    var normalized = normalizeRestrictedMembershipScope(scope);
+    if (normalized === 'public_unjoined') {
+      return '数据库已入库、账号未加入的公开群组/频道';
+    }
+    if (normalized === 'access_unknown') {
+      return '批量更新或同步调度确认的访问异常群组/频道';
+    }
+    return '已加入账号的群组/频道';
   }
 
   function createRestrictedMembershipGroupHeader(scope, count) {
@@ -749,6 +769,7 @@
     if (normalized === 'all') return '全部平台';
     if (normalized === 'ios') return 'iOS/苹果';
     if (normalized === 'apple') return 'Apple/苹果';
+    if (normalized === 'access') return '访问状态';
     return raw;
   }
 
@@ -759,6 +780,10 @@
     if (normalized === 'porn') return '色情';
     if (normalized === 'terms' || normalized === 'tos') return '违反条款';
     if (normalized === 'copyright') return '版权';
+    if (normalized === 'access_unavailable') return '会话不可访问';
+    if (normalized === 'access_denied') return '账号无访问权限';
+    if (normalized === 'account_banned') return '账号被封禁';
+    if (normalized === 'entity_unavailable') return '实体无法解析或不存在';
     return raw;
   }
 
@@ -778,6 +803,18 @@
         });
       });
     });
+    if (item && item.access_failure_type) {
+      if (
+        pairs.length === 1
+        && pairs[0].key === buildRestrictionFilterKey('', '')
+      ) {
+        pairs = [];
+      }
+      pairs.push({
+        key: buildRestrictionFilterKey('access', item.access_failure_type),
+        label: buildRestrictionFilterLabel('access', item.access_failure_type)
+      });
+    }
     return pairs.length > 0
       ? pairs
       : [{ key: buildRestrictionFilterKey('', ''), label: buildRestrictionFilterLabel('', '') }];
@@ -843,9 +880,9 @@
     if (!Array.isArray(restrictedState.items) || restrictedState.items.length === 0) {
       var empty = document.createElement('div');
       empty.className = 'empty-box';
-      empty.textContent = '暂无内容限制/风险标记扫描结果。';
+      empty.textContent = '暂无风险或访问异常结果。';
       elements.restrictedList.appendChild(empty);
-      elements.restrictedStatus.textContent = '暂无内容限制/风险标记扫描结果，可点击“扫描限制标记”。';
+      elements.restrictedStatus.textContent = '暂无风险或访问异常结果，可点击“扫描风险状态”。';
       return;
     }
     if (items.length === 0) {
@@ -853,7 +890,7 @@
       noMatch.className = 'empty-box';
       noMatch.textContent = '当前筛选条件下没有匹配结果。';
       elements.restrictedList.appendChild(noMatch);
-      elements.restrictedStatus.textContent = '当前类型 0 个，共 ' + restrictedState.items.length + ' 个内容限制/风险标记结果。';
+      elements.restrictedStatus.textContent = '当前类型 0 个，共 ' + restrictedState.items.length + ' 个风险或访问异常结果。';
       return;
     }
 
@@ -864,19 +901,19 @@
       statusElement: elements.restrictedStatus,
       progressText: function (visible, total) {
         if ((restrictedState.filterValue || '__all__') === '__all__') {
-          return '正在显示 ' + visible + '/' + total + ' 个内容限制/风险标记结果...';
+          return '正在显示 ' + visible + '/' + total + ' 个风险或访问异常结果...';
         }
         return '正在显示当前类型 ' + visible + '/' + total + ' 个，共 '
           + restrictedState.items.length
-          + ' 个内容限制/风险标记结果...';
+          + ' 个风险或访问异常结果...';
       },
       doneText: function (total) {
         if ((restrictedState.filterValue || '__all__') === '__all__') {
-          return '发现 ' + total + ' 个带 Telegram 内容限制/风险标记的群组/频道。';
+          return '发现 ' + total + ' 个存在 Telegram 风险标记或访问异常的群组/频道。';
         }
         return '当前类型 ' + total + ' 个，共 '
           + restrictedState.items.length
-          + ' 个内容限制/风险标记结果。';
+          + ' 个风险或访问异常结果。';
       },
       getGroup: function (item) {
         return normalizeRestrictedMembershipScope(item && item.membership_scope);
@@ -906,6 +943,9 @@
             { label: '标记', value: item.risk_flags || '' },
             { label: '账号状态', value: restrictedMembershipLabel(item.membership_scope) },
             { label: '数据库', value: restrictedDatabaseLabel(item) },
+            { label: '访问失败', value: item.access_failure_message || '' },
+            { label: '失败次数', value: Number(item.access_failure_count || 0) > 0 ? String(item.access_failure_count) : '' },
+            { label: '最近失败', value: formatDateTime(item.access_last_failed_at) },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
           ],
           actions: createChannelActions(item, elements, {
@@ -960,7 +1000,7 @@
   }
 
   async function handleScanRestrictedClick(elements) {
-    if (!window.confirm('确认扫描账号已加入及数据库中可解析的公开群组/频道风险标记？')) {
+    if (!window.confirm('确认扫描账号已加入及数据库公开群组/频道的风险标记和访问状态？')) {
       appendLog(elements, '已取消扫描');
       return;
     }

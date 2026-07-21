@@ -495,7 +495,11 @@
     var onStop = typeof opts.onStop === 'function' ? opts.onStop : null;
     var getDoneMessage = typeof opts.getDoneMessage === 'function'
       ? opts.getDoneMessage
-      : function (state) { return state.doneMessage || '任务执行完成'; };
+      : function (state, snapshot) {
+          var stage = String(snapshot && snapshot.progress && snapshot.progress.stage || '');
+          if (stage === 'partial') return '任务部分完成，请检查失败、暂缓或未启动项';
+          return state.doneMessage || '任务执行完成';
+        };
     var getErrorMessage = typeof opts.getErrorMessage === 'function'
       ? opts.getErrorMessage
       : function (state) { return state.errorMessage || '任务执行失败，请检查日志'; };
@@ -795,6 +799,7 @@
     if (normalized === 'updating') return '更新中';
     if (normalized === 'finalizing') return '整理中';
     if (normalized === 'fetching') return '抓取中';
+    if (normalized === 'partial') return '部分完成';
     if (normalized === 'done') return '完成';
     if (normalized === 'error') return '失败';
     if (normalized === 'queued') return '排队中';
@@ -837,6 +842,12 @@
         return {
           key: key,
           message: '[进度] 已处理 ' + current + '/' + total
+        };
+      }
+      if (normalizedStage === 'partial') {
+        return {
+          key: key,
+          message: '[进度] 已处理 ' + current + '/' + total + '，部分完成'
         };
       }
       return {

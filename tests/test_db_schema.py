@@ -662,6 +662,19 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.assertIn("last_message_ts", admin_restricted_chat_columns)
         self.assertIn("scanned_at", admin_restricted_chat_columns)
 
+        cur.execute("PRAGMA table_info(admin_chat_access_risks)")
+        access_risk_columns = {row[1] for row in cur.fetchall()}
+        self.assertIn("chat_id", access_risk_columns)
+        self.assertIn("risk_type", access_risk_columns)
+        self.assertIn("risk_message", access_risk_columns)
+        self.assertIn("failure_count", access_risk_columns)
+        self.assertIn("first_failed_at", access_risk_columns)
+        self.assertIn("last_failed_at", access_risk_columns)
+        self.assertIn("last_success_at", access_risk_columns)
+        self.assertIn("source_job_id", access_risk_columns)
+        self.assertIn("source_account", access_risk_columns)
+        self.assertIn("is_active", access_risk_columns)
+
         cur.execute("PRAGMA table_info(admin_recovery_chats)")
         admin_recovery_chat_columns = {row[1] for row in cur.fetchall()}
         self.assertIn("chat_id", admin_recovery_chat_columns)

@@ -21,6 +21,7 @@ from tg_harvest.admin_jobs.cleanup import (
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
+    classify_chat_access_failure,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
     read_chat_username,
@@ -60,6 +61,11 @@ from tg_harvest.ingest.store import (
     get_last_message_id as _get_last_message_id,
 )
 from tg_harvest.search.manticore_sync import schedule_manticore_sync
+from tg_harvest.storage.channel_management import (
+    list_active_chat_access_risk_ids,
+    record_chat_access_risk,
+    resolve_chat_access_risk,
+)
 from tg_harvest.storage.connection import synchronized_write
 
 DELETE_CHAT_FAST_PATH_THRESHOLD = 50000
@@ -709,6 +715,63 @@ def _admin_update_should_defer_chat(exc: Exception) -> bool:
     return "没有可用账号执行当前群组" in str(exc)
 
 
+def _record_chat_access_risk_best_effort(
+    *,
+    get_conn_fn: Callable[[], Any],
+    job_id: str,
+    chat_id: int,
+    chat_title: str,
+    chat_username: str | None,
+    chat_type: str,
+    source_account: str,
+    exc: Exception,
+) -> bool:
+    risk_type = classify_chat_access_failure(exc)
+    if not risk_type:
+        return False
+    try:
+        call_with_conn(
+            get_conn_fn,
+            record_chat_access_risk,
+            chat_id=int(chat_id),
+            chat_title=chat_title,
+            chat_username=chat_username,
+            chat_type=chat_type,
+            risk_type=risk_type,
+            risk_message=admin_error_message(exc),
+            source_job_id=str(job_id),
+            source_account=source_account,
+        )
+        return True
+    except Exception:
+        logging.exception(
+            "持久化群组访问风险失败: job_id=%s chat_id=%s", job_id, chat_id
+        )
+        return False
+
+
+def _resolve_chat_access_risk_best_effort(
+    *,
+    get_conn_fn: Callable[[], Any],
+    job_id: str,
+    chat_id: int,
+) -> bool:
+    try:
+        return bool(
+            call_with_conn(
+                get_conn_fn,
+                resolve_chat_access_risk,
+                chat_id=int(chat_id),
+                source_job_id=str(job_id),
+            )
+        )
+    except Exception:
+        logging.exception(
+            "解除群组访问风险失败: job_id=%s chat_id=%s", job_id, chat_id
+        )
+        return False
+
+
 def _load_admin_update_rows(conn: Any) -> list[Any]:
     cur = conn.cursor()
     try:
@@ -753,6 +816,13 @@ def _admin_update_all_chats(
     if not rows:
         admin_job_append_log_fn(job_id, "当前无可更新群聊，任务结束")
         return True
+
+    try:
+        active_access_risk_ids = call_with_conn(
+            get_conn_fn, list_active_chat_access_risk_ids
+        )
+    except Exception:
+        active_access_risk_ids = set()
 
     admin_job_append_log_fn(
         job_id,
@@ -1263,15 +1333,14 @@ def _admin_update_all_chats(
         )
         current_chat_label = _chat_log_label(raw_chat_id, current_chat_title)
         current_chat_username = _row_value(row, "chat_username", None)
+        current_chat_type = str(_row_value(row, "chat_type", "") or "")
+        account = account_assignments.get(idx) or _account_plan_item(account_plan, idx)
 
         try:
             current_chat_id = int(raw_chat_id)
             if current_chat_id == 0:
                 raise RuntimeError("无法识别群组/频道 ID")
 
-            account = account_assignments.get(idx) or _account_plan_item(
-                account_plan, idx
-            )
             added_count, used_account = _run_with_fallback(
                 idx=idx,
                 current_chat_id=current_chat_id,
@@ -1285,6 +1354,15 @@ def _admin_update_all_chats(
                     job_id,
                     f"[{idx}/{total}] 已切换账号完成采集：原账号={account.label}，实际账号={used_account.label}，群组={current_chat_label}",
                 )
+            with stats_lock:
+                should_resolve_access_risk = current_chat_id in active_access_risk_ids
+            if should_resolve_access_risk and _resolve_chat_access_risk_best_effort(
+                get_conn_fn=get_conn_fn,
+                job_id=str(job_id),
+                chat_id=current_chat_id,
+            ):
+                with stats_lock:
+                    active_access_risk_ids.discard(current_chat_id)
             return current_chat_title, current_chat_id, True, added_count, None
         except Exception as chat_exc:
             logging.exception(f"Worker 执行群组 {current_chat_label} 失败")
@@ -1297,6 +1375,22 @@ def _admin_update_all_chats(
                     0,
                     user_msg,
                 )
+            try:
+                failed_chat_id = int(raw_chat_id)
+            except (TypeError, ValueError):
+                failed_chat_id = 0
+            if failed_chat_id and _record_chat_access_risk_best_effort(
+                get_conn_fn=get_conn_fn,
+                job_id=str(job_id),
+                chat_id=failed_chat_id,
+                chat_title=current_chat_title,
+                chat_username=current_chat_username,
+                chat_type=current_chat_type,
+                source_account=str(getattr(account, "key", "")),
+                exc=chat_exc,
+            ):
+                with stats_lock:
+                    active_access_risk_ids.add(failed_chat_id)
             return (
                 current_chat_title,
                 raw_chat_id,
@@ -1471,9 +1565,13 @@ def _admin_update_all_chats(
         job_id,
         processed_count if stopped_early else total,
         total=total,
-        stage="done" if failed_count == 0 else "error",
+        stage=(
+            "partial"
+            if failed_count > 0 or deferred_count > 0 or skipped_count > 0
+            else "done"
+        ),
     )
-    return failed_count == 0
+    return failed_count == 0 or success_count > 0
 
 
 def _admin_process_single_chat_update(
@@ -2827,6 +2925,7 @@ def _admin_update_job_runner(
 
     heartbeat_stop, heartbeat_thread = _start_job_heartbeat(job_id, _admin_job_heartbeat)
     local_client = None
+    chat_username = None
     worker_id = f"{job_id}_main"
     try:
         job_context.set(str(job_id))
@@ -2874,6 +2973,11 @@ def _admin_update_job_runner(
                 chat_title=chat_title,
                 chat_username=chat_username,
             )
+            _resolve_chat_access_risk_best_effort(
+                get_conn_fn=get_conn_fn,
+                job_id=str(job_id),
+                chat_id=int(chat_id),
+            )
         _persist_admin_job_status(
             job_id,
             status="done",
@@ -2882,6 +2986,22 @@ def _admin_update_job_runner(
     except Exception as exc:
         logging.exception("后台增量采集任务失败: job_id=%s", job_id)
         user_msg = admin_error_message(exc)
+        if not (isinstance(chat_id, str) and chat_id.strip().lower() == "all"):
+            try:
+                failed_chat_id = int(chat_id)
+            except (TypeError, ValueError):
+                failed_chat_id = 0
+            if failed_chat_id:
+                _record_chat_access_risk_best_effort(
+                    get_conn_fn=get_conn_fn,
+                    job_id=str(job_id),
+                    chat_id=failed_chat_id,
+                    chat_title=chat_title,
+                    chat_username=chat_username,
+                    chat_type="",
+                    source_account="manual",
+                    exc=exc,
+                )
         admin_job_append_log_fn(job_id, f"采集失败：{user_msg}")
         _mark_admin_job_error_best_effort(
             job_id,
@@ -3222,6 +3342,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         deleted_messages = _prepare_delete_chat_message_targets(cur, chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
+        _delete_from_optional_chat_table(cur, "admin_chat_access_risks", chat_id)
         _delete_from_optional_chat_table(cur, "admin_recovery_chats", chat_id)
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
         cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
@@ -3295,6 +3416,9 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         )
         _delete_from_optional_chat_targets_table(
             cur, "admin_restricted_chats", "temp_delete_empty_chats"
+        )
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_chat_access_risks", "temp_delete_empty_chats"
         )
         _delete_from_optional_chat_targets_table(
             cur, "admin_recovery_chats", "temp_delete_empty_chats"

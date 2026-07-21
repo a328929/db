@@ -71,6 +71,47 @@ UNAVAILABLE_RESTRICTION_REASONS = frozenset({"terms", "tos"})
 ChatIdentity = tuple[str, int]
 
 
+def classify_chat_access_failure_text(value: Any) -> str:
+    error_text = str(value or "").strip().lower()
+    if not error_text or any(
+        token in error_text
+        for token in (
+            "floodwait",
+            "flood wait",
+            "频控",
+            "timeout",
+            "timed out",
+            "network",
+            "database",
+            "数据库忙",
+        )
+    ):
+        return ""
+    if "userbanned" in error_text or "账号已被该群组/频道封禁" in error_text:
+        return "account_banned"
+    if any(
+        token in error_text
+        for token in (
+            "channelprivate",
+            "chatforbidden",
+            "您已被踢出该群组",
+            "群组已转为私有",
+        )
+    ):
+        return "access_denied"
+    if any(
+        token in error_text
+        for token in (
+            "could not find the input entity",
+            "not exist",
+            "该群组/频道已解散或不存在",
+            "本地实体缓存未命中",
+        )
+    ):
+        return "entity_unavailable"
+    return ""
+
+
 def load_known_chat_ids(conn: Any) -> set[int]:
     cur = conn.cursor()
     try:
@@ -352,25 +393,65 @@ def restricted_chat_row_from_entity(
     )
 
 
+def unavailable_chat_risk_row(
+    *,
+    chat_id: int,
+    chat_title: str,
+    chat_username: str = "",
+    chat_type: str = "",
+    risk_type: str = "access_unavailable",
+    risk_message: str = "群组当前不可访问",
+    membership_scope: str = "joined",
+    last_message_at: str = "",
+    last_message_ts: int | None = None,
+) -> RestrictedChatInventoryRow:
+    username = _clean_username(chat_username)
+    return RestrictedChatInventoryRow(
+        chat_id=int(chat_id),
+        chat_title=str(chat_title or "").strip() or f"Chat {int(chat_id)}",
+        chat_username=username,
+        chat_type=str(chat_type or ""),
+        is_public=1 if username else 0,
+        restriction_text=str(risk_message or "群组当前不可访问"),
+        risk_flags=str(risk_type or "access_unavailable"),
+        membership_scope=str(membership_scope or "joined"),
+        last_message_at=str(last_message_at or ""),
+        last_message_ts=last_message_ts,
+    )
+
+
 def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatInventoryRow]:
     rows: list[RestrictedChatInventoryRow] = []
     seen_chat_ids: set[ChatIdentity] = set()
 
     for dialog in dialogs:
         base_row = _row_from_dialog(dialog)
-        if base_row is None or base_row.unavailable_reason:
+        if base_row is None:
             continue
 
-        entity = getattr(dialog, "entity", None)
-        restricted_row = restricted_chat_row_from_entity(
-            entity,
-            chat_id=base_row.chat_id,
-            chat_title=base_row.chat_title,
-            chat_username=base_row.chat_username,
-            last_message_at=base_row.last_message_at,
-            last_message_ts=base_row.last_message_ts,
-            membership_scope="joined",
-        )
+        if base_row.unavailable_reason:
+            restricted_row = unavailable_chat_risk_row(
+                chat_id=base_row.chat_id,
+                chat_title=base_row.chat_title,
+                chat_username=base_row.chat_username,
+                chat_type=base_row.chat_type,
+                risk_type="access_unavailable",
+                risk_message=base_row.unavailable_reason,
+                membership_scope="joined",
+                last_message_at=base_row.last_message_at,
+                last_message_ts=base_row.last_message_ts,
+            )
+        else:
+            entity = getattr(dialog, "entity", None)
+            restricted_row = restricted_chat_row_from_entity(
+                entity,
+                chat_id=base_row.chat_id,
+                chat_title=base_row.chat_title,
+                chat_username=base_row.chat_username,
+                last_message_at=base_row.last_message_at,
+                last_message_ts=base_row.last_message_ts,
+                membership_scope="joined",
+            )
         if restricted_row is None:
             continue
 

@@ -9,6 +9,7 @@ from tg_harvest.admin_jobs.core import (
 )
 from tg_harvest.admin_jobs.sessions import _start_job_heartbeat, bind_client_event_loop
 from tg_harvest.domain.chat_ids import candidate_chat_entity_ids
+from tg_harvest.domain.chat_inventory import classify_chat_access_failure_text
 from tg_harvest.domain.coerce import clean_username
 from tg_harvest.ingest.flood_wait import (
     call_with_bounded_retry,
@@ -31,6 +32,23 @@ def is_entity_lookup_miss_error(exc: Exception) -> bool:
         return True
     err_str = f"{type(exc).__name__}: {exc}".lower()
     return "not exist" in err_str or "could not find the input entity" in err_str
+
+
+def classify_chat_access_failure(exc: BaseException) -> str:
+    current: BaseException | None = exc
+    inspected: set[int] = set()
+    parts: list[str] = []
+    while current is not None and id(current) not in inspected:
+        inspected.add(id(current))
+        parts.append(f"{type(current).__name__}: {current}".lower())
+        current = current.__cause__ or current.__context__
+    error_text = " | ".join(parts)
+
+    if is_flood_wait_error(exc):
+        return ""
+    if isinstance(exc, UsernameFallbackSkippedError):
+        return "entity_unavailable"
+    return classify_chat_access_failure_text(error_text)
 
 
 def admin_error_message(exc: Exception) -> str:

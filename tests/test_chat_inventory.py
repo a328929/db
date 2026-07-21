@@ -232,12 +232,14 @@ def test_find_restricted_joined_chats_reports_reasons_and_risk_flags():
     rows = find_restricted_joined_chats(dialogs)
     rows_by_id = {row.chat_id: row for row in rows}
 
-    assert [row.chat_id for row in rows] == [1, 2]
+    assert [row.chat_id for row in rows] == [3, 1, 2]
     assert rows_by_id[1].restriction_platforms == "all"
     assert rows_by_id[1].restriction_reasons == "porn"
     assert "pornographic content" in rows_by_id[1].restriction_text
     assert rows_by_id[1].risk_flags == "restricted"
     assert rows_by_id[2].risk_flags == "scam"
+    assert rows_by_id[3].risk_flags == "access_unavailable"
+    assert rows_by_id[3].restriction_text == "Telegram 返回该会话不可访问"
 
 
 def test_merge_restricted_chat_rows_preserves_risks_seen_by_both_accounts():
@@ -349,6 +351,65 @@ def test_restricted_scan_combines_joined_and_cached_public_unjoined_results():
     assert rows_by_id[1].risk_flags == "restricted"
     assert rows_by_id[2].membership_scope == "public_unjoined"
     assert rows_by_id[2].risk_flags == "scam"
+
+
+def test_restricted_scan_records_public_entity_lookup_failure_as_access_risk():
+    class _UnavailableClient(_RiskScanClient):
+        def get_entity(self, _value):
+            raise ValueError("Could not find the input entity for PeerChannel")
+
+    client = _UnavailableClient([], {})
+    database_rows = [
+        {
+            "chat_id": 9,
+            "chat_title": "Gone Public Channel",
+            "chat_username": "gone-public-channel",
+            "chat_type": "Channel",
+            "last_message_at": "2026-04-01 10:00:00",
+            "last_message_ts": 1775037600,
+        }
+    ]
+
+    def fake_call_with_conn(_get_conn_fn, fn, *args, **kwargs):
+        del args, kwargs
+        if fn.__name__ == "list_database_channels":
+            return database_rows
+        if fn.__name__ == "list_restricted_chat_scan_results":
+            return []
+        raise AssertionError(fn.__name__)
+
+    cfg = SimpleNamespace(
+        session_name="primary",
+        secondary_session_name="",
+        admin_restricted_public_resolve_limit=1,
+        admin_restricted_public_resolve_gap_seconds=0,
+        flood_wait_switch_threshold=30,
+    )
+    logs = []
+    with (
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory.call_with_conn",
+            side_effect=fake_call_with_conn,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory._create_isolated_worker_client",
+            return_value=client,
+        ),
+        patch("tg_harvest.admin_jobs.channel_inventory._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.channel_inventory._cleanup_isolated_worker_session"),
+    ):
+        rows = _scan_restricted_chat_rows(
+            cfg=cfg,
+            get_conn_fn=lambda: None,
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+            job_id="job-risk-unavailable",
+        )
+
+    assert len(rows) == 1
+    assert rows[0].chat_id == 9
+    assert rows[0].risk_flags == "entity_unavailable"
+    assert rows[0].membership_scope == "public_unjoined"
+    assert any("确认不可访问 1 个" in message for message in logs)
 
 
 def test_all_platform_terms_restriction_marks_entity_unavailable():

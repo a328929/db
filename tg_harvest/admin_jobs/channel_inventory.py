@@ -10,6 +10,7 @@ from typing import Any
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
+    classify_chat_access_failure,
     finish_job_heartbeat,
     mark_admin_job_running,
     start_admin_job_heartbeat,
@@ -33,6 +34,7 @@ from tg_harvest.domain.chat_inventory import (
     load_joined_chat_inventory,
     load_known_chat_identities,
     restricted_chat_row_from_entity,
+    unavailable_chat_risk_row,
 )
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry, is_flood_wait_error
 from tg_harvest.storage.channel_management import (
@@ -365,6 +367,7 @@ def _scan_restricted_chat_rows(
     joined_identities: set[tuple[str, int]] = set()
     active_clients: list[tuple[_ScanAccount, Any, str]] = []
     probed_public_chat_ids: set[int] = set()
+    public_access_failure_count = 0
 
     try:
         for account in _scan_accounts(cfg):
@@ -470,6 +473,9 @@ def _scan_restricted_chat_rows(
         account_next_resolve_at: dict[str, float] = {}
         unresolved_rows = list(uncached_by_id.values())[:resolve_limit]
         for index, row in enumerate(unresolved_rows):
+            access_failures: list[tuple[str, Exception]] = []
+            had_transient_failure = False
+            resolved = False
             for account_offset in range(len(active_clients)):
                 account, client, _worker_id = active_clients[
                     (index + account_offset) % len(active_clients)
@@ -494,7 +500,13 @@ def _scan_restricted_chat_rows(
                         )
                 except Exception as exc:
                     if is_flood_wait_error(exc):
+                        had_transient_failure = True
                         continue
+                    risk_type = classify_chat_access_failure(exc)
+                    if risk_type:
+                        access_failures.append((risk_type, exc))
+                    else:
+                        had_transient_failure = True
                     logging.info(
                         "公开频道风险补探测失败: chat_id=%s account=%s error=%s",
                         row.get("chat_id"),
@@ -509,7 +521,33 @@ def _scan_restricted_chat_rows(
                     row=row,
                     entity=entity,
                 )
+                resolved = True
                 break
+
+            if (
+                not resolved
+                and not had_transient_failure
+                and len(access_failures) == len(active_clients)
+            ):
+                risk_type, last_exc = access_failures[-1]
+                chat_id = int(row["chat_id"])
+                risk_row = unavailable_chat_risk_row(
+                    chat_id=chat_id,
+                    chat_title=str(row.get("chat_title") or ""),
+                    chat_username=str(row.get("chat_username") or ""),
+                    chat_type=str(row.get("chat_type") or ""),
+                    risk_type=risk_type,
+                    risk_message=admin_error_message(last_exc),
+                    membership_scope="public_unjoined",
+                    last_message_at=str(row.get("last_message_at") or ""),
+                    last_message_ts=row.get("last_message_ts"),
+                )
+                key = chat_identity_key(risk_row.chat_id, risk_row.chat_type)
+                merged_rows[key] = _merge_restricted_chat_row(
+                    merged_rows.get(key), risk_row
+                )
+                probed_public_chat_ids.add(chat_id)
+                public_access_failure_count += 1
 
         candidate_ids = {int(row["chat_id"]) for row in public_rows}
         for previous in previous_rows:
@@ -525,7 +563,8 @@ def _scan_restricted_chat_rows(
         admin_job_append_log_fn(
             job_id,
             "公开群组补探测完成："
-            f"成功刷新 {len(probed_public_chat_ids)} 个，"
+            f"成功刷新 {max(0, len(probed_public_chat_ids) - public_access_failure_count)} 个，"
+            f"确认不可访问 {public_access_failure_count} 个，"
             f"本轮未主动解析 {max(0, len(uncached_by_id) - len(unresolved_rows))} 个",
         )
     finally:

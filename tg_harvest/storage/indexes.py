@@ -503,6 +503,12 @@ def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor):
 def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
+        "idx_admin_chat_access_risks_active",
+        "CREATE INDEX idx_admin_chat_access_risks_active "
+        "ON admin_chat_access_risks(is_active, last_failed_at DESC, chat_id ASC)",
+    )
+    _ensure_index(
+        cur,
         "idx_account_runtime_cooldown",
         "CREATE INDEX idx_account_runtime_cooldown "
         "ON account_runtime_state(cooldown_until ASC, account_key ASC)",

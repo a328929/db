@@ -273,6 +273,29 @@ def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str
     """)
 
 
+def _create_admin_chat_access_risks_table(
+    cur: sqlite3.Cursor, strict_suffix: str
+) -> None:
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_chat_access_risks (
+        chat_id              INTEGER PRIMARY KEY,
+        chat_title           TEXT NOT NULL,
+        chat_username        TEXT,
+        chat_type            TEXT,
+        risk_type            TEXT NOT NULL,
+        risk_message         TEXT NOT NULL,
+        failure_count        INTEGER NOT NULL DEFAULT 1,
+        first_failed_at      TEXT NOT NULL,
+        last_failed_at       TEXT NOT NULL,
+        last_success_at      TEXT,
+        source_job_id        TEXT,
+        source_account       TEXT,
+        is_active            INTEGER NOT NULL DEFAULT 1,
+        updated_at           TEXT NOT NULL
+    ){strict_suffix}
+    """)
+
+
 def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_recovery_chats (
@@ -591,6 +614,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_admin_job_tables(cur, strict_suffix)
     _create_admin_missing_chats_table(cur, strict_suffix)
     _create_admin_restricted_chats_table(cur, strict_suffix)
+    _create_admin_chat_access_risks_table(cur, strict_suffix)
     _create_admin_recovery_chats_table(cur, strict_suffix)
     _create_admin_clone_runs_table(cur, strict_suffix)
     _create_admin_clone_plans_table(cur, strict_suffix)
@@ -839,6 +863,36 @@ def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
             ("last_message_ts", "last_message_ts INTEGER"),
             ("scan_job_id", "scan_job_id TEXT"),
             ("scanned_at", "scanned_at TEXT NOT NULL DEFAULT (datetime('now'))"),
+        ],
+    )
+
+
+def _ensure_admin_chat_access_risks_schema(cur: sqlite3.Cursor) -> None:
+    _ensure_table_columns(
+        cur,
+        "admin_chat_access_risks",
+        [
+            ("chat_username", "chat_username TEXT"),
+            ("chat_type", "chat_type TEXT"),
+            ("risk_type", "risk_type TEXT NOT NULL DEFAULT 'access_unavailable'"),
+            ("risk_message", "risk_message TEXT NOT NULL DEFAULT ''"),
+            ("failure_count", "failure_count INTEGER NOT NULL DEFAULT 1"),
+            (
+                "first_failed_at",
+                "first_failed_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            ),
+            (
+                "last_failed_at",
+                "last_failed_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            ),
+            ("last_success_at", "last_success_at TEXT"),
+            ("source_job_id", "source_job_id TEXT"),
+            ("source_account", "source_account TEXT"),
+            ("is_active", "is_active INTEGER NOT NULL DEFAULT 1"),
+            (
+                "updated_at",
+                "updated_at TEXT NOT NULL DEFAULT (datetime('now'))",
+            ),
         ],
     )
 
@@ -1348,6 +1402,7 @@ def create_schema(
         _ensure_admin_job_schema(cur)
         _ensure_admin_missing_chats_schema(cur)
         _ensure_admin_restricted_chats_schema(cur)
+        _ensure_admin_chat_access_risks_schema(cur)
         _ensure_admin_recovery_chats_schema(cur)
         _ensure_admin_clone_runs_schema(cur)
         _ensure_admin_clone_plans_schema(cur)

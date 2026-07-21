@@ -731,7 +731,10 @@
       }
     },
     fetchJSON: fetchJSON,
-    getDoneMessage: function () {
+    getDoneMessage: function (_state, snapshot) {
+      if (String(snapshot && snapshot.progress && snapshot.progress.stage || '') === 'partial') {
+        return '批量更新部分完成：成功结果已保留，请检查失败、暂缓或未启动群组';
+      }
       return '任务执行完成';
     },
     getElements: getElements,

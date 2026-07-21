@@ -6,12 +6,15 @@ from tg_harvest.domain.chat_inventory import (
     RestrictedChatInventoryRow,
 )
 from tg_harvest.storage.channel_management import (
+    list_active_chat_access_risk_ids,
     list_database_channels,
     list_missing_chat_scan_results,
     list_restricted_chat_scan_results,
     normalize_channel_sort,
+    record_chat_access_risk,
     replace_missing_chat_scan_results,
     replace_restricted_chat_scan_results,
+    resolve_chat_access_risk,
 )
 
 
@@ -77,6 +80,26 @@ class ChannelManagementStorageTests(unittest.TestCase):
                 last_message_ts INTEGER,
                 scan_job_id TEXT,
                 scanned_at TEXT NOT NULL
+            )
+            """
+        )
+        cur.execute(
+            """
+            CREATE TABLE admin_chat_access_risks (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT,
+                chat_type TEXT,
+                risk_type TEXT NOT NULL,
+                risk_message TEXT NOT NULL,
+                failure_count INTEGER NOT NULL DEFAULT 1,
+                first_failed_at TEXT NOT NULL,
+                last_failed_at TEXT NOT NULL,
+                last_success_at TEXT,
+                source_job_id TEXT,
+                source_account TEXT,
+                is_active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL
             )
             """
         )
@@ -309,6 +332,146 @@ class ChannelManagementStorageTests(unittest.TestCase):
             [2, 0, 0],
             [row["message_count"] for row in rows],
         )
+
+    def test_access_risk_is_merged_counted_and_resolved(self) -> None:
+        record_chat_access_risk(
+            self.conn,
+            chat_id=2,
+            chat_title="Large",
+            chat_username="large",
+            chat_type="Channel",
+            risk_type="access_denied",
+            risk_message="群组已转为私有且账号不在其中",
+            source_job_id="update-1",
+            source_account="primary",
+            observed_at="2026-04-09T00:00:00+00:00",
+        )
+        record_chat_access_risk(
+            self.conn,
+            chat_id=2,
+            chat_title="Large",
+            chat_username="large",
+            chat_type="Channel",
+            risk_type="access_denied",
+            risk_message="群组已转为私有且账号不在其中",
+            source_job_id="update-2",
+            source_account="secondary",
+            observed_at="2026-04-10T00:00:00+00:00",
+        )
+
+        rows = list_restricted_chat_scan_results(self.conn)
+
+        self.assertEqual({2}, list_active_chat_access_risk_ids(self.conn))
+        self.assertEqual(1, len(rows))
+        self.assertEqual("access", rows[0]["risk_source"])
+        self.assertEqual("access_denied", rows[0]["access_failure_type"])
+        self.assertEqual(2, rows[0]["access_failure_count"])
+        self.assertEqual(1, rows[0]["in_database"])
+
+        self.assertTrue(
+            resolve_chat_access_risk(
+                self.conn,
+                chat_id=2,
+                source_job_id="update-3",
+                resolved_at="2026-04-11T00:00:00+00:00",
+            )
+        )
+        self.assertEqual(set(), list_active_chat_access_risk_ids(self.conn))
+        self.assertEqual([], list_restricted_chat_scan_results(self.conn))
+
+    def test_access_risk_merges_with_telegram_restriction(self) -> None:
+        replace_restricted_chat_scan_results(
+            self.conn,
+            [
+                RestrictedChatInventoryRow(
+                    chat_id=2,
+                    chat_title="Large",
+                    chat_type="Channel",
+                    risk_flags="restricted",
+                )
+            ],
+            scan_job_id="scan-1",
+            scanned_at="2026-04-09T00:00:00+00:00",
+        )
+        record_chat_access_risk(
+            self.conn,
+            chat_id=2,
+            chat_title="Large",
+            chat_username="large",
+            chat_type="Channel",
+            risk_type="entity_unavailable",
+            risk_message="实体无法解析",
+            source_job_id="update-1",
+            observed_at="2026-04-10T00:00:00+00:00",
+        )
+
+        row = list_restricted_chat_scan_results(self.conn)[0]
+
+        self.assertEqual("telegram,access", row["risk_source"])
+        self.assertEqual("restricted、entity_unavailable", row["risk_flags"])
+        self.assertEqual("实体无法解析", row["access_failure_message"])
+
+    def test_scheduler_access_failure_is_visible_without_backfill_write(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE sync_chat_state (
+                chat_id INTEGER PRIMARY KEY,
+                chat_title TEXT NOT NULL,
+                chat_username TEXT,
+                membership_scope TEXT NOT NULL DEFAULT 'unknown',
+                status TEXT NOT NULL DEFAULT 'backoff',
+                last_success_at TEXT NOT NULL DEFAULT '',
+                last_failure_at TEXT NOT NULL DEFAULT '',
+                last_failure_message TEXT NOT NULL DEFAULT '',
+                failure_count INTEGER NOT NULL DEFAULT 0,
+                last_source_account TEXT NOT NULL DEFAULT '',
+                is_active INTEGER NOT NULL DEFAULT 1,
+                updated_at TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO sync_chat_state(
+                chat_id,
+                chat_title,
+                chat_username,
+                last_failure_at,
+                last_failure_message,
+                failure_count,
+                last_source_account
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                3,
+                "Fresh",
+                None,
+                "2026-04-12 00:00:00",
+                "该群组/频道已解散或不存在",
+                3,
+                "primary",
+            ),
+        )
+        self.conn.commit()
+
+        rows = list_restricted_chat_scan_results(self.conn)
+
+        self.assertEqual(1, len(rows))
+        self.assertEqual("scheduler", rows[0]["risk_source"])
+        self.assertEqual("entity_unavailable", rows[0]["access_failure_type"])
+        self.assertEqual(3, rows[0]["access_failure_count"])
+        self.assertEqual({3}, list_active_chat_access_risk_ids(self.conn))
+
+        self.assertTrue(
+            resolve_chat_access_risk(
+                self.conn,
+                chat_id=3,
+                source_job_id="update-1",
+                resolved_at="2026-04-13T00:00:00+00:00",
+            )
+        )
+        self.assertEqual(set(), list_active_chat_access_risk_ids(self.conn))
+        self.assertEqual([], list_restricted_chat_scan_results(self.conn))
 
     def test_list_restricted_chat_scan_results_normalizes_signed_entity_id(self) -> None:
         self.conn.execute(

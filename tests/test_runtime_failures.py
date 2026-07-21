@@ -18,7 +18,11 @@ from tg_harvest.admin_jobs.cleanup import (
     _build_cleanup_targets_table,
     _execute_cleanup_deletion_batches,
 )
-from tg_harvest.admin_jobs.common import admin_error_message, resolve_chat_entity
+from tg_harvest.admin_jobs.common import (
+    admin_error_message,
+    classify_chat_access_failure,
+    resolve_chat_entity,
+)
 from tg_harvest.admin_jobs.core import (
     _admin_get_active_job,
     _admin_job_append_log,
@@ -120,6 +124,25 @@ class _FakeClient:
 class AdminUpdateRunnerTests(unittest.TestCase):
     def setUp(self) -> None:
         _ACCOUNT_FLOOD_COOLDOWNS.clear()
+
+    def test_access_failure_classifier_excludes_transient_and_system_errors(self) -> None:
+        self.assertEqual(
+            "access_denied",
+            classify_chat_access_failure(RuntimeError("ChannelPrivateError")),
+        )
+        self.assertEqual(
+            "entity_unavailable",
+            classify_chat_access_failure(
+                ValueError("Could not find the input entity for PeerChannel")
+            ),
+        )
+        self.assertEqual(
+            "",
+            classify_chat_access_failure(
+                AccountFloodWaitError(seconds=90, threshold_seconds=30)
+            ),
+        )
+        self.assertEqual("", classify_chat_access_failure(RuntimeError("disk full")))
 
     def test_load_admin_update_rows_sorts_by_last_message_time_desc(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -378,7 +401,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual(1, counters.written)
         self.assertEqual({7001}, finalize_mock.call_args.kwargs["touched_groups"])
 
-    def test_all_chat_update_returns_false_when_any_worker_fails(self) -> None:
+    def test_all_chat_update_reports_partial_completion_when_one_worker_fails(self) -> None:
         rows = [
             {"chat_id": 1, "chat_title": "ok", "chat_username": "ok_name"},
             {"chat_id": 2, "chat_title": "bad", "chat_username": "bad_name"},
@@ -452,13 +475,14 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 cfg,
             )
 
-        self.assertFalse(ok)
+        self.assertTrue(ok)
         self.assertTrue(any("增量采集失败" in line for line in logs))
         self.assertTrue(any("bad (ID=2)" in line for line in logs))
         self.assertTrue(any("失败 1 个" in line for line in logs))
         self.assertTrue(any("失败列表：bad (ID=2)" in line for line in logs))
         self.assertTrue(any(kwargs.get("total") == 2 for _, kwargs in progress_calls))
         self.assertTrue(any(kwargs.get("stage") == "updating" for _, kwargs in progress_calls))
+        self.assertTrue(any(kwargs.get("stage") == "partial" for _, kwargs in progress_calls))
 
     def test_all_chat_update_uses_database_rows_without_joined_inventory_filter(
         self,
