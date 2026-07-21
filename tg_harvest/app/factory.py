@@ -246,6 +246,7 @@ def _configured_search_payload_service(
     params,
     **kwargs,
 ):
+    kwargs["max_browsable_results"] = CFG.search_max_browsable_results
     if not str(params.text_query or "").strip():
         return sqlite_browse_payload_service(conn, params, **kwargs)
     if not manticore_index_is_ready(conn, CFG.manticore_table):
@@ -268,15 +269,17 @@ def _ensure_db() -> None:
             "检测到 %s 个后台任务因进程重启中断，已统一标记为失败",
             recovered_jobs,
         )
+    manticore_client = _build_manticore_client()
+    # Validate synchronously before text search is enabled. The background
+    # worker subsequently runs this exact audit at a low frequency.
+    validate_manticore_state(get_conn, manticore_client)
     configure_manticore_sync(
         get_conn,
-        _build_manticore_client(),
+        manticore_client,
         batch_size=CFG.manticore_sync_batch_size,
         idle_seconds=CFG.manticore_sync_interval_seconds,
+        validation_interval_seconds=CFG.manticore_validation_interval_seconds,
     )
-    # Validate the actual index before allowing text search to take over.
-    # A stale SQLite flag must not mask a truncated or missing Manticore table.
-    validate_manticore_state(get_conn, _build_manticore_client())
     ensure_database_chat_listener_runtime(cfg=CFG, get_conn_fn=get_conn)
 
 

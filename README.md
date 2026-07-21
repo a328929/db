@@ -59,7 +59,9 @@ bash start_web.sh
 - `TG_MANTICORE_BEARER_TOKEN`: 可选 HTTP Bearer Token，只从环境读取
 - `TG_MANTICORE_SYNC_BATCH_SIZE`: outbox 单批同步数量，默认 `1000`
 - `TG_MANTICORE_SYNC_INTERVAL_SECONDS`: 空闲时同步轮询秒数，默认 `2`
-- `TG_MANTICORE_MAX_MATCHES`: 单次搜索精确匹配上限，默认 `1000000`
+- `TG_MANTICORE_VALIDATION_INTERVAL_SECONDS`: SQLite 与 Manticore 全量一致性校验间隔，默认 `600`
+- `TG_MANTICORE_MAX_MATCHES`: Manticore 单次搜索内部匹配上限，默认 `1000000`
+- `TG_SEARCH_MAX_BROWSABLE_RESULTS`: 关键词搜索和空关键词浏览的分页窗口，默认 `100000`（每页 50 条时最多 2000 页）
 - `TG_ADMIN_PASSWORD`: 管理页密码，必须显式设置；未设置时后台登录会被拒绝
 - `FLASK_SECRET_KEY`: Flask session 签名密钥，建议显式设置以避免重启后登录态失效
 - `TG_REQUIRE_SECURE_CONFIG`: 设置为 `1` 时启用生产安全配置校验；缺少 `TG_ADMIN_PASSWORD` 或 `FLASK_SECRET_KEY` 会拒绝启动

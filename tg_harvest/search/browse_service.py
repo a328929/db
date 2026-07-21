@@ -75,6 +75,7 @@ def sqlite_browse_payload_service(
     page_size: int,
     max_count: int,
     map_search_items_fn,
+    max_browsable_results: int = 100000,
     **_unused: Any,
 ) -> dict[str, Any]:
     clauses, values = _filters(params)
@@ -93,10 +94,13 @@ def sqlite_browse_payload_service(
         """
         sort_field = f"mm.{column}"
     order_sql = f"{sort_field} {direction}, m.chat_id {direction}, m.message_id {direction}, m.pk {direction}"
+    effective_max = max(1, min(int(max_count), int(max_browsable_results)))
     page = max(1, int(params.page))
     offset = (page - 1) * int(page_size)
-    if offset >= int(max_count):
-        raise ValueError(f"浏览最多支持前 {math.ceil(max_count / page_size)} 页")
+    if offset >= effective_max:
+        raise ValueError(
+            f"浏览最多支持前 {math.ceil(effective_max / page_size)} 页"
+        )
 
     cur = conn.cursor()
     try:
@@ -112,11 +116,11 @@ def sqlite_browse_payload_service(
             count_from_sql = from_sql if duration is not None else "FROM messages m"
             cur.execute(
                 f"SELECT COUNT(*) FROM (SELECT 1 {count_from_sql} WHERE {where_sql} LIMIT ?)",
-                (*values, int(max_count) + 1),
+                (*values, effective_max + 1),
             )
             observed = int(cur.fetchone()[0] or 0)
-            total_is_capped = observed > int(max_count)
-            total = min(observed, int(max_count))
+            total_is_capped = observed > effective_max
+            total = min(observed, effective_max)
 
         rows: list[sqlite3.Row] = []
         if not params.count_only:

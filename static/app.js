@@ -13,6 +13,7 @@
     end_date: "",
     page: 1,
   };
+  const SEARCH_COUNT_CACHE_MAX_ENTRIES = 200;
   const searchCountCache = new Map();
 
   const els = {
@@ -531,18 +532,32 @@
     const dataVersion = String(payload.data_version || "");
     if (!dataVersion) return;
 
-    searchCountCache.set(_buildCountCacheKey(dataVersion), {
+    const cacheKey = _buildCountCacheKey(dataVersion);
+    // Map preserves insertion order. Refresh existing keys and evict the
+    // least-recently-used entry so long-lived tabs remain bounded.
+    searchCountCache.delete(cacheKey);
+    searchCountCache.set(cacheKey, {
       total,
       total_pages: totalPages,
       total_is_capped: !!payload.total_is_capped,
       chat_facets: Array.isArray(payload.chat_facets) ? payload.chat_facets : [],
     });
+    while (searchCountCache.size > SEARCH_COUNT_CACHE_MAX_ENTRIES) {
+      const oldestKey = searchCountCache.keys().next().value;
+      searchCountCache.delete(oldestKey);
+    }
   }
 
   function _getCachedCount(dataVersion) {
     const version = String(dataVersion || "");
     if (!version) return null;
-    return searchCountCache.get(_buildCountCacheKey(version)) || null;
+    const cacheKey = _buildCountCacheKey(version);
+    const cached = searchCountCache.get(cacheKey) || null;
+    if (cached) {
+      searchCountCache.delete(cacheKey);
+      searchCountCache.set(cacheKey, cached);
+    }
+    return cached;
   }
 
   async function _fetchSearchResult(payload) {

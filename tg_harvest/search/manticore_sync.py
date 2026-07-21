@@ -12,7 +12,9 @@ from typing import Any
 from tg_harvest.search.manticore_client import ManticoreClient
 from tg_harvest.storage.manticore_outbox import (
     OUTBOX_TABLE,
+    manticore_index_is_ready,
     record_manticore_validation,
+    set_manticore_index_status,
 )
 
 _SYNC_LOCK = threading.Lock()
@@ -23,7 +25,7 @@ _SYNC_CLIENT: ManticoreClient | None = None
 _SYNC_BATCH_SIZE = 1000
 _SYNC_IDLE_SECONDS = 2.0
 _SYNC_ERROR_BACKOFF_SECONDS = 30.0
-_VALIDATION_INTERVAL_SECONDS = 15.0
+_SYNC_VALIDATION_INTERVAL_SECONDS = 600.0
 
 
 @dataclass(frozen=True)
@@ -141,7 +143,11 @@ def _ack_outbox_items(conn: sqlite3.Connection, items: list[OutboxItem]) -> None
 
 
 def _record_outbox_failure(
-    conn: sqlite3.Connection, items: list[OutboxItem], error: Exception
+    conn: sqlite3.Connection,
+    items: list[OutboxItem],
+    error: Exception,
+    *,
+    table: str,
 ) -> None:
     message = str(error).strip()[:500]
     cur = conn.cursor()
@@ -154,7 +160,9 @@ def _record_outbox_failure(
             """,
             [(message, item.pk, item.revision) for item in items],
         )
-        conn.commit()
+        # This commit also persists the retry metadata above, keeping the
+        # failure record and readiness transition atomic.
+        set_manticore_index_status(conn, table, "stale")
     except Exception:
         conn.rollback()
         logging.exception("记录 Manticore 同步失败状态时发生数据库错误")
@@ -174,7 +182,7 @@ def drain_manticore_outbox(
     try:
         client.bulk(_build_bulk_operations(client, items))
     except Exception as exc:
-        _record_outbox_failure(conn, items, exc)
+        _record_outbox_failure(conn, items, exc, table=client.table)
         raise
     _ack_outbox_items(conn, items)
     return len(items)
@@ -232,15 +240,19 @@ def configure_manticore_sync(
     *,
     batch_size: int = 1000,
     idle_seconds: float = 2.0,
+    validation_interval_seconds: float = 600.0,
 ) -> None:
     global _SYNC_BATCH_SIZE, _SYNC_CLIENT, _SYNC_GET_CONN_FN
-    global _SYNC_IDLE_SECONDS, _SYNC_THREAD
+    global _SYNC_IDLE_SECONDS, _SYNC_THREAD, _SYNC_VALIDATION_INTERVAL_SECONDS
 
     with _SYNC_LOCK:
         _SYNC_GET_CONN_FN = get_conn_fn
         _SYNC_CLIENT = client
         _SYNC_BATCH_SIZE = max(1, int(batch_size))
         _SYNC_IDLE_SECONDS = max(0.2, float(idle_seconds))
+        _SYNC_VALIDATION_INTERVAL_SECONDS = max(
+            60.0, float(validation_interval_seconds)
+        )
         if _SYNC_THREAD is not None and _SYNC_THREAD.is_alive():
             _SYNC_EVENT.set()
             return
@@ -257,15 +269,32 @@ def schedule_manticore_sync() -> None:
     _SYNC_EVENT.set()
 
 
+def _manticore_validation_is_due(
+    *,
+    now: float,
+    last_validated_at: float,
+    interval_seconds: float,
+    drained_total: int,
+    index_ready: bool,
+) -> bool:
+    if drained_total > 0 and not index_ready:
+        return True
+    return now - last_validated_at >= interval_seconds
+
+
 def _manticore_sync_worker() -> None:
     table_ready = False
-    last_validated_at = 0.0
+    # Application startup performs an exact validation before this worker is
+    # configured. Normal outbox traffic must not turn that expensive audit
+    # into a per-batch operation.
+    last_validated_at = time.monotonic()
     while True:
         with _SYNC_LOCK:
             get_conn_fn = _SYNC_GET_CONN_FN
             client = _SYNC_CLIENT
             batch_size = _SYNC_BATCH_SIZE
             idle_seconds = _SYNC_IDLE_SECONDS
+            validation_interval_seconds = _SYNC_VALIDATION_INTERVAL_SECONDS
         _SYNC_EVENT.wait(timeout=idle_seconds)
         _SYNC_EVENT.clear()
         if get_conn_fn is None or client is None:
@@ -286,7 +315,19 @@ def _manticore_sync_worker() -> None:
                 drained_total += drained
                 time.sleep(0.02)
             now = time.monotonic()
-            if drained_total > 0 or now - last_validated_at >= _VALIDATION_INTERVAL_SECONDS:
+            recovery_validation_due = False
+            if drained_total > 0:
+                with closing(get_conn_fn()) as conn:
+                    recovery_validation_due = not manticore_index_is_ready(
+                        conn, client.table
+                    )
+            if _manticore_validation_is_due(
+                now=now,
+                last_validated_at=last_validated_at,
+                interval_seconds=validation_interval_seconds,
+                drained_total=drained_total,
+                index_ready=not recovery_validation_due,
+            ):
                 validate_manticore_state(get_conn_fn, client)
                 last_validated_at = now
         except Exception:

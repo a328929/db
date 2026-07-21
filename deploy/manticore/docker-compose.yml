@@ -3,7 +3,7 @@ services:
     container_name: tg-manticore
     image: manticoresearch/manticore@sha256:e44d8c9ced8147e73421d3b86e138fbdd3f4fefbcc1cbe043db648fb1cc75a7b
     restart: unless-stopped
-    mem_limit: 1536m
+    mem_limit: 3g
     cpus: 2.0
     environment:
       searchd_not_terms_only_allowed: "1"

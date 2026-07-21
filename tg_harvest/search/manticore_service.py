@@ -201,6 +201,7 @@ def manticore_search_payload_service(
     max_count: int,
     max_matches: int,
     map_search_items_fn,
+    max_browsable_results: int = 100000,
     **_unused: Any,
 ) -> dict[str, Any]:
     text_query, _duration = _search_text_and_duration(params)
@@ -224,7 +225,14 @@ def manticore_search_payload_service(
             f"id {effective_order}"
         )
 
-    effective_max = max(1, min(int(max_count), int(max_matches)))
+    effective_max = max(
+        1,
+        min(
+            int(max_count),
+            int(max_matches),
+            int(max_browsable_results),
+        ),
+    )
     page = max(1, int(params.page))
     offset = (page - 1) * int(page_size)
     if offset >= effective_max:

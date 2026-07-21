@@ -134,8 +134,14 @@ def _load_raw_config_values() -> dict:
         "manticore_sync_interval_seconds": _env_float(
             "TG_MANTICORE_SYNC_INTERVAL_SECONDS", 2.0
         ),
+        "manticore_validation_interval_seconds": _env_float(
+            "TG_MANTICORE_VALIDATION_INTERVAL_SECONDS", 600.0
+        ),
         "manticore_max_matches": _env_int(
             "TG_MANTICORE_MAX_MATCHES", 1000000
+        ),
+        "search_max_browsable_results": _env_int(
+            "TG_SEARCH_MAX_BROWSABLE_RESULTS", 100000
         ),
         # 管理页数据库容量健康阈值，单位均为字节。阈值只影响只读告警，不会触发维护操作。
         "db_health_size_warning_bytes": _env_int(
@@ -342,8 +348,14 @@ def _normalize_config_values(raw: dict) -> dict:
     normalized["manticore_sync_interval_seconds"] = max(
         0.2, float(normalized["manticore_sync_interval_seconds"])
     )
+    normalized["manticore_validation_interval_seconds"] = max(
+        60.0, float(normalized["manticore_validation_interval_seconds"])
+    )
     normalized["manticore_max_matches"] = max(
         1000, int(normalized["manticore_max_matches"])
+    )
+    normalized["search_max_browsable_results"] = max(
+        1000, int(normalized["search_max_browsable_results"])
     )
     normalized["db_health_size_warning_bytes"] = max(
         1, int(normalized["db_health_size_warning_bytes"])
@@ -528,7 +540,11 @@ def _build_app_config(values: dict) -> "AppConfig":
         manticore_sync_interval_seconds=values[
             "manticore_sync_interval_seconds"
         ],
+        manticore_validation_interval_seconds=values[
+            "manticore_validation_interval_seconds"
+        ],
         manticore_max_matches=values["manticore_max_matches"],
+        search_max_browsable_results=values["search_max_browsable_results"],
         db_health_size_warning_bytes=values["db_health_size_warning_bytes"],
         db_health_size_critical_bytes=values["db_health_size_critical_bytes"],
         db_health_wal_warning_bytes=values["db_health_wal_warning_bytes"],
@@ -658,7 +674,9 @@ class AppConfig:
     manticore_timeout_seconds: float
     manticore_sync_batch_size: int
     manticore_sync_interval_seconds: float
+    manticore_validation_interval_seconds: float
     manticore_max_matches: int
+    search_max_browsable_results: int
 
     # 后台任务
     admin_job_max_count: int

@@ -756,6 +756,15 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("data_version: String(dataVersion || \"\")", source)
         self.assertIn("_getCachedCount(data.data_version)", source)
 
+    def test_search_count_cache_has_a_bounded_lru_eviction_policy(self) -> None:
+        source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+        self.assertIn("SEARCH_COUNT_CACHE_MAX_ENTRIES = 200", source)
+        self.assertIn(
+            "searchCountCache.size > SEARCH_COUNT_CACHE_MAX_ENTRIES", source
+        )
+        self.assertIn("searchCountCache.keys().next().value", source)
+        self.assertGreaterEqual(source.count("searchCountCache.delete(cacheKey)"), 2)
+
     def test_background_count_version_change_does_not_force_refresh_prompt(self) -> None:
         source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
         self.assertNotIn("数据库已更新，请重新搜索以刷新结果。", source)

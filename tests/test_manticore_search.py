@@ -13,6 +13,7 @@ from tg_harvest.search.manticore_service import (
     manticore_search_payload_service,
 )
 from tg_harvest.search.manticore_sync import (
+    _manticore_validation_is_due,
     drain_manticore_outbox,
     validate_manticore_state,
 )
@@ -204,6 +205,24 @@ class ManticoreOutboxTests(unittest.TestCase):
         ).fetchone()
         self.assertEqual(("upsert", 2), tuple(row))
 
+    def test_failed_drain_marks_index_stale_and_keeps_outbox_item(self):
+        pk = self._insert_message()
+        set_manticore_index_status(self.conn, "tg_messages", "ready")
+
+        class FailingClient(_FakeManticoreClient):
+            def bulk(self, operations):
+                raise RuntimeError("search backend unavailable")
+
+        with self.assertRaisesRegex(RuntimeError, "backend unavailable"):
+            drain_manticore_outbox(self.conn, FailingClient())
+
+        self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
+        row = self.conn.execute(
+            f"SELECT attempts, last_error FROM {OUTBOX_TABLE} WHERE pk = ?", (pk,)
+        ).fetchone()
+        self.assertEqual(1, row["attempts"])
+        self.assertIn("backend unavailable", row["last_error"])
+
     def test_empty_content_is_kept_as_a_filterable_document(self):
         self.conn.execute(
             """
@@ -319,6 +338,37 @@ class ManticoreValidationTests(unittest.TestCase):
             )
         finally:
             conn.close()
+
+    def test_normal_sync_does_not_force_an_exact_validation(self):
+        self.assertFalse(
+            _manticore_validation_is_due(
+                now=130.0,
+                last_validated_at=100.0,
+                interval_seconds=600.0,
+                drained_total=2000,
+                index_ready=True,
+            )
+        )
+
+    def test_periodic_or_recovery_state_triggers_exact_validation(self):
+        self.assertTrue(
+            _manticore_validation_is_due(
+                now=700.0,
+                last_validated_at=100.0,
+                interval_seconds=600.0,
+                drained_total=0,
+                index_ready=True,
+            )
+        )
+        self.assertTrue(
+            _manticore_validation_is_due(
+                now=130.0,
+                last_validated_at=100.0,
+                interval_seconds=600.0,
+                drained_total=1,
+                index_ready=False,
+            )
+        )
 
 
 class ManticoreServiceTests(unittest.TestCase):
@@ -489,6 +539,23 @@ class ManticoreServiceTests(unittest.TestCase):
 
         self.assertIn("OPTION ranker=none", client.sql[0])
 
+    def test_very_deep_pages_stop_before_the_expensive_offset_window(self):
+        client = _FakeManticoreClient()
+
+        with self.assertRaisesRegex(ValueError, "前 2000 页"):
+            manticore_search_payload_service(
+                self.conn,
+                self._params(page=2001),
+                client=client,
+                page_size=50,
+                max_count=50000000,
+                max_matches=1000000,
+                max_browsable_results=100000,
+                map_search_items_fn=lambda rows: rows,
+            )
+
+        self.assertEqual([], client.sql)
+
     def test_empty_query_browses_with_sqlite_ordering_indexes(self):
         payload = sqlite_browse_payload_service(
             self.conn,
@@ -523,6 +590,17 @@ class ManticoreServiceTests(unittest.TestCase):
 
         self.assertEqual(1, payload["total"])
         self.assertEqual([], payload["chat_facets"])
+
+    def test_empty_query_browse_uses_the_same_deep_page_window(self):
+        with self.assertRaisesRegex(ValueError, "前 2000 页"):
+            sqlite_browse_payload_service(
+                self.conn,
+                self._params(raw_query="", text_query="", page=2001),
+                page_size=50,
+                max_count=50000000,
+                max_browsable_results=100000,
+                map_search_items_fn=lambda rows: rows,
+            )
 
 
 if __name__ == "__main__":
