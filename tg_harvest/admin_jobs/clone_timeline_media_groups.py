@@ -63,6 +63,7 @@ def handle_media_group_item(
             source_client,
             source_entity,
             [int(message["message_id"]) for message in messages],
+            expected_grouped_id=int(grouped_id),
         )
         if not resolved_group.get("ok"):
             raise RuntimeError(str(resolved_group.get("error") or "API 媒体组解析失败"))

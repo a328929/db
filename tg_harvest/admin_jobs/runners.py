@@ -3136,6 +3136,7 @@ def _admin_cleanup_job_runner(
                 job_id,
                 target_count,
                 admin_job_append_log_fn,
+                cleanup_mode=cleanup_mode,
             )
             admin_job_append_log_fn(job_id, f"清理完成：共删除 {actual_deleted} 条数据")
         else:
@@ -3302,6 +3303,11 @@ def _prepare_empty_chat_targets(cur: Any) -> int:
               FROM messages m
               WHERE m.chat_id = c.chat_id
           )
+          AND NOT EXISTS (
+              SELECT 1
+              FROM clone_media_group_anchors a
+              WHERE a.chat_id = c.chat_id
+          )
         """
     )
     cur.execute("SELECT COUNT(*) FROM temp_delete_empty_chats")
@@ -3347,6 +3353,10 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
         cur.execute("DELETE FROM dedupe_actions WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM dedupe_runs WHERE chat_id = ?", (chat_id,))
+        cur.execute(
+            "DELETE FROM clone_media_group_anchors WHERE chat_id = ?",
+            (chat_id,),
+        )
         cur.execute("DELETE FROM media_groups WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
@@ -3433,6 +3443,12 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         cur.execute(
             """
             DELETE FROM dedupe_runs
+            WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
+            """
+        )
+        cur.execute(
+            """
+            DELETE FROM clone_media_group_anchors
             WHERE chat_id IN (SELECT chat_id FROM temp_delete_empty_chats)
             """
         )

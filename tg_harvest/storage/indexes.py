@@ -500,6 +500,15 @@ def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor):
     )
 
 
+def _create_clone_media_group_anchor_indexes(cur: sqlite3.Cursor):
+    _ensure_index(
+        cur,
+        "idx_clone_media_group_anchors_timeline",
+        "CREATE INDEX idx_clone_media_group_anchors_timeline "
+        "ON clone_media_group_anchors(chat_id, msg_date_ts, message_id, grouped_id)",
+    )
+
+
 def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
     _ensure_index(
         cur,
@@ -572,4 +581,5 @@ def _create_indexes(cur: sqlite3.Cursor):
     _create_admin_clone_plan_indexes(cur)
     _create_admin_clone_migration_indexes(cur)
     _create_admin_clone_media_transfer_indexes(cur)
+    _create_clone_media_group_anchor_indexes(cur)
     _create_sync_scheduler_indexes(cur)

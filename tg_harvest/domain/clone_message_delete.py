@@ -3,6 +3,9 @@ from dataclasses import dataclass
 
 CLONE_MESSAGE_DELETE_MAX_COUNT = 100_000
 CLONE_MESSAGE_DELETE_MAX_MESSAGE_ID = 2_147_483_647
+CLONE_MESSAGE_DELETE_ALL_CONFIRM_PREFIX = "RESET-CLONE-MESSAGES:"
+CLONE_MESSAGE_DELETE_RANGE_CONFIRM_PREFIX = "DELETE-TARGET-MESSAGE-RANGE:"
+CLONE_MESSAGE_RESET_REQUIRED_PHASE = "message_reset_required"
 
 _DELETE_SELECTION_RE = re.compile(r"^(?P<first>[1-9]\d*)(?:-(?P<last>[1-9]\d*))?$")
 
@@ -16,6 +19,8 @@ class CloneMessageDeleteSelection:
 
     @property
     def description(self) -> str:
+        if self.mode == "all":
+            return "清空目标副本并回退全部克隆迁移状态"
         if self.mode == "latest":
             return (
                 f"最后 {self.requested_count} 条已克隆源消息"
@@ -55,6 +60,39 @@ def parse_clone_message_delete_selection(value: object) -> CloneMessageDeleteSel
         requested_count=requested_count,
         first_message_id=first,
         last_message_id=last,
+    )
+
+
+def clone_message_delete_all_selection() -> CloneMessageDeleteSelection:
+    return CloneMessageDeleteSelection(mode="all", requested_count=0)
+
+
+def clone_message_delete_all_confirm_text(run_id: object) -> str:
+    return CLONE_MESSAGE_DELETE_ALL_CONFIRM_PREFIX + str(run_id or "").strip()
+
+
+def clone_message_delete_range_confirm_text(
+    run_id: object,
+    selection: CloneMessageDeleteSelection,
+) -> str:
+    if (
+        selection.mode != "range"
+        or selection.first_message_id is None
+        or selection.last_message_id is None
+    ):
+        raise ValueError("只有目标消息 ID 区间需要永久删除确认码")
+    return (
+        CLONE_MESSAGE_DELETE_RANGE_CONFIRM_PREFIX
+        + str(run_id or "").strip()
+        + f":{selection.first_message_id}-{selection.last_message_id}"
+    )
+
+
+def clone_run_message_reset_required(clone_run: object) -> bool:
+    return bool(
+        isinstance(clone_run, dict)
+        and str(clone_run.get("phase") or "").strip().lower()
+        == CLONE_MESSAGE_RESET_REQUIRED_PHASE
     )
 
 

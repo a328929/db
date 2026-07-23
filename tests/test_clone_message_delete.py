@@ -1,13 +1,14 @@
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from telethon.tl.types import InputChannel
+from telethon.tl.types import InputChannel, MessageActionChannelCreate
 
 from tg_harvest.admin_jobs.clone_message_delete import (
     _admin_clone_message_delete_job_runner,
 )
 from tg_harvest.domain.clone_message_delete import (
     CLONE_MESSAGE_DELETE_MAX_COUNT,
+    clone_message_delete_all_selection,
     parse_clone_message_delete_selection,
 )
 
@@ -315,3 +316,228 @@ def test_mapping_rewind_failure_stops_after_the_confirmed_remote_batch():
     assert statuses == ["running", "error"]
     assert [call[1] for call in client.delete_calls] == [list(range(1200, 1100, -1))]
     assert any("本地续克隆状态回退失败" in message for message in logs)
+
+
+def _run_complete_reset(client, *, mark_reset_side_effect=None):
+    statuses = []
+    logs = []
+
+    class Connection:
+        def close(self):
+            pass
+
+    reset_result = {
+        "mapping_count": 2,
+        "media_transfer_count": 1,
+        "migration_count": 3,
+        "migration_job_count": 3,
+    }
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete.start_admin_job_heartbeat",
+            return_value=_heartbeat_pair(),
+        ),
+        patch("tg_harvest.admin_jobs.clone_message_delete.update_admin_job_progress"),
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete._ensure_base_session_valid",
+            return_value=True,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete._create_isolated_worker_client",
+            return_value=client,
+        ),
+        patch("tg_harvest.admin_jobs.clone_message_delete.time.sleep"),
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete."
+            "list_pending_clone_relay_cleanup_for_run",
+            return_value=[],
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete."
+            "rewind_clone_mappings_for_deleted_target_messages",
+            side_effect=_rewind_result,
+        ) as rewind_mappings,
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete."
+            "mark_clone_run_message_reset_required",
+            side_effect=mark_reset_side_effect,
+        ) as mark_reset_required,
+        patch(
+            "tg_harvest.admin_jobs.clone_message_delete.reset_clone_run_timeline",
+            return_value=reset_result,
+        ) as reset_timeline,
+        patch("tg_harvest.admin_jobs.clone_message_delete._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_message_delete._cleanup_isolated_worker_session"),
+    ):
+        _admin_clone_message_delete_job_runner(
+            "job-message-reset",
+            clone_run={**_clone_run(), "target_owner_session": "secondary"},
+            selection=clone_message_delete_all_selection(),
+            delete_delay_ms=0,
+            cfg=_cfg(),
+            get_conn_fn=Connection,
+            admin_job_set_status_fn=lambda _job_id, status: statuses.append(status),
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+        )
+    return statuses, logs, rewind_mappings, reset_timeline, mark_reset_required
+
+
+def test_complete_reset_deletes_every_remote_batch_before_resetting_local_state():
+    class Messages(list):
+        def __init__(self, items, total):
+            super().__init__(items)
+            self.total = total
+
+    class Client:
+        def __init__(self):
+            self.read_count = 0
+            self.delete_calls = []
+
+        def get_messages(self, _target, *, limit):
+            assert limit == 100
+            self.read_count += 1
+            if self.read_count == 1:
+                return Messages(
+                    [SimpleNamespace(id=5), SimpleNamespace(id=4), SimpleNamespace(id=3)],
+                    total=3,
+                )
+            return Messages([], total=0)
+
+        def delete_messages(self, target, message_ids, *, revoke):
+            self.delete_calls.append((target, list(message_ids), revoke))
+            return []
+
+    client = Client()
+    statuses, logs, rewind_mappings, reset_timeline, mark_reset_required = (
+        _run_complete_reset(client)
+    )
+
+    assert statuses == ["running", "done"]
+    assert client.delete_calls[0][1:] == ([5, 4, 3], True)
+    assert rewind_mappings.call_count == 1
+    assert reset_timeline.call_count == 1
+    assert mark_reset_required.call_count == 1
+    assert any("目标副本完整清空完成" in message for message in logs)
+    assert any("尚未同步消息的状态" in message for message in logs)
+
+
+def test_complete_reset_does_not_clear_local_state_when_remote_messages_remain():
+    class Messages(list):
+        total = 1
+
+    class Client:
+        def get_messages(self, _target, *, limit):
+            assert limit == 100
+            return Messages([SimpleNamespace(id=5)])
+
+        def delete_messages(self, _target, _message_ids, *, revoke):
+            assert revoke is True
+            return []
+
+    statuses, logs, _rewind_mappings, reset_timeline, mark_reset_required = (
+        _run_complete_reset(Client())
+    )
+
+    assert statuses == ["running", "error"]
+    assert reset_timeline.call_count == 0
+    assert mark_reset_required.call_count == 1
+    assert any("等待删除结果同步后仍返回上一批" in message for message in logs)
+
+
+def test_complete_reset_waits_for_telegram_delete_propagation_without_repeating_work():
+    class Messages(list):
+        total = 1
+
+    class Client:
+        def __init__(self):
+            self.read_count = 0
+            self.delete_calls = []
+
+        def get_messages(self, _target, *, limit):
+            assert limit == 100
+            self.read_count += 1
+            if self.read_count <= 2:
+                return Messages([SimpleNamespace(id=5)])
+            return Messages([])
+
+        def delete_messages(self, target, message_ids, *, revoke):
+            self.delete_calls.append((target, list(message_ids), revoke))
+            return []
+
+    client = Client()
+    statuses, logs, rewind_mappings, reset_timeline, _mark_reset_required = (
+        _run_complete_reset(client)
+    )
+
+    assert statuses == ["running", "done"]
+    assert len(client.delete_calls) == 1
+    assert client.delete_calls[0][1:] == ([5], True)
+    assert rewind_mappings.call_count == 1
+    assert reset_timeline.call_count == 1
+    assert any("等待删除结果同步" in message for message in logs)
+
+
+def test_complete_reset_ignores_immutable_channel_creation_service_message():
+    class Messages(list):
+        def __init__(self, items, total):
+            super().__init__(items)
+            self.total = total
+
+    creation_message = SimpleNamespace(
+        id=1,
+        action=MessageActionChannelCreate(title="Clone Target"),
+    )
+
+    class Client:
+        def __init__(self):
+            self.read_count = 0
+            self.delete_calls = []
+
+        def get_messages(self, _target, *, limit):
+            assert limit == 100
+            self.read_count += 1
+            if self.read_count == 1:
+                return Messages(
+                    [SimpleNamespace(id=2, action=None), creation_message],
+                    total=2,
+                )
+            return Messages([creation_message], total=1)
+
+        def delete_messages(self, target, message_ids, *, revoke):
+            self.delete_calls.append((target, list(message_ids), revoke))
+            return []
+
+    client = Client()
+    statuses, logs, rewind_mappings, reset_timeline, mark_reset_required = (
+        _run_complete_reset(client)
+    )
+
+    assert statuses == ["running", "done"]
+    assert len(client.delete_calls) == 1
+    assert client.delete_calls[0][1:] == ([2], True)
+    assert rewind_mappings.call_count == 1
+    assert reset_timeline.call_count == 1
+    assert mark_reset_required.call_count == 1
+    assert any("不可删除的群组创建系统事件" in message for message in logs)
+
+
+def test_complete_reset_does_not_touch_remote_when_safety_barrier_cannot_persist():
+    class Client:
+        def get_messages(self, *_args, **_kwargs):
+            raise AssertionError("安全状态写入失败后不得读取或删除远端消息")
+
+        def delete_messages(self, *_args, **_kwargs):
+            raise AssertionError("安全状态写入失败后不得删除远端消息")
+
+    statuses, logs, rewind_mappings, reset_timeline, mark_reset_required = (
+        _run_complete_reset(
+            Client(),
+            mark_reset_side_effect=RuntimeError("database unavailable"),
+        )
+    )
+
+    assert statuses == ["running", "error"]
+    assert mark_reset_required.call_count == 1
+    assert rewind_mappings.call_count == 0
+    assert reset_timeline.call_count == 0
+    assert any("database unavailable" in message for message in logs)

@@ -345,17 +345,84 @@ def _delete_cleanup_batch(conn, cur, pks: list[int]) -> int:
         raise
 
 
+@synchronized_write
+def _preserve_clone_media_group_anchors(conn, cur) -> int:
+    try:
+        cur.execute(
+            """
+            SELECT COUNT(*)
+            FROM messages AS m
+            JOIN temp_cleanup_targets AS t
+              ON t.chat_id = m.chat_id
+             AND t.pk = m.pk
+            WHERE m.grouped_id IS NOT NULL
+              AND COALESCE(m.has_media, 0) = 1
+            """
+        )
+        anchor_count = int(cur.fetchone()[0] or 0)
+        cur.execute(
+            """
+            INSERT INTO clone_media_group_anchors(
+                chat_id, grouped_id, message_id, msg_date_text,
+                msg_date_ts, cleanup_reason, created_at, updated_at
+            )
+            SELECT
+                m.chat_id,
+                m.grouped_id,
+                m.message_id,
+                COALESCE(m.msg_date_text, ''),
+                COALESCE(m.msg_date_ts, 0),
+                'empty_media',
+                datetime('now'),
+                datetime('now')
+            FROM messages AS m
+            JOIN temp_cleanup_targets AS t
+              ON t.chat_id = m.chat_id
+             AND t.pk = m.pk
+            WHERE m.grouped_id IS NOT NULL
+              AND COALESCE(m.has_media, 0) = 1
+            ON CONFLICT(chat_id, grouped_id, message_id) DO UPDATE SET
+                msg_date_text = excluded.msg_date_text,
+                msg_date_ts = excluded.msg_date_ts,
+                cleanup_reason = excluded.cleanup_reason,
+                updated_at = excluded.updated_at
+            """
+        )
+        conn.commit()
+        return anchor_count
+    except Exception:
+        with suppress(Exception):
+            conn.rollback()
+        raise
+
+
 def _execute_cleanup_deletion_batches(
     conn,
     cur,
     job_id: str,
     target_count: int,
     admin_job_append_log_fn: Callable[[str, str], Any],
+    *,
+    cleanup_mode: str = "keyword",
 ):
     deleted = 0
     affected_chats, affected_groups_by_chat = _collect_cleanup_affected_state(cur)
     deletion_error: Exception | None = None
     try:
+        if str(cleanup_mode or "").strip().lower() == "empty_media":
+            anchor_count = _preserve_clone_media_group_anchors(conn, cur)
+            if anchor_count > 0:
+                try:
+                    admin_job_append_log_fn(
+                        job_id,
+                        "已为克隆恢复目录保留 "
+                        f"{anchor_count} 条媒体组成员锚点；主消息仍按计划物理删除",
+                    )
+                except Exception:
+                    logging.exception(
+                        "记录克隆媒体组锚点保留结果失败: job_id=%s",
+                        job_id,
+                    )
         while True:
             cur.execute(
                 f"SELECT pk FROM temp_cleanup_targets LIMIT {CLEANUP_DELETE_BATCH_SIZE}"

@@ -19,6 +19,8 @@ from tg_harvest.admin_jobs.clone_media_copy import (
     confirm_clone_target_messages,
     copy_clone_media_direct_without_source,
     copy_clone_media_via_relay_without_source,
+    load_clone_relay_participant_count,
+    reconcile_clone_media_target_checkpoints,
     record_clone_media_mapping,
     resolve_clone_relay_chat,
     validate_clone_relay_execution,
@@ -68,6 +70,7 @@ from tg_harvest.admin_jobs.sessions import (
     _start_job_heartbeat,
     bind_client_event_loop,
 )
+from tg_harvest.domain.clone_message_delete import clone_run_message_reset_required
 from tg_harvest.domain.clone_plan import (
     CLONE_TEXT_MIGRATION_MAX_MESSAGE_LIMIT,
     CLONE_TEXT_MIGRATION_MAX_SEND_DELAY_MS,
@@ -193,7 +196,8 @@ def _log_timeline_start(
         )
         admin_job_append_log_fn(
             state.job_id,
-            "媒体复制策略：固定中转频道桥接；两跳均 drop_author=True，不显示原群或中转频道跳转",
+            "媒体复制策略：第一跳匿名复制到固定中转频道；第二跳下载中转媒体并重新上传为独立目标消息，"
+            "清理中转后再次核验目标消息仍然存在",
         )
     else:
         media_account = _clean_text(state.accounts.get("media_source_account"))
@@ -337,6 +341,10 @@ def _admin_clone_timeline_migration_job_runner(
         source_chat_id = int(run["source_chat_id"])
         target_chat_id = int(run.get("target_chat_id") or 0)
         source_snapshot_message_id = clone_plan_source_snapshot_message_id(plan)
+        if clone_run_message_reset_required(run):
+            raise RuntimeError(
+                "完整清空尚未完成，必须先重试完整清空"
+            )
         if source_snapshot_message_id <= 0:
             raise RuntimeError("迁移计划缺少已核验的源消息快照，请重新执行在线深度预检")
         if not target_chat_id:
@@ -480,6 +488,26 @@ def _admin_clone_timeline_migration_job_runner(
             if state.using_relay and target_client is not None
             else None
         )
+        relay_participant_count_for_source = (
+            load_clone_relay_participant_count(
+                source_client,
+                relay_entity_for_source,
+            )
+            if state.using_relay
+            and source_client is not None
+            and relay_entity_for_source is not None
+            else None
+        )
+        relay_participant_count_for_target = (
+            load_clone_relay_participant_count(
+                target_client,
+                relay_entity_for_target,
+            )
+            if state.using_relay
+            and target_client is not None
+            and relay_entity_for_target is not None
+            else None
+        )
         if state.using_relay:
             if relay_entity_for_source is None or relay_entity_for_target is None:
                 raise RuntimeError("固定中转频道桥接实体尚未初始化")
@@ -489,6 +517,12 @@ def _admin_clone_timeline_migration_job_runner(
                 relay_chat_id=clone_plan_media_relay_chat_id(plan),
                 source_chat_id=source_chat_id,
                 target_chat_id=target_chat_id,
+                relay_participant_count_for_source=(
+                    relay_participant_count_for_source
+                ),
+                relay_participant_count_for_target=(
+                    relay_participant_count_for_target
+                ),
             )
         media_transfer_context = CloneMediaTransferContext(
             get_conn_fn=get_conn_fn,
@@ -503,6 +537,43 @@ def _admin_clone_timeline_migration_job_runner(
                 clone_plan_media_relay_chat_id(plan) if state.using_relay else 0
             ),
         )
+        checkpoint_audit = (
+            reconcile_clone_media_target_checkpoints(
+                client=target_client,
+                target_entity=media_target_entity,
+                transfer_context=media_transfer_context,
+                log_step=lambda message: admin_job_append_log_fn(job_id, message),
+            )
+            if target_client is not None and media_target_entity is not None
+            else {"checked_count": 0, "missing_count": 0}
+        )
+        if checkpoint_audit["missing_count"]:
+            preview = timeline_preview(
+                get_conn_fn=get_conn_fn,
+                run_id=run_id,
+                source_chat_id=source_chat_id,
+                max_source_message_id=source_snapshot_message_id,
+            )
+            accounts = validate_plan_for_timeline(plan=plan, preview=preview)
+            state = build_execution_state(
+                job_id=job_id,
+                run_id=run_id,
+                plan_id=plan_id,
+                migration_id=migration_id,
+                run=run,
+                plan=plan,
+                preview=preview,
+                accounts=accounts,
+                normalized_message_limit=normalized_message_limit,
+                normalized_send_delay_ms=normalized_send_delay_ms,
+            )
+            update_migration_required(
+                get_conn_fn=get_conn_fn,
+                migration_id=migration_id,
+                text_total=state.text_total,
+                media_total=state.media_total,
+                media_group_total=state.media_group_total,
+            )
         if state.using_relay:
             if source_client is None or relay_entity_for_source is None:
                 raise RuntimeError("固定中转频道清理连接尚未初始化")
@@ -818,6 +889,19 @@ def _admin_clone_timeline_migration_job_runner(
                 )
             if state.stopped or state.limit_reached:
                 break
+
+        if media_target_entity is not None:
+            final_checkpoint_audit = reconcile_clone_media_target_checkpoints(
+                client=target_client,
+                target_entity=media_target_entity,
+                transfer_context=media_transfer_context,
+                log_step=lambda message: admin_job_append_log_fn(job_id, message),
+            )
+            if final_checkpoint_audit["missing_count"]:
+                raise CloneMediaDeliverySafetyError(
+                    "迁移结束核验发现目标媒体已不存在，已回退错误成功映射；"
+                    "本次任务不会标记成功，请重新执行迁移。"
+                )
 
         if (
             not state.stopped

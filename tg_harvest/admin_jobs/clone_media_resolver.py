@@ -398,6 +398,7 @@ def clone_api_resolve_media_group(
     anchor_message_ids: list[int],
     *,
     scan_radius: int = CLONE_MEDIA_GROUP_API_SCAN_RADIUS,
+    expected_grouped_id: int | None = None,
 ) -> dict[str, Any]:
     """Resolve a media group from source API using DB message ids only as anchors."""
     anchors = sorted({int(message_id) for message_id in anchor_message_ids if message_id})
@@ -420,7 +421,8 @@ def clone_api_resolve_media_group(
         )
         if _message_has_media(message)
     ]
-    if not anchor_messages:
+    normalized_expected_grouped_id = optional_int(expected_grouped_id)
+    if not anchor_messages and normalized_expected_grouped_id is None:
         return {
             "ok": False,
             "message_ids": [],
@@ -429,10 +431,13 @@ def clone_api_resolve_media_group(
             "resolution": "missing_anchor_messages",
         }
 
-    api_grouped_id = None
+    api_grouped_id = normalized_expected_grouped_id
     for message in anchor_messages:
-        api_grouped_id = _message_grouped_id(message)
-        if api_grouped_id is not None:
+        candidate_grouped_id = _message_grouped_id(message)
+        if candidate_grouped_id is None:
+            continue
+        if api_grouped_id is None or candidate_grouped_id == api_grouped_id:
+            api_grouped_id = candidate_grouped_id
             break
 
     if api_grouped_id is None:

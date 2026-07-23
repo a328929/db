@@ -824,6 +824,35 @@ def _admin_reconcile_terminal_clone_records(*, now: datetime) -> None:
                 AND j.status = 'error'
           )
         """,
+        """
+        UPDATE admin_clone_migrations
+        SET status = 'error', phase = 'interrupted', error_message = ?,
+            updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND NOT EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_migrations.job_id
+          )
+        """,
+        """
+        UPDATE admin_clone_plans
+        SET status = 'error', error_message = ?, updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND NOT EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_plans.job_id
+          )
+        """,
+        """
+        UPDATE admin_clone_runs
+        SET status = 'error', phase = 'interrupted', error_message = ?,
+            updated_at = ?, completed_at = ?
+        WHERE status IN ('queued', 'running')
+          AND NOT EXISTS (
+              SELECT 1 FROM admin_jobs j
+              WHERE j.job_id = admin_clone_runs.job_id
+          )
+        """,
     ]
     with closing(_admin_connect()) as conn:
         cur = conn.cursor()
@@ -841,10 +870,16 @@ def _admin_reconcile_terminal_clone_records(*, now: datetime) -> None:
                     SET status = 'error', phase = 'interrupted', error_message = ?,
                         updated_at = ?
                     WHERE status = 'deleting'
-                      AND EXISTS (
-                          SELECT 1 FROM admin_jobs j
-                          WHERE j.job_id = admin_clone_runs.deletion_job_id
-                            AND j.status = 'error'
+                      AND (
+                          NOT EXISTS (
+                              SELECT 1 FROM admin_jobs j
+                              WHERE j.job_id = admin_clone_runs.deletion_job_id
+                          )
+                          OR EXISTS (
+                              SELECT 1 FROM admin_jobs j
+                              WHERE j.job_id = admin_clone_runs.deletion_job_id
+                                AND j.status = 'error'
+                          )
                       )
                     """,
                     (message, now_text),

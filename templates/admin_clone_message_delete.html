@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
-  <title>删除局部克隆消息</title>
+  <title>克隆消息删除与回退</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_manage.css') }}">
   <link rel="stylesheet" href="{{ url_for('static', filename='admin_clone.css') }}">
@@ -12,7 +12,7 @@
   <main class="page" id="admin-clone-message-delete-page">
     <header class="page-header">
       <p class="eyebrow">克隆工作台 / 管理记录</p>
-      <h1>删除局部克隆消息</h1>
+      <h1>克隆消息删除与回退</h1>
       <p class="subtle">整数用于回滚已克隆内容并更新续克隆边界；目标消息 ID 区间只清理副本，不修改克隆记录。源群不会被读取、修改或删除。</p>
       <a id="admin-clone-message-delete-back-link" class="clone-back-link" href="/admin/clone/runs/manage">返回当前记录</a>
     </header>
@@ -34,12 +34,12 @@
       <div class="clone-panel-head">
         <div>
           <h2 id="cloneMessageDeleteFormTitle" class="section-title">删除规则</h2>
-          <p class="clone-subline">单个整数按源消息 ID 回滚最后 N 条已克隆内容，目标群公告不参与计数；目标消息 ID 区间仅用于独立清理，后续迁移不会补回。</p>
+          <p class="clone-subline">单个整数按源消息 ID 回滚最后 N 条已克隆内容；目标消息 ID 区间是永久删除，不回退克隆记录，后续迁移不会补回。</p>
         </div>
       </div>
       <form id="admin-clone-message-delete-form" class="clone-message-delete-form" novalidate>
         <div class="field">
-          <label for="admin-clone-message-delete-selection">回滚克隆数量或目标消息 ID 区间</label>
+          <label for="admin-clone-message-delete-selection">可回滚克隆数量，或永久删除的目标消息 ID 区间</label>
           <input
             id="admin-clone-message-delete-selection"
             name="selection"
@@ -73,15 +73,84 @@
       </form>
     </section>
 
+    <section class="panel clone-panel clone-danger-block" aria-labelledby="cloneMessageResetTitle">
+      <div class="clone-panel-head">
+        <div>
+          <h2 id="cloneMessageResetTitle" class="section-title">完整清空与回退</h2>
+          <p class="clone-subline">保留目标副本和预检计划，清空目标副本全部当前消息，并移除全部迁移映射、媒体检查点和迁移任务历史。</p>
+        </div>
+        <div class="clone-toolbar">
+          <button id="admin-clone-message-reset-open-btn" class="btn danger" type="button" disabled>清空群组并回退全部克隆数据</button>
+        </div>
+      </div>
+      <p id="admin-clone-message-reset-status" class="clone-message-delete-form-status" role="status" aria-live="polite"></p>
+    </section>
+
     <details id="admin-clone-message-delete-log-panel" class="panel clone-panel clone-log-panel" open>
       <summary class="clone-log-summary">执行日志</summary>
       <div class="admin-log-head clone-log-head">
-        <h2 class="sr-only">局部消息删除日志</h2>
-        <button id="admin-clear-clone-message-delete-logs-btn" class="btn" type="button" hidden aria-label="清空局部消息删除日志">清空日志</button>
+        <h2 class="sr-only">克隆消息删除与回退日志</h2>
+        <button id="admin-clear-clone-message-delete-logs-btn" class="btn" type="button" hidden aria-label="清空克隆消息删除与回退日志">清空日志</button>
       </div>
-      <div id="admin-clone-message-delete-log-container" class="admin-log-container" aria-label="局部消息删除日志"></div>
+      <div id="admin-clone-message-delete-log-container" class="admin-log-container" aria-label="克隆消息删除与回退日志"></div>
     </details>
   </main>
+
+  <section
+    id="admin-clone-message-range-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCloneMessageRangeDialogTitle"
+    hidden
+  >
+    <h2 id="adminCloneMessageRangeDialogTitle">确认永久删除目标消息 ID 区间</h2>
+    <p class="subtle">该操作不会回退克隆映射，后续迁移不会补回这些目标消息。</p>
+    <p id="admin-clone-message-range-dialog-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-clone-message-range-confirm-input">永久删除确认码</label>
+      <input
+        id="admin-clone-message-range-confirm-input"
+        name="admin-clone-message-range-confirm-input"
+        type="text"
+        autocomplete="off"
+        aria-describedby="admin-clone-message-range-confirm-hint"
+      />
+    </div>
+    <p id="admin-clone-message-range-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
+    <div aria-label="永久删除目标消息操作按钮组">
+      <button id="admin-clone-message-range-cancel-btn" class="btn" type="button">取消</button>
+      <button id="admin-clone-message-range-confirm-btn" class="btn danger" type="button" disabled>确认永久删除</button>
+    </div>
+  </section>
+
+  <section
+    id="admin-clone-message-reset-dialog"
+    class="admin-dialog"
+    role="dialog"
+    aria-modal="true"
+    aria-labelledby="adminCloneMessageResetDialogTitle"
+    hidden
+  >
+    <h2 id="adminCloneMessageResetDialogTitle">确认完整清空目标副本</h2>
+    <p class="subtle">目标副本中的全部当前消息和本地迁移状态将被清除；源群、目标副本本身和在线预检计划保留。</p>
+    <p id="admin-clone-message-reset-dialog-status" class="admin-login-status" role="status" aria-live="polite"></p>
+    <div class="field">
+      <label for="admin-clone-message-reset-confirm-input">确认码</label>
+      <input
+        id="admin-clone-message-reset-confirm-input"
+        name="admin-clone-message-reset-confirm-input"
+        type="text"
+        autocomplete="off"
+        aria-describedby="admin-clone-message-reset-confirm-hint"
+      />
+    </div>
+    <p id="admin-clone-message-reset-confirm-hint" class="clone-confirm-hint" aria-live="polite"></p>
+    <div aria-label="完整清空操作按钮组">
+      <button id="admin-clone-message-reset-cancel-btn" class="btn" type="button">取消</button>
+      <button id="admin-clone-message-reset-confirm-btn" class="btn danger" type="button" disabled>确认清空并回退</button>
+    </div>
+  </section>
 
   <section
     id="admin-login-dialog"
@@ -92,7 +161,7 @@
     hidden
   >
     <h2 id="adminCloneMessageDeleteLoginTitle">管理员身份验证</h2>
-    <p class="subtle">进入局部消息删除页面，请先验证管理员密码。</p>
+    <p class="subtle">进入克隆消息删除与回退页面，请先验证管理员密码。</p>
     <p id="admin-login-status" class="admin-login-status" role="status" aria-live="polite"></p>
     <div class="field">
       <label for="admin-password-input">登录密码</label>

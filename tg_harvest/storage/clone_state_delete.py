@@ -1,6 +1,10 @@
 import logging
 import sqlite3
+from contextlib import suppress
 
+from tg_harvest.domain.clone_message_delete import (
+    CLONE_MESSAGE_RESET_REQUIRED_PHASE,
+)
 from tg_harvest.storage.clone_common import _clean_text
 from tg_harvest.storage.connection import synchronized_write
 
@@ -431,6 +435,225 @@ def delete_clone_run(
                 cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
             except Exception:
                 logging.exception("删除克隆记录失败后的 SAVEPOINT 释放失败")
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def mark_clone_run_message_reset_required(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    target_chat_id: int,
+) -> None:
+    """Persist a migration barrier before deleting any target messages."""
+    normalized_run_id = _clean_text(run_id)
+    normalized_target_chat_id = int(target_chat_id)
+    if not normalized_run_id:
+        raise ValueError("run_id 不能为空")
+    if normalized_target_chat_id <= 0:
+        raise ValueError("target_chat_id 参数非法")
+
+    cur = conn.cursor()
+    owns_transaction = not conn.in_transaction
+    savepoint_name = f"mark_clone_message_reset_{id(cur)}"
+    try:
+        if owns_transaction:
+            cur.execute("BEGIN IMMEDIATE")
+        else:
+            cur.execute(f"SAVEPOINT {savepoint_name}")
+        cur.execute(
+            """
+            SELECT status, target_chat_id
+            FROM admin_clone_runs
+            WHERE run_id = ?
+            LIMIT 1
+            """,
+            (normalized_run_id,),
+        )
+        run = cur.fetchone()
+        if run is None:
+            raise RuntimeError("克隆运行记录不存在")
+        if int(run["target_chat_id"] or 0) != normalized_target_chat_id:
+            raise RuntimeError("克隆目标与运行记录不一致，拒绝开始回退")
+        if str(run["status"] or "").strip().lower() in {
+            "queued",
+            "running",
+            "stopping",
+            "deleting",
+        }:
+            raise RuntimeError("克隆运行仍有其他操作，拒绝开始回退")
+        cur.execute(
+            """
+            UPDATE admin_clone_runs
+            SET status = 'done', phase = ?,
+                error_message = '完整清空尚未完成，必须重试完整清空后才能继续迁移',
+                updated_at = datetime('now')
+            WHERE run_id = ?
+            """,
+            (CLONE_MESSAGE_RESET_REQUIRED_PHASE, normalized_run_id),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("克隆回退安全状态写入失败")
+        if owns_transaction:
+            conn.commit()
+        else:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+    except Exception:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            with suppress(sqlite3.Error):
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            with suppress(sqlite3.Error):
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        raise
+    finally:
+        cur.close()
+
+
+@synchronized_write
+def reset_clone_run_timeline(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    target_chat_id: int,
+) -> dict[str, int]:
+    """Return a created target to its pre-migration local state.
+
+    The clone run and its preflight plans remain usable. Delivery checkpoints,
+    timeline migrations, and the jobs owned by those migrations are removed in
+    one transaction after the caller has independently cleared the remote
+    target and relay messages.
+    """
+    normalized_run_id = _clean_text(run_id)
+    normalized_target_chat_id = int(target_chat_id)
+    if not normalized_run_id:
+        raise ValueError("run_id 不能为空")
+    if normalized_target_chat_id <= 0:
+        raise ValueError("target_chat_id 参数非法")
+
+    cur = conn.cursor()
+    owns_transaction = not conn.in_transaction
+    savepoint_name = f"reset_clone_timeline_{id(cur)}"
+    try:
+        if owns_transaction:
+            cur.execute("BEGIN IMMEDIATE")
+        else:
+            cur.execute(f"SAVEPOINT {savepoint_name}")
+
+        cur.execute(
+            """
+            SELECT status, target_chat_id
+            FROM admin_clone_runs
+            WHERE run_id = ?
+            LIMIT 1
+            """,
+            (normalized_run_id,),
+        )
+        run = cur.fetchone()
+        if run is None:
+            raise RuntimeError("克隆运行记录不存在")
+        if int(run["target_chat_id"] or 0) != normalized_target_chat_id:
+            raise RuntimeError("克隆目标与运行记录不一致，拒绝重置")
+        if str(run["status"] or "").strip().lower() in {
+            "queued",
+            "running",
+            "stopping",
+            "deleting",
+        }:
+            raise RuntimeError("克隆任务仍在执行，拒绝重置迁移状态")
+
+        cur.execute(
+            """
+            SELECT migration_id, job_id
+            FROM admin_clone_migrations
+            WHERE run_id = ?
+            """,
+            (normalized_run_id,),
+        )
+        migration_rows = cur.fetchall()
+        migration_job_ids = sorted(
+            {
+                str(row["job_id"] or "").strip()
+                for row in migration_rows
+                if str(row["job_id"] or "").strip()
+            }
+        )
+        active_job_ids = _active_related_job_ids(cur, migration_job_ids)
+        if active_job_ids:
+            raise RuntimeError(
+                "克隆迁移任务仍在运行，拒绝重置：" + ", ".join(active_job_ids)
+            )
+
+        counts: dict[str, int] = {}
+        for result_key, table_name in (
+            ("media_transfer_count", "admin_clone_media_transfers"),
+            ("mapping_count", "admin_clone_message_map"),
+        ):
+            cur.execute(
+                f"DELETE FROM {table_name} WHERE run_id = ?",
+                (normalized_run_id,),
+            )
+            counts[result_key] = max(0, int(cur.rowcount or 0))
+
+        cur.execute(
+            "DELETE FROM admin_clone_migrations WHERE run_id = ?",
+            (normalized_run_id,),
+        )
+        counts["migration_count"] = max(0, int(cur.rowcount or 0))
+
+        purged_job_count = 0
+        if migration_job_ids and _table_exists(cur, "admin_jobs"):
+            has_job_logs = _table_exists(
+                cur,
+                "admin_job_logs",
+            ) and _table_has_column(cur, "admin_job_logs", "job_id")
+            for job_id_part in _iter_batches(migration_job_ids):
+                placeholders = ", ".join("?" for _ in job_id_part)
+                if has_job_logs:
+                    cur.execute(
+                        f"DELETE FROM admin_job_logs WHERE job_id IN ({placeholders})",
+                        job_id_part,
+                    )
+                cur.execute(
+                    f"DELETE FROM admin_jobs WHERE job_id IN ({placeholders})",
+                    job_id_part,
+                )
+                purged_job_count += max(0, int(cur.rowcount or 0))
+        counts["migration_job_count"] = purged_job_count
+
+        deletion_owner_reset = (
+            ", deletion_job_id = ''"
+            if _table_has_column(cur, "admin_clone_runs", "deletion_job_id")
+            else ""
+        )
+        cur.execute(
+            f"""
+            UPDATE admin_clone_runs
+            SET status = 'done', phase = 'done', error_message = '',
+                updated_at = datetime('now'){deletion_owner_reset}
+            WHERE run_id = ?
+            """,
+            (normalized_run_id,),
+        )
+        if cur.rowcount != 1:
+            raise RuntimeError("克隆运行记录重置失败")
+
+        if owns_transaction:
+            conn.commit()
+        else:
+            cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
+        return counts
+    except Exception:
+        if owns_transaction:
+            conn.rollback()
+        else:
+            with suppress(sqlite3.Error):
+                cur.execute(f"ROLLBACK TO SAVEPOINT {savepoint_name}")
+            with suppress(sqlite3.Error):
+                cur.execute(f"RELEASE SAVEPOINT {savepoint_name}")
         raise
     finally:
         cur.close()

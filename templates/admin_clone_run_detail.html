@@ -205,11 +205,11 @@
       <section class="clone-report-block clone-record-local-delete" aria-labelledby="cloneRunLocalDeleteTitle">
         <div class="clone-panel-head">
           <div>
-            <h3 id="cloneRunLocalDeleteTitle">局部删除</h3>
-            <p class="clone-subline">按已克隆源消息数量回滚尾部并更新续克隆边界；目标消息 ID 区间只做独立清理，不修改克隆映射。</p>
+            <h3 id="cloneRunLocalDeleteTitle">消息删除与完整回退</h3>
+            <p class="clone-subline">可局部回滚已克隆消息，也可清空目标副本并将全部迁移状态恢复到尚未同步消息。</p>
           </div>
           <div class="clone-toolbar">
-            <a id="admin-clone-runs-message-delete-link" class="btn danger" href="#" hidden>打开局部删除</a>
+            <a id="admin-clone-runs-message-delete-link" class="btn danger" href="#" hidden>打开消息删除与回退</a>
           </div>
         </div>
       </section>

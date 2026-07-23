@@ -4,7 +4,6 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Any
 
-from tg_harvest.domain.clone_target_permissions import clone_target_write_was_rejected
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
 from tg_harvest.storage.clone_state_common import (
     _build_clone_message_mapping_filters,
@@ -189,6 +188,7 @@ def rewind_clone_mappings_for_deleted_target_messages(
 
     rewound_rows: list[sqlite3.Row] = []
     matched_target_ids: set[int] = set()
+    transfers_to_rewind: dict[int, sqlite3.Row] = {}
     cur = conn.cursor()
     try:
         cur.execute("BEGIN IMMEDIATE")
@@ -233,6 +233,27 @@ def rewind_clone_mappings_for_deleted_target_messages(
                     *target_id_chunk,
                 ],
             )
+            cur.execute(
+                f"""
+                SELECT
+                    id,
+                    transfer_strategy,
+                    source_hop_status,
+                    cleanup_status,
+                    relay_message_id
+                FROM admin_clone_media_transfers
+                WHERE run_id = ?
+                  AND target_chat_id = ?
+                  AND target_message_id IN ({placeholders})
+                """,
+                [
+                    normalized_run_id,
+                    normalized_target_chat_id,
+                    *target_id_chunk,
+                ],
+            )
+            for transfer in cur.fetchall():
+                transfers_to_rewind[int(transfer["id"])] = transfer
 
         media_sources_by_chat: dict[int, set[int]] = {}
         for row in rewound_rows:
@@ -273,31 +294,34 @@ def rewind_clone_mappings_for_deleted_target_messages(
                         *source_id_chunk,
                     ],
                 )
-                transfers = cur.fetchall()
-                for transfer in transfers:
-                    should_reuse_relay_message = (
-                        str(transfer["transfer_strategy"] or "") == "relay"
-                        and str(transfer["source_hop_status"] or "") == "sent"
-                        and _optional_int(transfer["relay_message_id"]) is not None
-                        and str(transfer["cleanup_status"] or "") != "done"
-                    )
-                    if should_reuse_relay_message:
-                        cur.execute(
-                            """
-                            UPDATE admin_clone_media_transfers
-                            SET target_random_id = ?, target_message_id = NULL,
-                                target_hop_status = 'pending', error_message = '',
-                                updated_at = ?
-                            WHERE id = ?
-                            """,
-                            (_new_delivery_random_id(), now, int(transfer["id"])),
-                        )
-                    else:
-                        cur.execute(
-                            "DELETE FROM admin_clone_media_transfers WHERE id = ?",
-                            (int(transfer["id"]),),
-                        )
-                    rewound_media_transfer_count += 1
+                for transfer in cur.fetchall():
+                    transfers_to_rewind[int(transfer["id"])] = transfer
+
+        rewound_media_transfer_count = 0
+        for transfer in transfers_to_rewind.values():
+            should_reuse_relay_message = (
+                str(transfer["transfer_strategy"] or "") == "relay"
+                and str(transfer["source_hop_status"] or "") == "sent"
+                and _optional_int(transfer["relay_message_id"]) is not None
+                and str(transfer["cleanup_status"] or "") != "done"
+            )
+            if should_reuse_relay_message:
+                cur.execute(
+                    """
+                    UPDATE admin_clone_media_transfers
+                    SET target_random_id = ?, target_message_id = NULL,
+                        target_hop_status = 'pending', error_message = '',
+                        updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (_new_delivery_random_id(), now, int(transfer["id"])),
+                )
+            else:
+                cur.execute(
+                    "DELETE FROM admin_clone_media_transfers WHERE id = ?",
+                    (int(transfer["id"]),),
+                )
+            rewound_media_transfer_count += 1
 
         conn.commit()
     except Exception:
@@ -538,7 +562,7 @@ def ensure_clone_text_delivery(
     ):
         if not (
             existing.get("status") == "error"
-            and clone_target_write_was_rejected(existing.get("error_message"))
+            and existing.get("target_message_id") is None
         ):
             raise RuntimeError("已存在文本交付记录绑定不同目标侧账号，拒绝跨账号恢复")
         reset_failed_delivery = True

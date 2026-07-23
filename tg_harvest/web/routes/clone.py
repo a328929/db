@@ -21,6 +21,10 @@ from tg_harvest.admin_jobs.clone_target_metrics import (
 )
 from tg_harvest.app.services import CloneRouteServices
 from tg_harvest.domain.clone_message_delete import (
+    clone_message_delete_all_confirm_text,
+    clone_message_delete_all_selection,
+    clone_message_delete_range_confirm_text,
+    clone_run_message_reset_required,
     parse_clone_message_delete_selection,
 )
 from tg_harvest.domain.clone_plan import (
@@ -443,7 +447,9 @@ def _timeline_migration_readiness(
     migration_account = str(shared["migration_account"] or "")
     media_execution_account = str(shared["media_execution_account"] or "")
 
-    if clone_run.get("status") != "done" or not clone_run.get("target_chat_id"):
+    if clone_run_message_reset_required(clone_run):
+        reasons.append("完整清空尚未完成，请先重试完整清空")
+    elif clone_run.get("status") != "done" or not clone_run.get("target_chat_id"):
         reasons.append("目标副本尚未创建完成，不能执行完整时间线迁移")
     if "plan_missing" in shared["reason_codes"]:
         reasons.append("请先执行在线深度预检并生成迁移计划")
@@ -692,6 +698,21 @@ def _clone_workbench_focus(
                 item["run"],
                 "查看删除进度",
                 _clone_workbench_href("/admin/clone/runs/detail", item["run"]),
+            )
+
+    for item in candidates:
+        if clone_run_message_reset_required(item["run"]):
+            return focus(
+                "attention",
+                "migrate",
+                "完整清空需要重试",
+                "上次完整清空未完成；恢复完成前不会允许继续迁移。",
+                item["run"],
+                "继续完整清空",
+                _clone_workbench_href(
+                    "/admin/clone/runs/messages/delete",
+                    item["run"],
+                ),
             )
 
     for item in candidates:
@@ -1263,6 +1284,14 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
         options, error_response = _parse_clone_message_delete_options(data)
         if error_response is not None:
             return error_response
+        selection = options["selection"]
+        if selection.mode == "range":
+            expected_confirm = clone_message_delete_range_confirm_text(
+                normalized_run_id,
+                selection,
+            )
+            if str(data.get("confirm") or "").strip() != expected_confirm:
+                return json_error("confirm 参数不匹配", 400)
 
         try:
             with closing(deps.get_conn_fn()) as conn:
@@ -1276,6 +1305,11 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 target_chat_id = int(clone_run.get("target_chat_id") or 0)
                 if target_chat_id <= 0:
                     return json_error("目标副本尚未创建，不能删除局部消息", 400)
+                if clone_run_message_reset_required(clone_run):
+                    return json_error(
+                        "完整清空尚未完成，只能重试完整清空",
+                        409,
+                    )
                 latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
                 latest_migration = deps.load_latest_clone_migration_fn(
                     conn,
@@ -1302,7 +1336,6 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
         except Exception:
             return logged_json_error(deps.logger, "系统异常", "系统异常")
 
-        selection = options["selection"]
         target_title = str(clone_run.get("target_title") or target_chat_id)
         job_id, error_response = _create_clone_job_or_response(
             deps,
@@ -1354,6 +1387,108 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                     "first_message_id": selection.first_message_id,
                     "last_message_id": selection.last_message_id,
                     "delete_delay_ms": options["delete_delay_ms"],
+                }
+            },
+        )
+
+    @app.post("/api/admin/clone/runs/<run_id>/reset-messages")
+    @admin_login_required
+    def api_admin_clone_run_reset_messages(run_id):
+        normalized_run_id, error_response = _parse_run_id(run_id)
+        if error_response is not None:
+            return error_response
+        data, error_response = require_json_dict()
+        if error_response is not None:
+            return error_response
+
+        expected_confirm = clone_message_delete_all_confirm_text(normalized_run_id)
+        if str(data.get("confirm") or "").strip() != expected_confirm:
+            return json_error("confirm 参数不匹配", 400)
+        delete_delay_ms, error_response = _parse_optional_nonnegative_int(
+            data.get("delete_delay_ms"),
+            field_name="delete_delay_ms",
+            default=0,
+            max_value=CLONE_MESSAGE_DELETE_MAX_DELAY_MS,
+        )
+        if error_response is not None:
+            return error_response
+
+        try:
+            with closing(deps.get_conn_fn()) as conn:
+                clone_run, error_response = _load_clone_run_or_response(
+                    conn,
+                    deps.load_clone_run_fn,
+                    normalized_run_id,
+                )
+                if error_response is not None:
+                    return error_response
+                target_chat_id = int(clone_run.get("target_chat_id") or 0)
+                if target_chat_id <= 0:
+                    return json_error("目标副本尚未创建，不能完整清空", 400)
+                latest_plan = deps.load_latest_clone_plan_fn(conn, normalized_run_id)
+                latest_migration = deps.load_latest_clone_migration_fn(
+                    conn,
+                    normalized_run_id,
+                )
+                active_job = _active_clone_job_snapshot(
+                    deps,
+                    clone_run=clone_run,
+                    latest_plan=latest_plan,
+                    latest_migration=latest_migration,
+                )
+                if active_job is not None:
+                    return json_error(
+                        "关联克隆任务仍在执行，不能完整清空",
+                        409,
+                        active_job=active_job,
+                    )
+        except sqlite3.Error:
+            return logged_json_error(
+                deps.logger,
+                "读取克隆完整清空上下文失败",
+                "读取克隆完整清空上下文失败",
+            )
+        except Exception:
+            return logged_json_error(deps.logger, "系统异常", "系统异常")
+
+        target_title = str(clone_run.get("target_title") or target_chat_id)
+        job_id, error_response = _create_clone_job_or_response(
+            deps,
+            "clone_message_reset",
+            target_chat_id=target_chat_id,
+            target_label=f"清空克隆消息：{target_title}",
+        )
+        if error_response is not None:
+            return error_response
+
+        selection = clone_message_delete_all_selection()
+        return _start_clone_job_response(
+            deps,
+            job_id=job_id,
+            initial_logs=[
+                "已接收目标副本完整清空请求",
+                f"运行记录：{normalized_run_id}",
+                "将清空目标副本全部当前消息，并回退全部克隆迁移状态；源群和目标副本本身保留。",
+            ],
+            start_job_fn=lambda current_job_id: (
+                deps.admin_start_clone_message_delete_job_thread_fn(
+                    current_job_id,
+                    clone_run=clone_run,
+                    selection=selection,
+                    delete_delay_ms=int(delete_delay_ms or 0),
+                    cfg=deps.cfg,
+                    get_conn_fn=deps.get_conn_fn,
+                    admin_job_set_status_fn=deps.admin_job_set_status_fn,
+                    admin_job_append_log_fn=deps.admin_job_append_log_fn,
+                )
+            ),
+            response_extra={
+                "reset": {
+                    "run_id": normalized_run_id,
+                    "target_chat_id": target_chat_id,
+                    "mode": "all",
+                    "preserves_target": True,
+                    "preserves_preflight_plan": True,
                 }
             },
         )
@@ -1432,6 +1567,11 @@ def _register_clone_job_routes(app, deps: _CloneRouteDeps) -> None:
                 )
                 if error_response is not None:
                     return error_response
+                if clone_run_message_reset_required(clone_run):
+                    return json_error(
+                        "完整清空尚未完成，请先重试完整清空",
+                        409,
+                    )
         except sqlite3.Error:
             return logged_json_error(
                 deps.logger,

@@ -797,6 +797,22 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual("active", focus["state"])
         self.assertEqual("查看迁移进度", focus["action"]["label"])
 
+    def test_clone_workbench_prioritizes_incomplete_message_reset(self) -> None:
+        self.clone_runs[0]["phase"] = "message_reset_required"
+
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/workbench")
+
+        self.assertEqual(200, response.status_code)
+        focus = response.get_json()["focus"]
+        self.assertEqual("attention", focus["state"])
+        self.assertEqual("继续完整清空", focus["action"]["label"])
+        self.assertEqual(
+            "/admin/clone/runs/messages/delete?run_id=run-existing",
+            focus["action"]["href"],
+        )
+
     def test_clone_chats_api_includes_telegram_links(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
@@ -1026,7 +1042,14 @@ class CloneRoutesTests(unittest.TestCase):
             csrf_token = self._login_admin()
             response = self.client.post(
                 "/api/admin/clone/runs/run-existing/delete-messages",
-                json={"selection": "200-1000", "delete_delay_ms": 50},
+                json={
+                    "selection": "200-1000",
+                    "delete_delay_ms": 50,
+                    "confirm": (
+                        "DELETE-TARGET-MESSAGE-RANGE:"
+                        "run-existing:200-1000"
+                    ),
+                },
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
@@ -1051,6 +1074,20 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(50, kwargs["delete_delay_ms"])
         self.assertTrue(callable(kwargs["get_conn_fn"]))
 
+    def test_clone_run_message_range_delete_requires_exact_confirm_code(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/delete-messages",
+                json={"selection": "200-1000", "confirm": "wrong"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+        self.assertEqual([], self.created_jobs)
+        self.assertEqual([], self.started_message_delete_jobs)
+
     def test_clone_run_message_delete_rejects_invalid_selection_before_job_creation(self) -> None:
         with self._auth_config_patch():
             csrf_token = self._login_admin()
@@ -1064,6 +1101,120 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertIn("起始消息 ID", response.get_json()["error"])
         self.assertEqual([], self.started_message_delete_jobs)
 
+    def test_clone_run_message_reset_requires_exact_confirm_code(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/reset-messages",
+                json={"confirm": "wrong", "delete_delay_ms": 0},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(400, response.status_code)
+        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+        self.assertEqual([], self.created_jobs)
+        self.assertEqual([], self.started_message_delete_jobs)
+
+    def test_clone_run_message_reset_starts_complete_reset_job(self) -> None:
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/reset-messages",
+                json={
+                    "confirm": "RESET-CLONE-MESSAGES:run-existing",
+                    "delete_delay_ms": 75,
+                },
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(200, response.status_code)
+        payload = response.get_json()
+        self.assertEqual("clone_message_reset", payload["job"]["job_type"])
+        self.assertEqual("all", payload["reset"]["mode"])
+        self.assertTrue(payload["reset"]["preserves_target"])
+        self.assertTrue(payload["reset"]["preserves_preflight_plan"])
+        self.assertEqual(1, len(self.started_message_delete_jobs))
+        args, kwargs = self.started_message_delete_jobs[0]
+        self.assertEqual(("job-clone-1",), args)
+        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
+        self.assertEqual("all", kwargs["selection"].mode)
+        self.assertEqual(0, kwargs["selection"].requested_count)
+        self.assertEqual(75, kwargs["delete_delay_ms"])
+
+    def test_clone_run_message_reset_rejects_related_active_migration(self) -> None:
+        self.created_clone_migrations.append(
+            {
+                "migration_id": "migration-active",
+                "run_id": "run-existing",
+                "job_id": "job-migration-active",
+                "mode": "timeline_replay",
+                "status": "running",
+            }
+        )
+        self.job_statuses["job-migration-active"] = "running"
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/reset-messages",
+                json={"confirm": "RESET-CLONE-MESSAGES:run-existing"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(409, response.status_code)
+        payload = response.get_json()
+        self.assertEqual(
+            "关联克隆任务仍在执行，不能完整清空",
+            payload["error"],
+        )
+        self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
+        self.assertEqual([], self.created_jobs)
+        self.assertEqual([], self.started_message_delete_jobs)
+
+    def test_incomplete_message_reset_blocks_partial_delete_but_allows_retry(self) -> None:
+        self.clone_runs[0]["phase"] = "message_reset_required"
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            partial_response = self.client.post(
+                "/api/admin/clone/runs/run-existing/delete-messages",
+                json={"selection": "10"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+            reset_response = self.client.post(
+                "/api/admin/clone/runs/run-existing/reset-messages",
+                json={"confirm": "RESET-CLONE-MESSAGES:run-existing"},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(409, partial_response.status_code)
+        self.assertIn("只能重试完整清空", partial_response.get_json()["error"])
+        self.assertEqual(200, reset_response.status_code)
+        self.assertEqual("clone_message_reset", reset_response.get_json()["job"]["job_type"])
+
+    def test_incomplete_message_reset_blocks_preflight_and_timeline_migration(self) -> None:
+        self.clone_runs[0]["phase"] = "message_reset_required"
+        self._create_done_plan()
+
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            preflight_response = self.client.post(
+                "/api/admin/clone/runs/run-existing/deep-preflight",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+            migration_response = self.client.post(
+                "/api/admin/clone/runs/run-existing/migrate-timeline",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(409, preflight_response.status_code)
+        self.assertEqual(400, migration_response.status_code)
+        self.assertIn("完整清空尚未完成", migration_response.get_json()["error"])
+        self.assertEqual([], self.started_deep_preflight_jobs)
+        self.assertEqual([], self.started_timeline_migration_jobs)
+
     def test_clone_message_delete_page_accepts_authenticated_record_link(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
@@ -1072,7 +1223,7 @@ class CloneRoutesTests(unittest.TestCase):
             )
 
         self.assertEqual(200, response.status_code)
-        self.assertIn("删除局部克隆消息", response.get_data(as_text=True))
+        self.assertIn("克隆消息删除与回退", response.get_data(as_text=True))
 
     def test_clone_run_target_message_count_reads_remote_snapshot(self) -> None:
         with (

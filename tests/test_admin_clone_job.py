@@ -18,9 +18,12 @@ from tg_harvest.admin_jobs.clone_timeline_store import (
     record_text_mapping,
 )
 from tg_harvest.storage.clone import (
+    build_clone_source_snapshot,
+    build_clone_timeline_replay_preview,
     create_clone_migration,
     create_clone_plan,
     create_clone_run,
+    list_clone_media_group_messages,
     list_clone_timeline_replay_batch,
     load_clone_message_mapping,
     load_clone_run,
@@ -412,12 +415,16 @@ class _DeepPreflightClient:
         relay_ok=True,
         latest_message_id=1,
         relay_public=False,
+        relay_entity_participants_count=None,
+        relay_full_participants_count=2,
     ):
         self.source_ok = source_ok
         self.target_ok = target_ok
         self.relay_ok = relay_ok
         self.latest_message_id = int(latest_message_id)
         self.relay_public = bool(relay_public)
+        self.relay_entity_participants_count = relay_entity_participants_count
+        self.relay_full_participants_count = relay_full_participants_count
 
     def get_entity(self, value):
         normalized = int(value) if isinstance(value, int) or str(value).lstrip("-").isdigit() else value
@@ -443,11 +450,18 @@ class _DeepPreflightClient:
                 creator=True,
                 broadcast=True,
                 megagroup=False,
-                participants_count=2,
+                participants_count=self.relay_entity_participants_count,
                 username="public_relay" if self.relay_public else "",
                 default_banned_rights=SimpleNamespace(send_messages=False),
             )
         raise ValueError("Could not find the input entity")
+
+    def __call__(self, _request):
+        return SimpleNamespace(
+            full_chat=SimpleNamespace(
+                participants_count=self.relay_full_participants_count,
+            )
+        )
 
     def get_messages(self, _entity, **_kwargs):
         return [
@@ -734,8 +748,16 @@ def test_clone_deep_preflight_job_enables_relay_when_accounts_split_access(tmp_p
     assert plan["capabilities"]["media_relay"]["chat_id"] == 999
     assert plan["capabilities"]["media_relay"]["source_account"] == "primary"
     assert plan["capabilities"]["media_relay"]["target_account"] == "secondary"
+    assert plan["capabilities"]["media_relay"]["requires_drop_author_each_hop"] is False
+    assert plan["capabilities"]["media_relay"]["source_hop_requires_drop_author"] is True
+    assert plan["capabilities"]["media_relay"]["target_hop_mode"] == "binary_reupload"
     assert plan["capabilities"]["media_relay"]["keeps_source_link"] is False
     assert plan["capabilities"]["media_relay"]["keeps_relay_link"] is False
+    assert plan["capabilities"]["media_relay"]["target_survives_relay_cleanup"] is True
+    assert all(
+        account["relay_participant_count"] == 2
+        for account in plan["capabilities"]["accounts"]
+    )
     assert any("固定中转频道桥接" in item for item in plan["warnings"])
 
 
@@ -1132,6 +1154,95 @@ def test_clone_timeline_batch_filters_completed_text_media_and_groups(tmp_path):
     ] == [("text", 2, None)]
 
 
+def test_clone_timeline_discovers_fully_cleaned_media_group_from_anchors(tmp_path):
+    db_path = tmp_path / "clone-timeline-cleaned-group.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        conn.executemany(
+            """
+            INSERT INTO clone_media_group_anchors(
+                chat_id, grouped_id, message_id, msg_date_text, msg_date_ts
+            )
+            VALUES (100, 555, ?, ?, ?)
+            """,
+            [
+                (10, "2026-01-01 00:00:10", 10),
+                (11, "2026-01-01 00:00:11", 11),
+            ],
+        )
+        create_clone_migration(
+            conn,
+            migration_id="job-cleaned-group",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-cleaned-group",
+            mode="timeline_replay",
+            target_chat_id=777,
+        )
+        conn.commit()
+
+        snapshot = build_clone_source_snapshot(conn, source_chat_id=100)
+        preview = build_clone_timeline_replay_preview(
+            conn,
+            run_id="job-clone",
+            source_chat_id=100,
+            max_source_message_id=100_000,
+        )
+        group_messages = list_clone_media_group_messages(
+            conn,
+            chat_id=100,
+            grouped_id=555,
+            max_source_message_id=100_000,
+        )
+        before = list_clone_timeline_replay_batch(
+            conn,
+            run_id="job-clone",
+            chat_id=100,
+            max_source_message_id=100_000,
+            limit=10,
+        )
+
+        for source_message_id in (10, 11):
+            record_clone_message_mapping(
+                conn,
+                migration_id="job-cleaned-group",
+                run_id="job-clone",
+                plan_id="plan-text",
+                source_chat_id=100,
+                source_message_id=source_message_id,
+                source_msg_date_ts=source_message_id,
+                target_chat_id=777,
+                target_message_id=9100 + source_message_id,
+                mode="media_group_copy",
+                status="done",
+            )
+        after = list_clone_timeline_replay_batch(
+            conn,
+            run_id="job-clone",
+            chat_id=100,
+            max_source_message_id=100_000,
+            limit=10,
+        )
+    finally:
+        conn.close()
+
+    assert snapshot["latest_message_id"] == 11
+    assert snapshot["message_count"] == 3
+    assert preview["media_total"] == 2
+    assert preview["media_group_total"] == 1
+    assert preview["media_remaining"] == 2
+    assert [message["message_id"] for message in group_messages] == [10, 11]
+    assert any(
+        item["item_type"] == "media_group"
+        and item["grouped_id"] == 555
+        and item["item_count"] == 2
+        for item in before
+    )
+    assert all(item["grouped_id"] != 555 for item in after)
+
+
 def test_clone_timeline_migration_limit_applies_to_remaining_items(tmp_path):
     db_path = tmp_path / "clone-timeline-resume-limit.db"
     _create_job_db(db_path)
@@ -1262,6 +1373,76 @@ def test_clone_timeline_migration_limit_applies_to_remaining_items(tmp_path):
     assert existing_mapping is not None and existing_mapping["target_message_id"] == 9001
     assert next_mapping is not None and next_mapping["target_message_id"] == 9301
     assert later_mapping is None
+
+
+def test_clone_timeline_worker_rejects_incomplete_message_reset(tmp_path):
+    db_path = tmp_path / "clone-timeline-reset-required.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    try:
+        update_clone_run(
+            conn,
+            run_id="job-clone",
+            phase="message_reset_required",
+            error_message="reset incomplete",
+        )
+        create_clone_migration(
+            conn,
+            migration_id="job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            job_id="job-timeline",
+            mode="timeline_replay",
+            target_chat_id=777,
+            target_title="Source Backup",
+            target_write_account="text:primary",
+            plan={"plan_id": "plan-text"},
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    statuses = []
+    logs = []
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration._start_job_heartbeat",
+            return_value=_heartbeat_pair(),
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration.finish_job_heartbeat"
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_migration."
+            "_admin_job_update_progress"
+        ),
+    ):
+        _admin_clone_timeline_migration_job_runner(
+            "job-timeline",
+            run_id="job-clone",
+            plan_id="plan-text",
+            migration_id="job-timeline",
+            cfg=_runner_cfg(),
+            get_conn_fn=lambda: _connect(db_path),
+            admin_job_set_status_fn=lambda _job_id, status: statuses.append(status)
+            or True,
+            admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
+        )
+
+    conn = _connect(db_path)
+    try:
+        migration = load_latest_clone_migration(conn, "job-clone")
+        mapping_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_message_map WHERE run_id = 'job-clone'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert statuses == ["running", "error"]
+    assert migration is not None and migration["status"] == "error"
+    assert mapping_count == 0
+    assert any("必须先重试完整清空" in message for message in logs)
 
 
 def test_clone_timeline_stops_when_sent_text_mapping_cannot_be_persisted(tmp_path):
@@ -2311,6 +2492,7 @@ def test_clone_timeline_migration_chunks_album_compatible_group_at_limit(tmp_pat
 class _RelayMediaClient:
     def __init__(self, *, source_ok=True, target_ok=True, relay_ok=True):
         self.forward_calls = []
+        self.send_file_calls = []
         self.delete_calls = []
         self.source_messages = {}
         self.source_ok = source_ok
@@ -2376,6 +2558,16 @@ class _RelayMediaClient:
         self.delete_calls.append((args, kwargs))
         return True
 
+    def send_file(self, *args, **kwargs):
+        self.send_file_calls.append((args, kwargs))
+        files = args[1] if len(args) > 1 else None
+        items = files if isinstance(files, list) else [files]
+        messages = [
+            SimpleNamespace(id=9200 + index)
+            for index, _file in enumerate(items, start=1)
+        ]
+        return messages[0] if len(messages) == 1 else messages
+
 
 class _RelaySecondHopFloodClient(_RelayMediaClient):
     def __init__(self, *, source_ok=True, target_ok=True, relay_ok=True, flood_on_target=False):
@@ -2385,13 +2577,11 @@ class _RelaySecondHopFloodClient(_RelayMediaClient):
 
     def forward_messages(self, *args, **kwargs):
         self.forward_attempts += 1
+        return super().forward_messages(*args, **kwargs)
+
+    def send_file(self, *args, **kwargs):
         target = args[0] if args else None
-        from_peer = kwargs.get("from_peer")
-        if (
-            self.flood_on_target
-            and getattr(target, "id", None) == 777
-            and getattr(from_peer, "id", None) == 999
-        ):
+        if self.flood_on_target and getattr(target, "id", None) == 777:
             from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 
             raise AccountFloodWaitError(
@@ -2400,7 +2590,7 @@ class _RelaySecondHopFloodClient(_RelayMediaClient):
                 account_label="secondary",
                 scope="clone-relay-target-hop",
             )
-        return super().forward_messages(*args, **kwargs)
+        return super().send_file(*args, **kwargs)
 
 
 
@@ -2538,21 +2728,18 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
             },
         )
     ]
-    assert target_client.forward_calls == [
+    assert target_client.forward_calls == []
+    assert target_client.send_file_calls == [
         (
-            (SimpleNamespace(id=777, title="Source Backup"), 9201),
-                {
-                    "from_peer": SimpleNamespace(
-                        id=999,
-                        title="Relay Channel",
-                        creator=True,
-                        broadcast=True,
-                        megagroup=False,
-                        username="",
-                        participants_count=2,
-                    ),
-                    "drop_author": True,
-                    "silent": True,
+            (
+                SimpleNamespace(id=777, title="Source Backup"),
+                target_client.source_messages[9201].media,
+            ),
+            {
+                "caption": "",
+                "formatting_entities": [],
+                "parse_mode": None,
+                "silent": True,
             },
         )
     ]

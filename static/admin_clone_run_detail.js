@@ -600,6 +600,9 @@
 
   function buildOperationStatusText(run, plan) {
     var status = String(run.status || '').trim().toLowerCase();
+    if (isMessageResetRequired(run)) {
+      return '上次完整清空未完成；必须先进入消息删除与回退页面重试完整清空。';
+    }
     if (status === 'queued' || status === 'running') {
       return '目标副本仍在创建中；创建完成后可执行在线预检。';
     }
@@ -1191,8 +1194,14 @@
 
   function canResumeMigration(run) {
     return String((run && run.status) || '').trim().toLowerCase() === 'done'
+      && !isMessageResetRequired(run)
       && !!(run && run.target_chat_id)
       && !!String((run && run.run_id) || '').trim();
+  }
+
+  function isMessageResetRequired(run) {
+    return String((run && run.phase) || '').trim().toLowerCase()
+      === 'message_reset_required';
   }
 
   function hasPlanBlockingIssues(plan) {
@@ -1211,7 +1220,11 @@
   }
 
   function canDeleteLocalMessages(run) {
-    return canResumeMigration(run) && !state.operationJob.isPolling;
+    var hasTarget = !!(run && run.target_chat_id)
+      && !!String((run && run.run_id) || '').trim();
+    return hasTarget
+      && (canResumeMigration(run) || isMessageResetRequired(run))
+      && !state.operationJob.isPolling;
   }
 
   function buildRunMessageDeleteHref(run) {

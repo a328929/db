@@ -167,6 +167,27 @@ def _create_media_groups_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
+def _create_clone_media_group_anchors_table(
+    cur: sqlite3.Cursor,
+    strict_suffix: str,
+) -> None:
+    """Keep API recovery anchors when searchable message rows are cleaned."""
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS clone_media_group_anchors (
+        chat_id              INTEGER NOT NULL,
+        grouped_id           INTEGER NOT NULL,
+        message_id           INTEGER NOT NULL,
+        msg_date_text        TEXT NOT NULL DEFAULT '',
+        msg_date_ts          INTEGER NOT NULL DEFAULT 0,
+        cleanup_reason       TEXT NOT NULL DEFAULT 'empty_media',
+        created_at           TEXT NOT NULL DEFAULT (datetime('now')),
+        updated_at           TEXT NOT NULL DEFAULT (datetime('now')),
+        PRIMARY KEY(chat_id, grouped_id, message_id),
+        FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+    ){strict_suffix}
+    """)
+
+
 def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str):
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS dedupe_runs (
@@ -610,6 +631,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
     _create_messages_table(cur, strict_suffix)
     _create_message_media_table(cur, strict_suffix)
     _create_media_groups_table(cur, strict_suffix)
+    _create_clone_media_group_anchors_table(cur, strict_suffix)
     _create_dedupe_tables(cur, strict_suffix)
     _create_admin_job_tables(cur, strict_suffix)
     _create_admin_missing_chats_table(cur, strict_suffix)

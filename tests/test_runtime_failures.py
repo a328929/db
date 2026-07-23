@@ -4549,6 +4549,42 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertEqual("interrupted", reconciled["phase"])
         self.assertIn("所属后台任务已失败", reconciled["error_message"])
 
+        conn = sqlite3.connect(self.db_path)
+        try:
+            conn.execute(
+                """
+                UPDATE admin_clone_migrations
+                SET status = 'running', phase = 'replaying_timeline',
+                    error_message = '', completed_at = NULL
+                WHERE migration_id = 'migration-interrupted'
+                """
+            )
+            conn.execute("DELETE FROM admin_jobs WHERE job_id = ?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        try:
+            missing_job_reconciled = conn.execute(
+                """
+                SELECT status, phase, error_message
+                FROM admin_clone_migrations
+                WHERE migration_id = 'migration-interrupted'
+                """
+            ).fetchone()
+        finally:
+            conn.close()
+
+        self.assertEqual("error", missing_job_reconciled["status"])
+        self.assertEqual("interrupted", missing_job_reconciled["phase"])
+        self.assertIn(
+            "所属后台任务已失败",
+            missing_job_reconciled["error_message"],
+        )
+
     def test_interrupted_clone_delete_job_marks_run_error(self) -> None:
         job = _admin_job_create(
             "clone_target_delete",

@@ -21,14 +21,30 @@ def build_clone_source_snapshot(
     try:
         cur.execute(
             """
+            WITH recoverable_messages AS (
+                SELECT message_id, COALESCE(msg_date_ts, 0) AS msg_date_ts
+                FROM messages
+                WHERE chat_id = ?
+                UNION ALL
+                SELECT
+                    a.message_id,
+                    COALESCE(a.msg_date_ts, 0) AS msg_date_ts
+                FROM clone_media_group_anchors AS a
+                WHERE a.chat_id = ?
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM messages AS m
+                        WHERE m.chat_id = a.chat_id
+                          AND m.message_id = a.message_id
+                  )
+            )
             SELECT
                 COUNT(*) AS message_count,
                 COALESCE(MAX(message_id), 0) AS latest_message_id,
                 COALESCE(MAX(msg_date_ts), 0) AS latest_message_ts
-            FROM messages
-            WHERE chat_id = ?
+            FROM recoverable_messages
             """,
-            (int(source_chat_id),),
+            (int(source_chat_id), int(source_chat_id)),
         )
         row = cur.fetchone()
         return {
@@ -334,7 +350,25 @@ def build_clone_media_copy_preview(
     try:
         cur.execute(
             f"""
-            WITH group_stats AS (
+            WITH source_media AS (
+                SELECT m.chat_id, m.message_id, m.grouped_id
+                FROM messages AS m
+                WHERE m.chat_id = ?
+                  {max_filter}
+                  AND COALESCE(m.has_media, 0) = 1
+                UNION ALL
+                SELECT a.chat_id, a.message_id, a.grouped_id
+                FROM clone_media_group_anchors AS a
+                WHERE a.chat_id = ?
+                  {"AND a.message_id <= ?" if normalized_max_message_id else ""}
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM messages AS existing
+                        WHERE existing.chat_id = a.chat_id
+                          AND existing.message_id = a.message_id
+                  )
+            ),
+            group_stats AS (
                 SELECT
                     m.chat_id,
                     m.grouped_id,
@@ -342,11 +376,8 @@ def build_clone_media_copy_preview(
                     MIN(m.message_id) AS first_message_id,
                     MAX(m.message_id) AS last_message_id,
                     MAX(m.message_id) - MIN(m.message_id) + 1 AS message_id_span
-                FROM messages m
-                WHERE m.chat_id = ?
-                  {max_filter}
-                  AND m.grouped_id IS NOT NULL
-                  AND COALESCE(m.has_media, 0) = 1
+                FROM source_media m
+                WHERE m.grouped_id IS NOT NULL
                 GROUP BY m.chat_id, m.grouped_id
             ),
             media_messages AS (
@@ -369,16 +400,13 @@ def build_clone_media_copy_preview(
                         THEN 'complete_group'
                         ELSE 'incomplete_group'
                     END AS media_bucket
-                FROM messages m
+                FROM source_media m
                 LEFT JOIN media_groups mg
                   ON mg.chat_id = m.chat_id
                  AND mg.grouped_id = m.grouped_id
                 LEFT JOIN group_stats gs
                   ON gs.chat_id = m.chat_id
                  AND gs.grouped_id = m.grouped_id
-                WHERE m.chat_id = ?
-                  {max_filter}
-                  AND COALESCE(m.has_media, 0) = 1
             ),
             mapped AS (
                 SELECT
@@ -692,22 +720,58 @@ def list_clone_media_group_messages(
     try:
         cur.execute(
             f"""
+            WITH recoverable_group_messages AS (
+                SELECT
+                    chat_id,
+                    message_id,
+                    msg_date_text,
+                    msg_date_ts,
+                    grouped_id,
+                    COALESCE(
+                        NULLIF(TRIM(content), ''),
+                        NULLIF(TRIM(content_norm), ''),
+                        ''
+                    ) AS caption
+                FROM messages
+                WHERE chat_id = ?
+                  AND grouped_id = ?
+                  AND COALESCE(has_media, 0) = 1
+                  {max_filter}
+                UNION ALL
+                SELECT
+                    a.chat_id,
+                    a.message_id,
+                    a.msg_date_text,
+                    a.msg_date_ts,
+                    a.grouped_id,
+                    '' AS caption
+                FROM clone_media_group_anchors AS a
+                WHERE a.chat_id = ?
+                  AND a.grouped_id = ?
+                  {"AND a.message_id <= ?" if normalized_max_message_id else ""}
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM messages AS m
+                        WHERE m.chat_id = a.chat_id
+                          AND m.message_id = a.message_id
+                  )
+            )
             SELECT
                 chat_id,
                 message_id,
                 msg_date_text,
                 msg_date_ts,
                 COALESCE(msg_date_ts, 0) AS sort_ts,
-                COALESCE(NULLIF(TRIM(content), ''), NULLIF(TRIM(content_norm), ''), '')
-                    AS caption
-            FROM messages
-            WHERE chat_id = ?
-              AND grouped_id = ?
-              AND COALESCE(has_media, 0) = 1
-              {max_filter}
+                caption
+            FROM recoverable_group_messages
             ORDER BY message_id ASC
             """,
-            params,
+            [
+                *params,
+                int(chat_id),
+                int(grouped_id),
+                *([normalized_max_message_id] if normalized_max_message_id else []),
+            ],
         )
         return [
             {
@@ -769,18 +833,38 @@ def build_clone_timeline_replay_preview(
                   AND COALESCE(has_media, 0) = 1
                   AND grouped_id IS NULL
                 UNION ALL
-                SELECT MIN(message_id) AS sort_message_id
-                FROM messages
-                WHERE chat_id = ?
-                  {text_max_filter}
-                  AND COALESCE(has_media, 0) = 1
-                  AND grouped_id IS NOT NULL
+                SELECT MIN(group_message_id) AS sort_message_id
+                FROM (
+                    SELECT
+                        m.grouped_id,
+                        m.message_id AS group_message_id
+                    FROM messages AS m
+                    WHERE m.chat_id = ?
+                      {"AND m.message_id <= ?" if normalized_max_message_id else ""}
+                      AND COALESCE(m.has_media, 0) = 1
+                      AND m.grouped_id IS NOT NULL
+                    UNION ALL
+                    SELECT
+                        a.grouped_id,
+                        a.message_id AS group_message_id
+                    FROM clone_media_group_anchors AS a
+                    WHERE a.chat_id = ?
+                      {"AND a.message_id <= ?" if normalized_max_message_id else ""}
+                      AND NOT EXISTS (
+                            SELECT 1
+                            FROM messages AS existing
+                            WHERE existing.chat_id = a.chat_id
+                              AND existing.message_id = a.message_id
+                      )
+                ) AS recoverable_groups
                 GROUP BY grouped_id
             )
             SELECT COUNT(*) AS c
             FROM timeline_items
             """,
             [
+                int(source_chat_id),
+                *([normalized_max_message_id] if normalized_max_message_id else []),
                 int(source_chat_id),
                 *([normalized_max_message_id] if normalized_max_message_id else []),
                 int(source_chat_id),
@@ -852,14 +936,19 @@ def list_clone_timeline_replay_batch(
     media_max_filter = "AND m.message_id <= ?" if normalized_max_message_id else ""
 
     where_cursor = ""
-    params: list[Any] = [
-        CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
-        CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
-        int(chat_id),
-    ]
+    params: list[Any] = [int(chat_id)]
     if normalized_max_message_id:
         params.append(normalized_max_message_id)
     params.append(int(chat_id))
+    if normalized_max_message_id:
+        params.append(normalized_max_message_id)
+    params.extend(
+        [
+            CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
+            CLONE_TEXT_REPLAY_CHUNK_MAX_LEN,
+            int(chat_id),
+        ]
+    )
     if normalized_max_message_id:
         params.append(normalized_max_message_id)
     params.append(int(chat_id))
@@ -873,11 +962,9 @@ def list_clone_timeline_replay_batch(
             int(chat_id),
             normalized_run_id,
             int(chat_id),
+            normalized_run_id,
         ]
     )
-    if normalized_max_message_id:
-        params.append(normalized_max_message_id)
-    params.append(normalized_run_id)
     if normalized_after_ts is not None and normalized_after_message_id is not None:
         where_cursor = """
           AND (
@@ -898,7 +985,36 @@ def list_clone_timeline_replay_batch(
     try:
         cur.execute(
             f"""
-            WITH timeline_items AS (
+            WITH group_sources AS (
+                SELECT
+                    m.chat_id,
+                    m.message_id,
+                    m.grouped_id,
+                    m.msg_date_text,
+                    m.msg_date_ts
+                FROM messages AS m
+                WHERE m.chat_id = ?
+                  {media_max_filter}
+                  AND COALESCE(m.has_media, 0) = 1
+                  AND m.grouped_id IS NOT NULL
+                UNION ALL
+                SELECT
+                    a.chat_id,
+                    a.message_id,
+                    a.grouped_id,
+                    a.msg_date_text,
+                    a.msg_date_ts
+                FROM clone_media_group_anchors AS a
+                WHERE a.chat_id = ?
+                  {"AND a.message_id <= ?" if normalized_max_message_id else ""}
+                  AND NOT EXISTS (
+                        SELECT 1
+                        FROM messages AS existing
+                        WHERE existing.chat_id = a.chat_id
+                          AND existing.message_id = a.message_id
+                  )
+            ),
+            timeline_items AS (
                 SELECT
                     'text' AS item_type,
                     chat_id,
@@ -969,11 +1085,7 @@ def list_clone_timeline_replay_batch(
                     '' AS text,
                     COUNT(*) AS item_count,
                     COUNT(*) AS expected_done_count
-                FROM messages m
-                WHERE m.chat_id = ?
-                  {media_max_filter}
-                  AND COALESCE(m.has_media, 0) = 1
-                  AND m.grouped_id IS NOT NULL
+                FROM group_sources m
                 GROUP BY m.chat_id, m.grouped_id
             ),
             text_done AS (
@@ -1002,7 +1114,7 @@ def list_clone_timeline_replay_batch(
                 SELECT
                     m.grouped_id,
                     COUNT(DISTINCT m.message_id) AS done_count
-                FROM messages m
+                FROM group_sources m
                 JOIN admin_clone_message_map cmm
                   ON cmm.run_id = ?
                  AND cmm.source_chat_id = m.chat_id
@@ -1010,8 +1122,6 @@ def list_clone_timeline_replay_batch(
                  AND cmm.mode = 'media_group_copy'
                  AND cmm.status = 'done'
                 WHERE m.chat_id = ?
-                  {media_max_filter}
-                  AND COALESCE(m.has_media, 0) = 1
                   AND m.grouped_id IS NOT NULL
                 GROUP BY m.grouped_id
             )

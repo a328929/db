@@ -12,7 +12,9 @@ from tg_harvest.storage.clone import (
     load_clone_tail_delete_selection,
     mark_clone_media_transfer_source_hop_sent,
     mark_clone_media_transfer_target_hop_sent,
+    mark_clone_run_message_reset_required,
     record_clone_message_mapping,
+    reset_clone_run_timeline,
     rewind_clone_mappings_for_deleted_target_messages,
     update_clone_run,
 )
@@ -530,3 +532,163 @@ def test_rewind_reuses_uncleaned_relay_message_with_a_fresh_target_random_id(tmp
     assert retained_transfer["target_message_id"] is None
     assert retained_transfer["cleanup_status"] == "pending"
     assert int(retained_transfer["target_random_id"]) != old_target_random_id
+
+
+def test_reset_clone_timeline_preserves_target_and_plan_but_removes_all_delivery_state(
+    tmp_path,
+):
+    conn = _create_clone_context(tmp_path / "reset-clone-timeline.db")
+    try:
+        _insert_message(conn, message_id=1, content="", has_media=1)
+        _record_mapping(
+            conn,
+            source_message_id=1,
+            target_message_id=9301,
+            mode="media_copy",
+        )
+        ensure_clone_media_transfers(
+            conn,
+            migration_id="migration-rewind",
+            run_id="run-rewind",
+            plan_id="plan-rewind",
+            source_chat_id=100,
+            source_message_ids=[1],
+            target_chat_id=777,
+            transfer_strategy=CLONE_MEDIA_TRANSFER_DIRECT,
+        )
+        conn.execute(
+            """
+            INSERT INTO admin_jobs(
+                job_id, job_type, status, created_at, updated_at
+            ) VALUES (
+                'job-migration-rewind', 'clone_timeline_migration', 'done',
+                '2026-01-01', '2026-01-01'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO admin_job_logs(job_id, seq, ts, message)
+            VALUES ('job-migration-rewind', 1, '2026-01-01', 'done')
+            """
+        )
+        conn.commit()
+
+        reset = reset_clone_run_timeline(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+        )
+        run = conn.execute(
+            "SELECT * FROM admin_clone_runs WHERE run_id = 'run-rewind'"
+        ).fetchone()
+        plan_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_plans WHERE run_id = 'run-rewind'"
+        ).fetchone()[0]
+        migration_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_migrations WHERE run_id = 'run-rewind'"
+        ).fetchone()[0]
+        mapping_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_message_map WHERE run_id = 'run-rewind'"
+        ).fetchone()[0]
+        transfer_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_media_transfers WHERE run_id = 'run-rewind'"
+        ).fetchone()[0]
+        migration_job_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_jobs WHERE job_id = 'job-migration-rewind'"
+        ).fetchone()[0]
+        migration_log_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_job_logs WHERE job_id = 'job-migration-rewind'"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert reset == {
+        "media_transfer_count": 1,
+        "mapping_count": 1,
+        "migration_count": 1,
+        "migration_job_count": 1,
+    }
+    assert run is not None
+    assert run["target_chat_id"] == 777
+    assert run["status"] == "done"
+    assert run["phase"] == "done"
+    assert plan_count == 1
+    assert migration_count == 0
+    assert mapping_count == 0
+    assert transfer_count == 0
+    assert migration_job_count == 0
+    assert migration_log_count == 0
+
+
+def test_complete_reset_barrier_persists_until_timeline_reset(tmp_path):
+    conn = _create_clone_context(tmp_path / "reset-barrier.db")
+    try:
+        mark_clone_run_message_reset_required(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+        )
+        marked = conn.execute(
+            "SELECT status, phase, error_message FROM admin_clone_runs "
+            "WHERE run_id = 'run-rewind'"
+        ).fetchone()
+
+        reset_clone_run_timeline(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+        )
+        reset = conn.execute(
+            "SELECT status, phase, error_message FROM admin_clone_runs "
+            "WHERE run_id = 'run-rewind'"
+        ).fetchone()
+    finally:
+        conn.close()
+
+    assert marked["status"] == "done"
+    assert marked["phase"] == "message_reset_required"
+    assert "必须重试完整清空" in marked["error_message"]
+    assert reset["status"] == "done"
+    assert reset["phase"] == "done"
+    assert reset["error_message"] == ""
+
+
+def test_rewind_deleted_target_resets_media_transfer_without_mapping(tmp_path):
+    conn = _create_clone_context(tmp_path / "rewind-unmapped-transfer.db")
+    try:
+        _insert_message(conn, message_id=1, content="", has_media=1)
+        ensure_clone_media_transfers(
+            conn,
+            migration_id="migration-rewind",
+            run_id="run-rewind",
+            plan_id="plan-rewind",
+            source_chat_id=100,
+            source_message_ids=[1],
+            target_chat_id=777,
+            transfer_strategy=CLONE_MEDIA_TRANSFER_DIRECT,
+        )
+        mark_clone_media_transfer_target_hop_sent(
+            conn,
+            run_id="run-rewind",
+            source_chat_id=100,
+            target_message_ids_by_source={1: 9301},
+        )
+
+        rewind = rewind_clone_mappings_for_deleted_target_messages(
+            conn,
+            run_id="run-rewind",
+            target_chat_id=777,
+            target_message_ids=[9301],
+        )
+        transfer_count = conn.execute(
+            "SELECT COUNT(*) FROM admin_clone_media_transfers "
+            "WHERE run_id = 'run-rewind' AND source_message_id = 1"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+
+    assert rewind["rewound_mapping_count"] == 0
+    assert rewind["rewound_media_transfer_count"] == 1
+    assert rewind["unmapped_target_message_count"] == 1
+    assert transfer_count == 0

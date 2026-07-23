@@ -13,6 +13,8 @@
     remoteMessageCountError: '',
     remoteMessageCountLoading: false,
     busy: false,
+    operationKind: 'partial',
+    pendingRangeSelection: null,
     job: {
       jobId: '',
       lastSeq: 0,
@@ -48,6 +50,20 @@
       logPanel: document.getElementById('admin-clone-message-delete-log-panel'),
       logContainer: document.getElementById('admin-clone-message-delete-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-clone-message-delete-logs-btn'),
+      rangeDialog: document.getElementById('admin-clone-message-range-dialog'),
+      rangeDialogStatus: document.getElementById('admin-clone-message-range-dialog-status'),
+      rangeConfirmInput: document.getElementById('admin-clone-message-range-confirm-input'),
+      rangeConfirmHint: document.getElementById('admin-clone-message-range-confirm-hint'),
+      rangeCancelBtn: document.getElementById('admin-clone-message-range-cancel-btn'),
+      rangeConfirmBtn: document.getElementById('admin-clone-message-range-confirm-btn'),
+      resetOpenBtn: document.getElementById('admin-clone-message-reset-open-btn'),
+      resetStatus: document.getElementById('admin-clone-message-reset-status'),
+      resetDialog: document.getElementById('admin-clone-message-reset-dialog'),
+      resetDialogStatus: document.getElementById('admin-clone-message-reset-dialog-status'),
+      resetConfirmInput: document.getElementById('admin-clone-message-reset-confirm-input'),
+      resetConfirmHint: document.getElementById('admin-clone-message-reset-confirm-hint'),
+      resetCancelBtn: document.getElementById('admin-clone-message-reset-cancel-btn'),
+      resetConfirmBtn: document.getElementById('admin-clone-message-reset-confirm-btn'),
       loginDialog: document.getElementById('admin-login-dialog'),
       loginStatus: document.getElementById('admin-login-status'),
       passwordInput: document.getElementById('admin-password-input'),
@@ -68,6 +84,8 @@
     renderRun(elements);
     renderSelectionPreview(elements);
     setBusy(elements, false);
+    closeRangeDialog(elements, { skipFocusRestore: true });
+    closeResetDialog(elements, { skipFocusRestore: true });
   }
 
   function bindEvents(elements) {
@@ -91,10 +109,51 @@
     });
     elements.form.addEventListener('submit', function (event) {
       event.preventDefault();
-      submitDeleteJob(elements);
+      requestDeleteJob(elements);
     });
     elements.clearLogsBtn.addEventListener('click', function () {
       shared.clearLogs(elements);
+    });
+    elements.rangeCancelBtn.addEventListener('click', function () {
+      closeRangeDialog(elements);
+    });
+    elements.rangeConfirmInput.addEventListener('input', function () {
+      syncRangeConfirmButton(elements);
+    });
+    elements.rangeConfirmInput.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeRangeDialog(elements);
+        return;
+      }
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      if (!elements.rangeConfirmBtn.disabled) submitConfirmedRangeDelete(elements);
+    });
+    elements.rangeConfirmBtn.addEventListener('click', function () {
+      submitConfirmedRangeDelete(elements);
+    });
+    elements.resetOpenBtn.addEventListener('click', function () {
+      openResetDialog(elements);
+    });
+    elements.resetCancelBtn.addEventListener('click', function () {
+      closeResetDialog(elements);
+    });
+    elements.resetConfirmInput.addEventListener('input', function () {
+      syncResetConfirmButton(elements);
+    });
+    elements.resetConfirmInput.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        closeResetDialog(elements);
+        return;
+      }
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      if (!elements.resetConfirmBtn.disabled) submitResetJob(elements);
+    });
+    elements.resetConfirmBtn.addEventListener('click', function () {
+      submitResetJob(elements);
     });
   }
 
@@ -115,8 +174,10 @@
       if (!state.run) throw new Error('克隆记录响应缺少目标副本');
       renderRun(elements);
       elements.status.textContent = state.run.target_chat_id
-        ? '已选择目标副本。删除操作将由第二账号执行。'
-        : '该记录尚未创建目标副本，不能删除局部消息。';
+        ? (messageResetRequired()
+          ? '上次完整清空未完成，当前只能重试完整清空，不能局部删除或继续迁移。'
+          : '已选择目标副本。局部删除由第二账号执行，完整清空由目标副本创建账号执行。')
+        : '该记录尚未创建目标副本，不能执行消息删除或回退。';
       await resumeMatchingDeleteJob(elements);
       if (!state.job.isPolling) {
         await loadTargetMessageCount(elements, { force: true });
@@ -146,7 +207,11 @@
       '当前远端消息数',
       remoteMessageCountDisplay()
     );
-    appendSummaryItem(elements.target, '执行账号', '第二账号');
+    appendSummaryItem(
+      elements.target,
+      '执行账号',
+      '局部删除使用第二账号；完整清空使用目标副本创建账号'
+    );
     syncSubmitButton(elements);
   }
 
@@ -255,6 +320,14 @@
       : '将清理目标消息 ID ' + selection.first + ' 到 ' + selection.last + '，共 ' + shared.formatNumber(selection.count) + ' 个 ID；克隆映射保持不变，后续迁移不会补回。';
     elements.selectionPreview.textContent = message;
     elements.selectionPreview.className = 'clone-message-delete-preview';
+    elements.submitBtn.textContent = selection.mode === 'latest'
+      ? '开始回滚局部克隆消息'
+      : '永久删除目标消息 ID 区间';
+  }
+
+  function messageResetRequired() {
+    return String((state.run && state.run.phase) || '').trim().toLowerCase()
+      === 'message_reset_required';
   }
 
   function syncSubmitButton(elements) {
@@ -263,12 +336,13 @@
     var canSubmit = !!(state.run && state.run.target_chat_id)
       && !selection.error
       && !delay.error
+      && !messageResetRequired()
       && !state.busy;
     shared.setElementDisabled(elements.submitBtn, !canSubmit);
   }
 
-  async function submitDeleteJob(elements) {
-    if (state.busy || !state.run || !state.run.target_chat_id) return;
+  function requestDeleteJob(elements) {
+    if (state.busy || !state.run || !state.run.target_chat_id || messageResetRequired()) return;
     var selection = readSelection();
     var delay = readDelay();
     if (selection.error || delay.error) {
@@ -276,8 +350,20 @@
       syncSubmitButton(elements);
       return;
     }
+    if (selection.mode === 'range') {
+      openRangeDialog(elements, selection);
+      return;
+    }
+    submitDeleteJob(elements, selection, '');
+  }
+
+  async function submitDeleteJob(elements, selection, rangeConfirm) {
+    if (state.busy || !state.run || !state.run.target_chat_id || messageResetRequired()) return;
+    var delay = readDelay();
+    if (!selection || selection.error || delay.error) return;
 
     setBusy(elements, true);
+    state.operationKind = 'partial';
     elements.formStatus.textContent = '正在创建删除任务...';
     try {
       var payload = await fetchJSON(
@@ -287,17 +373,22 @@
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
             selection: selection.text,
-            delete_delay_ms: delay.value
+            delete_delay_ms: delay.value,
+            confirm: rangeConfirm || undefined
           })
         }
       );
       var jobId = shared.getCreatedJobId(payload);
+      closeRangeDialog(elements, { skipFocusRestore: true });
       shared.clearLogs(elements);
       elements.logPanel.open = true;
       elements.formStatus.textContent = '删除任务已创建，正在连接第二账号...';
       jobPollController.start(state.job, jobId, { clearLogs: false });
     } catch (error) {
-      elements.formStatus.textContent = '创建删除任务失败：' + error.message;
+      var statusElement = selection.mode === 'range'
+        ? elements.rangeDialogStatus
+        : elements.formStatus;
+      statusElement.textContent = '创建删除任务失败：' + error.message;
       setBusy(elements, false);
     }
   }
@@ -307,9 +398,14 @@
     try {
       var payload = await fetchJSON('/api/admin/jobs/active');
       var job = payload && payload.job ? payload.job : null;
-      if (!job || String(job.job_type || '') !== 'clone_message_delete') return;
+      var jobType = String((job && job.job_type) || '');
+      if (jobType !== 'clone_message_delete' && jobType !== 'clone_message_reset') return;
       if (Number(job.target_chat_id) !== Number(state.run.target_chat_id)) return;
-      elements.formStatus.textContent = '检测到正在执行的局部消息删除任务，已恢复日志。';
+      state.operationKind = jobType === 'clone_message_reset' ? 'reset' : 'partial';
+      var statusElement = state.operationKind === 'reset' ? elements.resetStatus : elements.formStatus;
+      statusElement.textContent = state.operationKind === 'reset'
+        ? '检测到正在执行的完整清空任务，已恢复日志。'
+        : '检测到正在执行的局部消息删除任务，已恢复日志。';
       elements.logPanel.open = true;
       jobPollController.start(state.job, String(job.job_id || ''), { resume: true });
     } catch (error) {
@@ -321,6 +417,12 @@
     state.busy = !!busy;
     shared.setElementDisabled(elements.selection, state.busy);
     shared.setElementDisabled(elements.delay, state.busy);
+    syncRangeConfirmButton(elements);
+    shared.setElementDisabled(
+      elements.resetOpenBtn,
+      state.busy || !state.run || !state.run.target_chat_id
+    );
+    syncResetConfirmButton(elements);
     syncMessageCountRefreshButton(elements);
     syncSubmitButton(elements);
   }
@@ -331,6 +433,118 @@
       || !state.run.target_chat_id
       || state.remoteMessageCountLoading;
     shared.setElementDisabled(elements.refreshMessageCountBtn, disabled);
+  }
+
+  function resetConfirmText() {
+    return 'RESET-CLONE-MESSAGES:' + state.runId;
+  }
+
+  function rangeConfirmText(selection) {
+    return 'DELETE-TARGET-MESSAGE-RANGE:'
+      + state.runId
+      + ':'
+      + selection.first
+      + '-'
+      + selection.last;
+  }
+
+  function openRangeDialog(elements, selection) {
+    state.pendingRangeSelection = selection;
+    elements.rangeDialogStatus.textContent = '';
+    elements.rangeConfirmInput.value = '';
+    elements.rangeConfirmHint.textContent = '请输入永久删除确认码：' + rangeConfirmText(selection);
+    elements.rangeDialog.hidden = false;
+    syncRangeConfirmButton(elements);
+    elements.rangeConfirmInput.focus();
+  }
+
+  function closeRangeDialog(elements, options) {
+    var opts = options || {};
+    elements.rangeDialog.hidden = true;
+    elements.rangeDialogStatus.textContent = '';
+    elements.rangeConfirmInput.value = '';
+    state.pendingRangeSelection = null;
+    syncRangeConfirmButton(elements);
+    if (!opts.skipFocusRestore) elements.submitBtn.focus();
+  }
+
+  function syncRangeConfirmButton(elements) {
+    var selection = state.pendingRangeSelection;
+    var matches = !!selection
+      && String(elements.rangeConfirmInput.value || '').trim() === rangeConfirmText(selection);
+    shared.setElementDisabled(elements.rangeConfirmBtn, state.busy || !matches);
+  }
+
+  function submitConfirmedRangeDelete(elements) {
+    var selection = state.pendingRangeSelection;
+    if (!selection || elements.rangeConfirmBtn.disabled) return;
+    submitDeleteJob(elements, selection, rangeConfirmText(selection));
+  }
+
+  function openResetDialog(elements) {
+    if (state.busy || !state.run || !state.run.target_chat_id) return;
+    elements.resetDialogStatus.textContent = '';
+    elements.resetConfirmInput.value = '';
+    elements.resetConfirmHint.textContent = '请输入确认码：' + resetConfirmText();
+    elements.resetDialog.hidden = false;
+    syncResetConfirmButton(elements);
+    elements.resetConfirmInput.focus();
+  }
+
+  function closeResetDialog(elements, options) {
+    var opts = options || {};
+    elements.resetDialog.hidden = true;
+    elements.resetDialogStatus.textContent = '';
+    elements.resetConfirmInput.value = '';
+    syncResetConfirmButton(elements);
+    if (!opts.skipFocusRestore) elements.resetOpenBtn.focus();
+  }
+
+  function syncResetConfirmButton(elements) {
+    var matches = String(elements.resetConfirmInput.value || '').trim() === resetConfirmText();
+    shared.setElementDisabled(elements.resetConfirmBtn, state.busy || !matches);
+  }
+
+  async function submitResetJob(elements) {
+    if (
+      state.busy
+      || !state.run
+      || !state.run.target_chat_id
+      || String(elements.resetConfirmInput.value || '').trim() !== resetConfirmText()
+    ) {
+      return;
+    }
+    var delay = readDelay();
+    if (delay.error) {
+      elements.resetDialogStatus.textContent = delay.error;
+      return;
+    }
+
+    setBusy(elements, true);
+    state.operationKind = 'reset';
+    elements.resetDialogStatus.textContent = '正在创建完整清空任务...';
+    try {
+      var payload = await fetchJSON(
+        '/api/admin/clone/runs/' + encodeURIComponent(state.runId) + '/reset-messages',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            confirm: resetConfirmText(),
+            delete_delay_ms: delay.value
+          })
+        }
+      );
+      var jobId = shared.getCreatedJobId(payload);
+      closeResetDialog(elements, { skipFocusRestore: true });
+      shared.clearLogs(elements);
+      elements.logPanel.open = true;
+      elements.resetStatus.textContent = '完整清空任务已创建，正在连接目标副本创建账号...';
+      jobPollController.start(state.job, jobId, { clearLogs: false });
+    } catch (error) {
+      elements.resetDialogStatus.textContent = '创建完整清空任务失败：' + error.message;
+      setBusy(elements, false);
+    }
   }
 
   function readRunId() {
@@ -376,33 +590,51 @@
       var total = progress.total === null || progress.total === undefined
         ? ''
         : '/' + shared.formatNumber(progress.total);
-      elements.formStatus.textContent = snapshot.stop_requested
+      var statusElement = state.operationKind === 'reset' ? elements.resetStatus : elements.formStatus;
+      statusElement.textContent = snapshot.stop_requested
         ? '已收到停止请求，正在完成当前批次...'
-        : '正在删除：' + shared.formatNumber(current) + total + ' 条消息。';
+        : (state.operationKind === 'reset' ? '正在完整清空：' : '正在删除：')
+          + shared.formatNumber(current) + total + ' 条消息。';
     },
     getDoneMessage: function (_jobState, snapshot) {
       var stage = String((((snapshot || {}).progress || {}).stage) || '');
       return stage === 'stopped'
-        ? '局部消息删除已停止。'
-        : '局部消息删除任务已完成。';
+        ? (state.operationKind === 'reset' ? '完整清空已停止。' : '局部消息删除已停止。')
+        : (state.operationKind === 'reset' ? '完整清空任务已完成。' : '局部消息删除任务已完成。');
     },
     getErrorMessage: function () {
-      return '局部消息删除失败，请查看上方日志。';
+      return state.operationKind === 'reset'
+        ? '完整清空失败，请查看上方日志。'
+        : '局部消息删除失败，请查看上方日志。';
     },
     onDone: async function (snapshot) {
       var elements = getElements();
       if (!elements) return;
       var stage = String((((snapshot || {}).progress || {}).stage) || '');
-      elements.formStatus.textContent = stage === 'stopped'
+      var statusElement = state.operationKind === 'reset' ? elements.resetStatus : elements.formStatus;
+      statusElement.textContent = stage === 'stopped'
         ? '删除已停止，未提交的消息不会被处理。'
-        : '局部消息删除已完成；整数回滚可通过续克隆补齐，目标消息 ID 区间不会补回。';
-      await loadTargetMessageCount(elements, { force: true });
+        : (state.operationKind === 'reset'
+          ? '目标副本消息与全部迁移状态已清空。'
+          : '局部消息删除已完成；整数回滚可通过续克隆补齐，目标消息 ID 区间不会补回。');
+      if (state.operationKind === 'reset') {
+        await loadRun(elements);
+      } else {
+        await loadTargetMessageCount(elements, { force: true });
+      }
     },
     onError: async function () {
       var elements = getElements();
       if (!elements) return;
-      elements.formStatus.textContent = '局部消息删除失败，远端可能已部分删除；请查看执行日志后再继续迁移。';
-      await loadTargetMessageCount(elements, { force: true });
+      var statusElement = state.operationKind === 'reset' ? elements.resetStatus : elements.formStatus;
+      statusElement.textContent = state.operationKind === 'reset'
+        ? '完整清空失败，远端可能已部分删除；请重新执行完整清空后再继续迁移。'
+        : '局部消息删除失败，远端可能已部分删除；请查看执行日志后再继续迁移。';
+      if (state.operationKind === 'reset') {
+        await loadRun(elements);
+      } else {
+        await loadTargetMessageCount(elements, { force: true });
+      }
     }
   });
 

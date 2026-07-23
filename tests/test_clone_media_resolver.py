@@ -107,6 +107,28 @@ class CloneMediaResolverTests(unittest.TestCase):
         self.assertEqual(7002, result["grouped_id"])
         self.assertEqual("api_group_expanded", result["resolution"])
 
+    def test_clone_media_group_resolver_uses_catalog_group_when_anchor_is_gone(self):
+        client = _ResolverClient(
+            [
+                _media_message(49, grouped_id=7001),
+                _media_message(50, grouped_id=7002),
+                _media_message(52, grouped_id=7002),
+                _media_message(53, grouped_id=7003),
+            ]
+        )
+
+        result = clone_api_resolve_media_group(
+            client,
+            "source",
+            [51],
+            scan_radius=3,
+            expected_grouped_id=7002,
+        )
+
+        self.assertIs(True, result["ok"])
+        self.assertEqual(7002, result["grouped_id"])
+        self.assertEqual([50, 52], result["message_ids"])
+
     def test_clone_media_message_resolver_retries_transient_error(self):
         client = _RetryOnceResolverClient([_media_message(51, grouped_id=7002)])
 

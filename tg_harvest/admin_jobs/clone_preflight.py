@@ -10,6 +10,9 @@ from tg_harvest.admin_jobs.clone_job_state import (
     _try_update_record,
     _update_required_record,
 )
+from tg_harvest.admin_jobs.clone_media_copy import (
+    load_clone_relay_participant_count,
+)
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
@@ -100,7 +103,11 @@ def _source_forwarding_permission(entity: Any) -> str:
     return "unknown"
 
 
-def _relay_safety_state(entity: Any) -> str:
+def _relay_safety_state(
+    entity: Any,
+    *,
+    participant_count: Any = None,
+) -> str:
     """Require a dedicated private broadcast channel with no extra viewers."""
     if entity is None:
         return "unknown"
@@ -110,7 +117,7 @@ def _relay_safety_state(entity: Any) -> str:
     if bool(getattr(entity, "megagroup", False)):
         return "unsafe_group"
     if getattr(entity, "broadcast", None) is True:
-        participants_count = safe_int(getattr(entity, "participants_count", None), -1)
+        participants_count = safe_int(participant_count, -1)
         if participants_count < 0:
             return "unknown_participants"
         if participants_count > 2:
@@ -272,10 +279,20 @@ def _check_account_access(
             result["relay_error"] = relay_error
             result["relay_send_permission"] = _target_send_permission(relay_entity)
             result["relay_cleanup_permission"] = _relay_cleanup_permission(relay_entity)
-            result["relay_safety"] = _relay_safety_state(relay_entity)
-            result["relay_participant_count"] = getattr(
-                relay_entity, "participants_count", None
+            relay_participant_count = None
+            if relay_entity is not None:
+                try:
+                    relay_participant_count = load_clone_relay_participant_count(
+                        client,
+                        relay_entity,
+                    )
+                except Exception as exc:
+                    result["relay_error"] = admin_error_message(exc)
+            result["relay_safety"] = _relay_safety_state(
+                relay_entity,
+                participant_count=relay_participant_count,
             )
+            result["relay_participant_count"] = relay_participant_count
         return result
     except Exception as exc:
         logging.exception(
@@ -593,9 +610,12 @@ def _build_deep_preflight_outcome(
             "source_account": relay_source_account,
             "target_account": relay_target_account,
             "privacy": CLONE_FORWARD_PRIVACY_MODE,
-            "requires_drop_author_each_hop": True,
+            "requires_drop_author_each_hop": False,
+            "source_hop_requires_drop_author": True,
+            "target_hop_mode": "binary_reupload",
             "keeps_source_link": False,
             "keeps_relay_link": False,
+            "target_survives_relay_cleanup": True,
             "requires_private_broadcast_channel": True,
         }
         if relay

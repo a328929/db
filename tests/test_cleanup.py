@@ -196,6 +196,82 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
+    def test_unsearchable_cleanup_preserves_clone_media_group_anchors(self) -> None:
+        self.conn.executemany(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                grouped_id, content, content_norm, has_media, is_promo,
+                dedupe_eligible
+            )
+            VALUES (1, ?, ?, ?, 'PHOTO', 88, '', '', 1, 0, 0)
+            """,
+            [
+                (30, "2026-01-01 00:00:30", 30),
+                (31, "2026-01-01 00:00:31", 31),
+            ],
+        )
+        self.conn.execute(
+            """
+            INSERT INTO media_groups(
+                chat_id, grouped_id, first_message_id, first_msg_date_ts,
+                last_message_id, last_msg_date_ts, item_count, active_items
+            )
+            VALUES (1, 88, 30, 30, 31, 31, 2, 2)
+            """
+        )
+        self.conn.commit()
+
+        cur = self.conn.cursor()
+        try:
+            target_count = _build_cleanup_targets_table(
+                cur,
+                "empty_media",
+                "",
+                [],
+                "",
+            )
+            self.conn.commit()
+            deleted = _execute_cleanup_deletion_batches(
+                self.conn,
+                cur,
+                "job-1",
+                target_count,
+                lambda *_args: None,
+                cleanup_mode="empty_media",
+            )
+        finally:
+            cur.close()
+
+        self.assertEqual(2, deleted)
+        self.assertEqual(
+            0,
+            self.conn.execute(
+                "SELECT COUNT(*) FROM messages WHERE grouped_id = 88"
+            ).fetchone()[0],
+        )
+        self.assertEqual(
+            0,
+            self.conn.execute(
+                "SELECT COUNT(*) FROM media_groups WHERE grouped_id = 88"
+            ).fetchone()[0],
+        )
+        anchors = self.conn.execute(
+            """
+            SELECT grouped_id, message_id, msg_date_ts, cleanup_reason
+            FROM clone_media_group_anchors
+            WHERE chat_id = 1 AND grouped_id = 88
+            ORDER BY message_id
+            """
+        ).fetchall()
+        self.assertEqual(
+            [
+                (88, 30, 30, "empty_media"),
+                (88, 31, 31, "empty_media"),
+            ],
+            [tuple(row) for row in anchors],
+        )
+
     def test_cleanup_removes_stale_media_group_id_from_media_metadata(self) -> None:
         """A stale message_media grouped_id must not leave an orphan aggregate."""
         self.conn.execute(

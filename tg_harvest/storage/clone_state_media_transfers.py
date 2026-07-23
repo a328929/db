@@ -3,7 +3,6 @@ import sqlite3
 from collections.abc import Iterable
 from typing import Any
 
-from tg_harvest.domain.clone_target_permissions import clone_target_write_was_rejected
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
 from tg_harvest.storage.row_access import row_int as _row_int
 
@@ -113,11 +112,19 @@ def _relay_first_hop_is_reusable(existing: dict) -> bool:
     )
 
 
+def _target_delivery_is_recoverable(existing: dict) -> bool:
+    return (
+        existing["target_hop_status"] in {"sent", "unconfirmed"}
+        and existing["target_message_id"] is not None
+    )
+
+
 def _can_replan_unsent_transfer(existing: dict) -> bool:
     return (
-        existing["target_hop_status"] != "sent"
+        existing["target_hop_status"] == "pending"
+        and existing["target_message_id"] is None
+        and existing["source_hop_status"] != "ambiguous"
         and not _relay_first_hop_is_reusable(existing)
-        and clone_target_write_was_rejected(existing["error_message"])
     )
 
 
@@ -200,10 +207,10 @@ def ensure_clone_media_transfers(
 
     A transfer row is created before any Telegram write. Reusing the stored
     random IDs makes a retry of a timed-out forward idempotent at MTProto level.
-    A target-side permission rejection may be replanned after an online
-    preflight selects a different writable account.  Other failed or pending
-    transfers remain account-bound because the remote outcome may be
-    ambiguous; a sent target hop is always account-bound.
+    Every migration attempt may adopt run-level checkpoints without inheriting
+    the previous task's plan or error state. Confirmed and observable target
+    deliveries keep their remote IDs, while an intent that has no remote
+    result can be recreated for the current plan.
     """
     normalized_ids = _normalized_message_ids(source_message_ids)
     if not normalized_ids:
@@ -262,6 +269,21 @@ def ensure_clone_media_transfers(
                 source_account=normalized_source_account,
                 target_account=normalized_target_account,
             )
+            if plan_changed and _target_delivery_is_recoverable(existing):
+                cur.execute(
+                    """
+                    UPDATE admin_clone_media_transfers
+                    SET migration_id = ?, plan_id = ?, updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        normalized_migration_id,
+                        normalized_plan_id,
+                        now,
+                        int(existing["id"]),
+                    ),
+                )
+                continue
             if plan_changed and _can_replan_unsent_transfer(existing):
                 cur.execute(
                     "DELETE FROM admin_clone_media_transfers WHERE id = ?",
@@ -284,20 +306,20 @@ def ensure_clone_media_transfers(
                 continue
 
             if plan_changed and _relay_first_hop_is_reusable(existing):
-                if not clone_target_write_was_rejected(existing["error_message"]):
-                    raise RuntimeError(
-                        "媒体传输状态尚未确认可安全重规划，拒绝跨账号恢复"
-                    )
                 if (
                     existing["transfer_strategy"] == strategy
-                    and existing["source_account"] == normalized_source_account
                     and existing["relay_chat_id"] in (None, normalized_relay_chat_id)
                 ):
+                    target_account_changed = bool(
+                        existing["target_account"]
+                        and normalized_target_account
+                        and existing["target_account"] != normalized_target_account
+                    )
                     cur.execute(
                         """
                         UPDATE admin_clone_media_transfers
-                        SET migration_id = ?, plan_id = ?, target_account = ?,
-                            target_random_id = ?, target_message_id = NULL,
+                        SET migration_id = ?, plan_id = ?, source_account = ?,
+                            target_account = ?, target_random_id = ?, target_message_id = NULL,
                             target_hop_status = 'pending', error_message = '',
                             updated_at = ?
                         WHERE id = ?
@@ -305,8 +327,13 @@ def ensure_clone_media_transfers(
                         (
                             normalized_migration_id,
                             normalized_plan_id,
+                            normalized_source_account,
                             normalized_target_account,
-                            _new_random_id(),
+                            (
+                                _new_random_id()
+                                if target_account_changed
+                                else int(existing["target_random_id"])
+                            ),
                             now,
                             int(existing["id"]),
                         ),
@@ -483,6 +510,7 @@ def list_pending_clone_relay_cleanup(
     run_id: str,
     source_chat_id: int,
     relay_chat_id: int,
+    include_incomplete_target: bool = False,
 ) -> list[dict]:
     cur = conn.cursor()
     try:
@@ -494,7 +522,8 @@ def list_pending_clone_relay_cleanup(
               AND source_chat_id = ?
               AND transfer_strategy = 'relay'
               AND relay_chat_id = ?
-              AND target_hop_status = 'sent'
+              AND source_hop_status = 'sent'
+              AND (? = 1 OR target_hop_status = 'sent')
               AND cleanup_status != 'done'
               AND relay_message_id IS NOT NULL
             ORDER BY source_message_id ASC
@@ -503,7 +532,69 @@ def list_pending_clone_relay_cleanup(
                 _clean_text(run_id),
                 int(source_chat_id),
                 int(relay_chat_id),
+                int(bool(include_incomplete_target)),
             ),
+        )
+        return [
+            item
+            for item in (_transfer_from_row(row) for row in cur.fetchall())
+            if item is not None
+        ]
+    finally:
+        cur.close()
+
+
+def list_pending_clone_relay_cleanup_for_run(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+) -> list[dict]:
+    """Load every known relay copy still retained by a clone run."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM admin_clone_media_transfers
+            WHERE run_id = ?
+              AND transfer_strategy = 'relay'
+              AND source_hop_status = 'sent'
+              AND cleanup_status != 'done'
+              AND relay_chat_id IS NOT NULL
+              AND relay_message_id IS NOT NULL
+            ORDER BY relay_chat_id ASC, source_message_id ASC
+            """,
+            (_clean_text(run_id),),
+        )
+        return [
+            item
+            for item in (_transfer_from_row(row) for row in cur.fetchall())
+            if item is not None
+        ]
+    finally:
+        cur.close()
+
+
+def list_clone_media_target_checkpoints(
+    conn: sqlite3.Connection,
+    *,
+    run_id: str,
+    target_chat_id: int,
+) -> list[dict]:
+    """Load media deliveries that claim a durable target message."""
+    cur = conn.cursor()
+    try:
+        cur.execute(
+            """
+            SELECT *
+            FROM admin_clone_media_transfers
+            WHERE run_id = ?
+              AND target_chat_id = ?
+              AND target_hop_status = 'sent'
+              AND target_message_id IS NOT NULL
+            ORDER BY target_message_id ASC, source_message_id ASC
+            """,
+            (_clean_text(run_id), int(target_chat_id)),
         )
         return [
             item
@@ -551,22 +642,38 @@ def record_clone_media_transfer_error(
     source_chat_id: int,
     source_message_ids: Iterable[Any],
     message: Any,
+    ambiguous_hop: str = "",
 ) -> None:
     normalized_ids = _normalized_message_ids(source_message_ids)
     if not normalized_ids:
         return
+    normalized_ambiguous_hop = _clean_text(ambiguous_hop).lower()
+    if normalized_ambiguous_hop not in {"", "source", "target"}:
+        raise ValueError("未知的媒体传输不确定状态")
     placeholders = ",".join("?" for _ in normalized_ids)
     cur = conn.cursor()
     try:
         cur.execute(
             f"""
             UPDATE admin_clone_media_transfers
-            SET error_message = ?, updated_at = ?
+            SET source_hop_status = CASE
+                    WHEN ? = 'source' AND source_hop_status != 'sent'
+                    THEN 'ambiguous'
+                    ELSE source_hop_status
+                END,
+                target_hop_status = CASE
+                    WHEN ? = 'target' AND target_hop_status != 'sent'
+                    THEN 'ambiguous'
+                    ELSE target_hop_status
+                END,
+                error_message = ?, updated_at = ?
             WHERE run_id = ?
               AND source_chat_id = ?
               AND source_message_id IN ({placeholders})
             """,
             [
+                normalized_ambiguous_hop,
+                normalized_ambiguous_hop,
                 _clean_text(message),
                 _now_iso(),
                 _clean_text(run_id),

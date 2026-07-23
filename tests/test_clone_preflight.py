@@ -86,6 +86,18 @@ def _create_clone_schema(conn):
     )
     cur.execute(
         """
+        CREATE TABLE clone_media_group_anchors (
+            chat_id INTEGER NOT NULL,
+            grouped_id INTEGER NOT NULL,
+            message_id INTEGER NOT NULL,
+            msg_date_text TEXT NOT NULL DEFAULT '',
+            msg_date_ts INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY(chat_id, grouped_id, message_id)
+        )
+        """
+    )
+    cur.execute(
+        """
         CREATE TABLE admin_clone_runs (
             run_id TEXT PRIMARY KEY,
             job_id TEXT NOT NULL UNIQUE,
