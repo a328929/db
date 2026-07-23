@@ -305,6 +305,7 @@ def _clear_all_target_messages(
             )
             continue
         propagation_wait_reads = 0
+        # Check stop request BEFORE submitting deletion to Telegram
         if _admin_job_stop_requested(job_id):
             raise RuntimeError("用户请求停止，目标消息可能已部分删除；请重新执行完整清空")
 

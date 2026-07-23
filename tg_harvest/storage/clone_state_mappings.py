@@ -22,6 +22,12 @@ _TARGET_MESSAGE_ID_BATCH_SIZE = 500
 
 
 def _new_delivery_random_id() -> int:
+    """Generate a cryptographically secure random ID for Telegram MTProto delivery.
+
+    NOTE: This does not check if the ID is already in use. The probability of
+    collision is astronomically low (1 in 2^63), but the system relies on
+    Telegram's RANDOM_ID_DUPLICATE error to detect actual collisions if they occur.
+    """
     return secrets.randbelow(_MAX_TELEGRAM_RANDOM_ID) + 1
 
 

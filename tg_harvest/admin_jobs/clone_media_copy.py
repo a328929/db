@@ -146,6 +146,11 @@ def _store_target_ids(
     source_message_ids: list[int],
     target_message_ids: list[int | None],
 ) -> None:
+    """Store target message IDs in a database transaction.
+
+    If this fails, the entire media transfer should be considered incomplete
+    and may need to be retried with fresh random IDs.
+    """
     target_ids_by_source = {
         source_message_id: int(target_message_id)
         for source_message_id, target_message_id in zip(
@@ -157,13 +162,27 @@ def _store_target_ids(
     }
     if not target_ids_by_source:
         return
-    call_with_conn(
-        context.get_conn_fn,
-        mark_clone_media_transfer_target_hop_sent,
-        run_id=context.run_id,
-        source_chat_id=context.source_chat_id,
-        target_message_ids_by_source=target_ids_by_source,
-    )
+    try:
+        call_with_conn(
+            context.get_conn_fn,
+            mark_clone_media_transfer_target_hop_sent,
+            run_id=context.run_id,
+            source_chat_id=context.source_chat_id,
+            target_message_ids_by_source=target_ids_by_source,
+        )
+    except Exception as exc:
+        # Database transaction failed - this is a critical error that prevents
+        # safe retry with the same random IDs
+        logging.exception(
+            "Failed to persist target message IDs after successful Telegram delivery: "
+            "run_id=%s source_chat_id=%s",
+            context.run_id,
+            context.source_chat_id,
+        )
+        raise CloneMappingPersistenceError(
+            "媒体已成功发送到目标，但持久化映射失败；"
+            "迁移已中止以避免使用相同随机ID重复发送"
+        ) from exc
 
 
 def _store_observed_target_ids(
@@ -598,6 +617,14 @@ def validate_clone_relay_execution(
     relay_participant_count_for_source: int | None = None,
     relay_participant_count_for_target: int | None = None,
 ) -> None:
+    """Validate relay channel safety before media transfer.
+
+    SECURITY NOTE: This check has a TOCTOU window between validation and actual
+    transfer. The participant count could change after validation but before the
+    transfer completes. This is an inherent limitation of the Telegram API.
+    Mitigation: Keep the window as small as possible and re-validate if the
+    transfer fails with unexpected errors.
+    """
     expected_id = stored_chat_id_from_entity_id(relay_chat_id)
     protected_ids = {
         stored_chat_id_from_entity_id(source_chat_id),

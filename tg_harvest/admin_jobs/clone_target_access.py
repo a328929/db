@@ -48,6 +48,12 @@ def clone_run_target_input_channel(
     client: Any,
     clone_run: dict,
 ) -> InputChannel | None:
+    """Resolve target channel input from clone run metadata.
+
+    NOTE: This has a potential race condition - the access_hash or cached entity
+    could become stale between retrieval and use. Callers should handle
+    CHANNEL_INVALID or similar errors and potentially retry with fresh entity resolution.
+    """
     if clone_run_target_conflicts_with_source(clone_run):
         return None
     try:
@@ -64,10 +70,15 @@ def clone_run_target_input_channel(
     if access_hash:
         return InputChannel(target_chat_id, access_hash)
 
-    with bind_client_event_loop(client):
-        cached_entity = client.get_input_entity(target_chat_id)
-    if isinstance(cached_entity, InputChannel):
-        return cached_entity
-    if isinstance(cached_entity, InputPeerChannel):
-        return InputChannel(cached_entity.channel_id, cached_entity.access_hash)
+    # Fallback to session cache - this could be stale but is better than nothing
+    try:
+        with bind_client_event_loop(client):
+            cached_entity = client.get_input_entity(target_chat_id)
+        if isinstance(cached_entity, InputChannel):
+            return cached_entity
+        if isinstance(cached_entity, InputPeerChannel):
+            return InputChannel(cached_entity.channel_id, cached_entity.access_hash)
+    except Exception:
+        # Session cache miss or error - return None and let caller handle
+        pass
     return None
