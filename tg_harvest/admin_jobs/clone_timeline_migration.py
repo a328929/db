@@ -196,8 +196,8 @@ def _log_timeline_start(
         )
         admin_job_append_log_fn(
             state.job_id,
-            "媒体复制策略：第一跳匿名复制到固定中转频道；第二跳下载中转媒体并重新上传为独立目标消息，"
-            "清理中转后再次核验目标消息仍然存在",
+            "媒体复制策略：两跳均使用 drop_author=True 匿名复制，不下载媒体，"
+            "不显示原群或中转频道跳转；清理中转后再次核验目标消息仍然存在",
         )
     else:
         media_account = _clean_text(state.accounts.get("media_source_account"))

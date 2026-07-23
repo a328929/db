@@ -628,22 +628,18 @@ def test_relay_delivery_resumes_second_hop_without_repeating_first_hop(tmp_path)
 
     assert [message.id for message in result] == [8200, 8201]
     assert resumed_source_client.forward_calls == []
-    assert resumed_target_client.forward_calls == []
-    assert resumed_target_client.send_file_calls == [
+    assert resumed_target_client.forward_calls == [
         (
             "target",
-            ["relay-media-7100", "relay-media-7101"],
+            [7100, 7101],
             {
-                "caption": ["caption-7100", "caption-7101"],
-                "formatting_entities": [
-                    ["entity-7100"],
-                    ["entity-7101"],
-                ],
-                "parse_mode": None,
+                "from_peer": "relay",
+                "drop_author": True,
                 "silent": True,
             },
         )
     ]
+    assert resumed_target_client.send_file_calls == []
     assert resumed_source_client.delete_calls == [
         ("relay", [7100, 7101], {"revoke": True})
     ]
@@ -1054,8 +1050,18 @@ def test_relay_delivery_reuses_first_hop_in_new_failed_task_retry(tmp_path):
 
     assert result.id == 8300
     assert resumed_source_client.forward_calls == []
-    assert resumed_target_client.forward_calls == []
-    assert len(resumed_target_client.send_file_calls) == 1
+    assert resumed_target_client.forward_calls == [
+        (
+            "target",
+            7100,
+            {
+                "from_peer": "relay",
+                "drop_author": True,
+                "silent": True,
+            },
+        )
+    ]
+    assert resumed_target_client.send_file_calls == []
 
 
 def test_relay_participant_count_falls_back_to_full_channel():

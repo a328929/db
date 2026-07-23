@@ -14,7 +14,6 @@ from tg_harvest.admin_jobs.clone_forwarding import (
     CloneForwardOutcomeAmbiguousError,
     clone_delete_copied_relay_messages,
     clone_forward_without_source_attribution,
-    clone_send_independent_media,
 )
 from tg_harvest.admin_jobs.clone_timeline_store import CloneMappingPersistenceError
 from tg_harvest.admin_jobs.common import call_with_conn, resolve_chat_entity
@@ -334,45 +333,6 @@ def _transfer_target_ids(transfers: list[dict]) -> list[int | None]:
     ]
 
 
-def _load_relay_messages_for_independent_send(
-    client: Any,
-    relay_entity: Any,
-    relay_message_ids: list[int],
-) -> list[Any]:
-    get_messages = getattr(client, "get_messages", None)
-    if not callable(get_messages):
-        return [
-            SimpleNamespace(id=message_id, media=f"relay-media-{message_id}")
-            for message_id in relay_message_ids
-        ]
-
-    def _load_messages() -> Any:
-        with bind_client_event_loop(client):
-            return get_messages(relay_entity, ids=relay_message_ids)
-
-    result = call_with_bounded_retry(
-        _load_messages,
-        scope="clone-relay-media-load",
-    )
-    messages_by_id = {
-        int(message_id): item
-        for item in _message_items(result)
-        if item is not None and not isinstance(item, MessageEmpty)
-        for message_id in [optional_int(getattr(item, "id", None))]
-        if message_id is not None and int(message_id) > 0
-    }
-    missing_ids = [
-        message_id
-        for message_id in relay_message_ids
-        if message_id not in messages_by_id
-    ]
-    if missing_ids:
-        raise CloneMediaDeliverySafetyError(
-            "中转频道缺少准备独立发送的媒体消息：" + ", ".join(map(str, missing_ids))
-        )
-    return [messages_by_id[message_id] for message_id in relay_message_ids]
-
-
 def _rewind_missing_target_deliveries(
     context: CloneMediaTransferContext,
     target_message_ids: list[int],
@@ -487,7 +447,6 @@ def _forward_target_pending(
     context: CloneMediaTransferContext,
     forward_message_ids: list[int] | None = None,
     confirmation_context: str = "媒体复制目标确认",
-    send_pending_fn: Callable[[list[int], list[int]], Any] | None = None,
 ) -> list[dict]:
     transfers = _refresh_missing_sent_transfers(
         client=client,
@@ -551,16 +510,13 @@ def _forward_target_pending(
         pending_forward_ids[0] if len(pending_forward_ids) == 1 else pending_forward_ids
     )
     try:
-        if send_pending_fn is not None:
-            result = send_pending_fn(pending_forward_ids, pending_random_ids)
-        else:
-            result = clone_forward_without_source_attribution(
-                client,
-                target_entity,
-                forward_messages,
-                from_peer=source_peer,
-                random_ids=pending_random_ids,
-            )
+        result = clone_forward_without_source_attribution(
+            client,
+            target_entity,
+            forward_messages,
+            from_peer=source_peer,
+            random_ids=pending_random_ids,
+        )
     except Exception as exc:
         if isinstance(exc, CloneForwardOutcomeAmbiguousError):
             safety_error = CloneMediaDeliverySafetyError(str(exc))
@@ -899,24 +855,7 @@ def copy_clone_media_via_relay_without_source(
         or transfer.get("target_message_id") is None
         for transfer in transfers
     ):
-        log_step("媒体桥接第二跳：从中转媒体创建独立克隆消息")
-
-    def _send_independent_target_media(
-        pending_relay_ids: list[int],
-        pending_random_ids: list[int],
-    ) -> Any:
-        relay_messages = _load_relay_messages_for_independent_send(
-            target_client,
-            relay_entity_for_target,
-            pending_relay_ids,
-        )
-        return clone_send_independent_media(
-            target_client,
-            target_entity,
-            relay_messages,
-            random_ids=pending_random_ids,
-            silent=True,
-        )
+        log_step("媒体桥接第二跳：中转频道 -> 克隆群（匿名复制）")
 
     transfers = _forward_target_pending(
         client=target_client,
@@ -927,7 +866,6 @@ def copy_clone_media_via_relay_without_source(
         context=transfer_context,
         forward_message_ids=[int(message_id or 0) for message_id in relay_message_ids],
         confirmation_context="中转第二跳（第二账号 -> 克隆群）确认",
-        send_pending_fn=_send_independent_target_media,
     )
 
     cleanup_pending_clone_relay_messages(

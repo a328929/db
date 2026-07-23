@@ -748,9 +748,9 @@ def test_clone_deep_preflight_job_enables_relay_when_accounts_split_access(tmp_p
     assert plan["capabilities"]["media_relay"]["chat_id"] == 999
     assert plan["capabilities"]["media_relay"]["source_account"] == "primary"
     assert plan["capabilities"]["media_relay"]["target_account"] == "secondary"
-    assert plan["capabilities"]["media_relay"]["requires_drop_author_each_hop"] is False
+    assert plan["capabilities"]["media_relay"]["requires_drop_author_each_hop"] is True
     assert plan["capabilities"]["media_relay"]["source_hop_requires_drop_author"] is True
-    assert plan["capabilities"]["media_relay"]["target_hop_mode"] == "binary_reupload"
+    assert plan["capabilities"]["media_relay"]["target_hop_mode"] == "anonymous_forward"
     assert plan["capabilities"]["media_relay"]["keeps_source_link"] is False
     assert plan["capabilities"]["media_relay"]["keeps_relay_link"] is False
     assert plan["capabilities"]["media_relay"]["target_survives_relay_cleanup"] is True
@@ -2577,9 +2577,6 @@ class _RelaySecondHopFloodClient(_RelayMediaClient):
 
     def forward_messages(self, *args, **kwargs):
         self.forward_attempts += 1
-        return super().forward_messages(*args, **kwargs)
-
-    def send_file(self, *args, **kwargs):
         target = args[0] if args else None
         if self.flood_on_target and getattr(target, "id", None) == 777:
             from tg_harvest.ingest.flood_wait import AccountFloodWaitError
@@ -2590,7 +2587,7 @@ class _RelaySecondHopFloodClient(_RelayMediaClient):
                 account_label="secondary",
                 scope="clone-relay-target-hop",
             )
-        return super().send_file(*args, **kwargs)
+        return super().forward_messages(*args, **kwargs)
 
 
 
@@ -2728,21 +2725,28 @@ def test_clone_timeline_migration_job_copies_media_via_relay_without_attribution
             },
         )
     ]
-    assert target_client.forward_calls == []
-    assert target_client.send_file_calls == [
+    assert target_client.forward_calls == [
         (
             (
                 SimpleNamespace(id=777, title="Source Backup"),
-                target_client.source_messages[9201].media,
+                9201,
             ),
             {
-                "caption": "",
-                "formatting_entities": [],
-                "parse_mode": None,
+                "from_peer": SimpleNamespace(
+                    id=999,
+                    title="Relay Channel",
+                    creator=True,
+                    broadcast=True,
+                    megagroup=False,
+                    username="",
+                    participants_count=2,
+                ),
+                "drop_author": True,
                 "silent": True,
             },
         )
     ]
+    assert target_client.send_file_calls == []
     assert source_client.delete_calls == [
         (
             (
