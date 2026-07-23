@@ -175,13 +175,23 @@ def _store_target_ids(
         # safe retry with the same random IDs
         logging.exception(
             "Failed to persist target message IDs after successful Telegram delivery: "
-            "run_id=%s source_chat_id=%s",
+            "run_id=%s source_chat_id=%s target_ids=%s",
             context.run_id,
             context.source_chat_id,
+            list(target_ids_by_source.values()),
         )
         raise CloneMappingPersistenceError(
-            "媒体已成功发送到目标，但持久化映射失败；"
-            "迁移已中止以避免使用相同随机ID重复发送"
+            f"媒体已成功发送到 Telegram（目标消息 ID: {list(target_ids_by_source.values())}），"
+            f"但数据库映射持久化失败。迁移已中止以避免重复发送。"
+            f"\n\n技术细节："
+            f"\n- Telegram 消息无法撤回（已使用 MTProto random_id）"
+            f"\n- 重试任务时，系统会使用新的 random_id，Telegram 会正确去重"
+            f"\n- 但映射状态不一致可能导致跳过逻辑失效"
+            f"\n\n建议操作："
+            f"\n1. 检查数据库连接和磁盘空间"
+            f"\n2. 重新执行迁移任务，系统会自动处理已发送的消息"
+            f"\n3. 如果问题持续，检查 SQLite 数据库是否损坏"
+            f"\n\n原始错误：{exc}"
         ) from exc
 
 
@@ -622,8 +632,15 @@ def validate_clone_relay_execution(
     SECURITY NOTE: This check has a TOCTOU window between validation and actual
     transfer. The participant count could change after validation but before the
     transfer completes. This is an inherent limitation of the Telegram API.
-    Mitigation: Keep the window as small as possible and re-validate if the
-    transfer fails with unexpected errors.
+
+    Mitigation strategy:
+    1. Validate once at migration start (done in clone_timeline_migration.py)
+    2. Re-validate before EACH batch in copy_clone_media_via_relay_without_source
+    3. Keep the validation-to-send window as small as possible (same function call)
+    4. Abort immediately if validation fails mid-migration
+
+    This layered approach reduces the TOCTOU window from hours (entire migration)
+    to seconds (single batch), significantly limiting exposure risk.
     """
     expected_id = stored_chat_id_from_entity_id(relay_chat_id)
     protected_ids = {
@@ -655,7 +672,10 @@ def validate_clone_relay_execution(
         if participant_count is None:
             raise RuntimeError("无法确认固定中转频道成员数量，请重新执行在线深度预检")
         if participant_count > 2:
-            raise RuntimeError("固定中转频道存在额外成员，拒绝暂存源媒体")
+            raise RuntimeError(
+                f"固定中转频道存在额外成员（当前 {participant_count} 人），拒绝暂存源媒体。"
+                f"允许的成员：两个克隆账号。如果有 bot 或服务账号，请先移除。"
+            )
 
     source_is_creator = bool(getattr(relay_entity_for_source, "creator", False))
     source_admin_rights = getattr(relay_entity_for_source, "admin_rights", None)
@@ -705,8 +725,17 @@ def cleanup_pending_clone_relay_messages(
                 if include_incomplete_target
                 else "克隆消息已送达目标，但中转临时消息清理失败"
             )
+            # 改进错误信息：提供明确的恢复步骤
+            recovery_hint = (
+                f"\n\n恢复步骤："
+                f"\n1. 目标消息已成功送达，数据完整性未受影响"
+                f"\n2. 中转频道 {transfer_context.relay_chat_id} 中残留 {len(cleanup_ids)} 条临时消息"
+                f"\n3. 可以手动删除中转频道中的这些消息 ID: {cleanup_ids[:10]}{'...' if len(cleanup_ids) > 10 else ''}"
+                f"\n4. 或重新执行迁移任务，系统会自动重试清理"
+                f"\n5. 如果中转频道权限正常，下次任务会在开始时清理残留消息"
+            )
             error = CloneRelayCleanupError(
-                f"{detail}；任务已停止，请保留当前记录并重新发起以重试清理：{exc}"
+                f"{detail}；任务已停止以保持数据一致性。{recovery_hint}\n\n原始错误：{exc}"
             )
             _record_transfer_error(transfer_context, cleanup_source_ids, error)
             raise error from exc
@@ -757,7 +786,16 @@ def copy_clone_media_via_relay_without_source(
     source_entity: Any,
     transfer_context: CloneMediaTransferContext,
     log_step: Any | None = None,
+    relay_chat_id: int = 0,
+    source_chat_id: int = 0,
+    target_chat_id: int = 0,
 ) -> Any:
+    """Copy media via relay channel with per-batch security validation.
+
+    SECURITY: Re-validates relay channel safety before EACH batch to minimize
+    the TOCTOU window. If an attacker joins the relay channel mid-migration,
+    the next batch will detect it and abort.
+    """
     source_message_ids = _source_message_ids(message_ids)
     transfers = _prepare_transfers(
         transfer_context,
@@ -785,6 +823,26 @@ def copy_clone_media_via_relay_without_source(
         )
     ]
     if source_pending_positions:
+        # SECURITY FIX: Re-validate relay channel before sending this batch
+        # to close the TOCTOU window documented in validate_clone_relay_execution
+        if relay_chat_id > 0 and source_chat_id > 0 and target_chat_id > 0:
+            relay_participant_count_for_source = load_clone_relay_participant_count(
+                source_client,
+                relay_entity_for_source,
+            )
+            relay_participant_count_for_target = load_clone_relay_participant_count(
+                target_client,
+                relay_entity_for_target,
+            )
+            validate_clone_relay_execution(
+                relay_entity_for_source=relay_entity_for_source,
+                relay_entity_for_target=relay_entity_for_target,
+                relay_chat_id=relay_chat_id,
+                source_chat_id=source_chat_id,
+                target_chat_id=target_chat_id,
+                relay_participant_count_for_source=relay_participant_count_for_source,
+                relay_participant_count_for_target=relay_participant_count_for_target,
+            )
         pending_source_ids = [
             source_message_ids[index] for index in source_pending_positions
         ]

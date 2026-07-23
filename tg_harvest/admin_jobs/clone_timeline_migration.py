@@ -608,6 +608,9 @@ def _admin_clone_timeline_migration_job_runner(
                     source_entity=source_entity,
                     transfer_context=media_transfer_context,
                     log_step=lambda message: admin_job_append_log_fn(job_id, message),
+                    relay_chat_id=clone_plan_media_relay_chat_id(plan),
+                    source_chat_id=source_chat_id,
+                    target_chat_id=target_chat_id,
                 )
             return copy_clone_media_direct_without_source(
                 client=source_client,

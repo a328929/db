@@ -453,8 +453,24 @@ def _admin_clone_message_delete_job_runner(
             total = len(message_ids)
             admin_job_append_log_fn(
                 job_id,
-                "将按目标消息 ID 从小到大提交清理请求；"
-                "区间清理不会修改克隆映射，也不会触发续克隆补回。",
+                "将按目标消息 ID 从小到大提交清理请求。",
+            )
+            admin_job_append_log_fn(
+                job_id,
+                "⚠️  重要提示：区间删除不会修改克隆映射记录。"
+                "这意味着：",
+            )
+            admin_job_append_log_fn(
+                job_id,
+                "  1. 删除的克隆消息不会在续克隆时自动补回"
+            )
+            admin_job_append_log_fn(
+                job_id,
+                "  2. 如果区间包含非克隆消息（如公告、置顶），这些消息也会被删除"
+            )
+            admin_job_append_log_fn(
+                job_id,
+                "  3. 如需重新克隆这些消息，请改用'尾部回滚'模式或'完整清空'",
             )
 
         update_admin_job_progress(
