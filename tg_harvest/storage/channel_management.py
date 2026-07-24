@@ -480,7 +480,12 @@ def replace_missing_chat_scan_results(
                     clean_username(getattr(row, "chat_username", "")),
                     str(getattr(row, "chat_type", "") or ""),
                     enabled_int(getattr(row, "is_public", None)),
-                    str(getattr(row, "unavailable_reason", "") or "").strip(),
+                    # Add source account to unavailable_reason if present
+                    (
+                        f"{str(getattr(row, 'unavailable_reason', '') or '').strip()} (来源账号: {getattr(row, 'scan_source_account', '')})"
+                        if str(getattr(row, "unavailable_reason", "") or "").strip() and str(getattr(row, "scan_source_account", "") or "").strip()
+                        else str(getattr(row, "unavailable_reason", "") or "").strip()
+                    ),
                     str(getattr(row, "last_message_at", "") or ""),
                     _optional_int(getattr(row, "last_message_ts", None)),
                     str(scan_job_id or ""),

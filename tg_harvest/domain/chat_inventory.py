@@ -30,6 +30,12 @@ class ChatInventoryRow:
     unavailable_reason: str = ""
     last_message_at: str = ""
     last_message_ts: int | None = None
+    scan_source_account: str = ""
+    """Account key that observed this state (e.g., 'primary', 'secondary').
+
+    Used to distinguish between group-level unavailability (all accounts see it)
+    and account-level access failures (only specific accounts blocked).
+    """
 
 
 @dataclass(frozen=True)
@@ -234,7 +240,7 @@ def _dialog_last_message_fields(dialog: Any) -> tuple[str, int | None]:
         return str(dt), None
 
 
-def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
+def _row_from_dialog(dialog: Any, source_account: str = "") -> ChatInventoryRow | None:
     if not _is_joined_group_or_channel(dialog):
         return None
 
@@ -258,15 +264,35 @@ def _row_from_dialog(dialog: Any) -> ChatInventoryRow | None:
         unavailable_reason=_dialog_unavailable_reason(dialog),
         last_message_at=last_message_at,
         last_message_ts=last_message_ts,
+        scan_source_account=str(source_account or ""),
     )
 
 
-def load_joined_chat_inventory(dialogs: Iterable[Any]) -> list[ChatInventoryRow]:
+def load_joined_chat_inventory(dialogs: Iterable[Any], source_account: str = "") -> list[ChatInventoryRow]:
+    """Extract inventory of joined groups/channels from Telegram dialogs.
+
+    Args:
+        dialogs: Iterable of Telegram dialog objects from client.iter_dialogs().
+        source_account: Account key that performed the scan (e.g., 'primary', 'secondary').
+            Used to track which account observed unavailable states.
+
+    Returns:
+        List of ChatInventoryRow for groups/channels the account has joined.
+        Excludes:
+        - User/bot dialogs (not groups/channels)
+        - Dialogs marked as 'left' or 'deactivated'
+        - Duplicate chat IDs (keeps first occurrence)
+
+    Notes:
+        - Handles both accessible and forbidden (ChannelForbidden) chats
+        - Preserves last message timestamp when available
+        - Normalizes usernames to lowercase without '@'
+    """
     rows: list[ChatInventoryRow] = []
     seen_chat_ids: set[ChatIdentity] = set()
 
     for dialog in dialogs:
-        row = _row_from_dialog(dialog)
+        row = _row_from_dialog(dialog, source_account)
         if row is None:
             continue
         identity = chat_identity_key(row.chat_id, row.chat_type)
@@ -420,12 +446,32 @@ def unavailable_chat_risk_row(
     )
 
 
-def find_restricted_joined_chats(dialogs: Iterable[Any]) -> list[RestrictedChatInventoryRow]:
+def find_restricted_joined_chats(dialogs: Iterable[Any], source_account: str = "") -> list[RestrictedChatInventoryRow]:
+    """Find joined groups/channels with Telegram risk flags or access restrictions.
+
+    Args:
+        dialogs: Iterable of Telegram dialog objects.
+        source_account: Account key performing the scan.
+
+    Returns:
+        List of RestrictedChatInventoryRow for chats with any of:
+        - Telegram restriction reasons (porn, copyright, spam, etc.)
+        - Risk flags (restricted, scam, fake)
+        - Unavailable status (ChannelForbidden, ChatForbidden)
+
+        Sorted by: title (case-insensitive), chat_id.
+
+    Notes:
+        - Extracts restriction_reason array from entities (platform, reason, text)
+        - Merges multiple restrictions with '、' separator
+        - Sets membership_scope='joined' for all results
+        - Chats without any restrictions/risks are excluded
+    """
     rows: list[RestrictedChatInventoryRow] = []
     seen_chat_ids: set[ChatIdentity] = set()
 
     for dialog in dialogs:
-        base_row = _row_from_dialog(dialog)
+        base_row = _row_from_dialog(dialog, source_account)
         if base_row is None:
             continue
 
@@ -498,9 +544,29 @@ def find_missing_joined_chats(
     known_chat_ids: Iterable[Any],
     *,
     include_unavailable: bool = False,
+    source_account: str = "",
 ) -> list[ChatInventoryRow]:
+    """Find groups/channels the account has joined but are not in the database.
+
+    Args:
+        dialogs: Iterable of Telegram dialog objects.
+        known_chat_ids: Collection of chat IDs or (chat_type, chat_id) tuples
+            already present in the database.
+        include_unavailable: If True, include chats marked as unavailable/forbidden.
+            If False (default), only return accessible chats.
+        source_account: Account key performing the scan.
+
+    Returns:
+        Sorted list of ChatInventoryRow for joined chats missing from the database.
+        Sorted by: unavailable status (accessible first), title (case-insensitive), chat_id.
+
+    Notes:
+        - Uses identity normalization to handle Telegram's multiple ID formats
+          (positive, negative, -100 prefix)
+        - A chat is considered "known" if any of its identity candidates match
+    """
     return filter_missing_joined_rows(
-        load_joined_chat_inventory(dialogs),
+        load_joined_chat_inventory(dialogs, source_account),
         known_chat_ids,
         include_unavailable=include_unavailable,
     )
