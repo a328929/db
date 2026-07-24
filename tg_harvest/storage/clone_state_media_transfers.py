@@ -394,27 +394,47 @@ def mark_clone_media_transfer_source_hop_sent(
     if not relay_message_ids_by_source:
         return
     now = _now_iso()
+    normalized_run_id = _clean_text(run_id)
+    normalized_source_chat_id = int(source_chat_id)
+
     cur = conn.cursor()
     try:
-        for source_message_id, relay_message_id in relay_message_ids_by_source.items():
-            cur.execute(
-                """
-                UPDATE admin_clone_media_transfers
-                SET relay_message_id = ?, source_hop_status = 'sent',
-                    cleanup_status = 'pending', error_message = '', updated_at = ?
-                WHERE run_id = ? AND source_chat_id = ? AND source_message_id = ?
-                  AND transfer_strategy = 'relay'
-                """,
-                (
-                    int(relay_message_id),
-                    now,
-                    _clean_text(run_id),
-                    int(source_chat_id),
-                    int(source_message_id),
-                ),
+        # Batch update using CASE statement for better performance
+        source_ids = list(relay_message_ids_by_source.keys())
+        placeholders = ",".join("?" * len(source_ids))
+
+        # Build CASE expression for relay_message_id mapping
+        case_parts = []
+        params = []
+        for source_id, relay_id in relay_message_ids_by_source.items():
+            case_parts.append("WHEN source_message_id = ? THEN ?")
+            params.extend([int(source_id), int(relay_id)])
+
+        case_expr = f"CASE {' '.join(case_parts)} END"
+
+        # Execute batch update
+        cur.execute(
+            f"""
+            UPDATE admin_clone_media_transfers
+            SET relay_message_id = {case_expr},
+                source_hop_status = 'sent',
+                cleanup_status = 'pending',
+                error_message = '',
+                updated_at = ?
+            WHERE run_id = ? AND source_chat_id = ?
+              AND source_message_id IN ({placeholders})
+              AND transfer_strategy = 'relay'
+            """,
+            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        )
+
+        # Verify all rows were updated
+        if cur.rowcount != len(relay_message_ids_by_source):
+            raise RuntimeError(
+                f"中转第一跳状态写入失败: 预期更新 {len(relay_message_ids_by_source)} 行，"
+                f"实际更新 {cur.rowcount} 行"
             )
-            if cur.rowcount != 1:
-                raise RuntimeError("中转第一跳状态写入失败")
+
         conn.commit()
     except Exception:
         conn.rollback()
@@ -433,29 +453,45 @@ def mark_clone_media_transfer_target_hop_sent(
     if not target_message_ids_by_source:
         return
     now = _now_iso()
+    normalized_run_id = _clean_text(run_id)
+    normalized_source_chat_id = int(source_chat_id)
+
     cur = conn.cursor()
     try:
-        for (
-            source_message_id,
-            target_message_id,
-        ) in target_message_ids_by_source.items():
-            cur.execute(
-                """
-                UPDATE admin_clone_media_transfers
-                SET target_message_id = ?, target_hop_status = 'sent',
-                    error_message = '', updated_at = ?
-                WHERE run_id = ? AND source_chat_id = ? AND source_message_id = ?
-                """,
-                (
-                    int(target_message_id),
-                    now,
-                    _clean_text(run_id),
-                    int(source_chat_id),
-                    int(source_message_id),
-                ),
+        # Batch update using CASE statement for better performance
+        source_ids = list(target_message_ids_by_source.keys())
+        placeholders = ",".join("?" * len(source_ids))
+
+        # Build CASE expression for target_message_id mapping
+        case_parts = []
+        params = []
+        for source_id, target_id in target_message_ids_by_source.items():
+            case_parts.append("WHEN source_message_id = ? THEN ?")
+            params.extend([int(source_id), int(target_id)])
+
+        case_expr = f"CASE {' '.join(case_parts)} END"
+
+        # Execute batch update
+        cur.execute(
+            f"""
+            UPDATE admin_clone_media_transfers
+            SET target_message_id = {case_expr},
+                target_hop_status = 'sent',
+                error_message = '',
+                updated_at = ?
+            WHERE run_id = ? AND source_chat_id = ?
+              AND source_message_id IN ({placeholders})
+            """,
+            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        )
+
+        # Verify all rows were updated
+        if cur.rowcount != len(target_message_ids_by_source):
+            raise RuntimeError(
+                f"目标媒体状态写入失败: 预期更新 {len(target_message_ids_by_source)} 行，"
+                f"实际更新 {cur.rowcount} 行"
             )
-            if cur.rowcount != 1:
-                raise RuntimeError("目标媒体状态写入失败")
+
         conn.commit()
     except Exception:
         conn.rollback()
@@ -475,27 +511,46 @@ def mark_clone_media_transfer_target_hop_observed(
     if not target_message_ids_by_source:
         return
     now = _now_iso()
+    normalized_run_id = _clean_text(run_id)
+    normalized_source_chat_id = int(source_chat_id)
+
     cur = conn.cursor()
     try:
-        for source_message_id, target_message_id in target_message_ids_by_source.items():
-            cur.execute(
-                """
-                UPDATE admin_clone_media_transfers
-                SET target_message_id = ?, target_hop_status = 'unconfirmed',
-                    error_message = '', updated_at = ?
-                WHERE run_id = ? AND source_chat_id = ? AND source_message_id = ?
-                  AND target_hop_status != 'sent'
-                """,
-                (
-                    int(target_message_id),
-                    now,
-                    _clean_text(run_id),
-                    int(source_chat_id),
-                    int(source_message_id),
-                ),
+        # Batch update using CASE statement for better performance
+        source_ids = list(target_message_ids_by_source.keys())
+        placeholders = ",".join("?" * len(source_ids))
+
+        # Build CASE expression for target_message_id mapping
+        case_parts = []
+        params = []
+        for source_id, target_id in target_message_ids_by_source.items():
+            case_parts.append("WHEN source_message_id = ? THEN ?")
+            params.extend([int(source_id), int(target_id)])
+
+        case_expr = f"CASE {' '.join(case_parts)} END"
+
+        # Execute batch update
+        cur.execute(
+            f"""
+            UPDATE admin_clone_media_transfers
+            SET target_message_id = {case_expr},
+                target_hop_status = 'unconfirmed',
+                error_message = '',
+                updated_at = ?
+            WHERE run_id = ? AND source_chat_id = ?
+              AND source_message_id IN ({placeholders})
+              AND target_hop_status != 'sent'
+            """,
+            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        )
+
+        # Verify all rows were updated
+        if cur.rowcount != len(target_message_ids_by_source):
+            raise RuntimeError(
+                f"目标媒体待确认状态写入失败: 预期更新 {len(target_message_ids_by_source)} 行，"
+                f"实际更新 {cur.rowcount} 行"
             )
-            if cur.rowcount != 1:
-                raise RuntimeError("目标媒体待确认状态写入失败")
+
         conn.commit()
     except Exception:
         conn.rollback()

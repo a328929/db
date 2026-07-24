@@ -490,6 +490,21 @@ def _admin_job_update_progress(
         owner_pid = os.getpid()
         owner_host = _job_runtime._admin_runtime_host()
 
+        # Determine if we should log before opening connection
+        if isinstance(log_step, int) and log_step > 0:
+            on_step = safe_current > 0 and safe_current % log_step == 0
+        else:
+            on_step = False
+        is_final = isinstance(progress_total, int) and safe_current >= progress_total
+        should_log = (
+            auto_log
+            and (force_log or on_step or is_final)
+            and safe_current != last_logged_current
+        )
+
+        # Update last_logged_current in single transaction if logging
+        new_last_logged = safe_current if should_log else last_logged_current
+
         with closing(_admin_connect()) as conn:
             cur = conn.cursor()
             try:
@@ -511,7 +526,7 @@ def _admin_job_update_progress(
                         safe_current,
                         progress_total,
                         progress_stage,
-                        last_logged_current,
+                        new_last_logged,
                         updated_at,
                         owner_instance_id,
                         int(owner_pid),
@@ -528,53 +543,17 @@ def _admin_job_update_progress(
         if not updated:
             return False
 
-        if isinstance(log_step, int) and log_step > 0:
-            on_step = safe_current > 0 and safe_current % log_step == 0
-        else:
-            on_step = False
-        is_final = isinstance(progress_total, int) and safe_current >= progress_total
-        should_log = force_log or on_step or is_final
-
-        if not auto_log or not should_log or safe_current == last_logged_current:
-            return True
-
-        if isinstance(progress_total, int):
-            log_message = f"正在抓取消息（占位）：第 {safe_current}/{progress_total} 条"
-        else:
-            log_message = f"正在抓取消息（占位）：第 {safe_current} 条"
-        stage_display = _job_runtime.ADMIN_JOB_STATUS_DISPLAY_MAP.get(
-            progress_stage, progress_stage
-        )
-        stage_prefix = f"[{stage_display}] " if stage_display else ""
-        _admin_job_append_log(job_id, f"{stage_prefix}{log_message}")
-
-        with closing(_admin_connect()) as conn:
-            cur = conn.cursor()
-            try:
-                cur.execute(
-                    """
-                    UPDATE admin_jobs
-                    SET last_logged_current = ?,
-                        updated_at = ?,
-                        owner_instance_id = ?,
-                        owner_pid = ?,
-                        owner_host = ?,
-                        heartbeat_at = ?
-                    WHERE job_id = ?
-                    """,
-                    (
-                        safe_current,
-                        _job_runtime._admin_now_iso(),
-                        owner_instance_id,
-                        int(owner_pid),
-                        owner_host,
-                        _job_runtime._admin_now_iso(),
-                        job_id,
-                    ),
-                )
-                conn.commit()
-            finally:
-                cur.close()
+        # Append log message if needed (after successful DB update)
+        if should_log:
+            if isinstance(progress_total, int):
+                log_message = f"正在抓取消息（占位）：第 {safe_current}/{progress_total} 条"
+            else:
+                log_message = f"正在抓取消息（占位）：第 {safe_current} 条"
+            stage_display = _job_runtime.ADMIN_JOB_STATUS_DISPLAY_MAP.get(
+                progress_stage, progress_stage
+            )
+            stage_prefix = f"[{stage_display}] " if stage_display else ""
+            _admin_job_append_log(job_id, f"{stage_prefix}{log_message}")
         return True
 
 
