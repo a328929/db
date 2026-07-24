@@ -72,6 +72,7 @@ bash start_web.sh
 - Web 服务默认监听 `8890` 端口。
 - 应用首次请求或直接运行 `python3 -m tg_harvest web` 时会自动初始化数据库结构与 Manticore 增量同步。
 - 搜索结果支持全量分页返回，不会把总结果数硬裁到 5000/10000。
+- **搜索语法**：查看 [docs/search-syntax.md](docs/search-syntax.md) 了解布尔运算符、通配符、短语搜索等高级用法。
 - 后台管理页面需要先访问 `/admin/login` 完成登录；后台写操作使用登录态绑定的 CSRF token 防护。公网部署时建议放在 HTTPS、内网/VPN 或反向代理鉴权之后，并设置 `TG_REQUIRE_SECURE_CONFIG=1`。
 
 ## Manticore 搜索后端

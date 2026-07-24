@@ -572,11 +572,15 @@
 
     if (!resp.ok) {
       let errorMessage = `错误 ${resp.status}: `;
+      let shouldRetry = false;
+      let retryDelay = 0;
 
       if (resp.status === 429) {
           errorMessage = "搜索太频繁啦，请稍等一分钟再试。";
       } else if (resp.status === 500 || resp.status === 503) {
-          errorMessage = "数据库忙或采集任务正在进行中，请 15 秒后再试。";
+          errorMessage = "数据库繁忙，将在 15 秒后自动重试...";
+          shouldRetry = true;
+          retryDelay = 15000;
       } else {
           try {
             const errorPayload = await resp.json();
@@ -589,7 +593,12 @@
             errorMessage += "未知错误";
           }
       }
-      throw new Error(errorMessage);
+
+      const error = new Error(errorMessage);
+      error.shouldRetry = shouldRetry;
+      error.retryDelay = retryDelay;
+      error.statusCode = resp.status;
+      throw error;
     }
 
     return resp.json();
@@ -709,9 +718,72 @@
       _fetchAndApplyCountInBackground(searchId, { ...data });
 
     } catch (err) {
-      if (searchId === currentSearchId) {
+      if (searchId !== currentSearchId) return;
+
+      // 检查是否需要自动重试（503错误）
+      if (err.shouldRetry && err.retryDelay) {
         _handleSearchError(err);
+
+        // 延迟后自动重试一次
+        setTimeout(async () => {
+          // 确保在重试时searchId仍然有效
+          if (searchId !== currentSearchId) return;
+
+          setStatus("正在自动重试...");
+          _setSearchLoading(true);
+
+          try {
+            const payload = _buildSearchRequestPayload();
+            payload.skip_count = true;
+            const data = await _fetchSearchResult(payload);
+
+            if (searchId !== currentSearchId) return;
+
+            if ((!data.items || data.items.length === 0) && Number(data.total || 0) <= 0) {
+              data.total = 0;
+              data.total_pages = 0;
+              _setCachedCount(data);
+              _handleSearchSuccess(data, false);
+              return;
+            }
+
+            const hasManticoreCount =
+              data.search_backend === "manticore" && Number.isFinite(Number(data.total)) &&
+              Number(data.total) >= 0;
+            if (hasManticoreCount) {
+              _setCachedCount(data);
+              _handleSearchSuccess(data, false);
+              return;
+            }
+
+            _handleSearchSuccess(data, true);
+
+            const cachedCount = _getCachedCount(data.data_version);
+            if (cachedCount) {
+              data.total = cachedCount.total;
+              data.total_pages = cachedCount.total_pages;
+              data.total_is_capped = cachedCount.total_is_capped;
+              data.chat_facets = cachedCount.chat_facets || [];
+              applyCountToRenderedResults(data);
+              return;
+            }
+
+            _fetchAndApplyCountInBackground(searchId, { ...data });
+
+          } catch (retryErr) {
+            if (searchId !== currentSearchId) return;
+            _handleSearchError(retryErr);
+          } finally {
+            if (searchId === currentSearchId) {
+              _setSearchLoading(false);
+            }
+          }
+        }, err.retryDelay);
+
+        return;
       }
+
+      _handleSearchError(err);
     } finally {
       // 仅在未提前释放交互锁时才在这里恢复 UI。
       if (!loadingReleased && searchId === currentSearchId) {

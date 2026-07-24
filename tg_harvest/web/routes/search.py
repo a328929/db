@@ -7,6 +7,7 @@ from typing import Any
 
 from flask import jsonify, request
 
+from tg_harvest.web.ip_utils import get_client_ip
 from tg_harvest.web.responses import json_error, logged_json_error, require_json_dict
 
 # 简单的 IP 限流字典：{bucket:ip: deque([timestamps])}
@@ -96,7 +97,7 @@ def register_search_routes(
 
         # 前端一次可见搜索会再发起一次 count_only 后台统计；它不应额外消耗用户搜索额度。
         # 但 count_only 仍会触发数据库统计，必须单独限流，避免被直接调用拖垮数据库。
-        ip = request.remote_addr or "unknown"
+        ip = get_client_ip(request)
         rate_bucket = (
             "count_only" if _request_flag_is_true(data.get("count_only")) else "search"
         )

@@ -24,12 +24,30 @@ def _escape_match_text(value: str) -> str:
 def _compile_match_term(node: SearchExprNode) -> str:
     value = str(node.value or "")
     escaped = _escape_match_text(value)
+
+    # 短语、中文或包含空格：使用精确短语匹配
     if node.kind == "PHRASE" or _CJK_RE.search(value) or any(ch.isspace() for ch in value):
         return f'"{escaped}"'
+
+    # 检查用户是否显式使用通配符
+    has_user_wildcard = "*" in value or "?" in value
+
+    # 如果用户已指定通配符，保留它们（不转义）
+    if has_user_wildcard:
+        # 只转义 % (Manticore特殊字符)，保留 * 和 ?
+        escaped = escaped.replace("%", "\\%")
+        return escaped
+
+    # 用户未指定通配符：转义所有特殊字符，使用精确匹配
     escaped = escaped.replace("*", "\\*").replace("?", "\\?").replace("%", "\\%")
+
+    # 单字符词：精确匹配
     if len(value) < 2:
         return escaped
-    return f"*{escaped}*"
+
+    # 普通词：默认精确匹配（不自动添加通配符）
+    # 用户如需模糊匹配，可以手动输入 test* 或 *test* 或 *test
+    return escaped
 
 
 def compile_manticore_match(expr: SearchExprNode | None) -> str:
