@@ -14,6 +14,7 @@ from tg_harvest.admin_jobs.clone_job_state import (
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    cfg_with_session_name,
     finish_job_heartbeat,
     mark_admin_job_running,
     start_admin_job_heartbeat,
@@ -61,17 +62,6 @@ def normalize_clone_target_title(raw_title: Any, *, fallback_title: str) -> str:
     return title or "克隆副本"
 
 
-def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
-    values = dict(getattr(cfg, "__dict__", {}) or {})
-    if not values:
-        values = {
-            "api_id": getattr(cfg, "api_id", 0),
-            "api_hash": getattr(cfg, "api_hash", ""),
-        }
-    values["session_name"] = session_name
-    return SimpleNamespace(**values)
-
-
 def _secondary_cfg_or_error(cfg: Any) -> Any:
     primary_session_name = str(getattr(cfg, "session_name", "") or "").strip()
     secondary_session_name = str(getattr(cfg, "secondary_session_name", "") or "").strip()
@@ -79,7 +69,7 @@ def _secondary_cfg_or_error(cfg: Any) -> Any:
         raise RuntimeError("未配置 TG_SECONDARY_SESSION_NAME，无法由第二账号创建副本")
     if secondary_session_name == primary_session_name:
         raise RuntimeError("第二账号 session 与主账号相同，无法作为独立克隆目标账号")
-    return _cfg_with_session_name(cfg, secondary_session_name)
+    return cfg_with_session_name(cfg, secondary_session_name)
 
 
 def _clone_about(source_chat: dict[str, Any]) -> str:

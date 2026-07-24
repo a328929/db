@@ -219,7 +219,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self,
     ) -> None:
         per_account, effective = _admin_update_effective_concurrency(
-            SimpleNamespace(),
             configured_concurrency=4,
             active_account_count=2,
         )
@@ -227,7 +226,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertEqual(2, effective)
 
         per_account, effective = _admin_update_effective_concurrency(
-            SimpleNamespace(),
             configured_concurrency=4,
             active_account_count=1,
         )
@@ -469,7 +467,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-1",
-                None,
                 lambda: _FakeConn(rows),
                 append_log,
                 cfg,
@@ -565,7 +562,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-1",
-                None,
                 lambda: _FakeConn(rows),
                 append_log,
                 cfg,
@@ -653,7 +649,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-probe-small",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -745,7 +740,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-probe-large",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -854,7 +848,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-accounts",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -963,7 +956,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-public-plan",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1072,7 +1064,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-fallback",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1182,7 +1173,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-primary-general-fallback",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1436,7 +1426,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-secondary-limited-username",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1540,7 +1529,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-secondary-defaults-to-cache-only",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1649,7 +1637,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-primary-flood",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1767,7 +1754,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-primary-takeover-budget",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1882,7 +1868,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-secondary-username-gap",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -1996,7 +1981,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-short-cooldown",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -2178,7 +2162,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-long-cooldown",
-                None,
                 lambda: _FakeConn(rows),
                 lambda _job_id, message: logs.append(str(message)),
                 cfg,
@@ -2266,7 +2249,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-1",
-                None,
                 lambda: _FakeConn(rows),
                 append_log,
                 cfg,
@@ -2341,7 +2323,6 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         ):
             ok = _admin_update_all_chats(
                 "job-1",
-                None,
                 lambda: _FakeConn(rows),
                 append_log,
                 cfg,

@@ -9,6 +9,7 @@ from typing import Any
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
+    cfg_with_session_name,
     classify_chat_access_failure,
     finish_job_heartbeat,
     mark_admin_job_running,
@@ -371,17 +372,6 @@ class _ScanAccount:
     cfg: Any
 
 
-def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
-    values = dict(getattr(cfg, "__dict__", {}) or {})
-    if not values:
-        values = {
-            "api_id": getattr(cfg, "api_id", 0),
-            "api_hash": getattr(cfg, "api_hash", ""),
-        }
-    values["session_name"] = session_name
-    return SimpleNamespace(**values)
-
-
 def _scan_accounts(cfg: Any) -> list[_ScanAccount]:
     accounts = [_ScanAccount(key="primary", label="主账号", cfg=cfg)]
     primary_session_name = str(getattr(cfg, "session_name", "") or "").strip()
@@ -393,7 +383,7 @@ def _scan_accounts(cfg: Any) -> list[_ScanAccount]:
             _ScanAccount(
                 key="secondary",
                 label="第二账号",
-                cfg=_cfg_with_session_name(cfg, secondary_session_name),
+                cfg=cfg_with_session_name(cfg, secondary_session_name),
             )
         )
     return accounts

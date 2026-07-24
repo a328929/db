@@ -5,13 +5,13 @@ from typing import Any
 
 from telethon.tl.functions.channels import DeleteChannelRequest
 
-from tg_harvest.admin_jobs.clone import _cfg_with_session_name
 from tg_harvest.admin_jobs.clone_target_access import (
     clone_run_target_conflicts_with_source,
     clone_run_target_input_channel,
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
+    cfg_with_session_name,
     finish_job_heartbeat,
     mark_admin_job_running,
     start_admin_job_heartbeat,
@@ -43,9 +43,9 @@ def _target_owner_cfg(cfg: Any, target_owner_session: Any) -> Any | None:
     if not owner_session:
         owner_session = secondary_session
     if owner_session and owner_session == primary_session:
-        return _cfg_with_session_name(cfg, primary_session)
+        return cfg_with_session_name(cfg, primary_session)
     if owner_session and owner_session == secondary_session:
-        return _cfg_with_session_name(cfg, secondary_session)
+        return cfg_with_session_name(cfg, secondary_session)
     return None
 
 

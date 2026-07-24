@@ -21,6 +21,7 @@ from tg_harvest.admin_jobs.cleanup import (
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
+    cfg_with_session_name,
     classify_chat_access_failure,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
@@ -51,6 +52,7 @@ from tg_harvest.admin_jobs.sessions import (
 from tg_harvest.admin_jobs.streaming import stream_entity_harvest_to_writer
 from tg_harvest.admin_jobs.update_writer import ChatUpdateWriteCoordinator
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
+from tg_harvest.domain.chat_titles import chat_title_or_fallback
 from tg_harvest.domain.coerce import clean_username, optional_int, safe_int
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
@@ -223,16 +225,9 @@ def _row_value(row: Any, key: str, default: Any = None) -> Any:
     return default if value is None else value
 
 
-def _chat_title_fallback(chat_id: Any, chat_title: Any) -> str:
-    title = str(chat_title or "").strip()
-    if title:
-        return title
-    chat_id_text = str(chat_id or "").strip()
-    return f"Chat {chat_id_text}" if chat_id_text else "未知群组"
-
-
 def _chat_log_label(chat_id: Any, chat_title: Any) -> str:
-    title = _chat_title_fallback(chat_id, chat_title)
+    """Format a chat for logging with title and ID."""
+    title = chat_title_or_fallback(safe_int(chat_id), chat_title)
     chat_id_text = str(chat_id or "").strip()
     if not chat_id_text:
         return title
@@ -292,7 +287,7 @@ def _admin_update_account_plan(
         )
         return accounts
 
-    secondary_cfg = _cfg_with_session_name(cfg, secondary_session_name)
+    secondary_cfg = cfg_with_session_name(cfg, secondary_session_name)
     if not _ensure_base_session_valid(secondary_cfg, job_id, admin_job_append_log_fn):
         admin_job_append_log_fn(
             job_id,
@@ -577,12 +572,10 @@ def _build_admin_update_account_assignments(
 
 
 def _admin_update_effective_concurrency(
-    cfg: Any,
     *,
     configured_concurrency: int,
     active_account_count: int,
 ) -> tuple[int, int]:
-    _ = cfg
     if int(active_account_count) > 1:
         # 双账号批量更新时限制为单账号单线程，避免同一账号并行切群造成请求突刺。
         per_account_limit = 1
@@ -806,7 +799,7 @@ def _load_admin_update_rows(conn: Any) -> list[Any]:
 
 
 def _admin_update_all_chats(
-    job_id, _ignored_client, get_conn_fn, admin_job_append_log_fn, cfg
+    job_id, get_conn_fn, admin_job_append_log_fn, cfg
 ):
     if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
         return False
@@ -865,7 +858,6 @@ def _admin_update_all_chats(
     except (TypeError, ValueError):
         configured_concurrency = 5
     per_account_concurrency, effective_concurrency = _admin_update_effective_concurrency(
-        cfg,
         configured_concurrency=configured_concurrency,
         active_account_count=len(account_plan),
     )
@@ -1328,8 +1320,8 @@ def _admin_update_all_chats(
         job_context.set(str(job_id))
         passthrough_token = job_log_passthrough_enabled.set(False)
         raw_chat_id = _row_value(row, "chat_id", "")
-        current_chat_title = _chat_title_fallback(
-            raw_chat_id, _row_value(row, "chat_title", "")
+        current_chat_title = chat_title_or_fallback(
+            safe_int(raw_chat_id), _row_value(row, "chat_title", "")
         )
         current_chat_label = _chat_log_label(raw_chat_id, current_chat_title)
         current_chat_username = _row_value(row, "chat_username", None)
@@ -1489,8 +1481,8 @@ def _admin_update_all_chats(
                     except Exception as e:
                         failed_count += 1
                         raw_chat_id = _row_value(row, "chat_id", "")
-                        chat_title = _chat_title_fallback(
-                            raw_chat_id, _row_value(row, "chat_title", "")
+                        chat_title = chat_title_or_fallback(
+                            safe_int(raw_chat_id), _row_value(row, "chat_title", "")
                         )
                         chat_label = _chat_log_label(raw_chat_id, chat_title)
                         err_msg = admin_error_message(e)
@@ -1711,7 +1703,7 @@ def _run_single_chat_update_with_account_fallback(
     ):
         raise primary_exc
 
-    secondary_cfg = _cfg_with_session_name(cfg, secondary_session_name)
+    secondary_cfg = cfg_with_session_name(cfg, secondary_session_name)
     if not _ensure_base_session_valid(secondary_cfg, job_id, admin_job_append_log_fn):
         raise primary_exc
 
@@ -1813,17 +1805,6 @@ def _probe_update_progress_total(
 
     logging.info("%s 探测到最新消息 ID=%s", chat_label, latest_message_id)
     return latest_message_id
-
-
-def _cfg_with_session_name(cfg: Any, session_name: str) -> Any:
-    values = dict(getattr(cfg, "__dict__", {}) or {})
-    if not values:
-        values = {
-            "api_id": getattr(cfg, "api_id", 0),
-            "api_hash": getattr(cfg, "api_hash", ""),
-        }
-    values["session_name"] = session_name
-    return SimpleNamespace(**values)
 
 
 def _entity_identity(entity: Any) -> int:
@@ -2133,7 +2114,7 @@ def _resolve_harvest_targets(
             raise primary_flood_wait_exc
         return _HarvestTargetResolution([], [])
 
-    secondary_cfg = _cfg_with_session_name(cfg, secondary_session_name)
+    secondary_cfg = cfg_with_session_name(cfg, secondary_session_name)
     if not _ensure_base_session_valid(secondary_cfg, job_id, admin_job_append_log_fn):
         admin_job_append_log_fn(
             job_id,
@@ -2356,7 +2337,7 @@ def _try_stream_new_chat_multi_account_ranges(
         )
         return False
 
-    secondary_cfg = _cfg_with_session_name(cfg, secondary_session_name)
+    secondary_cfg = cfg_with_session_name(cfg, secondary_session_name)
     if not _ensure_base_session_valid(secondary_cfg, job_id, admin_job_append_log_fn):
         admin_job_append_log_fn(
             job_id,
@@ -2495,7 +2476,7 @@ def _resolve_new_chat_fallback_target(
         if not secondary_session_name or secondary_session_name == primary_session_name:
             raise RuntimeError("未配置可用第二账号，无法切换账号继续新增采集")
 
-        secondary_cfg = _cfg_with_session_name(cfg, secondary_session_name)
+        secondary_cfg = cfg_with_session_name(cfg, secondary_session_name)
         secondary_account = SimpleNamespace(
             key="secondary", label="第二账号", cfg=secondary_cfg
         )
@@ -2947,7 +2928,7 @@ def _admin_update_job_runner(
         admin_job_append_log_fn(job_id, "会话验证通过，正在建立 Telegram 连接...")
         if is_all_scope:
             all_ok = _admin_update_all_chats(
-                job_id, None, get_conn_fn, admin_job_append_log_fn, cfg
+                job_id, get_conn_fn, admin_job_append_log_fn, cfg
             )
             if not all_ok:
                 _mark_admin_job_error_best_effort(
@@ -3242,23 +3223,6 @@ def _clear_sync_scheduler_state_for_chat_targets(cur: Any, target_table: str) ->
             )
             """
         )
-
-
-def _delete_from_optional_message_pk_targets_table(
-    cur: Any, table_name: str, target_table: str
-) -> int:
-    if not _optional_table_exists(cur, table_name):
-        return 0
-    cur.execute(
-        f"""
-        DELETE FROM {table_name}
-        WHERE pk IN (
-            SELECT pk
-            FROM {target_table}
-        )
-        """
-    )
-    return int(cur.rowcount or 0)
 
 
 def _prepare_delete_chat_message_targets(cur: Any, chat_id: int) -> int:

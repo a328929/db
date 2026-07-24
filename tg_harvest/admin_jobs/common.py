@@ -1,5 +1,6 @@
 import threading
 from collections.abc import Callable
+from types import SimpleNamespace
 from typing import Any
 
 from tg_harvest.admin_jobs.core import (
@@ -198,3 +199,19 @@ def read_chat_username(
         return str(username) if username else None
     except Exception:
         return None
+
+
+def cfg_with_session_name(cfg: Any, session_name: str) -> Any:
+    """Create a new config object with a different session name.
+
+    This is the canonical implementation used across all admin jobs.
+    Consolidates duplicate implementations from runners.py, clone.py, and channel_inventory.py.
+    """
+    values = dict(getattr(cfg, "__dict__", {}) or {})
+    if not values:
+        values = {
+            "api_id": getattr(cfg, "api_id", 0),
+            "api_hash": getattr(cfg, "api_hash", ""),
+        }
+    values["session_name"] = session_name
+    return SimpleNamespace(**values)

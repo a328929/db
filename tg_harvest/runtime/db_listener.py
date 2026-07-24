@@ -15,11 +15,14 @@ from typing import Any
 
 from telethon import events
 
-from tg_harvest.admin_jobs.common import admin_error_message, resolve_chat_entity
+from tg_harvest.admin_jobs.common import (
+    admin_error_message,
+    cfg_with_session_name,
+    resolve_chat_entity,
+)
 from tg_harvest.admin_jobs.runners import (
     _account_cooldown_remaining,
     _admin_process_single_chat_update,
-    _cfg_with_session_name,
     _create_isolated_worker_client,
     _ensure_base_session_valid,
     _read_session_cached_chat_ids,
@@ -1204,7 +1207,7 @@ class DatabaseChatListenerRuntime:
         ).strip()
         primary_session_name = accounts[0].session_name
         if secondary_session_name and secondary_session_name != primary_session_name:
-            secondary_cfg = _cfg_with_session_name(self._cfg, secondary_session_name)
+            secondary_cfg = cfg_with_session_name(self._cfg, secondary_session_name)
             accounts.append(
                 _ListenerAccount(
                     key="secondary",

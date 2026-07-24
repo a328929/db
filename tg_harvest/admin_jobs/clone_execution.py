@@ -1,6 +1,6 @@
 from typing import Any
 
-from tg_harvest.admin_jobs.clone import _cfg_with_session_name
+from tg_harvest.admin_jobs.common import cfg_with_session_name
 from tg_harvest.admin_jobs.sessions import bind_client_event_loop
 from tg_harvest.domain.clone_plan import CLONE_TEXT_REPLAY_CHUNK_MAX_LEN
 from tg_harvest.domain.coerce import clean_text as clean_clone_text
@@ -34,10 +34,10 @@ def clone_cfg_for_account(cfg: Any, account: str) -> Any:
             raise RuntimeError("计划要求第二账号执行迁移，但未配置第二账号 session")
         if secondary_session_name == primary_session_name:
             raise RuntimeError("第二账号 session 与主账号相同，不能作为独立迁移账号")
-        return _cfg_with_session_name(cfg, secondary_session_name)
+        return cfg_with_session_name(cfg, secondary_session_name)
     if not primary_session_name:
         raise RuntimeError("计划要求主账号执行迁移，但未配置主账号 session")
-    return _cfg_with_session_name(cfg, primary_session_name)
+    return cfg_with_session_name(cfg, primary_session_name)
 
 
 def split_clone_text_chunks(text: str) -> list[str]:

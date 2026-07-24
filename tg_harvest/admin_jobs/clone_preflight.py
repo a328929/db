@@ -3,7 +3,6 @@ from collections.abc import Callable
 from contextlib import suppress
 from typing import Any
 
-from tg_harvest.admin_jobs.clone import _cfg_with_session_name
 from tg_harvest.admin_jobs.clone_job_state import (
     _clean_text,
     _load_required_record,
@@ -16,6 +15,7 @@ from tg_harvest.admin_jobs.clone_media_copy import (
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
     call_with_conn,
+    cfg_with_session_name,
     finish_job_heartbeat,
     is_entity_lookup_miss_error,
     mark_admin_job_running,
@@ -710,7 +710,7 @@ def _load_clone_run_required(
 
 
 def _primary_cfg(cfg: Any) -> Any:
-    return _cfg_with_session_name(cfg, _clean_text(getattr(cfg, "session_name", "")))
+    return cfg_with_session_name(cfg, _clean_text(getattr(cfg, "session_name", "")))
 
 
 def _secondary_cfg(cfg: Any) -> Any | None:
@@ -718,7 +718,7 @@ def _secondary_cfg(cfg: Any) -> Any | None:
     secondary_session_name = _clean_text(getattr(cfg, "secondary_session_name", ""))
     if not secondary_session_name or secondary_session_name == primary_session_name:
         return None
-    return _cfg_with_session_name(cfg, secondary_session_name)
+    return cfg_with_session_name(cfg, secondary_session_name)
 
 
 def _admin_clone_deep_preflight_job_runner(
