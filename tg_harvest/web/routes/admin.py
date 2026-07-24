@@ -22,7 +22,7 @@ class AdminRoutesHandler:
         self,
         *,
         services: AdminRouteServices,
-    ):
+    ) -> None:
         self.services = services
         self.logger = services.logger
         self.cfg = services.cfg
@@ -78,10 +78,10 @@ class AdminRoutesHandler:
         self.admin_harvest_target_max_len = services.admin_harvest_target_max_len
         self.admin_cleanup_keyword_max_len = services.admin_cleanup_keyword_max_len
 
-    def _json_error(self, message: str, status_code: int):
+    def _json_error(self, message: str, status_code: int) -> Any:
         return json_error(message, status_code)
 
-    def _require_json_dict(self):
+    def _require_json_dict(self) -> dict[str, Any]:
         return require_json_dict()
 
     def _create_started_exclusive_job_response(
@@ -93,7 +93,7 @@ class AdminRoutesHandler:
         initial_logs: tuple[str, ...] | list[str] = (),
         start_job_fn,
         response_extra: dict[str, Any] | None = None,
-    ):
+    ) -> Any:
         return create_started_exclusive_job_response(
             self.admin_try_create_exclusive_job_fn,
             self.admin_job_get_snapshot_fn,
@@ -107,7 +107,7 @@ class AdminRoutesHandler:
             response_extra=response_extra,
         )
 
-    def _load_chat_brief_or_response(self, chat_id: int):
+    def _load_chat_brief_or_response(self, chat_id: int) -> tuple[dict[str, Any] | None, Any]:
         try:
             with closing(self.get_conn_fn()) as conn:
                 chat_brief = self.admin_get_chat_brief_fn(conn, int(chat_id))
@@ -122,7 +122,7 @@ class AdminRoutesHandler:
             return None, self._json_error("chat_id 不存在", 404)
         return chat_brief, None
 
-    def _resolve_chat_target_or_response(self, raw_chat_id: Any):
+    def _resolve_chat_target_or_response(self, raw_chat_id: Any) -> tuple[int | None, str | None, Any]:
         try:
             chat_id = int(raw_chat_id)
         except (TypeError, ValueError):
@@ -133,7 +133,7 @@ class AdminRoutesHandler:
             return None, None, error_response
         return chat_id, str(chat_brief["chat_title"]), None
 
-    def _resolve_scope_target_or_response(self, data: dict):
+    def _resolve_scope_target_or_response(self, data: dict) -> tuple[str | None, int | None, str | None, Any]:
         raw_scope = data.get("scope", "")
         scope = str(raw_scope or "").strip().lower()
         if scope not in {"all", "chat"}:
@@ -151,13 +151,13 @@ class AdminRoutesHandler:
             return None, None, None, error_response
         return scope, chat_id, chat_title, None
 
-    def _require_confirmation(self, data: dict, expected: str):
+    def _require_confirmation(self, data: dict, expected: str) -> Any | None:
         supplied = str(data.get("confirm") or "").strip()
         if supplied != expected:
             return self._json_error("confirm 参数不匹配", 400)
         return None
 
-    def _resolve_harvest_target_or_response(self, data: dict):
+    def _resolve_harvest_target_or_response(self, data: dict) -> tuple[str | None, Any]:
         raw_target = data.get("target", "")
         if not isinstance(raw_target, str):
             return None, self._json_error("target 参数必须为字符串", 400)
@@ -187,7 +187,7 @@ class AdminRoutesHandler:
         ]
 
     @admin_login_required
-    def api_admin_chats(self):
+    def api_admin_chats(self) -> Any:
         try:
             with closing(self.get_conn_fn()) as conn:
                 payload = self.build_admin_chats_payload_fn(conn)
@@ -200,7 +200,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_stats(self):
+    def api_admin_stats(self) -> Any:
         try:
             chat_id = self.parse_admin_chat_id_fn(request.args.get("chat_id"))
         except (ValueError, TypeError):
@@ -218,7 +218,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_sync_stats(self):
+    def api_admin_sync_stats(self) -> Any:
         try:
             with closing(self.get_conn_fn()) as conn:
                 payload = self.build_admin_sync_stats_payload_fn(
@@ -234,7 +234,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_sync_live_messages(self):
+    def api_admin_sync_live_messages(self) -> Any:
         raw_limit = str(request.args.get("limit", "") or "").strip()
         try:
             limit = int(raw_limit) if raw_limit else 50
@@ -258,7 +258,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_storage_health(self):
+    def api_admin_storage_health(self) -> Any:
         if self.build_admin_storage_health_payload_fn is None:
             return self._json_error("数据库健康状态未配置", 503)
         try:
@@ -276,7 +276,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_sync_diagnose(self):
+    def api_admin_sync_diagnose(self) -> Any:
         try:
             payload = self.trigger_sync_remediation_fn()
             status_code = 200 if bool(payload.get("ok")) else 503
@@ -286,7 +286,7 @@ class AdminRoutesHandler:
             return self._json_error("执行消息同步诊断失败", 500)
 
     @admin_login_required
-    def api_admin_sync_scheduler(self):
+    def api_admin_sync_scheduler(self) -> Any:
         try:
             health_snapshot = self.get_sync_health_snapshot_fn()
             with closing(self.get_conn_fn()) as conn:
@@ -303,7 +303,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_sync_chats(self):
+    def api_admin_sync_chats(self) -> Any:
         raw_limit = str(request.args.get("limit", "") or "").strip()
         raw_offset = str(request.args.get("offset", "") or "").strip()
         try:
@@ -329,7 +329,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_sync_chat_probe(self, chat_id: int):
+    def api_admin_sync_chat_probe(self, chat_id: int) -> Any:
         try:
             safe_chat_id = int(chat_id)
         except (TypeError, ValueError):
@@ -348,7 +348,7 @@ class AdminRoutesHandler:
             return self._json_error("执行单群同步调度诊断失败", 500)
 
     @admin_login_required
-    def api_admin_sync_model_reset(self):
+    def api_admin_sync_model_reset(self) -> Any:
         try:
             with closing(self.get_conn_fn()) as conn:
                 payload = sync_scheduler.reset_model_state(conn)
@@ -361,14 +361,14 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_job_snapshot(self, job_id: str):
+    def api_admin_job_snapshot(self, job_id: str) -> Any:
         snapshot = self.admin_job_get_snapshot_fn(job_id)
         if snapshot is None:
             return self._json_error("任务不存在", 404)
         return jsonify({"ok": True, "job": snapshot})
 
     @admin_login_required
-    def api_admin_job_logs(self, job_id: str):
+    def api_admin_job_logs(self, job_id: str) -> Any:
         raw_after_seq = (request.args.get("after_seq") or "").strip()
         try:
             after_seq = int(raw_after_seq) if raw_after_seq else 0
@@ -385,7 +385,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_active_job(self):
+    def api_admin_active_job(self) -> Any:
         active_job = self.admin_get_active_job_fn()
         if active_job is None:
             return jsonify({"ok": True, "job": None})
@@ -395,7 +395,7 @@ class AdminRoutesHandler:
         return jsonify({"ok": True, "job": snapshot or active_job})
 
     @admin_login_required
-    def api_admin_job_stop(self, job_id: str):
+    def api_admin_job_stop(self, job_id: str) -> Any:
         snapshot = self.admin_job_get_snapshot_fn(job_id)
         if snapshot is None:
             return self._json_error("任务不存在", 404)
@@ -414,7 +414,7 @@ class AdminRoutesHandler:
         return jsonify({"ok": True, "job": snapshot})
 
     @admin_login_required
-    def api_admin_job_create_harvest(self):
+    def api_admin_job_create_harvest(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response
@@ -440,7 +440,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_job_create_update(self):
+    def api_admin_job_create_update(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response
@@ -498,7 +498,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_update_preflight(self):
+    def api_admin_update_preflight(self) -> Any:
         raw_chat_id = str(request.args.get("chat_id", "all") or "all").strip()
         if not raw_chat_id:
             raw_chat_id = "all"
@@ -522,7 +522,7 @@ class AdminRoutesHandler:
             return self._json_error("系统异常", 500)
 
     @admin_login_required
-    def api_admin_job_create_delete(self):
+    def api_admin_job_create_delete(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response
@@ -556,7 +556,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_job_create_delete_empty_chats(self):
+    def api_admin_job_create_delete_empty_chats(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response
@@ -579,7 +579,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_job_create_cleanup(self):
+    def api_admin_job_create_cleanup(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response
@@ -645,7 +645,7 @@ class AdminRoutesHandler:
         )
 
     @admin_login_required
-    def api_admin_job_create_cleanup_empty(self):
+    def api_admin_job_create_cleanup_empty(self) -> Any:
         data, error_response = self._require_json_dict()
         if error_response is not None:
             return error_response

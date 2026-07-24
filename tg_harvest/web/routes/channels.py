@@ -1,6 +1,8 @@
 import sqlite3
 from contextlib import closing
 
+from typing import Any, Callable
+
 from flask import jsonify, render_template
 
 from tg_harvest.app.services import ChannelRouteServices
@@ -12,13 +14,13 @@ from tg_harvest.web.responses import (
 from tg_harvest.web.routes.chat_links import with_chat_links
 
 
-def _load_linked_channel_items(get_conn_fn, list_fn, build_link_bundle_fn, *args, **kwargs):
+def _load_linked_channel_items(get_conn_fn, list_fn, build_link_bundle_fn, *args, **kwargs) -> list[dict[str, Any]]:
     with closing(get_conn_fn()) as conn:
         rows = list_fn(conn, *args, **kwargs)
     return with_chat_links(rows, build_link_bundle_fn)
 
 
-def _channel_items_payload(items):
+def _channel_items_payload(items) -> dict[str, Any]:
     return {"ok": True, "items": items, "count": len(items)}
 
 
@@ -103,12 +105,12 @@ def register_channel_routes(
 
     @app.get("/admin/channels")
     @admin_page_login_required
-    def admin_channels_page():
+    def admin_channels_page() -> Any:
         return render_template("admin_channels.html")
 
     @app.get("/api/admin/channels")
     @admin_login_required
-    def api_admin_channels():
+    def api_admin_channels() -> Any:
         try:
             from flask import request
 
@@ -129,7 +131,7 @@ def register_channel_routes(
         except Exception:
             return logged_json_error(services.logger, "系统异常", "系统异常")
 
-    def _scan_result_response(list_fn, log_message: str):
+    def _scan_result_response(list_fn, log_message: str) -> Any:
         try:
             items = _load_linked_channel_items(
                 services.get_conn_fn,
@@ -144,7 +146,7 @@ def register_channel_routes(
 
     @app.get("/api/admin/channels/missing")
     @admin_login_required
-    def api_admin_missing_channels():
+    def api_admin_missing_channels() -> Any:
         return _scan_result_response(
             services.list_missing_chat_scan_results_fn,
             "读取未入库群组扫描结果失败",
@@ -152,7 +154,7 @@ def register_channel_routes(
 
     @app.get("/api/admin/channels/restricted")
     @admin_login_required
-    def api_admin_restricted_channels():
+    def api_admin_restricted_channels() -> Any:
         return _scan_result_response(
             services.list_restricted_chat_scan_results_fn,
             "读取内容限制群组扫描结果失败",
@@ -164,7 +166,7 @@ def register_channel_routes(
         target_label,
         received_log,
         start_thread_fn,
-    ):
+    ) -> Any:
         return create_started_exclusive_job_response(
             services.admin_try_create_exclusive_job_fn,
             services.admin_job_get_snapshot_fn,
@@ -185,7 +187,7 @@ def register_channel_routes(
 
     @app.post("/api/admin/channels/missing/scan")
     @admin_login_required
-    def api_admin_missing_channels_scan():
+    def api_admin_missing_channels_scan() -> Any:
         return _create_scan_job_response(
             "missing_chats_scan",
             target_label="账号未入库群组扫描",
@@ -195,7 +197,7 @@ def register_channel_routes(
 
     @app.post("/api/admin/channels/restricted/scan")
     @admin_login_required
-    def api_admin_restricted_channels_scan():
+    def api_admin_restricted_channels_scan() -> Any:
         return _create_scan_job_response(
             "restricted_chats_scan",
             target_label="内容限制/风险标记扫描",

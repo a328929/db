@@ -4,20 +4,20 @@ import threading
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from tg_harvest.runtime import paths as _runtime_paths
 
 DB_WRITE_LOCK = threading.RLock()
 
 
-def synchronized_write(func):
+def synchronized_write(func: Callable) -> Callable:
     """
     装饰器：确保被装饰的函数在执行时持有全局写入锁。
     增加了获取锁的超时机制（15秒），防止 Web 线程被后台长任务永久阻塞导致服务死锁。
     """
 
-    def wrapper(*args, **kwargs):
+    def wrapper(*args, **kwargs) -> Any:
         acquired = DB_WRITE_LOCK.acquire(timeout=15)
         if not acquired:
             logging.error(f"无法在 15s 内获取数据库写锁: {func.__name__}")
@@ -75,7 +75,7 @@ def _open_connection(db_name: str) -> sqlite3.Connection:
 
 def _apply_core_pragmas(
     cur: sqlite3.Cursor, cache_mb: int = 256, *, set_journal_mode: bool = True
-):
+) -> None:
     if set_journal_mode:
         cur.execute("PRAGMA journal_mode=WAL;")
     cur.execute("PRAGMA synchronous=NORMAL;")
@@ -89,7 +89,7 @@ def _apply_core_pragmas(
     cur.execute("PRAGMA wal_autocheckpoint=1000;")
 
 
-def _apply_optional_pragmas(cur: sqlite3.Cursor, mmap_mb: int = 512):
+def _apply_optional_pragmas(cur: sqlite3.Cursor, mmap_mb: int = 512) -> None:
     with suppress(Exception):
         mmap_bytes = mmap_mb * 1024 * 1024
         cur.execute(f"PRAGMA mmap_size={mmap_bytes};")
@@ -103,7 +103,7 @@ def _apply_pragmas(
     mmap_mb: int = 512,
     *,
     set_journal_mode: bool = True,
-):
+) -> None:
     cur = conn.cursor()
     try:
         _apply_core_pragmas(

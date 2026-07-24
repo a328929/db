@@ -800,7 +800,7 @@ def _load_admin_update_rows(conn: Any) -> list[Any]:
 
 def _admin_update_all_chats(
     job_id, get_conn_fn, admin_job_append_log_fn, cfg
-):
+) -> bool:
     if not _ensure_base_session_valid(cfg, job_id, admin_job_append_log_fn):
         return False
 
@@ -1316,7 +1316,7 @@ def _admin_update_all_chats(
             raise last_exc
         raise RuntimeError("没有可用账号执行当前群组")
 
-    def _worker(idx, row):
+    def _worker(idx, row) -> tuple[str, Any, bool | None, int, str | None]:
         job_context.set(str(job_id))
         passthrough_token = job_log_passthrough_enabled.set(False)
         raw_chat_id = _row_value(row, "chat_id", "")
@@ -3134,11 +3134,11 @@ def _admin_cleanup_job_runner(
     )
 
 
-def _admin_start_harvest_job_thread(job_id, target, **kwargs):
+def _admin_start_harvest_job_thread(job_id, target, **kwargs) -> Any:
     return start_admin_job_thread(_admin_harvest_job_runner, job_id, target, **kwargs)
 
 
-def _admin_start_update_job_thread(job_id, chat_id, chat_title, **kwargs):
+def _admin_start_update_job_thread(job_id, chat_id, chat_title, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_update_job_runner, job_id, chat_id, chat_title, **kwargs
     )
@@ -3487,19 +3487,19 @@ def _count_chat_related_rows(conn: Any, chat_id: int) -> dict[str, int]:
         cur.close()
 
 
-def _admin_start_delete_job_thread(job_id, chat_id, chat_title, **kwargs):
+def _admin_start_delete_job_thread(job_id, chat_id, chat_title, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_delete_job_runner, job_id, chat_id, chat_title, **kwargs
     )
 
 
-def _admin_start_delete_empty_chats_job_thread(job_id, **kwargs):
+def _admin_start_delete_empty_chats_job_thread(job_id, **kwargs) -> Any:
     return start_admin_job_thread(_admin_delete_empty_chats_job_runner, job_id, **kwargs)
 
 
 def _admin_start_cleanup_job_thread(
     job_id, keyword, scope, chat_id, target_label, **kwargs
-):
+) -> Any:
     return start_admin_job_thread(
         _admin_cleanup_job_runner,
         job_id,
@@ -3513,7 +3513,7 @@ def _admin_start_cleanup_job_thread(
 
 def _admin_start_cleanup_empty_job_thread(
     job_id, scope, chat_id, target_label, **kwargs
-):
+) -> Any:
     return start_admin_job_thread(
         _admin_cleanup_job_runner,
         job_id,
