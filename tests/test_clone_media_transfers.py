@@ -2,7 +2,11 @@ import sqlite3
 from dataclasses import replace
 from types import SimpleNamespace
 
-import pytest
+try:
+    import pytest
+except ImportError:
+    pytest = None
+
 from telethon.tl.types import MessageEmpty, PeerChannel
 
 from tg_harvest.admin_jobs.clone_forwarding import CloneForwardOutcomeAmbiguousError

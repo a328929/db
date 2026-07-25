@@ -5,6 +5,7 @@ from typing import Any
 
 from tg_harvest.storage.clone_common import _clean_text, _now_iso, _optional_int
 from tg_harvest.storage.row_access import row_int as _row_int
+from tg_harvest.storage.sql_builders import build_batch_case_update
 
 CLONE_MEDIA_TRANSFER_DIRECT = "direct"
 CLONE_MEDIA_TRANSFER_RELAY = "relay"
@@ -399,34 +400,31 @@ def mark_clone_media_transfer_source_hop_sent(
 
     cur = conn.cursor()
     try:
-        # Batch update using CASE statement for better performance
-        source_ids = list(relay_message_ids_by_source.keys())
-        placeholders = ",".join("?" * len(source_ids))
+        # Build case_updates mapping source_message_id -> field updates
+        case_updates = {
+            int(source_id): {'relay_message_id': int(relay_id)}
+            for source_id, relay_id in relay_message_ids_by_source.items()
+        }
 
-        # Build CASE expression for relay_message_id mapping
-        case_parts = []
-        params = []
-        for source_id, relay_id in relay_message_ids_by_source.items():
-            case_parts.append("WHEN source_message_id = ? THEN ?")
-            params.extend([int(source_id), int(relay_id)])
-
-        case_expr = f"CASE {' '.join(case_parts)} END"
-
-        # Execute batch update
-        cur.execute(
-            f"""
-            UPDATE admin_clone_media_transfers
-            SET relay_message_id = {case_expr},
-                source_hop_status = 'sent',
-                cleanup_status = 'pending',
-                error_message = '',
-                updated_at = ?
-            WHERE run_id = ? AND source_chat_id = ?
-              AND source_message_id IN ({placeholders})
-              AND transfer_strategy = 'relay'
-            """,
-            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        # Use sql_builders for batch CASE update
+        sql, params = build_batch_case_update(
+            table='admin_clone_media_transfers',
+            match_field='source_message_id',
+            case_updates=case_updates,
+            set_fields={
+                'source_hop_status': 'sent',
+                'cleanup_status': 'pending',
+                'error_message': '',
+                'updated_at': now,
+            },
+            where_conditions={
+                'run_id': normalized_run_id,
+                'source_chat_id': normalized_source_chat_id,
+                'transfer_strategy': 'relay',
+            }
         )
+
+        cur.execute(sql, params)
 
         # Verify all rows were updated
         if cur.rowcount != len(relay_message_ids_by_source):
@@ -458,32 +456,29 @@ def mark_clone_media_transfer_target_hop_sent(
 
     cur = conn.cursor()
     try:
-        # Batch update using CASE statement for better performance
-        source_ids = list(target_message_ids_by_source.keys())
-        placeholders = ",".join("?" * len(source_ids))
+        # Build case_updates mapping source_message_id -> field updates
+        case_updates = {
+            int(source_id): {'target_message_id': int(target_id)}
+            for source_id, target_id in target_message_ids_by_source.items()
+        }
 
-        # Build CASE expression for target_message_id mapping
-        case_parts = []
-        params = []
-        for source_id, target_id in target_message_ids_by_source.items():
-            case_parts.append("WHEN source_message_id = ? THEN ?")
-            params.extend([int(source_id), int(target_id)])
-
-        case_expr = f"CASE {' '.join(case_parts)} END"
-
-        # Execute batch update
-        cur.execute(
-            f"""
-            UPDATE admin_clone_media_transfers
-            SET target_message_id = {case_expr},
-                target_hop_status = 'sent',
-                error_message = '',
-                updated_at = ?
-            WHERE run_id = ? AND source_chat_id = ?
-              AND source_message_id IN ({placeholders})
-            """,
-            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        # Use sql_builders for batch CASE update
+        sql, params = build_batch_case_update(
+            table='admin_clone_media_transfers',
+            match_field='source_message_id',
+            case_updates=case_updates,
+            set_fields={
+                'target_hop_status': 'sent',
+                'error_message': '',
+                'updated_at': now,
+            },
+            where_conditions={
+                'run_id': normalized_run_id,
+                'source_chat_id': normalized_source_chat_id,
+            }
         )
+
+        cur.execute(sql, params)
 
         # Verify all rows were updated
         if cur.rowcount != len(target_message_ids_by_source):
@@ -516,33 +511,30 @@ def mark_clone_media_transfer_target_hop_observed(
 
     cur = conn.cursor()
     try:
-        # Batch update using CASE statement for better performance
-        source_ids = list(target_message_ids_by_source.keys())
-        placeholders = ",".join("?" * len(source_ids))
+        # Build case_updates mapping source_message_id -> field updates
+        case_updates = {
+            int(source_id): {'target_message_id': int(target_id)}
+            for source_id, target_id in target_message_ids_by_source.items()
+        }
 
-        # Build CASE expression for target_message_id mapping
-        case_parts = []
-        params = []
-        for source_id, target_id in target_message_ids_by_source.items():
-            case_parts.append("WHEN source_message_id = ? THEN ?")
-            params.extend([int(source_id), int(target_id)])
-
-        case_expr = f"CASE {' '.join(case_parts)} END"
-
-        # Execute batch update
-        cur.execute(
-            f"""
-            UPDATE admin_clone_media_transfers
-            SET target_message_id = {case_expr},
-                target_hop_status = 'unconfirmed',
-                error_message = '',
-                updated_at = ?
-            WHERE run_id = ? AND source_chat_id = ?
-              AND source_message_id IN ({placeholders})
-              AND target_hop_status != 'sent'
-            """,
-            (*params, now, normalized_run_id, normalized_source_chat_id, *source_ids),
+        # Use sql_builders for batch CASE update
+        sql, params = build_batch_case_update(
+            table='admin_clone_media_transfers',
+            match_field='source_message_id',
+            case_updates=case_updates,
+            set_fields={
+                'target_hop_status': 'unconfirmed',
+                'error_message': '',
+                'updated_at': now,
+            },
+            where_conditions={
+                'run_id': normalized_run_id,
+                'source_chat_id': normalized_source_chat_id,
+            },
+            where_clauses=["target_hop_status != 'sent'"]
         )
+
+        cur.execute(sql, params)
 
         # Verify all rows were updated
         if cur.rowcount != len(target_message_ids_by_source):
