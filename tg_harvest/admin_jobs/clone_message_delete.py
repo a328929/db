@@ -685,7 +685,7 @@ def _admin_clone_message_delete_job_runner(
                 _cleanup_isolated_worker_session(account_cfg, worker_id)
 
 
-def _admin_start_clone_message_delete_job_thread(job_id: str, **kwargs: Any):
+def _admin_start_clone_message_delete_job_thread(job_id: str, **kwargs: Any) -> Any:
     return start_admin_job_thread(
         _admin_clone_message_delete_job_runner,
         job_id,

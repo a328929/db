@@ -19,7 +19,7 @@ from tg_harvest.ingest.flood_wait import (
 
 
 class UsernameFallbackSkippedError(RuntimeError):
-    def __init__(self, chat_id: int, chat_username: str):
+    def __init__(self, chat_id: int, chat_username: str) -> None:
         self.chat_id = int(chat_id)
         self.chat_username = clean_username(chat_username)
         super().__init__(
@@ -124,7 +124,7 @@ def finish_job_heartbeat(heartbeat_stop, heartbeat_thread) -> None:
     heartbeat_thread.join(timeout=1.0)
 
 
-def start_admin_job_heartbeat(job_id: str):
+def start_admin_job_heartbeat(job_id: str) -> tuple[Any, Any]:
     job_context.set(str(job_id))
     return _start_job_heartbeat(job_id, _admin_job_heartbeat)
 
@@ -168,7 +168,7 @@ def call_with_conn(
         conn.close()
 
 
-def start_admin_job_thread(target, *args, **kwargs):
+def start_admin_job_thread(target, *args, **kwargs) -> Any:
     thread = threading.Thread(
         target=target,
         args=args,

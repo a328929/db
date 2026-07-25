@@ -202,7 +202,7 @@ def _merge_worker_session_entities_into_base_session(
 
 
 @contextmanager
-def bind_client_event_loop(client: Any):
+def bind_client_event_loop(client: Any) -> Any:
     loop = _client_event_loop(client)
     if loop is None:
         yield
@@ -340,7 +340,7 @@ def _disconnect_worker_client(client: Any) -> None:
             _restore_event_loop(None)
 
 
-def _cleanup_isolated_worker_session(cfg: Any, worker_id: str):
+def _cleanup_isolated_worker_session(cfg: Any, worker_id: str) -> None:
     worker_session_name = f"{cfg.session_name}_worker_{worker_id}"
     _merge_worker_session_entities_into_base_session(
         cfg.session_name,

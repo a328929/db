@@ -875,7 +875,7 @@ def _admin_clone_deep_preflight_job_runner(
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
 
 
-def _admin_start_clone_deep_preflight_job_thread(job_id: str, **kwargs: Any):
+def _admin_start_clone_deep_preflight_job_thread(job_id: str, **kwargs: Any) -> Any:
     from tg_harvest.admin_jobs.common import start_admin_job_thread
 
     return start_admin_job_thread(

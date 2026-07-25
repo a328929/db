@@ -934,7 +934,7 @@ def _admin_missing_chats_scan_job_runner(
     )
 
 
-def _admin_start_missing_chats_scan_job_thread(job_id: str, **kwargs):
+def _admin_start_missing_chats_scan_job_thread(job_id: str, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_missing_chats_scan_job_runner,
         job_id,
@@ -960,7 +960,7 @@ def _admin_restricted_chats_scan_job_runner(
     )
 
 
-def _admin_start_restricted_chats_scan_job_thread(job_id: str, **kwargs):
+def _admin_start_restricted_chats_scan_job_thread(job_id: str, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_restricted_chats_scan_job_runner,
         job_id,

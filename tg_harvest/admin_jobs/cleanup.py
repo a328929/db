@@ -53,7 +53,7 @@ def _build_cleanup_targets_table(
     scope_filter_sql,
     scope_filter_params,
     like_pattern,
-):
+) -> int:
     cur.execute("DROP TABLE IF EXISTS temp_cleanup_targets")
     cur.execute(
         """
@@ -135,7 +135,7 @@ def _collect_cleanup_affected_state(cur) -> tuple[set[int], dict[int, set[int]]]
     return affected_chats, affected_groups_by_chat
 
 
-def _chunked(values: list[int], size: int):
+def _chunked(values: list[int], size: int) -> Iterable[list[int]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
 
@@ -404,7 +404,7 @@ def _execute_cleanup_deletion_batches(
     admin_job_append_log_fn: Callable[[str, str], Any],
     *,
     cleanup_mode: str = "keyword",
-):
+) -> int:
     deleted = 0
     affected_chats, affected_groups_by_chat = _collect_cleanup_affected_state(cur)
     deletion_error: Exception | None = None

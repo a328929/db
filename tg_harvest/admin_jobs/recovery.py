@@ -443,7 +443,7 @@ def _admin_recovery_scan_job_runner(
         _cleanup_isolated_worker_session(cfg, worker_id)
 
 
-def _admin_start_recovery_scan_job_thread(job_id: str, **kwargs):
+def _admin_start_recovery_scan_job_thread(job_id: str, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_recovery_scan_job_runner,
         job_id,
@@ -508,7 +508,7 @@ def _admin_recovery_restore_job_runner(
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
 
 
-def _admin_start_recovery_restore_job_thread(job_id: str, **kwargs):
+def _admin_start_recovery_restore_job_thread(job_id: str, **kwargs) -> Any:
     return start_admin_job_thread(
         _admin_recovery_restore_job_runner,
         job_id,

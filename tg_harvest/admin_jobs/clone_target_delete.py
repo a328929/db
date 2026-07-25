@@ -300,7 +300,7 @@ def _admin_clone_target_delete_job_runner(
         finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
 
 
-def _admin_start_clone_target_delete_job_thread(job_id: str, **kwargs: Any):
+def _admin_start_clone_target_delete_job_thread(job_id: str, **kwargs: Any) -> Any:
     return start_admin_job_thread(
         _admin_clone_target_delete_job_runner,
         job_id,

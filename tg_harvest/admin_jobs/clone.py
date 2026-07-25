@@ -417,7 +417,7 @@ def _admin_clone_structure_job_runner(
             _cleanup_isolated_worker_session(secondary_cfg, worker_id)
 
 
-def _admin_start_clone_structure_job_thread(job_id: str, **kwargs):
+def _admin_start_clone_structure_job_thread(job_id: str, **kwargs) -> Any:
     from tg_harvest.admin_jobs.common import start_admin_job_thread
 
     return start_admin_job_thread(

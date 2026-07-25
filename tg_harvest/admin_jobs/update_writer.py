@@ -22,7 +22,7 @@ class ChatUpdateWriteCoordinator:
         job_id: str,
         get_conn_fn: Callable[[], Any],
         queue_maxsize: int = 0,
-    ):
+    ) -> None:
         self._job_id = str(job_id)
         self._get_conn_fn = get_conn_fn
         self._queue: Queue[dict[str, Any]] = Queue(maxsize=max(0, int(queue_maxsize)))

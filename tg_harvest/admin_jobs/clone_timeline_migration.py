@@ -953,7 +953,7 @@ def _admin_clone_timeline_migration_job_runner(
         _cleanup_runner_clients(clients, worker_ids, account_cfgs)
 
 
-def _admin_start_clone_timeline_migration_job_thread(job_id: str, **kwargs: Any):
+def _admin_start_clone_timeline_migration_job_thread(job_id: str, **kwargs: Any) -> Any:
     return start_admin_job_thread(
         _admin_clone_timeline_migration_job_runner,
         job_id,
