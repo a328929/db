@@ -16,6 +16,11 @@
   var formatDateTime = shared.formatDateTime;
   var formatNumber = shared.formatNumber;
 
+  // 引用 DOM 工具函数
+  var domUtils = window.TgHarvestDomUtils;
+  var createTextElement = domUtils ? domUtils.createTextElement : null;
+  var createInfoPill = domUtils ? domUtils.createRecoveryInfoPill : null;
+
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
   var JOB_POLL_RETRY_BASE_MS = 3000;
@@ -160,13 +165,6 @@
     });
   }
 
-  function createTextElement(tagName, className, text) {
-    var el = document.createElement(tagName);
-    if (className) el.className = className;
-    el.textContent = String(text || '');
-    return el;
-  }
-
   function setListCollapsed(toggleButton, listElement, collapsed) {
     listElement.hidden = !!collapsed;
     toggleButton.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -198,14 +196,6 @@
       return;
     }
     window.setTimeout(callback, 16);
-  }
-
-  function createInfoPill(label, value) {
-    var pill = document.createElement('span');
-    pill.className = 'recovery-info-pill';
-    pill.appendChild(createTextElement('span', 'recovery-info-label', label));
-    pill.appendChild(createTextElement('strong', '', value || '暂无'));
-    return pill;
   }
 
   function isCandidatePending(item) {

@@ -15,6 +15,11 @@
   var formatDateTime = shared.formatDateTime;
   var formatNumber = shared.formatNumber;
 
+  // 引用 DOM 工具函数
+  var domUtils = window.TgHarvestDomUtils;
+  var createTextElement = domUtils ? domUtils.createTextElement : null;
+  var createInfoPill = domUtils ? domUtils.createChannelInfoPill : null;
+
   var JOB_POLL_INTERVAL_MS = 3000;
   var JOB_POLL_RETRY_MAX_COUNT = 20;
   var JOB_POLL_RETRY_BASE_MS = 3000;
@@ -204,13 +209,6 @@
     return (item && item.last_message_at) || (item && item.last_seen_at) || '';
   }
 
-  function createTextElement(tagName, className, text) {
-    var el = document.createElement(tagName);
-    if (className) el.className = className;
-    el.textContent = String(text || '');
-    return el;
-  }
-
   function setListCollapsed(toggleButton, listElement, collapsed) {
     listElement.hidden = !!collapsed;
     toggleButton.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
@@ -320,14 +318,6 @@
     }
 
     appendBatch();
-  }
-
-  function createInfoPill(label, value) {
-    var pill = document.createElement('span');
-    pill.className = 'channel-info-pill';
-    pill.appendChild(createTextElement('span', 'channel-info-label', label));
-    pill.appendChild(createTextElement('strong', '', value || '暂无'));
-    return pill;
   }
 
   function schedulerMembershipLabel(scope) {

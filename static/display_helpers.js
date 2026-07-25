@@ -1,67 +1,12 @@
 (() => {
   "use strict";
 
-  const SHANGHAI_DATE_TIME_FORMATTER = new Intl.DateTimeFormat("zh-CN", {
-    timeZone: "Asia/Shanghai",
-    year: "numeric",
-    month: "2-digit",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-    hour12: false,
-  });
-
-  function parseUtcDateTime(value) {
-    const text = String(value || "").trim();
-    if (!text) {
-      return null;
-    }
-
-    const normalized = text.replace("T", " ").replace(/\s+UTC$/i, "");
-    const hasTimezone = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(normalized);
-    let candidate = normalized.replace(" ", "T");
-    if (hasTimezone) {
-      candidate = candidate.replace(/(\.\d+)(?=Z|[+-]\d{2}:?\d{2}$)/i, "");
-    } else {
-      candidate = candidate.replace(/\.\d+$/, "");
-      candidate += "Z";
-    }
-
-    const parsed = new Date(candidate);
-    if (Number.isNaN(parsed.getTime())) {
-      return null;
-    }
-    return parsed;
+  // 依赖 date_utils.js 提供的日期格式化函数
+  const dateUtils = window.TgHarvestDateUtils;
+  if (!dateUtils) {
+    console.error('display_helpers.js requires date_utils.js to be loaded first');
   }
-
-  function formatShanghaiDateTime(date) {
-    const parts = SHANGHAI_DATE_TIME_FORMATTER.formatToParts(date);
-    const values = {};
-    parts.forEach((part) => {
-      values[part.type] = part.value;
-    });
-    if (
-      !values.year ||
-      !values.month ||
-      !values.day ||
-      !values.hour ||
-      !values.minute ||
-      !values.second
-    ) {
-      return SHANGHAI_DATE_TIME_FORMATTER.format(date).replace(/\//g, "-");
-    }
-    return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}:${values.second}`;
-  }
-
-  function formatDateTime(value) {
-    const parsed = parseUtcDateTime(value);
-    if (!parsed) {
-      const fallback = String(value || "").trim();
-      return fallback || "暂无";
-    }
-    return formatShanghaiDateTime(parsed);
-  }
+  const formatDateTime = dateUtils ? dateUtils.formatDateTime : function(v) { return String(v || '暂无'); };
 
   function formatFileSize(bytes) {
     if (bytes == null || Number.isNaN(Number(bytes))) return "";

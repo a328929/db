@@ -8,6 +8,10 @@
   var setElementDisabled = shared.setElementDisabled;
   var trapFocusWithin = shared.trapFocusWithin;
 
+  // 引用 DOM 工具函数
+  var domUtils = window.TgHarvestDomUtils;
+  var createTextElement = domUtils ? domUtils.createTextElement : null;
+
   var LIVE_WINDOW_KEY = 'live';
   var LIVE_MESSAGES_LIMIT = 50;
   var LIVE_POLL_INTERVAL_MS = 15000;
@@ -233,13 +237,6 @@
     if (elements.windowGrid && typeof elements.windowGrid.setAttribute === 'function') {
       elements.windowGrid.setAttribute('aria-busy', syncState.busy ? 'true' : 'false');
     }
-  }
-
-  function createTextElement(tagName, className, text) {
-    var el = document.createElement(tagName);
-    if (className) el.className = className;
-    el.textContent = String(text || '');
-    return el;
   }
 
   function isLiveWindowSelected() {
