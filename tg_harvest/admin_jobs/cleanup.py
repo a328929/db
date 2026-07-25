@@ -462,3 +462,108 @@ def _execute_cleanup_deletion_batches(
             )
 
     return deleted
+
+
+# ============================================================================
+# Admin Job Framework Integration
+# ============================================================================
+
+from tg_harvest.admin_jobs.framework import (
+    AdminJobContext,
+    AdminJobResult,
+    admin_job,
+)
+from tg_harvest.admin_jobs.common import start_admin_job_thread
+
+
+@admin_job(name="数据清理", requires_client=False)
+def _admin_cleanup_job_runner(
+    ctx: AdminJobContext,
+    *,
+    keyword: str,
+    scope: str,
+    chat_id: int | None,
+    target_label: str,
+    cleanup_mode: str = "keyword",
+) -> AdminJobResult:
+    """Clean up messages from the database based on keyword or empty media criteria.
+
+    This job supports two cleanup modes:
+    1. keyword: Remove messages containing a specific keyword
+    2. empty_media: Remove messages with no searchable content
+
+    Args:
+        ctx: Admin job context with database access
+        keyword: Keyword to search for (keyword mode) or empty string (empty_media mode)
+        scope: 'chat' to limit to specific chat, or 'all' for global
+        chat_id: Chat ID when scope='chat'
+        target_label: Human-readable description of cleanup target
+        cleanup_mode: 'keyword' or 'empty_media'
+
+    Returns:
+        AdminJobResult with success status and deletion summary
+    """
+    conn = ctx.get_connection()
+    try:
+        cur = conn.cursor()
+
+        # Build scope filter
+        scope_filter_sql = ""
+        scope_filter_params = []
+        if scope == "chat" and chat_id is not None:
+            scope_filter_sql = " AND m.chat_id = ?"
+            scope_filter_params = [chat_id]
+
+        like_pattern = _build_cleanup_like_patterns(keyword)
+
+        # Safety check: prevent full table scan with empty keyword in keyword mode
+        if cleanup_mode == "keyword" and not keyword.strip():
+            return AdminJobResult(
+                success=False,
+                message="关键词不能为空，清理任务取消",
+            )
+
+        # Build target table
+        target_count = _build_cleanup_targets_table(
+            cur,
+            cleanup_mode,
+            scope_filter_sql,
+            scope_filter_params,
+            like_pattern,
+        )
+        conn.commit()
+
+        if target_count == 0:
+            return AdminJobResult(
+                success=True,
+                message="未发现符合条件的数据，任务结束",
+            )
+
+        ctx.log(f"检索到待清理数据：{target_count} 条，开始执行物理删除...")
+
+        # Execute deletion in batches
+        actual_deleted = _execute_cleanup_deletion_batches(
+            conn,
+            cur,
+            ctx.job_id,
+            target_count,
+            ctx.log,
+            cleanup_mode=cleanup_mode,
+        )
+
+        return AdminJobResult(
+            success=True,
+            message=f"清理完成：共删除 {actual_deleted} 条数据",
+        )
+
+    finally:
+        conn.close()
+
+
+def _admin_start_cleanup_job_thread(job_id: str, **kwargs) -> Any:
+    """Start cleanup job in a background thread."""
+    return start_admin_job_thread(
+        _admin_cleanup_job_runner,
+        job_id,
+        **kwargs,
+    )

@@ -14,9 +14,16 @@ from typing import Any
 from telethon.tl.types import InputPeerChannel, InputPeerChat
 
 from tg_harvest.admin_jobs.cleanup import (
+    _admin_cleanup_job_runner,
+    _admin_start_cleanup_job_thread,
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
     _execute_cleanup_deletion_batches,
+)
+from tg_harvest.admin_jobs.framework import (
+    AdminJobContext,
+    AdminJobResult,
+    admin_job,
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
@@ -2994,144 +3001,87 @@ def _admin_update_job_runner(
         root_logger.removeHandler(job_log_handler)
 
 
+@admin_job(name="删除群组数据", requires_client=False)
 def _admin_delete_job_runner(
-    job_id: str,
+    ctx: AdminJobContext,
+    *,
     chat_id: int,
     chat_title: str,
-    *,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> None:
-    def _run_delete(conn: Any) -> None:
-        admin_job_append_log_fn(
-            job_id, f"开始删除数据：目标={chat_title}，群组ID={chat_id}"
-        )
+) -> AdminJobResult:
+    """Delete all data for a specific chat from the database.
+
+    Args:
+        ctx: Admin job context with database access
+        chat_id: Chat ID to delete
+        chat_title: Chat title for logging
+
+    Returns:
+        AdminJobResult with success status and deletion summary
+    """
+    conn = ctx.get_connection()
+    try:
+        ctx.log(f"开始删除数据：目标={chat_title}，群组ID={chat_id}")
+
         related_counts = _count_chat_related_rows(conn, int(chat_id))
-        admin_job_append_log_fn(
-            job_id,
+        ctx.log(
             "待删除数据："
             f"消息 {related_counts['messages']} 条，"
             f"媒体记录 {related_counts['media_rows']} 条，"
-            f"媒体组 {related_counts['media_groups']} 个",
+            f"媒体组 {related_counts['media_groups']} 个"
         )
+
         if related_counts["messages"] >= DELETE_CHAT_FAST_PATH_THRESHOLD:
-            admin_job_append_log_fn(
-                job_id,
-                "大型群组启用快速删除模式：批量同步搜索索引，暂停逐条关联索引触发器",
+            ctx.log(
+                "大型群组启用快速删除模式：批量同步搜索索引，暂停逐条关联索引触发器"
             )
-        admin_job_append_log_fn(job_id, "清理关联数据...")
+
+        ctx.log("清理关联数据...")
         deleted_messages = _delete_chat_data(conn, int(chat_id))
-        admin_job_append_log_fn(
-            job_id, f"删除完成：共清除 {deleted_messages} 条消息"
+
+        return AdminJobResult(
+            success=True,
+            message=f"删除完成：共清除 {deleted_messages} 条消息",
         )
-
-    _run_simple_admin_job_with_conn(
-        job_id,
-        get_conn_fn=get_conn_fn,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-        run_fn=_run_delete,
-        error_prefix="删除失败：",
-    )
+    finally:
+        conn.close()
 
 
+@admin_job(name="删除零消息群组", requires_client=False)
 def _admin_delete_empty_chats_job_runner(
-    job_id: str,
-    *,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> None:
-    def _run_delete_empty(conn: Any) -> None:
-        admin_job_append_log_fn(job_id, "开始删除零消息群组")
+    ctx: AdminJobContext,
+) -> AdminJobResult:
+    """Delete all chats that have zero messages.
+
+    Args:
+        ctx: Admin job context with database access
+
+    Returns:
+        AdminJobResult with success status and deletion summary
+    """
+    conn = ctx.get_connection()
+    try:
+        ctx.log("开始删除零消息群组")
         stats = _delete_empty_chats_data(conn)
         deleted_chats = int(stats.get("deleted_chats", 0) or 0)
+
         if deleted_chats <= 0:
-            admin_job_append_log_fn(job_id, "未发现消息数量为 0 的可删除群组")
-        else:
-            admin_job_append_log_fn(
-                job_id,
+            return AdminJobResult(
+                success=True,
+                message="未发现消息数量为 0 的可删除群组",
+            )
+
+        return AdminJobResult(
+            success=True,
+            message=(
                 "零消息群组删除完成："
                 f"删除群组 {deleted_chats} 个，"
                 f"清理残留消息 {int(stats.get('deleted_messages', 0) or 0)} 条，"
                 f"媒体记录 {int(stats.get('deleted_media_rows', 0) or 0)} 条，"
-                f"媒体组 {int(stats.get('deleted_media_groups', 0) or 0)} 个",
-            )
-
-    _run_simple_admin_job_with_conn(
-        job_id,
-        get_conn_fn=get_conn_fn,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-        run_fn=_run_delete_empty,
-        error_prefix="删除零消息群组失败：",
-    )
-
-
-def _admin_cleanup_job_runner(
-    job_id: str,
-    keyword: str,
-    scope: str,
-    chat_id: int | None,
-    target_label: str,
-    *,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-    cleanup_mode: str = "keyword",
-) -> None:
-    def _run_cleanup(conn: Any) -> None:
-        cur = conn.cursor()
-
-        # 修正：根据 scope 和 chat_id 构建过滤条件
-        scope_filter_sql = ""
-        scope_filter_params = []
-        if scope == "chat" and chat_id is not None:
-            scope_filter_sql = " AND m.chat_id = ?"
-            scope_filter_params = [chat_id]
-
-        like_pattern = _build_cleanup_like_patterns(keyword)
-
-        # 安全检查：如果是关键词模式且关键词为空，则直接结束，防止 LIKE '%%' 扫描全库导致崩溃
-        if cleanup_mode == "keyword" and not keyword.strip():
-            admin_job_append_log_fn(job_id, "关键词不能为空，清理任务取消")
-            return
-
-        target_count = _build_cleanup_targets_table(
-            cur,
-            cleanup_mode,
-            scope_filter_sql,
-            scope_filter_params,
-            like_pattern,
+                f"媒体组 {int(stats.get('deleted_media_groups', 0) or 0)} 个"
+            ),
         )
-        conn.commit()
-
-        if target_count > 0:
-            admin_job_append_log_fn(
-                job_id, f"检索到待清理数据：{target_count} 条，开始执行物理删除..."
-            )
-            actual_deleted = _execute_cleanup_deletion_batches(
-                conn,
-                cur,
-                job_id,
-                target_count,
-                admin_job_append_log_fn,
-                cleanup_mode=cleanup_mode,
-            )
-            admin_job_append_log_fn(job_id, f"清理完成：共删除 {actual_deleted} 条数据")
-        else:
-            admin_job_append_log_fn(job_id, "未发现符合条件的数据，任务结束")
-
-    _run_simple_admin_job_with_conn(
-        job_id,
-        get_conn_fn=get_conn_fn,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-        run_fn=_run_cleanup,
-        error_prefix="清理失败：",
-        log_exception_fn=lambda: logging.exception(f"清理任务异常 (job_id: {job_id})"),
-    )
+    finally:
+        conn.close()
 
 
 def _admin_start_harvest_job_thread(job_id, target, **kwargs) -> Any:
@@ -3497,19 +3447,6 @@ def _admin_start_delete_empty_chats_job_thread(job_id, **kwargs) -> Any:
     return start_admin_job_thread(_admin_delete_empty_chats_job_runner, job_id, **kwargs)
 
 
-def _admin_start_cleanup_job_thread(
-    job_id, keyword, scope, chat_id, target_label, **kwargs
-) -> Any:
-    return start_admin_job_thread(
-        _admin_cleanup_job_runner,
-        job_id,
-        keyword,
-        scope,
-        chat_id,
-        target_label,
-        **kwargs,
-    )
-
 
 def _admin_start_cleanup_empty_job_thread(
     job_id, scope, chat_id, target_label, **kwargs
@@ -3517,9 +3454,11 @@ def _admin_start_cleanup_empty_job_thread(
     return start_admin_job_thread(
         _admin_cleanup_job_runner,
         job_id,
-        "",
-        scope,
-        chat_id,
-        target_label,
-        **{**kwargs, "cleanup_mode": "empty_media"},
+        keyword="",
+        scope=scope,
+        chat_id=chat_id,
+        target_label=target_label,
+        cleanup_mode="empty_media",
+        **kwargs,
     )
+
