@@ -4,6 +4,7 @@
   var shared = window.AdminManageShared;
   var appendLog = shared.appendLog;
   var buildDialogTargetPreview = shared.buildDialogTargetPreview;
+  var buildConfirmString = shared.buildConfirmString;
   var buildNamedConfirmText = shared.buildNamedConfirmText;
   var buildScopeRequestPayload = shared.buildScopeRequestPayload;
   var clearLogs = shared.clearLogs;
@@ -472,7 +473,7 @@
         requestPayload,
         buildScopeRequestPayload(target, 'chat_id 参数非法')
       );
-      requestPayload.confirm = 'CLEANUP:' + requestPayload.scope + ':' + getConfirmationTarget(requestPayload) + ':' + keyword;
+      requestPayload.confirm = buildConfirmString('CLEANUP', requestPayload.scope, getConfirmationTarget(requestPayload), keyword);
       await createJobAndStartPolling(elements, {
         url: '/api/admin/jobs/cleanup',
         requestPayload: requestPayload,
@@ -503,7 +504,7 @@
 
     try {
       var requestPayload = buildScopeRequestPayload(target, 'chat_id 参数非法');
-      requestPayload.confirm = 'CLEANUP_EMPTY:' + requestPayload.scope + ':' + getConfirmationTarget(requestPayload);
+      requestPayload.confirm = buildConfirmString('CLEANUP_EMPTY', requestPayload.scope, getConfirmationTarget(requestPayload));
       await createJobAndStartPolling(elements, {
         url: '/api/admin/jobs/cleanup-empty',
         requestPayload: requestPayload,
@@ -657,7 +658,7 @@
         url: '/api/admin/jobs/delete',
         requestPayload: {
           chat_id: chatId,
-          confirm: 'DELETE:' + chatId
+          confirm: buildConfirmString('DELETE', 'chat', chatId)
         },
         successMessage: '删除任务已创建：{jobId}'
       });
@@ -682,7 +683,7 @@
       await createJobAndStartPolling(elements, {
         url: '/api/admin/jobs/delete-empty-chats',
         requestPayload: {
-          confirm: 'DELETE_EMPTY_CHATS'
+          confirm: buildConfirmString('DELETE_EMPTY_CHATS', '', '')
         },
         successMessage: '零消息群组删除任务已创建：{jobId}'
       });

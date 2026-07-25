@@ -701,6 +701,16 @@
     return payload.scope === 'all' ? 'all' : String(payload.chat_id);
   }
 
+  function buildConfirmString(action, scope, target, extra) {
+    // 统一生成confirm字符串，避免手动拼接错误
+    // action: 'DELETE', 'CLEANUP', 'CLEANUP_EMPTY', etc.
+    var parts = [action, scope, target];
+    if (extra !== undefined && extra !== null) {
+      parts.push(String(extra));
+    }
+    return parts.join(':');
+  }
+
   function getCreatedJobId(payload) {
     var job = payload && payload.job ? payload.job : null;
     var jobId = job && job.job_id ? String(job.job_id) : '';
@@ -1148,6 +1158,7 @@
     appendLog: appendLog,
     buildDialogTargetPreview: buildDialogTargetPreview,
     buildChatOptionText: buildChatOptionText,
+    buildConfirmString: buildConfirmString,
     buildNamedConfirmText: buildNamedConfirmText,
     buildScopeRequestPayload: buildScopeRequestPayload,
     buildSnapshotProgressMessage: buildSnapshotProgressMessage,

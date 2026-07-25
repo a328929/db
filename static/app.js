@@ -33,8 +33,23 @@
     pagination: document.getElementById("pagination"),
   };
 
+  // 验证关键元素是否存在
+  function validateElements() {
+    const required = ['queryInput', 'searchBtn', 'scopeSelect', 'typeSelect',
+                     'sortSelect', 'orderSelect', 'statusLine', 'results'];
+    const missing = required.filter(key => !els[key]);
+    if (missing.length > 0) {
+      console.error('[app.js] Missing required elements:', missing.join(', '));
+      if (els.statusLine) {
+        els.statusLine.textContent = '页面初始化失败：缺少必需的页面元素。';
+      }
+      return false;
+    }
+    return true;
+  }
+
   function setStatus(text) {
-    els.statusLine.textContent = text;
+    if (els.statusLine) els.statusLine.textContent = text;
   }
 
   function setSearching(isSearching) {
@@ -68,14 +83,29 @@
     _markSearchCriteriaDirty();
   }
 
+  function _validateDateFormat(dateStr) {
+    if (!dateStr) return true; // 空值有效
+    // 支持 YYYYMMDD 或 YYYY-MM-DD 格式
+    const format1 = /^\d{8}$/; // YYYYMMDD
+    const format2 = /^\d{4}-\d{2}-\d{2}$/; // YYYY-MM-DD
+    return format1.test(dateStr) || format2.test(dateStr);
+  }
+
+  function _normalizeDate(dateStr) {
+    if (!dateStr) return "";
+    const trimmed = dateStr.trim();
+    if (!_validateDateFormat(trimmed)) return trimmed; // 返回原值让后端处理
+    return trimmed;
+  }
+
   function collectFormState({ resetPage = false } = {}) {
     state.query = els.queryInput.value || "";
     state.chat_id = els.scopeSelect.value || "all";
     state.search_type = els.typeSelect.value || "all";
     state.sort_by = els.sortSelect.value || "time";
     state.order = els.orderSelect.value || "desc";
-    state.start_date = (els.startDateInput.value || "").trim();
-    state.end_date = (els.endDateInput.value || "").trim();
+    state.start_date = _normalizeDate(els.startDateInput.value || "");
+    state.end_date = _normalizeDate(els.endDateInput.value || "");
     if (resetPage) state.page = 1;
   }
 
@@ -844,6 +874,9 @@
   }
 
   async function init() {
+    if (!validateElements()) {
+      return;
+    }
     bindEvents();
     updateSortAvailability();
     updateDateClearButtons();

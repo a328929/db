@@ -16,9 +16,12 @@
       || !Number.isSafeInteger(parsedChatId)
       || !Number.isSafeInteger(parsedMsgId)
   ) {
-      document.getElementById("statusLine").textContent = "缺少或无法识别群组、消息参数。";
-      document.getElementById("loadBeforeBtn").disabled = true;
-      document.getElementById("loadAfterBtn").disabled = true;
+      const statusEl = document.getElementById("statusLine");
+      const beforeBtn = document.getElementById("loadBeforeBtn");
+      const afterBtn = document.getElementById("loadAfterBtn");
+      if (statusEl) statusEl.textContent = "缺少或无法识别群组、消息参数。";
+      if (beforeBtn) beforeBtn.disabled = true;
+      if (afterBtn) afterBtn.disabled = true;
       return;
   }
 
@@ -130,8 +133,10 @@
   function updateAroundBoundaryState(items) {
       const targetIndex = items.findIndex(item => item.message_id === state.targetMsgId);
       if (targetIndex < 0) return;
-      state.hasMoreBefore = targetIndex >= 50;
-      state.hasMoreAfter = (items.length - targetIndex - 1) >= 50;
+      // around查询：before最多50条，after最多50条
+      // 只有当恰好达到50条时，才可能有更多
+      state.hasMoreBefore = targetIndex === 50;
+      state.hasMoreAfter = (items.length - targetIndex - 1) === 50;
   }
 
   async function loadData(direction) {
