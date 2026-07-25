@@ -17,6 +17,11 @@ from tg_harvest.admin_jobs.common import (
     start_admin_job_thread,
     update_admin_job_progress,
 )
+from tg_harvest.admin_jobs.framework import (
+    AdminJobContext,
+    AdminJobResult,
+    admin_job,
+)
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
@@ -916,21 +921,49 @@ _RESTRICTED_CHATS_SCAN_SPEC = _ChannelInventoryScanSpec(
 )
 
 
-def _admin_missing_chats_scan_job_runner(
-    job_id: str,
-    *,
-    cfg: Any,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> None:
-    _run_channel_inventory_scan_job(
-        job_id,
-        cfg=cfg,
-        get_conn_fn=get_conn_fn,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-        spec=_MISSING_CHATS_SCAN_SPEC,
+@admin_job(name="扫描未入库群组", requires_client=False)
+def _admin_missing_chats_scan_job_runner(ctx: AdminJobContext) -> AdminJobResult:
+    """Scan for groups/channels joined by accounts but not in database.
+
+    This job orchestrates scanning with Telegram clients internally, but doesn't
+    require a client from the framework since it manages multiple isolated clients
+    for primary and secondary accounts.
+
+    Args:
+        ctx: Admin job context with database access
+
+    Returns:
+        AdminJobResult with success status and count of missing chats found
+    """
+    ctx.progress.start(total=None, stage="running")
+
+    rows = _scan_missing_chat_rows(
+        cfg=ctx.config,
+        get_conn_fn=lambda: ctx.get_connection(),
+        admin_job_append_log_fn=ctx.log,
+        job_id=ctx.job_id,
+    )
+
+    scanned_at = _admin_now_iso()
+    ctx.log("正在保存扫描结果...")
+
+    conn = ctx.get_connection()
+    try:
+        saved_count = replace_missing_chat_scan_results(
+            conn,
+            rows,
+            scan_job_id=ctx.job_id,
+            scanned_at=scanned_at,
+        )
+    finally:
+        conn.close()
+
+    ctx.progress.update(current=saved_count)
+    ctx.progress.finish()
+
+    return AdminJobResult(
+        success=True,
+        message=f"扫描完成：发现 {saved_count} 个已加入但未入库的群组/频道",
     )
 
 
@@ -942,21 +975,49 @@ def _admin_start_missing_chats_scan_job_thread(job_id: str, **kwargs) -> Any:
     )
 
 
-def _admin_restricted_chats_scan_job_runner(
-    job_id: str,
-    *,
-    cfg: Any,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> None:
-    _run_channel_inventory_scan_job(
-        job_id,
-        cfg=cfg,
-        get_conn_fn=get_conn_fn,
-        admin_job_set_status_fn=admin_job_set_status_fn,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-        spec=_RESTRICTED_CHATS_SCAN_SPEC,
+@admin_job(name="扫描内容限制群组", requires_client=False)
+def _admin_restricted_chats_scan_job_runner(ctx: AdminJobContext) -> AdminJobResult:
+    """Scan for groups/channels with Telegram risk flags or access restrictions.
+
+    This job orchestrates scanning with Telegram clients internally, but doesn't
+    require a client from the framework since it manages multiple isolated clients
+    for primary and secondary accounts.
+
+    Args:
+        ctx: Admin job context with database access
+
+    Returns:
+        AdminJobResult with success status and count of restricted chats found
+    """
+    ctx.progress.start(total=None, stage="running")
+
+    rows = _scan_restricted_chat_rows(
+        cfg=ctx.config,
+        get_conn_fn=lambda: ctx.get_connection(),
+        admin_job_append_log_fn=ctx.log,
+        job_id=ctx.job_id,
+    )
+
+    scanned_at = _admin_now_iso()
+    ctx.log("正在保存扫描结果...")
+
+    conn = ctx.get_connection()
+    try:
+        saved_count = replace_restricted_chat_scan_results(
+            conn,
+            rows,
+            scan_job_id=ctx.job_id,
+            scanned_at=scanned_at,
+        )
+    finally:
+        conn.close()
+
+    ctx.progress.update(current=saved_count)
+    ctx.progress.finish()
+
+    return AdminJobResult(
+        success=True,
+        message=f"扫描完成：发现 {saved_count} 个带 Telegram 内容限制/风险标记的群组/频道",
     )
 
 

@@ -17,6 +17,11 @@ from tg_harvest.admin_jobs.common import (
     start_admin_job_thread,
     update_admin_job_progress,
 )
+from tg_harvest.admin_jobs.framework import (
+    AdminJobContext,
+    AdminJobResult,
+    admin_job,
+)
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
@@ -451,61 +456,60 @@ def _admin_start_recovery_scan_job_thread(job_id: str, **kwargs) -> Any:
     )
 
 
+@admin_job(name="恢复 Session 群组候选", requires_client=False)
 def _admin_recovery_restore_job_runner(
-    job_id: str,
+    ctx: AdminJobContext,
     *,
     chat_ids: Iterable[int] | None,
     target_label: str,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> None:
-    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
-    try:
-        normalized_chat_ids = (
-            None if chat_ids is None else sorted({int(chat_id) for chat_id in chat_ids})
-        )
-        mark_admin_job_running(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-        update_admin_job_progress(
-            job_id,
-            0,
-            total=None if normalized_chat_ids is None else len(normalized_chat_ids),
-            stage="running",
-        )
-        admin_job_append_log_fn(job_id, f"恢复目标：{target_label}")
-        admin_job_append_log_fn(job_id, "正在写入 chats 摘要...")
+) -> AdminJobResult:
+    """Restore chats from recovery candidates to the chats table.
 
-        result = call_with_conn(
-            get_conn_fn,
-            recover_chats_from_candidates,
+    This is a database-only operation that copies chat metadata from the
+    recovery_candidates table into the main chats table.
+
+    Args:
+        ctx: Admin job context with database access
+        chat_ids: Optional list of specific chat IDs to restore (None = all)
+        target_label: Human-readable label describing what's being restored
+
+    Returns:
+        AdminJobResult with success status and summary message
+    """
+    normalized_chat_ids = (
+        None if chat_ids is None else sorted({int(chat_id) for chat_id in chat_ids})
+    )
+
+    ctx.progress.start(
+        total=None if normalized_chat_ids is None else len(normalized_chat_ids),
+        stage="running",
+    )
+    ctx.log(f"恢复目标：{target_label}")
+    ctx.log("正在写入 chats 摘要...")
+
+    # Use the connection directly since we have ctx.get_connection as a getter
+    conn = ctx.get_connection()
+    try:
+        result = recover_chats_from_candidates(
+            conn,
             chat_ids=normalized_chat_ids,
-            job_id=job_id,
+            job_id=ctx.job_id,
             recovered_at=_admin_now_iso(),
         )
-
-        candidate_count = int(result["candidate_count"])
-        recovered_count = int(result["recovered_count"])
-        skipped_count = int(result["skipped_count"])
-        update_admin_job_progress(
-            job_id,
-            candidate_count,
-            total=candidate_count,
-            stage="done",
-        )
-        admin_job_append_log_fn(
-            job_id,
-            f"恢复完成：新增 {recovered_count} 个，已存在跳过 {skipped_count} 个",
-        )
-        admin_job_set_status_fn(job_id, "done")
-    except Exception as exc:
-        logging.exception("恢复 Session 群组候选失败: job_id=%s", job_id)
-        admin_job_append_log_fn(job_id, f"恢复失败：{admin_error_message(exc)}")
-        admin_job_set_status_fn(job_id, "error")
     finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
+        conn.close()
+
+    candidate_count = int(result["candidate_count"])
+    recovered_count = int(result["recovered_count"])
+    skipped_count = int(result["skipped_count"])
+
+    ctx.progress.update(current=candidate_count)
+    ctx.progress.finish()
+
+    return AdminJobResult(
+        success=True,
+        message=f"恢复完成：新增 {recovered_count} 个，已存在跳过 {skipped_count} 个",
+    )
 
 
 def _admin_start_recovery_restore_job_thread(job_id: str, **kwargs) -> Any:
