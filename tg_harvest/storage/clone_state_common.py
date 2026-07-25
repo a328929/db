@@ -95,7 +95,7 @@ def _query_one(
     sql: str,
     params: tuple[Any, ...] | list[Any],
     row_mapper,
-):
+) -> Any:
     cur = conn.cursor()
     try:
         cur.execute(sql, params)
@@ -133,7 +133,7 @@ def _query_count(
     return _row_int(row, field_name)
 
 
-def _commit_and_reload(conn: sqlite3.Connection, *, load_fn):
+def _commit_and_reload(conn: sqlite3.Connection, *, load_fn) -> Any:
     conn.commit()
     return load_fn()
 
@@ -143,7 +143,7 @@ def _commit_and_load_required(
     *,
     load_fn,
     missing_message: str,
-):
+) -> Any:
     loaded = _commit_and_reload(conn, load_fn=load_fn)
     if loaded is None:
         raise RuntimeError(missing_message)
@@ -156,7 +156,7 @@ def _execute_update_and_reload(
     params: list[Any],
     *,
     load_fn,
-):
+) -> Any:
     cur = conn.cursor()
     try:
         cur.execute(sql, params)

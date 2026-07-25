@@ -419,7 +419,7 @@ def build_single_promo_features(
     s_cfg = PROMO_SCORES
 
     # 1. 基础信号打分
-    def add_score(key: str, base_cfg: str, max_extra_cfg: str, label: str):
+    def add_score(key: str, base_cfg: str, max_extra_cfg: str, label: str) -> None:
         nonlocal score
         count = hits[key]
         if count > 0:

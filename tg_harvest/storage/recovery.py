@@ -25,7 +25,7 @@ from tg_harvest.storage.row_access import (
 from tg_harvest.storage.schema import _refresh_chat_message_counts
 
 
-def _recovery_row_params(row: Any, *, scan_job_id: str, scanned_at: str) -> tuple:
+def _recovery_row_params(row: Any, *, scan_job_id: str, scanned_at: str) -> tuple[Any, ...]:
     chat_id = _scan_row_int(row, "chat_id", 0)
     return (
         chat_id,
@@ -138,7 +138,7 @@ def replace_recovery_chat_scan_results(
         cur.close()
 
 
-def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
+def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     cur = conn.cursor()
     try:
         cur.execute(
@@ -218,7 +218,7 @@ def list_recovery_chat_candidates(conn: sqlite3.Connection) -> list[dict]:
         cur.close()
 
 
-def build_recovery_overview(conn: sqlite3.Connection) -> dict:
+def build_recovery_overview(conn: sqlite3.Connection) -> dict[str, Any]:
     cur = conn.cursor()
     try:
         cur.execute(
@@ -250,7 +250,7 @@ def build_recovery_overview(conn: sqlite3.Connection) -> dict:
         cur.close()
 
 
-def _candidate_upsert_chat_row(row: sqlite3.Row) -> tuple:
+def _candidate_upsert_chat_row(row: sqlite3.Row) -> tuple[Any, ...]:
     chat_id = _row_int(row, "chat_id")
     chat_username = clean_username(row["chat_username"])
     return (
@@ -269,7 +269,7 @@ def recover_chats_from_candidates(
     chat_ids: Iterable[int] | None,
     job_id: str,
     recovered_at: str,
-) -> dict:
+) -> dict[str, Any]:
     normalized_chat_ids = (
         None
         if chat_ids is None

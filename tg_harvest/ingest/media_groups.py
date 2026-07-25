@@ -80,7 +80,7 @@ def _load_all_grouped_ids(cur: sqlite3.Cursor, chat_id: int) -> list[int]:
 
 def _delete_media_groups(
     cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int]
-):
+) -> None:
     if not grouped_ids:
         return
     for part in chunked(grouped_ids, 500):
@@ -93,7 +93,7 @@ def _delete_media_groups(
 
 def _query_media_group_rows(
     cur: sqlite3.Cursor, chat_id: int, grouped_ids_part: list[int]
-):
+) -> list[sqlite3.Row]:
     placeholders = ",".join(["?"] * len(grouped_ids_part))
     cur.execute(
         f"""
@@ -198,7 +198,7 @@ def _build_media_group_upsert_rows(
     return up_rows
 
 
-def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: list[tuple]):
+def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: list[tuple]) -> None:
     if not up_rows:
         return
     cur.executemany(UPSERT_MEDIA_GROUP_SQL, up_rows)
@@ -206,7 +206,7 @@ def _upsert_media_group_rows(cur: sqlite3.Cursor, up_rows: list[tuple]):
 
 def _rebuild_media_groups_for_ids(
     cur: sqlite3.Cursor, chat_id: int, grouped_ids: list[int], cfg: AppConfig
-):
+) -> None:
     if not grouped_ids:
         return
     for part in chunked(sorted(set(grouped_ids)), 500):
@@ -236,7 +236,7 @@ def _delete_stale_media_groups_for_chat(cur: sqlite3.Cursor, chat_id: int) -> No
 
 def _resolve_refresh_grouped_ids(
     cur: sqlite3.Cursor, chat_id: int, grouped_ids: set[int] | None
-):
+) -> tuple[list[int], bool]:
     if grouped_ids is None:
         return _load_all_grouped_ids(cur, chat_id), True
     return _normalize_grouped_ids(grouped_ids), False
@@ -248,7 +248,7 @@ def _execute_media_group_refresh(
     cfg: AppConfig,
     target_ids: list[int],
     full_refresh: bool,
-):
+) -> None:
     if full_refresh:
         _rebuild_media_groups_for_ids(cur, chat_id, target_ids, cfg)
         _delete_stale_media_groups_for_chat(cur, chat_id)
@@ -275,7 +275,7 @@ def refresh_media_groups_for_chat(
     chat_id: int,
     cfg: AppConfig,
     grouped_ids: set[int] | None = None,
-):
+) -> tuple[int, str]:
     """
     grouped_ids=None: 在一次写事务中按 messages 全量同步，并清除孤立聚合。
     grouped_ids=set(...): 只同步指定 grouped_id，删除已不存在的目标聚合。

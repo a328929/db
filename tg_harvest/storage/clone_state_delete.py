@@ -1,5 +1,6 @@
 import logging
 import sqlite3
+from collections.abc import Iterator
 from contextlib import suppress
 
 from tg_harvest.domain.clone_message_delete import (
@@ -58,7 +59,7 @@ def _clone_related_job_ids(cur: sqlite3.Cursor, run_id: str) -> list[str]:
     return sorted({job_id for job_id in job_ids if job_id})
 
 
-def _iter_batches(values: list[str], size: int = _JOB_ID_BATCH_SIZE):
+def _iter_batches(values: list[str], size: int = _JOB_ID_BATCH_SIZE) -> Iterator[list[str]]:
     for start in range(0, len(values), size):
         yield values[start : start + size]
 

@@ -1,6 +1,7 @@
 import logging
 import sqlite3
 from collections import defaultdict
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Any
 
@@ -152,7 +153,7 @@ class BatchUpsertResult:
     # ``batch_upsert`` historically returned a grouped-id set. Keep the small
     # read-only set protocol so older internal integrations can migrate to the
     # richer result without changing their control flow.
-    def __iter__(self):
+    def __iter__(self) -> Iterator[int]:
         return iter(self.affected_grouped_ids)
 
     def __len__(self) -> int:
@@ -211,7 +212,7 @@ def get_last_message_id(conn: sqlite3.Connection, chat_id: int) -> int:
 
 
 @synchronized_write
-def upsert_chat(conn: sqlite3.Connection, row: tuple):
+def upsert_chat(conn: sqlite3.Connection, row: tuple) -> None:
     cur = conn.cursor()
     try:
         cur.execute(UPSERT_CHAT_SQL, row)
@@ -220,13 +221,13 @@ def upsert_chat(conn: sqlite3.Connection, row: tuple):
     conn.commit()
 
 
-def _batch_upsert_messages(cur: sqlite3.Cursor, msg_rows: list[tuple]):
+def _batch_upsert_messages(cur: sqlite3.Cursor, msg_rows: list[tuple]) -> None:
     if not msg_rows:
         return
     cur.executemany(UPSERT_MESSAGE_SQL, msg_rows)
 
 
-def _batch_upsert_media(cur: sqlite3.Cursor, media_rows: list[tuple]):
+def _batch_upsert_media(cur: sqlite3.Cursor, media_rows: list[tuple]) -> None:
     if not media_rows:
         return
     cur.executemany(UPSERT_MEDIA_SQL, media_rows)

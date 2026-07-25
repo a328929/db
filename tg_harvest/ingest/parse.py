@@ -10,7 +10,7 @@ from tg_harvest.domain.normalize import _safe_json
 
 
 # 设置日志
-def setup_logging():
+def setup_logging() -> None:
     root_logger = logging.getLogger()
     if not root_logger.handlers:
         logging.basicConfig(
@@ -361,7 +361,7 @@ class HarvestCounters:
     parse_failure_samples: list[str] = field(default_factory=list)
     parse_failures_by_type: dict[str, int] = field(default_factory=dict)
 
-    def note_parse_failure(self, err: Exception, message: Any = None):
+    def note_parse_failure(self, err: Exception, message: Any = None) -> None:
         self.parse_failures += 1
         key = err.__class__.__name__
         self.parse_failures_by_type[key] = self.parse_failures_by_type.get(key, 0) + 1
@@ -370,7 +370,7 @@ class HarvestCounters:
             self.parse_failure_samples.append(f"id={mid}, err={key}: {err}")
 
 
-def log_parse_failure_summary(counters: HarvestCounters):
+def log_parse_failure_summary(counters: HarvestCounters) -> None:
     if counters.parse_failures > 0:
         logging.warning(
             f"解析失败统计: total={counters.parse_failures} by_type={counters.parse_failures_by_type}"

@@ -39,7 +39,7 @@ def _ensure_index(cur: sqlite3.Cursor, index_name: str, expected_sql: str) -> No
     cur.execute(_create_index_sql(expected_sql))
 
 
-def _create_message_indexes(cur: sqlite3.Cursor):
+def _create_message_indexes(cur: sqlite3.Cursor) -> None:
     # 核心业务索引：按频道日期倒序排序（Web 列表主视图）
     _ensure_index(
         cur,
@@ -125,7 +125,7 @@ def _create_message_indexes(cur: sqlite3.Cursor):
         "ON messages(chat_id, created_at DESC, pk DESC)"
     )
 
-def _create_chat_indexes(cur: sqlite3.Cursor):
+def _create_chat_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_chats_title",
@@ -158,7 +158,7 @@ def _create_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_media_indexes(cur: sqlite3.Cursor):
+def _create_media_indexes(cur: sqlite3.Cursor) -> None:
     # 文件唯一性索引
     _ensure_index(
         cur,
@@ -226,7 +226,7 @@ def _create_media_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_media_group_indexes(cur: sqlite3.Cursor):
+def _create_media_group_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_mg_pure_hash",
@@ -273,7 +273,7 @@ def _create_media_group_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_dedupe_indexes(cur: sqlite3.Cursor):
+def _create_dedupe_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_dedupe_runs_chat",
@@ -292,7 +292,7 @@ def _create_dedupe_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_job_indexes(cur: sqlite3.Cursor):
+def _create_admin_job_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_jobs_updated_created",
@@ -316,7 +316,7 @@ def _create_admin_job_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_missing_chat_indexes(cur: sqlite3.Cursor):
+def _create_admin_missing_chat_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_missing_chats_scanned",
@@ -337,7 +337,7 @@ def _create_admin_missing_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
+def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_restricted_chats_scanned",
@@ -364,7 +364,7 @@ def _create_admin_restricted_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor):
+def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_recovery_chats_scanned",
@@ -391,7 +391,7 @@ def _create_admin_recovery_chat_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_clone_run_indexes(cur: sqlite3.Cursor):
+def _create_admin_clone_run_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_clone_runs_updated",
@@ -418,7 +418,7 @@ def _create_admin_clone_run_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_clone_plan_indexes(cur: sqlite3.Cursor):
+def _create_admin_clone_plan_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_clone_plans_run_updated",
@@ -433,7 +433,7 @@ def _create_admin_clone_plan_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
+def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_clone_migrations_run_updated",
@@ -491,7 +491,7 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor):
+def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_clone_media_transfers_recovery",
@@ -500,7 +500,7 @@ def _create_admin_clone_media_transfer_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_clone_media_group_anchor_indexes(cur: sqlite3.Cursor):
+def _create_clone_media_group_anchor_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_clone_media_group_anchors_timeline",
@@ -509,7 +509,7 @@ def _create_clone_media_group_anchor_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
+def _create_sync_scheduler_indexes(cur: sqlite3.Cursor) -> None:
     _ensure_index(
         cur,
         "idx_admin_chat_access_risks_active",
@@ -567,7 +567,7 @@ def _create_sync_scheduler_indexes(cur: sqlite3.Cursor):
     )
 
 
-def _create_indexes(cur: sqlite3.Cursor):
+def _create_indexes(cur: sqlite3.Cursor) -> None:
     _create_chat_indexes(cur)
     _create_message_indexes(cur)
     _create_media_indexes(cur)

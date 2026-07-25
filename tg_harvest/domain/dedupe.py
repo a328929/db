@@ -59,7 +59,7 @@ def _create_temp_dup_hashes(
     from_table: str,
     hash_col: str,
     where_extra: str = "",
-):
+) -> None:
     # 安全性检查：确保 table_suffix, from_table 和 hash_col 只包含合法字符
     import re
     if not all(re.match(r"^[a-zA-Z0-9_]+$", s) for s in [table_suffix, from_table, hash_col]):
@@ -80,7 +80,7 @@ def _create_temp_dup_hashes(
     cur.execute(sql, (chat_id, threshold))
 
 
-def _create_temp_dup_hashes_solo(cur: sqlite3.Cursor, chat_id: int, threshold: int):
+def _create_temp_dup_hashes_solo(cur: sqlite3.Cursor, chat_id: int, threshold: int) -> None:
     _create_temp_dup_hashes(
         cur,
         "solo",
@@ -94,7 +94,7 @@ def _create_temp_dup_hashes_solo(cur: sqlite3.Cursor, chat_id: int, threshold: i
 
 def _create_temp_dup_hashes_group_txt(
     cur: sqlite3.Cursor, chat_id: int, threshold: int
-):
+) -> None:
     _create_temp_dup_hashes(
         cur,
         "group_txt",
@@ -108,7 +108,7 @@ def _create_temp_dup_hashes_group_txt(
 
 def _create_temp_dup_hashes_group_med(
     cur: sqlite3.Cursor, chat_id: int, threshold: int
-):
+) -> None:
     _create_temp_dup_hashes(
         cur,
         "group_med",
@@ -138,13 +138,13 @@ def _create_dup_hash_tables(
     return solo, group_txt, group_med
 
 
-def _init_temp_targets(cur: sqlite3.Cursor):
+def _init_temp_targets(cur: sqlite3.Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_targets")
     # 为临时表增加 PRIMARY KEY，不仅是约束，更是为了让 DELETE 时的子查询命中索引。
     cur.execute("CREATE TEMP TABLE temp_targets(pk INTEGER PRIMARY KEY)")
 
 
-def _insert_targets_from_solo_hashes(cur: sqlite3.Cursor, chat_id: int):
+def _insert_targets_from_solo_hashes(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute(
         """
         INSERT OR IGNORE INTO temp_targets(pk)
@@ -157,7 +157,7 @@ def _insert_targets_from_solo_hashes(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _create_temp_target_groups_txt(cur: sqlite3.Cursor, chat_id: int):
+def _create_temp_target_groups_txt(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_target_groups_txt")
     cur.execute(
         """
@@ -172,7 +172,7 @@ def _create_temp_target_groups_txt(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _create_temp_target_groups_med(cur: sqlite3.Cursor, chat_id: int):
+def _create_temp_target_groups_med(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_target_groups_med")
     cur.execute(
         """
@@ -187,7 +187,7 @@ def _create_temp_target_groups_med(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _merge_temp_target_groups(cur: sqlite3.Cursor):
+def _merge_temp_target_groups(cur: sqlite3.Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_target_groups")
     cur.execute(
         """
@@ -199,7 +199,7 @@ def _merge_temp_target_groups(cur: sqlite3.Cursor):
     )
 
 
-def _insert_targets_from_group_hashes(cur: sqlite3.Cursor, chat_id: int):
+def _insert_targets_from_group_hashes(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute(
         """
         INSERT OR IGNORE INTO temp_targets(pk)
@@ -210,7 +210,7 @@ def _insert_targets_from_group_hashes(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
+def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int) -> None:
     _init_temp_targets(cur)
     _insert_targets_from_solo_hashes(cur, chat_id)
     _create_temp_target_groups_txt(cur, chat_id)
@@ -219,7 +219,7 @@ def _fill_temp_targets(cur: sqlite3.Cursor, chat_id: int):
     _insert_targets_from_group_hashes(cur, chat_id)
 
 
-def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int):
+def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_keep_solo")
     try:
         cur.execute(
@@ -248,7 +248,7 @@ def _build_keep_first_solo(cur: sqlite3.Cursor, chat_id: int):
         raise
 
 
-def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int):
+def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_txt")
     cur.execute(
         """
@@ -270,7 +270,7 @@ def _build_keep_first_groups_txt(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _build_keep_first_groups_med(cur: sqlite3.Cursor, chat_id: int):
+def _build_keep_first_groups_med(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_med")
     cur.execute(
         """
@@ -292,7 +292,7 @@ def _build_keep_first_groups_med(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _build_keep_first_groups_final(cur: sqlite3.Cursor):
+def _build_keep_first_groups_final(cur: sqlite3.Cursor) -> None:
     cur.execute("DROP TABLE IF EXISTS temp_keep_groups_final")
     cur.execute(
         """
@@ -304,7 +304,7 @@ def _build_keep_first_groups_final(cur: sqlite3.Cursor):
     )
 
 
-def _prune_temp_targets_with_keep_first(cur: sqlite3.Cursor, chat_id: int):
+def _prune_temp_targets_with_keep_first(cur: sqlite3.Cursor, chat_id: int) -> None:
     cur.execute("DELETE FROM temp_targets WHERE pk IN (SELECT pk FROM temp_keep_solo)")
     cur.execute(
         """
@@ -319,7 +319,7 @@ def _prune_temp_targets_with_keep_first(cur: sqlite3.Cursor, chat_id: int):
     )
 
 
-def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int):
+def _apply_keep_first(cur: sqlite3.Cursor, chat_id: int) -> None:
     _build_keep_first_solo(cur, chat_id)
     _build_keep_first_groups_txt(cur, chat_id)
     _build_keep_first_groups_med(cur, chat_id)
@@ -334,7 +334,7 @@ def _insert_dedupe_run(
     mode: str,
     threshold: int,
     promo_score_threshold: int,
-):
+) -> None:
     cur.execute(
         """
         INSERT INTO dedupe_runs(batch_id, chat_id, mode, threshold, promo_threshold, started_at)
@@ -367,7 +367,7 @@ def _prepare_dedupe_targets(
     )
 
 
-def _insert_dedupe_actions(cur: sqlite3.Cursor, batch_id: str):
+def _insert_dedupe_actions(cur: sqlite3.Cursor, batch_id: str) -> None:
     cur.execute(
         """
         INSERT INTO dedupe_actions(
@@ -398,7 +398,7 @@ def _collect_affected_group_ids(cur: sqlite3.Cursor) -> set[int]:
     return affected
 
 
-def _delete_target_messages(cur: sqlite3.Cursor):
+def _delete_target_messages(cur: sqlite3.Cursor) -> None:
     # 修复：分批删除以防止长时间霸占写锁导致 Web 线程超时报错
     BATCH_SIZE = 500
     while True:
@@ -439,7 +439,7 @@ def _finish_dedupe_run(
     dup_hash_count_group_txt: int,
     dup_hash_count_group_med: int,
     target_count: int,
-):
+) -> None:
     cur.execute(
         """
         UPDATE dedupe_runs

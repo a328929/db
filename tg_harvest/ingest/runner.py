@@ -598,7 +598,7 @@ def _process_entity(
     *,
     skip_postprocess_if_unchanged: bool = False,
     enable_dedupe: bool = True,
-):
+) -> None:
     total_started_at = time.perf_counter()
     chat_id = int(getattr(entity, "id", 0))
     chat_title = getattr(entity, "title", "Unknown")
@@ -638,7 +638,7 @@ def _process_entity(
         raise RuntimeError(f"数据库后处理失败 (chat_id={chat_id}): {e}") from e
 
 
-def run_harvest():
+def run_harvest() -> None:
     from telethon.sync import TelegramClient
 
     setup_logging()

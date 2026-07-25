@@ -51,7 +51,7 @@ def _remove_legacy_search_objects(cur: sqlite3.Cursor) -> None:
 # =========================
 
 
-def _create_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_chats_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS chats (
         chat_id          INTEGER PRIMARY KEY,
@@ -67,7 +67,7 @@ def _create_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_messages_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_messages_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS messages (
         pk                   INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +105,7 @@ def _create_messages_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_message_media_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_message_media_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS message_media (
         chat_id              INTEGER NOT NULL,
@@ -131,7 +131,7 @@ def _create_message_media_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_media_groups_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_media_groups_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS media_groups (
         chat_id              INTEGER NOT NULL,
@@ -188,7 +188,7 @@ def _create_clone_media_group_anchors_table(
     """)
 
 
-def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS dedupe_runs (
         batch_id                 TEXT PRIMARY KEY,
@@ -222,7 +222,7 @@ def _create_dedupe_tables(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_job_tables(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_job_tables(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_jobs (
         job_id               TEXT PRIMARY KEY,
@@ -256,7 +256,7 @@ def _create_admin_job_tables(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_missing_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_missing_chats_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_missing_chats (
         chat_id              INTEGER PRIMARY KEY,
@@ -273,7 +273,7 @@ def _create_admin_missing_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_restricted_chats (
         chat_id                  INTEGER PRIMARY KEY,
@@ -317,7 +317,7 @@ def _create_admin_chat_access_risks_table(
     """)
 
 
-def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_recovery_chats (
         chat_id                  INTEGER PRIMARY KEY,
@@ -339,7 +339,7 @@ def _create_admin_recovery_chats_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_clone_runs_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_clone_runs_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_clone_runs (
         run_id                   TEXT PRIMARY KEY,
@@ -370,7 +370,7 @@ def _create_admin_clone_runs_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_clone_plans_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_clone_plans_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_clone_plans (
         plan_id                  TEXT PRIMARY KEY,
@@ -399,7 +399,7 @@ def _create_admin_clone_plans_table(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_admin_clone_migrations_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_clone_migrations_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_clone_migrations (
         migration_id             TEXT PRIMARY KEY,
@@ -437,7 +437,7 @@ def _create_admin_clone_migrations_table(cur: sqlite3.Cursor, strict_suffix: str
     """)
 
 
-def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_clone_message_map (
         id                       INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -478,7 +478,7 @@ def _create_admin_clone_message_map_table(cur: sqlite3.Cursor, strict_suffix: st
 def _create_admin_clone_media_transfers_table(
     cur: sqlite3.Cursor,
     strict_suffix: str,
-):
+) -> None:
     """Persist every media delivery hop so a restart can resume idempotently."""
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS admin_clone_media_transfers (
@@ -512,7 +512,7 @@ def _create_admin_clone_media_transfers_table(
     """)
 
 
-def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     cur.execute(f"""
     CREATE TABLE IF NOT EXISTS account_runtime_state (
         account_key              TEXT PRIMARY KEY,
@@ -626,7 +626,7 @@ def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str):
     """)
 
 
-def _create_tables(cur: sqlite3.Cursor, strict_suffix: str):
+def _create_tables(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     _create_chats_table(cur, strict_suffix)
     _create_messages_table(cur, strict_suffix)
     _create_message_media_table(cur, strict_suffix)
@@ -1411,7 +1411,7 @@ def _optimize_query_planner_stats(cur: sqlite3.Cursor) -> None:
 def create_schema(
     conn: sqlite3.Connection,
     feats: SqliteFeatures,
-):
+) -> None:
     cur = conn.cursor()
     try:
         strict_suffix = " STRICT" if feats.supports_strict else ""

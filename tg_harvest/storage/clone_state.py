@@ -1,3 +1,5 @@
+from typing import Any
+
 from tg_harvest.storage.clone_state_common import (
     _append_optional_fields,
     _build_clone_message_mapping_filters,
@@ -103,7 +105,7 @@ __all__ = [
 ]
 
 
-def load_clone_run_detail(conn, run_id: str):
+def load_clone_run_detail(conn, run_id: str) -> dict[str, Any] | None:
     return _load_clone_run_detail_impl(
         conn,
         run_id,
