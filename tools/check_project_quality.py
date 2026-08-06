@@ -58,8 +58,27 @@ def build_steps(*, include_tests: bool) -> list[QualityStep]:
     if include_tests:
         steps.append(
             QualityStep(
-                name="Run tests",
-                command=(sys.executable, "-m", "pytest"),
+                name="Run tests with coverage",
+                command=(sys.executable, "-m", "coverage", "run", "-m", "pytest"),
+            )
+        )
+        steps.append(
+            QualityStep(
+                name="Export coverage report",
+                command=(sys.executable, "-m", "coverage", "xml", "-o", "coverage.xml"),
+            )
+        )
+        steps.append(
+            QualityStep(
+                name="Run static JavaScript tests with coverage",
+                command=(
+                    "node",
+                    "--test",
+                    "--experimental-test-coverage",
+                    "--test-reporter=lcov",
+                    "--test-reporter-destination=static-coverage.lcov",
+                    "tests/static_coverage.test.js",
+                ),
             )
         )
     steps.append(

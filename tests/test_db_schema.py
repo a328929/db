@@ -31,6 +31,12 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "created_at TEXT NOT NULL DEFAULT ''",
         )
 
+    def test_dynamic_datetime_default_requires_a_standalone_default_clause(self) -> None:
+        column_sql = "created_at TEXT DEFAULTXdefault(datetime('now'))"
+
+        self.assertFalse(_column_sql_has_dynamic_datetime_default(column_sql))
+        self.assertEqual(_sqlite_add_column_sql(column_sql), column_sql)
+
     def test_create_schema_removes_legacy_search_helper_column_and_indexes(self) -> None:
         cur = self.conn.cursor()
         cur.execute(

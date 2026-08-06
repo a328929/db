@@ -102,7 +102,7 @@ Manticore 执行；无关键词的时间线和媒体排序使用 SQLite 普通 B
 # 安装开发依赖
 python3 -m pip install -r requirements-dev.txt
 
-# 推荐：运行和 CI 一致的完整质量门禁
+# 推荐：运行和 CI 一致的完整质量门禁；会生成供 SonarQube 使用的 coverage.xml 和 static-coverage.lcov
 python3 tools/check_project_quality.py
 
 # 查看当前补丁按主题归类后的变更清单

@@ -209,6 +209,23 @@ class WorkerSessionCleanupTests(unittest.TestCase):
         self.assertFalse(valid)
         self.assertEqual(logs, ["连接 Telegram 失败: offline"])
 
+    def test_ensure_base_session_valid_reports_session_storage_errors(self) -> None:
+        logs = []
+        cfg = SimpleNamespace(session_name="readonly/primary", api_id=1, api_hash="hash")
+
+        with patch(
+            "tg_harvest.admin_jobs.sessions.Path.mkdir",
+            side_effect=OSError("readonly"),
+        ):
+            valid = _ensure_base_session_valid(
+                cfg,
+                "job-1",
+                lambda _job_id, message: logs.append(message),
+            )
+
+        self.assertFalse(valid)
+        self.assertEqual(logs, ["Session 初始化失败: readonly"])
+
 
 if __name__ == "__main__":
     unittest.main()

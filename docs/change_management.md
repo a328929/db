@@ -20,7 +20,7 @@ python3 tools/check_project_quality.py
 - Python 编译检查：`compileall` 覆盖运行时代码、测试、脚本和工具。
 - Python 静态检查：`ruff check tg_harvest tests scripts tools`。
 - 前端静态 JavaScript 语法检查：`node --check static/*.js`。
-- 单元测试：`pytest`。
+- 单元测试和覆盖率报告：Python 测试生成 `coverage.xml`，前端行为测试生成 `static-coverage.lcov`。
 - Flask 应用启动和关键路由冒烟检查。
 
 快速开发时可以临时跳过测试：

@@ -11,6 +11,10 @@
 .claude/
 __pycache__/
 .pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+static-coverage.lcov
 .env
 *.pyc
 .venv/

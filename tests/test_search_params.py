@@ -24,6 +24,12 @@ class SearchParamsTests(unittest.TestCase):
             ("news updates", 62),
         )
 
+    def test_cleanup_preserves_operators_between_query_terms(self) -> None:
+        self.assertEqual(
+            _cleanup_query_after_duration_removal("alpha++beta"),
+            "alpha++beta",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
