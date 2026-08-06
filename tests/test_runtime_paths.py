@@ -34,7 +34,7 @@ class RuntimePathsTests(unittest.TestCase):
             self.assertTrue(model_dir.is_dir())
             self.assertFalse((runtime_root / "legacy").exists())
             for path in (runtime_root, db_dir, session_dir, model_dir):
-                self.assertEqual(0o700, stat.S_IMODE(path.stat().st_mode))
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o700)
 
     def test_connect_db_restricts_database_and_sqlite_sidecars(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -50,12 +50,12 @@ class RuntimePathsTests(unittest.TestCase):
                 conn.execute("INSERT INTO sample(value) VALUES (1)")
                 conn.commit()
 
-                self.assertEqual(0o755, stat.S_IMODE(external_dir.stat().st_mode))
-                self.assertEqual(0o600, stat.S_IMODE(db_path.stat().st_mode))
+                self.assertEqual(stat.S_IMODE(external_dir.stat().st_mode), 0o755)
+                self.assertEqual(stat.S_IMODE(db_path.stat().st_mode), 0o600)
                 for suffix in ("-wal", "-shm"):
                     sidecar = Path(f"{db_path}{suffix}")
                     self.assertTrue(sidecar.exists())
-                    self.assertEqual(0o600, stat.S_IMODE(sidecar.stat().st_mode))
+                    self.assertEqual(stat.S_IMODE(sidecar.stat().st_mode), 0o600)
             finally:
                 conn.close()
 

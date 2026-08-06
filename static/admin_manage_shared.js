@@ -2,6 +2,9 @@
   'use strict';
 
   var adminCsrfToken = '';
+  var NUMBER_FORMATTER = new Intl.NumberFormat('en-US', {
+    maximumFractionDigits: 0
+  });
 
   function setAdminCsrfToken(token) {
     adminCsrfToken = typeof token === 'string' ? token : '';
@@ -13,18 +16,18 @@
 
   function isAdminWriteRequest(url, method) {
     var normalizedMethod = String(method || 'GET').toUpperCase();
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].indexOf(normalizedMethod) === -1) {
+    if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(normalizedMethod)) {
       return false;
     }
     var normalizedUrl = String(url || '');
-    if (normalizedUrl.indexOf('/api/admin/') !== 0) {
+    if (!normalizedUrl.startsWith('/api/admin/')) {
       return false;
     }
     return normalizedUrl !== '/api/admin/auth/login';
   }
 
   function buildFetchHeaders(url, requestOptions) {
-    var headers = Object.assign({}, requestOptions.headers || {});
+    var headers = { ...requestOptions.headers };
     var method = requestOptions.method || 'GET';
     if (isAdminWriteRequest(url, method) && adminCsrfToken) {
       headers['X-CSRF-Token'] = adminCsrfToken;
@@ -63,10 +66,10 @@
     if (Array.isArray(payload)) {
       return normalizeChatList(payload);
     }
-    if (payload && Array.isArray(payload.items)) {
+    if (Array.isArray(payload?.items)) {
       return normalizeChatList(payload.items);
     }
-    if (payload && Array.isArray(payload.chats)) {
+    if (Array.isArray(payload?.chats)) {
       return normalizeChatList(payload.chats);
     }
     return [];
@@ -147,7 +150,8 @@
   function formatNumber(value) {
     var number = Number(value || 0);
     if (!Number.isFinite(number)) return '0';
-    return String(Math.trunc(number)).replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    var integer = Math.trunc(number);
+    return NUMBER_FORMATTER.format(integer === 0 ? 0 : integer);
   }
 
   // 依赖 date_utils.js 提供的日期格式化函数
@@ -921,7 +925,7 @@
   function logMessageKind(text) {
     var normalized = String(text || '').trim();
     if (!normalized) return 'info';
-    if (normalized.indexOf('[进度]') === 0) return 'progress';
+    if (normalized.startsWith('[进度]')) return 'progress';
     if (/^账号执行统计：/.test(normalized)) return 'summary';
     if (/^(全部群组增量采集|扫描完成：|删除零消息群组完成：|零消息群组删除完成：)/.test(normalized)) {
       return 'summary';
@@ -944,20 +948,20 @@
 
   function splitLogPrefix(text) {
     var normalized = String(text || '');
-    var progressMatch = normalized.match(/^(\[进度\])\s*(.*)$/);
-    if (progressMatch) {
+    var progressPrefix = '[进度]';
+    if (normalized.startsWith(progressPrefix)) {
       return {
-        prefix: progressMatch[1],
-        message: progressMatch[2] || '',
+        prefix: progressPrefix,
+        message: normalized.slice(progressPrefix.length).trimStart(),
         kind: 'progress'
       };
     }
 
-    var stepMatch = normalized.match(/^(\[\d+\/\d+\])\s*(.*)$/);
+    var stepMatch = /^(\[\d+\/\d+\])/.exec(normalized);
     if (stepMatch) {
       return {
         prefix: stepMatch[1],
-        message: stepMatch[2] || '',
+        message: normalized.slice(stepMatch[1].length).trimStart(),
         kind: logMessageKind(normalized)
       };
     }

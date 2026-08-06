@@ -10,8 +10,9 @@ class ProjectQualityTests(unittest.TestCase):
 
         audit_steps = [step for step in steps if step.name == "Audit Python dependencies"]
 
-        self.assertEqual(1, len(audit_steps))
+        self.assertEqual(len(audit_steps), 1)
         self.assertEqual(
+            audit_steps[0].command,
             (
                 sys.executable,
                 "-m",
@@ -19,7 +20,6 @@ class ProjectQualityTests(unittest.TestCase):
                 "-r",
                 "requirements.txt",
             ),
-            audit_steps[0].command,
         )
 
 

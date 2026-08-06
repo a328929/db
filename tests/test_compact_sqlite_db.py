@@ -37,9 +37,9 @@ class CompactSqliteDbTests(unittest.TestCase):
                     )
                 ]
 
-            self.assertEqual([1], snapshot_values)
-            self.assertEqual(0o644, stat.S_IMODE(source_path.stat().st_mode))
-            self.assertEqual(0o600, stat.S_IMODE(snapshot_path.stat().st_mode))
+            self.assertEqual(snapshot_values, [1])
+            self.assertEqual(stat.S_IMODE(source_path.stat().st_mode), 0o644)
+            self.assertEqual(stat.S_IMODE(snapshot_path.stat().st_mode), 0o600)
 
     def test_required_free_space_accounts_for_snapshot_and_build(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -100,10 +100,10 @@ class CompactSqliteDbTests(unittest.TestCase):
             try:
                 conn.execute("CREATE TABLE sample (value INTEGER)")
                 conn.commit()
-                self.assertEqual(0o755, stat.S_IMODE(target_dir.stat().st_mode))
+                self.assertEqual(stat.S_IMODE(target_dir.stat().st_mode), 0o755)
                 for artifact in compact_sqlite_db._db_files(work_target):
                     if artifact.exists():
-                        self.assertEqual(0o600, stat.S_IMODE(artifact.stat().st_mode))
+                        self.assertEqual(stat.S_IMODE(artifact.stat().st_mode), 0o600)
             finally:
                 conn.close()
 
@@ -127,14 +127,14 @@ class CompactSqliteDbTests(unittest.TestCase):
                 force=False,
             )
 
-            self.assertEqual(0o755, stat.S_IMODE(target_dir.stat().st_mode))
+            self.assertEqual(stat.S_IMODE(target_dir.stat().st_mode), 0o755)
             target_artifacts = (
                 target,
                 *(Path(f"{target}{suffix}") for suffix in ("-wal", "-shm", "-journal")),
             )
             for candidate in target_artifacts:
                 self.assertTrue(candidate.exists())
-                self.assertEqual(0o600, stat.S_IMODE(candidate.stat().st_mode))
+                self.assertEqual(stat.S_IMODE(candidate.stat().st_mode), 0o600)
 
     def test_compaction_uses_snapshot_after_live_source_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -170,18 +170,18 @@ class CompactSqliteDbTests(unittest.TestCase):
                     "1",
                 ],
             ):
-                self.assertEqual(0, compact_sqlite_db.main())
+                self.assertEqual(compact_sqlite_db.main(), 0)
 
             with sqlite3.connect(source_path) as source_conn, sqlite3.connect(
                 target_path
             ) as target_conn:
                 self.assertEqual(
-                    2,
                     source_conn.execute("SELECT COUNT(*) FROM chats").fetchone()[0],
+                    2,
                 )
                 self.assertEqual(
-                    1,
                     target_conn.execute("SELECT COUNT(*) FROM chats").fetchone()[0],
+                    1,
                 )
 
     def test_compaction_cleans_source_snapshot_after_build_failure(self) -> None:
@@ -243,12 +243,12 @@ class CompactSqliteDbTests(unittest.TestCase):
                     "1",
                 ],
             ):
-                self.assertEqual(0, compact_sqlite_db.main())
+                self.assertEqual(compact_sqlite_db.main(), 0)
 
             self.assertFalse(compact_sqlite_db._any_db_file_exists(work_target))
             self.assertFalse(compact_sqlite_db._any_db_file_exists(source_snapshot))
-            self.assertEqual(0o755, stat.S_IMODE(target_dir.stat().st_mode))
-            self.assertEqual(0o600, stat.S_IMODE(target_path.stat().st_mode))
+            self.assertEqual(stat.S_IMODE(target_dir.stat().st_mode), 0o755)
+            self.assertEqual(stat.S_IMODE(target_path.stat().st_mode), 0o600)
 
             with sqlite3.connect(source_path) as source_conn, sqlite3.connect(
                 target_path
@@ -271,12 +271,12 @@ class CompactSqliteDbTests(unittest.TestCase):
                 pending = target_conn.execute(
                     "SELECT due_at, in_flight FROM sync_pending_updates WHERE chat_id = 1"
                 ).fetchone()
-                self.assertEqual(("2026-07-03 00:01:00", 1), pending)
+                self.assertEqual(pending, ("2026-07-03 00:01:00", 1))
                 model = target_conn.execute(
                     "SELECT backend, artifact_path FROM sync_model_state WHERE model_key = ?",
                     ("temporal_batch_predictor",),
                 ).fetchone()
-                self.assertEqual(("torch", "/tmp/model.pt"), model)
+                self.assertEqual(model, ("torch", "/tmp/model.pt"))
 
     def test_compaction_does_not_requeue_copied_messages(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -335,28 +335,28 @@ class CompactSqliteDbTests(unittest.TestCase):
                     "1",
                 ],
             ):
-                self.assertEqual(0, compact_sqlite_db.main())
+                self.assertEqual(compact_sqlite_db.main(), 0)
 
-            self.assertEqual([0, 0], pending_during_data_copy)
+            self.assertEqual(pending_during_data_copy, [0, 0])
             with sqlite3.connect(target_path) as target_conn:
                 self.assertEqual(
-                    0,
                     target_conn.execute(
                         "SELECT COUNT(*) FROM manticore_search_outbox"
                     ).fetchone()[0],
+                    0,
                 )
                 target_conn.execute(
                     "UPDATE messages SET content_norm = 'changed' WHERE message_id = 10"
                 )
                 target_conn.commit()
                 self.assertEqual(
-                    ("upsert", 1),
                     target_conn.execute(
                         """
                         SELECT operation, revision
                         FROM manticore_search_outbox
                         """
                     ).fetchone(),
+                    ("upsert", 1),
                 )
 
     def _seed_source(self, path: Path) -> None:

@@ -79,7 +79,7 @@ class OpenTelegramRouteTests(unittest.TestCase):
     def test_open_telegram_route_renders_public_app_link(self) -> None:
         response = self.client.get("/open/telegram?chat_id=1&message_id=123")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("tg://resolve?domain=public_chat&amp;post=123", body)
         self.assertIn("tg://privatepost?channel=1&amp;post=123", body)
@@ -89,7 +89,7 @@ class OpenTelegramRouteTests(unittest.TestCase):
     def test_open_telegram_route_marks_grouped_media_links_as_single(self) -> None:
         response = self.client.get("/open/telegram?chat_id=1&message_id=124")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("tg://resolve?domain=public_chat&amp;post=124&amp;single", body)
         self.assertIn("tg://privatepost?channel=1&amp;post=124&amp;single", body)
@@ -98,7 +98,7 @@ class OpenTelegramRouteTests(unittest.TestCase):
     def test_open_telegram_route_renders_basic_chat_openmessage_link(self) -> None:
         response = self.client.get("/open/telegram?chat_id=3&message_id=789")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("Basic Group", body)
         self.assertIn("tg://openmessage?chat_id=3&amp;message_id=789", body)
@@ -109,7 +109,7 @@ class OpenTelegramRouteTests(unittest.TestCase):
     def test_open_telegram_route_renders_private_app_link(self) -> None:
         response = self.client.get("/open/telegram?chat_id=2&message_id=456")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("tg://privatepost?channel=2&amp;post=456", body)
         self.assertIn("https://t.me/c/2/456", body)
@@ -120,7 +120,7 @@ class OpenTelegramRouteTests(unittest.TestCase):
             "/open/telegram?chat_id=-1002202633364&message_id=456"
         )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("Signed Private Chat", body)
         self.assertIn("tg://privatepost?channel=2202633364&amp;post=456", body)
@@ -129,8 +129,8 @@ class OpenTelegramRouteTests(unittest.TestCase):
     def test_open_telegram_route_rejects_invalid_params(self) -> None:
         response = self.client.get("/open/telegram?chat_id=bad&message_id=1")
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("chat_id 参数非法", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "chat_id 参数非法")
 
 
 class _LoggerStub:

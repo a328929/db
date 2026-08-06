@@ -1,5 +1,4 @@
 import logging
-import re
 import sqlite3
 from collections.abc import Iterable, Sequence
 from contextlib import suppress
@@ -655,20 +654,51 @@ def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bo
     return any(str(row[1]) == column_name for row in cur.fetchall())
 
 
-_DYNAMIC_DATETIME_DEFAULT_RE = re.compile(
-    r"\s+DEFAULT\s*\(\s*datetime\s*\(\s*['\"]now['\"]\s*\)\s*\)",
-    re.IGNORECASE,
+_DYNAMIC_DATETIME_DEFAULT_FORMS = (
+    "default(datetime('now'))",
+    'default(datetime("now"))',
 )
 
 
+def _dynamic_datetime_default_span(column_sql: str) -> tuple[int, int] | None:
+    source = str(column_sql or "")
+    compact_parts: list[str] = []
+    source_indexes: list[int] = []
+    for index, char in enumerate(source):
+        if char.isspace():
+            continue
+        compact_parts.append(char.lower())
+        source_indexes.append(index)
+
+    compact = "".join(compact_parts)
+    for form in _DYNAMIC_DATETIME_DEFAULT_FORMS:
+        compact_start = compact.find(form)
+        if compact_start < 0:
+            continue
+        start = source_indexes[compact_start]
+        if start == 0 or not source[start - 1].isspace():
+            continue
+        while start > 0 and source[start - 1].isspace():
+            start -= 1
+        compact_end = compact_start + len(form) - 1
+        end = source_indexes[compact_end] + 1
+        return start, end
+    return None
+
+
 def _column_sql_has_dynamic_datetime_default(column_sql: str) -> bool:
-    return _DYNAMIC_DATETIME_DEFAULT_RE.search(str(column_sql or "")) is not None
+    return _dynamic_datetime_default_span(column_sql) is not None
 
 
 def _sqlite_add_column_sql(column_sql: str) -> str:
     # SQLite cannot ADD COLUMN with DEFAULT(datetime('now')) on existing tables.
     # Use a constant default, then populate current rows below.
-    return _DYNAMIC_DATETIME_DEFAULT_RE.sub(" DEFAULT ''", str(column_sql or ""))
+    source = str(column_sql or "")
+    span = _dynamic_datetime_default_span(source)
+    if span is None:
+        return source
+    start, end = span
+    return source[:start] + " DEFAULT ''" + source[end:]
 
 
 def _add_table_column(

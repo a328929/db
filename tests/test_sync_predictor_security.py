@@ -20,10 +20,10 @@ class SafeTorchLoadTests(unittest.TestCase):
 
         result = _safe_torch_load(FakeTorch, path)
 
-        self.assertEqual({"model_state": {}}, result)
+        self.assertEqual(result, {"model_state": {}})
         self.assertEqual(
-            [(path, {"map_location": "cpu", "weights_only": True})],
             calls,
+            [(path, {"map_location": "cpu", "weights_only": True})],
         )
 
     def test_unsupported_safe_loading_fails_closed_without_retry(self) -> None:
@@ -38,7 +38,7 @@ class SafeTorchLoadTests(unittest.TestCase):
         with self.assertRaises(TypeError):
             _safe_torch_load(LegacyTorch, Path("legacy.pt"))
 
-        self.assertEqual(1, len(calls))
+        self.assertEqual(len(calls), 1)
         self.assertTrue(calls[0][1]["weights_only"])
 
     def test_prediction_reports_checkpoint_load_failure(self) -> None:
@@ -69,7 +69,7 @@ class SafeTorchLoadTests(unittest.TestCase):
         self.assertIsNone(torch)
         self.assertIsNone(model)
         self.assertIs(model_row, loaded_row)
-        self.assertEqual("artifact_load_failed: RuntimeError", reason)
+        self.assertEqual(reason, "artifact_load_failed: RuntimeError")
 
 
 if __name__ == "__main__":

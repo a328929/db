@@ -55,7 +55,7 @@ class CollectTargetEntitiesTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual([123], [int(entity.id) for entity in entities])
+        self.assertEqual([int(entity.id) for entity in entities], [123])
         self.assertIn(-100123, client.calls)
 
     def test_existing_negative_channel_ids_fallback_to_public_channel_id(self) -> None:
@@ -79,7 +79,7 @@ class CollectTargetEntitiesTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual([123], [int(entity.id) for entity in entities])
+        self.assertEqual([int(entity.id) for entity in entities], [123])
         self.assertIn(123, client.calls)
 
     def test_resolve_chat_entity_falls_back_to_username_after_negative_id_misses(self) -> None:

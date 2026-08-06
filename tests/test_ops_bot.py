@@ -30,8 +30,8 @@ class OpsBotClientTests(unittest.TestCase):
         self.assertFalse(is_notify_enabled(cfg))
 
     def test_token_mask_keeps_only_edges(self) -> None:
-        self.assertEqual("1234...wxyz", mask_bot_token("1234567890wxyz"))
-        self.assertEqual("***", mask_bot_token("short"))
+        self.assertEqual(mask_bot_token("1234567890wxyz"), "1234...wxyz")
+        self.assertEqual(mask_bot_token("short"), "***")
 
     def test_long_messages_are_trimmed_to_telegram_limit(self) -> None:
         message = trim_message("x" * 5000)
@@ -54,10 +54,10 @@ class OpsBotClientTests(unittest.TestCase):
 
         self.assertTrue(sent)
         kwargs = post_mock.call_args.kwargs
-        self.assertEqual("123:secret-token", kwargs["token"])
-        self.assertEqual("sendMessage", kwargs["method"])
-        self.assertEqual("-1001", kwargs["payload"]["chat_id"])
-        self.assertEqual("hello", kwargs["payload"]["text"])
+        self.assertEqual(kwargs["token"], "123:secret-token")
+        self.assertEqual(kwargs["method"], "sendMessage")
+        self.assertEqual(kwargs["payload"]["chat_id"], "-1001")
+        self.assertEqual(kwargs["payload"]["text"], "hello")
 
 
 class OpsBotNotificationTests(unittest.TestCase):

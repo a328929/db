@@ -54,7 +54,7 @@ class FrontendSafetyTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_admin_template_loads_shared_admin_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_manage.html").read_text(encoding="utf-8")
@@ -134,7 +134,7 @@ class FrontendSafetyTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_search_and_sync_time_labels_use_shared_formatters(self) -> None:
         app_source = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
@@ -285,7 +285,7 @@ class FrontendSafetyTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_admin_log_templates_do_not_describe_live_broadcast(self) -> None:
         for template_name in (
@@ -385,7 +385,7 @@ class FrontendSafetyTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     def test_admin_recovery_template_loads_shared_helpers(self) -> None:
         template = (ROOT / "templates" / "admin_recovery.html").read_text(
@@ -693,7 +693,7 @@ class FrontendSafetyTests(unittest.TestCase):
         styles = (ROOT / "static" / "admin_manage.css").read_text(
             encoding="utf-8"
         )
-        self.assertEqual(5, template.count('class="admin-nav-action"'))
+        self.assertEqual(template.count('class="admin-nav-action"'), 5)
         self.assertIn(".admin-nav-action {", styles)
         self.assertIn(".admin-nav-action:hover {", styles)
 
@@ -899,7 +899,7 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("onUnauthorized: handleUnauthorizedResponse", source)
         self.assertIn("elements && elements.loginDialog", source)
         self.assertNotIn("任务创建成功但缺少 job_id", source)
-        self.assertEqual(1, shared_source.count("任务创建成功但缺少 job_id"))
+        self.assertEqual(shared_source.count("任务创建成功但缺少 job_id"), 1)
         self.assertIn("line.setAttribute('role', 'listitem');", shared_source)
         self.assertIn("placeholder.setAttribute('role', 'listitem');", shared_source)
         self.assertIn("line.setAttribute('tabindex', '0');", shared_source)
@@ -1095,8 +1095,8 @@ class FrontendSafetyTests(unittest.TestCase):
             )
             self.assertTrue(matches, script_name)
             self.assertEqual(
-                {"sessionController.handleUnauthorizedResponse"},
                 set(matches),
+                {"sessionController.handleUnauthorizedResponse"},
                 script_name,
             )
             self.assertNotIn(

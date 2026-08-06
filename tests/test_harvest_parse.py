@@ -42,8 +42,8 @@ class ResolveTargetEntitiesTests(unittest.TestCase):
 
         entities = resolve_target_entities(client, "666")
 
-        self.assertEqual([target_entity], entities)
-        self.assertEqual([], client.get_entity_calls)
+        self.assertEqual(entities, [target_entity])
+        self.assertEqual(client.get_entity_calls, [])
 
     def test_numeric_target_falls_back_to_entity_lookup_when_title_missing(self) -> None:
         target_entity = object()
@@ -51,8 +51,8 @@ class ResolveTargetEntitiesTests(unittest.TestCase):
 
         entities = resolve_target_entities(client, "666")
 
-        self.assertEqual([target_entity], entities)
-        self.assertEqual([666], client.get_entity_calls)
+        self.assertEqual(entities, [target_entity])
+        self.assertEqual(client.get_entity_calls, [666])
 
     def test_username_target_uses_explicit_entity_lookup(self) -> None:
         target_entity = object()
@@ -60,8 +60,8 @@ class ResolveTargetEntitiesTests(unittest.TestCase):
 
         entities = resolve_target_entities(client, "@channel_name")
 
-        self.assertEqual([target_entity], entities)
-        self.assertEqual(["channel_name"], client.get_entity_calls)
+        self.assertEqual(entities, [target_entity])
+        self.assertEqual(client.get_entity_calls, ["channel_name"])
 
     def test_explicit_target_returns_empty_for_entity_lookup_miss(self) -> None:
         client = _FakeClient(
@@ -70,7 +70,7 @@ class ResolveTargetEntitiesTests(unittest.TestCase):
 
         entities = resolve_target_entities(client, "@missing_channel")
 
-        self.assertEqual([], entities)
+        self.assertEqual(entities, [])
 
     def test_explicit_target_propagates_unexpected_lookup_failure(self) -> None:
         client = _FakeClient(entity_exc=RuntimeError("network down"))
@@ -120,16 +120,16 @@ class MessageParserTests(unittest.TestCase):
         parsed = MessageParser.parse(message)
 
         self.assertIsNotNone(parsed)
-        self.assertEqual("VIDEO", parsed.msg_type)
-        self.assertEqual("clip.mp4", parsed.content)
-        self.assertEqual("987654321", parsed.media_meta["file_unique_id"])
-        self.assertEqual("clip.mp4", parsed.media_meta["file_name"])
-        self.assertEqual(".mp4", parsed.media_meta["file_ext"])
-        self.assertEqual("video/mp4", parsed.media_meta["mime_type"])
-        self.assertEqual(123456789, parsed.media_meta["file_size"])
-        self.assertEqual(61, parsed.media_meta["duration_sec"])
-        self.assertEqual(1920, parsed.media_meta["width"])
-        self.assertEqual(1080, parsed.media_meta["height"])
+        self.assertEqual(parsed.msg_type, "VIDEO")
+        self.assertEqual(parsed.content, "clip.mp4")
+        self.assertEqual(parsed.media_meta["file_unique_id"], "987654321")
+        self.assertEqual(parsed.media_meta["file_name"], "clip.mp4")
+        self.assertEqual(parsed.media_meta["file_ext"], ".mp4")
+        self.assertEqual(parsed.media_meta["mime_type"], "video/mp4")
+        self.assertEqual(parsed.media_meta["file_size"], 123456789)
+        self.assertEqual(parsed.media_meta["duration_sec"], 61)
+        self.assertEqual(parsed.media_meta["width"], 1920)
+        self.assertEqual(parsed.media_meta["height"], 1080)
 
     def test_parse_raises_on_unexpected_media_metadata_error(self) -> None:
         message = SimpleNamespace(
@@ -169,7 +169,7 @@ class MessageParserTests(unittest.TestCase):
         with self.assertRaises(MessageParseError) as captured:
             MessageParser.parse(message)
 
-        self.assertEqual(123, captured.exception.message_id)
+        self.assertEqual(captured.exception.message_id, 123)
         self.assertIsInstance(captured.exception.cause, ValueError)
 
 

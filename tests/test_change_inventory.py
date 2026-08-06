@@ -34,12 +34,12 @@ class ChangeInventoryTests(unittest.TestCase):
         entries = parse_status_porcelain_z(raw_status)
 
         self.assertEqual(
+            entries,
             [
                 StatusEntry(status=" M", path="README.md"),
                 StatusEntry(status="??", path="docs/change_management.md"),
                 StatusEntry(status="R ", path="new.py", old_path="old.py"),
             ],
-            entries,
         )
 
     def test_find_forbidden_entries_detects_runtime_and_secret_paths(self) -> None:

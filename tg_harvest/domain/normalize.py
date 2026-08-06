@@ -326,9 +326,13 @@ def _filter_and_denoise_tokens(s: str) -> str:
         if not tok:
             continue
         # 清掉 token 级多余符号
-        t = re.sub(
-            r"^[^\w\u4e00-\u9fff]+|[^\w\u4e00-\u9fff]+$", "", tok, flags=re.UNICODE
-        )
+        start = 0
+        end = len(tok)
+        while start < end and not _is_token_word_character(tok[start]):
+            start += 1
+        while end > start and not _is_token_word_character(tok[end - 1]):
+            end -= 1
+        t = tok[start:end]
         if not t:
             continue
 
@@ -343,6 +347,10 @@ def _filter_and_denoise_tokens(s: str) -> str:
             tokens.append(t)
 
     return " ".join(tokens)
+
+
+def _is_token_word_character(char: str) -> bool:
+    return char == "_" or char.isalnum() or "\u4e00" <= char <= "\u9fff"
 
 
 def _finalize_template_text(s: str) -> str:

@@ -245,13 +245,13 @@ def _ensure_base_session_valid(cfg: Any, job_id: str, append_log_fn: Callable) -
         else:
             append_log_fn(job_id, f"Session 数据库异常: {e}")
         return False
-    except (sqlite3.Error, OSError) as e:
-        logging.exception("验证 Telegram Session 失败: session=%s", cfg.session_name)
-        append_log_fn(job_id, f"Session 初始化失败: {e}")
-        return False
     except (RPCError, ConnectionError, TimeoutError) as e:
         logging.exception("连接 Telegram 验证 Session 失败: session=%s", cfg.session_name)
         append_log_fn(job_id, f"连接 Telegram 失败: {e}")
+        return False
+    except (sqlite3.Error, OSError) as e:
+        logging.exception("验证 Telegram Session 失败: session=%s", cfg.session_name)
+        append_log_fn(job_id, f"Session 初始化失败: {e}")
         return False
     except Exception as e:
         logging.exception("初始化 Telegram Session 时发生未知错误: session=%s", cfg.session_name)

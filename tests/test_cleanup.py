@@ -81,7 +81,7 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(3, deleted)
+        self.assertEqual(deleted, 3)
         self.assertGreaterEqual(lock.acquired, 2)
         self.assertEqual(lock.acquired, lock.released)
         self.assertTrue(log_lock_states)
@@ -126,13 +126,13 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(1, deleted)
+        self.assertEqual(deleted, 1)
         cur = self.conn.cursor()
         try:
             cur.execute(
                 "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id = 20"
             )
-            self.assertEqual(0, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 0)
         finally:
             cur.close()
 
@@ -185,14 +185,14 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(2, deleted)
+        self.assertEqual(deleted, 2)
         refresh_mock.assert_not_called()
         cur = self.conn.cursor()
         try:
             cur.execute(
                 "SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 1 AND grouped_id = 77"
             )
-            self.assertEqual(0, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 0)
         finally:
             cur.close()
 
@@ -243,18 +243,18 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(2, deleted)
+        self.assertEqual(deleted, 2)
         self.assertEqual(
-            0,
             self.conn.execute(
                 "SELECT COUNT(*) FROM messages WHERE grouped_id = 88"
             ).fetchone()[0],
+            0,
         )
         self.assertEqual(
-            0,
             self.conn.execute(
                 "SELECT COUNT(*) FROM media_groups WHERE grouped_id = 88"
             ).fetchone()[0],
+            0,
         )
         anchors = self.conn.execute(
             """
@@ -265,11 +265,11 @@ class CleanupWriteLockTests(unittest.TestCase):
             """
         ).fetchall()
         self.assertEqual(
+            [tuple(row) for row in anchors],
             [
                 (88, 30, 30, "empty_media"),
                 (88, 31, 31, "empty_media"),
             ],
-            [tuple(row) for row in anchors],
         )
 
     def test_cleanup_removes_stale_media_group_id_from_media_metadata(self) -> None:
@@ -318,7 +318,7 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(1, deleted)
+        self.assertEqual(deleted, 1)
         self.assertIsNone(
             self.conn.execute(
                 "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 20"
@@ -354,12 +354,12 @@ class CleanupWriteLockTests(unittest.TestCase):
         finally:
             setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
 
-        self.assertEqual((1000, 1000, 0), result)
+        self.assertEqual(result, (1000, 1000, 0))
         self.assertEqual(
-            0,
             self.conn.execute(
                 "SELECT COUNT(*) FROM media_groups WHERE chat_id = 1"
             ).fetchone()[0],
+            0,
         )
 
     def test_cleanup_continues_and_repairs_summaries_when_progress_logging_fails(
@@ -396,12 +396,12 @@ class CleanupWriteLockTests(unittest.TestCase):
         row = self.conn.execute(
             "SELECT message_count FROM chats WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(0, int(row["message_count"]))
+        self.assertEqual(int(row["message_count"]), 0)
         remaining = self.conn.execute(
             "SELECT COUNT(*) AS c FROM messages WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(3, deleted)
-        self.assertEqual(0, int(remaining["c"]))
+        self.assertEqual(deleted, 3)
+        self.assertEqual(int(remaining["c"]), 0)
 
     def test_cleanup_repairs_summary_when_media_group_rebuild_fails(self) -> None:
         self.conn.executemany(
@@ -452,8 +452,8 @@ class CleanupWriteLockTests(unittest.TestCase):
         summary = self.conn.execute(
             "SELECT message_count FROM chats WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(4, int(remaining["c"]))
-        self.assertEqual(4, int(summary["message_count"]))
+        self.assertEqual(int(remaining["c"]), 4)
+        self.assertEqual(int(summary["message_count"]), 4)
 
     def test_unchanged_media_group_refresh_does_not_rewrite_aggregate(self) -> None:
         self.conn.executemany(
@@ -519,7 +519,7 @@ class CleanupWriteLockTests(unittest.TestCase):
         )
 
         actions = self.conn.execute("SELECT action FROM media_group_audit").fetchall()
-        self.assertEqual([], actions)
+        self.assertEqual(actions, [])
 
 
 if __name__ == "__main__":

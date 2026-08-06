@@ -75,8 +75,8 @@ class ManticoreClientTests(unittest.TestCase):
             client.bulk([operation])
 
         request = urlopen.call_args.args[0]
-        self.assertEqual("Bearer secret", request.headers["Authorization"])
-        self.assertEqual("/bulk", request.full_url.removeprefix(client.base_url))
+        self.assertEqual(request.headers["Authorization"], "Bearer secret")
+        self.assertEqual(request.full_url.removeprefix(client.base_url), "/bulk")
         self.assertEqual(operation, json.loads(request.data.decode().strip()))
 
     def test_bulk_error_is_not_accepted_as_success(self):
@@ -105,7 +105,7 @@ class ManticoreClientTests(unittest.TestCase):
         with patch("urllib.request.urlopen", return_value=response):
             documents = client.sample_documents([7, 7, 0])
 
-        self.assertEqual({7: {"content": "sample", "chat_id": 1}}, documents)
+        self.assertEqual(documents, {7: {"content": "sample", "chat_id": 1}})
 
 
 class ManticoreExpressionTests(unittest.TestCase):
@@ -113,55 +113,55 @@ class ManticoreExpressionTests(unittest.TestCase):
         compiled = compile_manticore_match(parse_query("福利/会员+onlyfans-广告"))
         # 注意: 新策略下 onlyfans 不再自动添加通配符
         self.assertEqual(
-            '((("福利" | "会员") onlyfans) !("广告"))',
             compiled,
+            '((("福利" | "会员") onlyfans) !("广告"))',
         )
 
     def test_phrase_and_user_wildcards_are_escaped(self):
         self.assertEqual(
-            '"foo bar"', compile_manticore_match(parse_query('"foo bar"'))
+            compile_manticore_match(parse_query('"foo bar"')), '"foo bar"'
         )
         # 新策略: 不自动添加通配符，% 被转义
         self.assertEqual(
-            "100\\%_done",
             compile_manticore_match(parse_query("100%_done")),
+            "100\\%_done",
         )
 
     def test_exact_match_by_default(self):
         """默认使用精确匹配，不自动添加通配符"""
         # 普通词：精确匹配
-        self.assertEqual("test", compile_manticore_match(parse_query("test")))
-        self.assertEqual("onlyfans", compile_manticore_match(parse_query("onlyfans")))
+        self.assertEqual(compile_manticore_match(parse_query("test")), "test")
+        self.assertEqual(compile_manticore_match(parse_query("onlyfans")), "onlyfans")
 
         # 短词也精确匹配
-        self.assertEqual("te", compile_manticore_match(parse_query("te")))
-        self.assertEqual("a", compile_manticore_match(parse_query("a")))
+        self.assertEqual(compile_manticore_match(parse_query("te")), "te")
+        self.assertEqual(compile_manticore_match(parse_query("a")), "a")
 
     def test_user_specified_wildcards_preserved(self):
         """用户显式指定的通配符应该被保留"""
         # 后缀通配
-        self.assertEqual("test*", compile_manticore_match(parse_query("test*")))
+        self.assertEqual(compile_manticore_match(parse_query("test*")), "test*")
 
         # 前缀通配
-        self.assertEqual("*test", compile_manticore_match(parse_query("*test")))
+        self.assertEqual(compile_manticore_match(parse_query("*test")), "*test")
 
         # 包含实际词项的前后通配
-        self.assertEqual("*test*", compile_manticore_match(parse_query("*test*")))
+        self.assertEqual(compile_manticore_match(parse_query("*test*")), "*test*")
 
         # 中间通配
-        self.assertEqual("t*st", compile_manticore_match(parse_query("t*st")))
+        self.assertEqual(compile_manticore_match(parse_query("t*st")), "t*st")
 
         # 问号通配符
-        self.assertEqual("te?t", compile_manticore_match(parse_query("te?t")))
+        self.assertEqual(compile_manticore_match(parse_query("te?t")), "te?t")
 
     def test_special_chars_in_wildcard_mode(self):
         """通配模式中仍需转义 Manticore 控制字符"""
-        self.assertEqual("100\\%*", compile_manticore_match(parse_query("100%*")))
+        self.assertEqual(compile_manticore_match(parse_query("100%*")), "100\\%*")
 
     def test_manticore_control_characters_are_escaped(self):
-        self.assertEqual(r"alpha\|beta", compile_manticore_match(parse_query("alpha|beta")))
-        self.assertEqual(r"\@content", compile_manticore_match(parse_query("@content")))
-        self.assertEqual(r"foo\&bar", compile_manticore_match(parse_query("foo&bar")))
+        self.assertEqual(compile_manticore_match(parse_query("alpha|beta")), r"alpha\|beta")
+        self.assertEqual(compile_manticore_match(parse_query("@content")), r"\@content")
+        self.assertEqual(compile_manticore_match(parse_query("foo&bar")), r"foo\&bar")
 
     def test_bare_wildcard_is_rejected(self):
         with self.assertRaisesRegex(ValueError, "至少一个普通字符"):
@@ -185,7 +185,7 @@ class SearchRateLimitTests(unittest.TestCase):
 
         with patch.dict("os.environ", {"TG_TRUST_PROXY_CIDRS": ""}):
             ip = get_client_ip(mock_request)
-        self.assertEqual("192.168.1.100", ip)
+        self.assertEqual(ip, "192.168.1.100")
 
     def test_get_client_ip_with_trusted_proxy(self):
         """配置了可信代理时应解析 X-Forwarded-For"""
@@ -202,7 +202,7 @@ class SearchRateLimitTests(unittest.TestCase):
             {"TG_TRUST_PROXY_CIDRS": "127.0.0.1/32,10.0.0.0/8"},
         ):
             ip = get_client_ip(mock_request)
-            self.assertEqual("8.8.8.8", ip)
+            self.assertEqual(ip, "8.8.8.8")
 
     def test_untrusted_peer_cannot_forge_forwarded_for(self):
         from unittest.mock import Mock, patch
@@ -217,7 +217,7 @@ class SearchRateLimitTests(unittest.TestCase):
             "os.environ",
             {"TG_TRUST_PROXY": "1", "TG_TRUST_PROXY_CIDRS": "127.0.0.1/32"},
         ):
-            self.assertEqual("203.0.113.10", get_client_ip(mock_request))
+            self.assertEqual(get_client_ip(mock_request), "203.0.113.10")
 
     def test_get_client_ip_filters_internal_addresses(self):
         """应该过滤内部IP地址"""
@@ -268,7 +268,7 @@ class SearchRateLimitTests(unittest.TestCase):
                 mock_request.headers = {"X-Forwarded-For": invalid_ip}
                 ip = get_client_ip(mock_request)
                 # 无效IP应回退到 remote_addr
-                self.assertEqual("127.0.0.1", ip, f"Should reject: {invalid_ip}")
+                self.assertEqual(ip, "127.0.0.1", f"Should reject: {invalid_ip}")
 
     def test_search_rate_tracker_rejects_new_keys_at_capacity(self):
         with search_routes_module._rate_lock:
@@ -333,19 +333,19 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         """超过1000字符的查询应被拒绝"""
         # 正好1000字符应该成功
         query_1000 = "test" * 250
-        self.assertEqual(1000, len(query_1000))
+        self.assertEqual(len(query_1000), 1000)
         result = parse_query(query_1000)
         self.assertIsNotNone(result)
 
         # 超过1000字符应该失败
         query_1001 = "test" * 250 + "x"
-        self.assertEqual(1001, len(query_1001))
+        self.assertEqual(len(query_1001), 1001)
         with self.assertRaisesRegex(ValueError, "搜索表达式过长"):
             parse_query(query_1001)
 
         # 中文也应该按字符数计算
         query_chinese_1000 = "福利" * 500
-        self.assertEqual(1000, len(query_chinese_1000))
+        self.assertEqual(len(query_chinese_1000), 1000)
         result = parse_query(query_chinese_1000)
         self.assertIsNotNone(result)
 
@@ -450,30 +450,30 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         """多个NOT运算符应该正确处理"""
         # 双重否定应该成功解析
         result = parse_query("--test")
-        self.assertEqual("NOT", result.kind)
-        self.assertEqual("NOT", result.left.kind)
-        self.assertEqual("TERM", result.left.left.kind)
+        self.assertEqual(result.kind, "NOT")
+        self.assertEqual(result.left.kind, "NOT")
+        self.assertEqual(result.left.left.kind, "TERM")
 
         # 三重否定
         result = parse_query("---test")
-        self.assertEqual("NOT", result.kind)
-        self.assertEqual("NOT", result.left.kind)
-        self.assertEqual("NOT", result.left.left.kind)
+        self.assertEqual(result.kind, "NOT")
+        self.assertEqual(result.left.kind, "NOT")
+        self.assertEqual(result.left.left.kind, "NOT")
 
     def test_whitespace_handling(self):
         """空白符处理"""
         # 前后空格应该被trim
         result = parse_query("   test   ")
-        self.assertEqual("TERM", result.kind)
-        self.assertEqual("test", result.value)
+        self.assertEqual(result.kind, "TERM")
+        self.assertEqual(result.value, "test")
 
         # 词之间的多个空格应该被视为隐式AND
         result = parse_query("test   word")
-        self.assertEqual("AND", result.kind)
+        self.assertEqual(result.kind, "AND")
 
         # tab和换行也应该被当作空白
         result = parse_query("test\t\nword")
-        self.assertEqual("AND", result.kind)
+        self.assertEqual(result.kind, "AND")
 
     def test_special_characters_in_terms(self):
         """特殊字符在term中的处理"""
@@ -492,24 +492,24 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
 
         # 全角运算符应该被转换
         result = parse_query("福利＋会员")
-        self.assertEqual("AND", result.kind)
+        self.assertEqual(result.kind, "AND")
 
         result = parse_query("福利／会员")
-        self.assertEqual("OR", result.kind)
+        self.assertEqual(result.kind, "OR")
 
     def test_deeply_nested_expressions(self):
         """深度嵌套的表达式"""
         # 100层嵌套应该成功（在1000字符限制内）
         query_100 = "(" * 100 + "test" + ")" * 100
-        self.assertEqual(204, len(query_100))
+        self.assertEqual(len(query_100), 204)
         result = parse_query(query_100)
-        self.assertEqual("TERM", result.kind)
+        self.assertEqual(result.kind, "TERM")
 
         # 200层嵌套也应该成功
         query_200 = "(" * 200 + "test" + ")" * 200
-        self.assertEqual(404, len(query_200))
+        self.assertEqual(len(query_200), 404)
         result = parse_query(query_200)
-        self.assertEqual("TERM", result.kind)
+        self.assertEqual(result.kind, "TERM")
 
         # 超过1000字符的深度嵌套应该被长度限制拒绝
         query_over_limit = "(" * 500 + "test" + ")" * 500
@@ -520,12 +520,12 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         """复杂但合法的表达式应该成功解析"""
         # 多层嵌套的布尔运算
         result = parse_query("(a+b)/(c+d)")
-        self.assertEqual("OR", result.kind)
+        self.assertEqual(result.kind, "OR")
 
         # NOT在括号中
         result = parse_query("test+-(bad/worse)")
-        self.assertEqual("AND", result.kind)
-        self.assertEqual("NOT", result.right.kind)
+        self.assertEqual(result.kind, "AND")
+        self.assertEqual(result.right.kind, "NOT")
 
         # 长的合法表达式
         result = parse_query("word1+word2+word3/word4-word5")
@@ -533,9 +533,9 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
 
         # 短语和term混合
         result = parse_query('"exact phrase"+keyword')
-        self.assertEqual("AND", result.kind)
-        self.assertEqual("PHRASE", result.left.kind)
-        self.assertEqual("TERM", result.right.kind)
+        self.assertEqual(result.kind, "AND")
+        self.assertEqual(result.left.kind, "PHRASE")
+        self.assertEqual(result.right.kind, "TERM")
 
     def test_edge_case_normalization(self):
         """测试normalize对边界情况的处理"""
@@ -554,15 +554,15 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         """短语中的特殊内容"""
         # 短语中的转义
         result = parse_query(r'"quote with \" inside"')
-        self.assertEqual("PHRASE", result.kind)
+        self.assertEqual(result.kind, "PHRASE")
 
         # 短语中的运算符应该被当作普通字符
         result = parse_query('"has + and - operators"')
-        self.assertEqual("PHRASE", result.kind)
+        self.assertEqual(result.kind, "PHRASE")
 
         # 短语中的括号
         result = parse_query('"has (parentheses) inside"')
-        self.assertEqual("PHRASE", result.kind)
+        self.assertEqual(result.kind, "PHRASE")
 
 
 class ManticoreOutboxTests(unittest.TestCase):
@@ -607,8 +607,8 @@ class ManticoreOutboxTests(unittest.TestCase):
         row = self.conn.execute(
             f"SELECT * FROM {OUTBOX_TABLE} WHERE pk = ?", (pk,)
         ).fetchone()
-        self.assertEqual("upsert", row["operation"])
-        self.assertEqual(3, row["revision"])
+        self.assertEqual(row["operation"], "upsert")
+        self.assertEqual(row["revision"], 3)
 
     def test_moving_media_requeues_both_old_and_new_messages(self):
         first_pk = self._insert_message()
@@ -637,15 +637,15 @@ class ManticoreOutboxTests(unittest.TestCase):
             f"SELECT pk, operation FROM {OUTBOX_TABLE} ORDER BY pk"
         ).fetchall()
         self.assertEqual(
-            [(first_pk, "upsert"), (first_pk + 1, "upsert")],
             [tuple(row) for row in rows],
+            [(first_pk, "upsert"), (first_pk + 1, "upsert")],
         )
 
     def test_index_status_requires_an_explicit_completed_rebuild(self):
         self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
         set_manticore_index_status(self.conn, "tg_messages", "building")
         self.assertEqual(
-            "building", get_manticore_index_status(self.conn, "tg_messages")
+            get_manticore_index_status(self.conn, "tg_messages"), "building"
         )
         set_manticore_index_status(self.conn, "tg_messages", "ready")
         self.assertTrue(manticore_index_is_ready(self.conn, "tg_messages"))
@@ -657,7 +657,7 @@ class ManticoreOutboxTests(unittest.TestCase):
         self._insert_message()
         self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
 
-        self.assertEqual(1, drain_manticore_outbox(self.conn, _FakeManticoreClient()))
+        self.assertEqual(drain_manticore_outbox(self.conn, _FakeManticoreClient()), 1)
         self.assertTrue(manticore_index_is_ready(self.conn, "tg_messages"))
 
     def test_delete_overwrites_pending_upsert(self):
@@ -667,7 +667,7 @@ class ManticoreOutboxTests(unittest.TestCase):
         row = self.conn.execute(
             f"SELECT operation, revision FROM {OUTBOX_TABLE} WHERE pk = ?", (pk,)
         ).fetchone()
-        self.assertEqual(("delete", 2), tuple(row))
+        self.assertEqual(tuple(row), ("delete", 2))
 
     def test_drain_writes_current_document_and_acknowledges_revision(self):
         pk = self._insert_message()
@@ -680,12 +680,12 @@ class ManticoreOutboxTests(unittest.TestCase):
         self.conn.commit()
         client = _FakeManticoreClient()
 
-        self.assertEqual(1, drain_manticore_outbox(self.conn, client))
-        self.assertEqual(0, self.conn.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}").fetchone()[0])
+        self.assertEqual(drain_manticore_outbox(self.conn, client), 1)
+        self.assertEqual(self.conn.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}").fetchone()[0], 0)
         operation = client.operations[0]["replace"]
         self.assertEqual(pk, operation["id"])
-        self.assertEqual("normalized", operation["doc"]["content"])
-        self.assertEqual(123, operation["doc"]["file_size"])
+        self.assertEqual(operation["doc"]["content"], "normalized")
+        self.assertEqual(operation["doc"]["file_size"], 123)
 
     def test_drain_does_not_ack_a_newer_revision(self):
         pk = self._insert_message()
@@ -700,12 +700,12 @@ class ManticoreOutboxTests(unittest.TestCase):
                 conn.commit()
 
         self.assertEqual(
-            1, drain_manticore_outbox(self.conn, ConcurrentUpdateClient())
+            drain_manticore_outbox(self.conn, ConcurrentUpdateClient()), 1
         )
         row = self.conn.execute(
             f"SELECT operation, revision FROM {OUTBOX_TABLE} WHERE pk = ?", (pk,)
         ).fetchone()
-        self.assertEqual(("upsert", 2), tuple(row))
+        self.assertEqual(tuple(row), ("upsert", 2))
 
     def test_failed_drain_marks_index_stale_and_keeps_outbox_item(self):
         pk = self._insert_message()
@@ -722,7 +722,7 @@ class ManticoreOutboxTests(unittest.TestCase):
         row = self.conn.execute(
             f"SELECT attempts, last_error FROM {OUTBOX_TABLE} WHERE pk = ?", (pk,)
         ).fetchone()
-        self.assertEqual(1, row["attempts"])
+        self.assertEqual(row["attempts"], 1)
         self.assertIn("backend unavailable", row["last_error"])
 
     def test_empty_content_is_kept_as_a_filterable_document(self):
@@ -737,8 +737,8 @@ class ManticoreOutboxTests(unittest.TestCase):
         self.conn.commit()
         client = _FakeManticoreClient()
 
-        self.assertEqual(1, drain_manticore_outbox(self.conn, client))
-        self.assertEqual("", client.operations[0]["replace"]["doc"]["content"])
+        self.assertEqual(drain_manticore_outbox(self.conn, client), 1)
+        self.assertEqual(client.operations[0]["replace"]["doc"]["content"], "")
 
     def test_schema_removes_legacy_sqlite_search_objects(self):
         self.conn.executescript(
@@ -827,10 +827,10 @@ class ManticoreValidationTests(unittest.TestCase):
         try:
             self.assertTrue(manticore_index_is_ready(conn, "tg_messages"))
             self.assertEqual(
-                "1",
                 get_manticore_meta(
                     conn, "manticore:tg_messages:manticore_document_count"
                 ),
+                "1",
             )
         finally:
             conn.close()
@@ -845,10 +845,10 @@ class ManticoreValidationTests(unittest.TestCase):
         try:
             self.assertFalse(manticore_index_is_ready(conn, "tg_messages"))
             self.assertEqual(
-                "0",
                 get_manticore_meta(
                     conn, "manticore:tg_messages:manticore_document_count"
                 ),
+                "0",
             )
         finally:
             conn.close()
@@ -874,10 +874,10 @@ class ManticoreValidationTests(unittest.TestCase):
         conn = self._connect()
         try:
             self.assertEqual(
-                "Manticore consistency sample mismatch",
                 get_manticore_meta(
                     conn, "manticore:tg_messages:last_validation_error"
                 ),
+                "Manticore consistency sample mismatch",
             )
             self.assertFalse(manticore_index_is_ready(conn, "tg_messages"))
         finally:
@@ -1009,8 +1009,8 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: rows,
         )
 
-        self.assertEqual("manticore", payload["search_backend"])
-        self.assertEqual("Visible", payload["items"][0]["content"])
+        self.assertEqual(payload["search_backend"], "manticore")
+        self.assertEqual(payload["items"][0]["content"], "Visible")
         self.assertIn('MATCH(\'"福利"\')', client.sql[0])
         self.assertIn("ORDER BY msg_date_ts DESC", client.sql[0])
 
@@ -1064,8 +1064,8 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: rows,
         )
 
-        self.assertEqual(12, payload["total"])
-        self.assertEqual(1, len(client.sql))
+        self.assertEqual(payload["total"], 12)
+        self.assertEqual(len(client.sql), 1)
 
     def test_count_only_returns_total_without_expensive_group_facets(self):
         client = _FakeManticoreClient(
@@ -1082,8 +1082,8 @@ class ManticoreServiceTests(unittest.TestCase):
             max_matches=1000000,
             map_search_items_fn=lambda rows: rows,
         )
-        self.assertEqual(4, payload["total"])
-        self.assertEqual([], payload["chat_facets"])
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["chat_facets"], [])
 
     def test_relevance_sort_uses_manticore_weight_for_each_message_type(self):
         expected_type_codes = {
@@ -1110,7 +1110,7 @@ class ManticoreServiceTests(unittest.TestCase):
                     map_search_items_fn=lambda rows: rows,
                 )
 
-                self.assertEqual("relevance", payload["effective_sort"])
+                self.assertEqual(payload["effective_sort"], "relevance")
                 self.assertIn("ORDER BY WEIGHT() DESC", client.sql[0])
                 self.assertIn(f"type_code = {type_code}", client.sql[0])
 
@@ -1128,7 +1128,7 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: rows,
         )
 
-        self.assertEqual("asc", payload["effective_order"])
+        self.assertEqual(payload["effective_order"], "asc")
         self.assertIn("ORDER BY WEIGHT() ASC", client.sql[0])
 
     def test_non_relevance_page_sort_does_not_compute_bm25_scores(self):
@@ -1162,7 +1162,7 @@ class ManticoreServiceTests(unittest.TestCase):
                 map_search_items_fn=lambda rows: rows,
             )
 
-        self.assertEqual([], client.sql)
+        self.assertEqual(client.sql, [])
 
     def test_empty_query_browses_with_sqlite_ordering_indexes(self):
         payload = sqlite_browse_payload_service(
@@ -1173,8 +1173,8 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: [dict(row) for row in rows],
         )
 
-        self.assertEqual("sqlite_browse", payload["search_backend"])
-        self.assertEqual([self.pk], [row["pk"] for row in payload["items"]])
+        self.assertEqual(payload["search_backend"], "sqlite_browse")
+        self.assertEqual([row["pk"] for row in payload["items"]], [self.pk])
 
     def test_empty_query_relevance_sort_falls_back_to_time(self):
         payload = sqlite_browse_payload_service(
@@ -1185,7 +1185,7 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: [dict(row) for row in rows],
         )
 
-        self.assertEqual("time", payload["effective_sort"])
+        self.assertEqual(payload["effective_sort"], "time")
 
     def test_empty_query_count_uses_the_browse_path(self):
         payload = sqlite_browse_payload_service(
@@ -1196,8 +1196,8 @@ class ManticoreServiceTests(unittest.TestCase):
             map_search_items_fn=lambda rows: rows,
         )
 
-        self.assertEqual(1, payload["total"])
-        self.assertEqual([], payload["chat_facets"])
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["chat_facets"], [])
 
     def test_empty_query_browse_uses_the_same_deep_page_window(self):
         with self.assertRaisesRegex(ValueError, "前 2000 页"):

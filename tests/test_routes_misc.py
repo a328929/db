@@ -36,8 +36,8 @@ class AuthRoutesValidationTests(unittest.TestCase):
     def test_login_rejects_non_json_requests(self) -> None:
         response = self.client.post("/api/admin/auth/login", data="password=1")
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("请求必须为 JSON", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "请求必须为 JSON")
 
     def test_login_rejects_oversized_json_body(self) -> None:
         response = self.client.post(
@@ -46,20 +46,20 @@ class AuthRoutesValidationTests(unittest.TestCase):
             content_type="application/json",
         )
 
-        self.assertEqual(413, response.status_code)
-        self.assertEqual("请求体过大", response.get_json()["error"])
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(response.get_json()["error"], "请求体过大")
 
     def test_login_rejects_non_object_json(self) -> None:
         response = self.client.post("/api/admin/auth/login", json=["bad"])
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("请求 JSON 格式错误", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "请求 JSON 格式错误")
 
     def test_login_rejects_non_string_password(self) -> None:
         response = self.client.post("/api/admin/auth/login", json={"password": 123})
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("password 参数必须为字符串", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "password 参数必须为字符串")
 
     def test_login_rejects_when_admin_password_is_unconfigured(self) -> None:
         with patch(
@@ -68,8 +68,8 @@ class AuthRoutesValidationTests(unittest.TestCase):
         ):
             response = self.client.post("/api/admin/auth/login", json={})
 
-        self.assertEqual(503, response.status_code)
-        self.assertEqual("后台密码未配置", response.get_json()["error"])
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["error"], "后台密码未配置")
 
     def test_login_accepts_configured_password(self) -> None:
         with patch(
@@ -81,7 +81,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                 json={"password": "secret"},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
         self.assertNotIn("token", response.get_json())
         self.assertIsInstance(response.get_json()["csrf_token"], str)
@@ -98,8 +98,8 @@ class AuthRoutesValidationTests(unittest.TestCase):
             )
             check_response = self.client.get("/api/admin/auth/check")
 
-        self.assertEqual(200, login_response.status_code)
-        self.assertEqual(200, check_response.status_code)
+        self.assertEqual(login_response.status_code, 200)
+        self.assertEqual(check_response.status_code, 200)
         self.assertTrue(check_response.get_json()["authenticated"])
         self.assertEqual(
             login_response.get_json()["csrf_token"],
@@ -121,8 +121,8 @@ class AuthRoutesValidationTests(unittest.TestCase):
             )
             response = self.client.post("/api/admin/protected-write", json={})
 
-        self.assertEqual(200, login_response.status_code)
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(login_response.status_code, 200)
+        self.assertEqual(response.status_code, 403)
         self.assertTrue(response.get_json()["csrf_required"])
 
     def test_admin_write_request_accepts_valid_csrf_token(self) -> None:
@@ -145,7 +145,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
 
     def test_login_rate_limits_repeated_password_failures(self) -> None:
@@ -160,7 +160,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                     json={"password": "bad"},
                     environ_base={"REMOTE_ADDR": ip},
                 )
-                self.assertEqual(403, response.status_code)
+                self.assertEqual(response.status_code, 403)
 
             response = self.client.post(
                 "/api/admin/auth/login",
@@ -168,8 +168,8 @@ class AuthRoutesValidationTests(unittest.TestCase):
                 environ_base={"REMOTE_ADDR": ip},
             )
 
-        self.assertEqual(429, response.status_code)
-        self.assertEqual("登录失败次数过多，请稍后再试", response.get_json()["error"])
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.get_json()["error"], "登录失败次数过多，请稍后再试")
 
     def test_login_rate_limiter_rejects_new_keys_at_capacity(self) -> None:
         with auth_module._admin_login_failure_lock:
@@ -197,14 +197,14 @@ class AuthRoutesValidationTests(unittest.TestCase):
                     json={"password": "bad"},
                     environ_base={"REMOTE_ADDR": ip},
                 )
-                self.assertEqual(403, response.status_code)
+                self.assertEqual(response.status_code, 403)
 
             response = self.client.post(
                 "/api/admin/auth/login",
                 json={"password": "secret"},
                 environ_base={"REMOTE_ADDR": ip},
             )
-            self.assertEqual(200, response.status_code)
+            self.assertEqual(response.status_code, 200)
 
             response = self.client.post(
                 "/api/admin/auth/login",
@@ -212,7 +212,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                 environ_base={"REMOTE_ADDR": ip},
             )
 
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(response.status_code, 403)
 
     def test_proxy_clients_have_independent_login_failure_buckets(self) -> None:
         with patch.dict(
@@ -231,7 +231,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                         "HTTP_X_FORWARDED_FOR": "203.0.113.20",
                     },
                 )
-                self.assertEqual(403, response.status_code)
+                self.assertEqual(response.status_code, 403)
 
             response = self.client.post(
                 "/api/admin/auth/login",
@@ -242,7 +242,7 @@ class AuthRoutesValidationTests(unittest.TestCase):
                 },
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertTrue(response.get_json()["ok"])
 
     def test_login_rate_limiter_prunes_expired_client_keys(self) -> None:
@@ -282,50 +282,50 @@ class AuthRoutesValidationTests(unittest.TestCase):
 
     def test_normalize_admin_next_path_rejects_external_urls(self) -> None:
         self.assertEqual(
-            "/admin/manage",
             auth_module.normalize_admin_next_path("https://evil.example/admin/manage"),
+            "/admin/manage",
         )
         self.assertEqual(
-            "/admin/manage",
             auth_module.normalize_admin_next_path("//evil.example/admin/manage"),
+            "/admin/manage",
         )
 
     def test_normalize_admin_next_path_allows_known_admin_pages_only(self) -> None:
         self.assertEqual(
-            "/admin/channels?sort=updated_desc",
             auth_module.normalize_admin_next_path("/admin/channels?sort=updated_desc"),
+            "/admin/channels?sort=updated_desc",
         )
         self.assertEqual(
-            "/admin/recovery",
             auth_module.normalize_admin_next_path("/admin/recovery"),
+            "/admin/recovery",
         )
         self.assertEqual(
-            "/admin/sync",
             auth_module.normalize_admin_next_path("/admin/sync"),
+            "/admin/sync",
         )
         self.assertEqual(
-            "/admin/clone",
             auth_module.normalize_admin_next_path("/admin/clone"),
+            "/admin/clone",
         )
         self.assertEqual(
-            "/admin/clone/create",
             auth_module.normalize_admin_next_path("/admin/clone/create"),
+            "/admin/clone/create",
         )
         self.assertEqual(
-            "/admin/clone/migrate",
             auth_module.normalize_admin_next_path("/admin/clone/migrate"),
+            "/admin/clone/migrate",
         )
         self.assertEqual(
-            "/admin/clone/runs/manage",
             auth_module.normalize_admin_next_path("/admin/clone/runs/manage"),
+            "/admin/clone/runs/manage",
         )
         self.assertEqual(
-            "/admin/clone/runs/detail?run_id=run-existing",
             auth_module.normalize_admin_next_path("/admin/clone/runs/detail?run_id=run-existing"),
+            "/admin/clone/runs/detail?run_id=run-existing",
         )
         self.assertEqual(
-            "/admin/manage",
             auth_module.normalize_admin_next_path("/api/admin/chats"),
+            "/admin/manage",
         )
 
 
@@ -353,20 +353,20 @@ class AdminPageRoutesTests(unittest.TestCase):
             "/api/admin/auth/login",
             json={"password": "secret"},
         )
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
 
     def test_admin_manage_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/manage")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Fmanage", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Fmanage")
 
     def test_admin_login_page_sanitizes_next_parameter(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/login?next=https://evil.example/")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn('id="admin-login-page"', body)
         self.assertIn('data-next-path="/admin/manage"', body)
@@ -377,47 +377,47 @@ class AdminPageRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone")
 
     def test_authenticated_login_page_redirects_to_clone_runs_manage_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone/runs/manage")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone/runs/manage", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone/runs/manage")
 
     def test_authenticated_login_page_redirects_to_clone_run_detail_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone/runs/detail?run_id=run-existing")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone/runs/detail?run_id=run-existing", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone/runs/detail?run_id=run-existing")
 
     def test_authenticated_login_page_redirects_to_clone_create_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone/create")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone/create", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone/create")
 
     def test_authenticated_login_page_preserves_legacy_clone_migrate_page(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/login?next=/admin/clone/migrate")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone/migrate", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone/migrate")
 
     def test_authenticated_admin_manage_page_renders(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/manage")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIn("后台数据库管理", response.get_data(as_text=True))
 
     def test_authenticated_admin_sync_page_renders(self) -> None:
@@ -425,7 +425,7 @@ class AdminPageRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/sync")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIn("消息同步统计", response.get_data(as_text=True))
 
 
@@ -455,23 +455,23 @@ class SearchRoutesValidationTests(unittest.TestCase):
     def test_search_rejects_non_json_requests(self) -> None:
         response = self.client.post("/api/search", data="query=hello")
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("请求必须为 JSON", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "请求必须为 JSON")
 
     def test_search_rejects_non_object_json(self) -> None:
         response = self.client.post("/api/search", json=["hello"])
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("请求 JSON 格式错误", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "请求 JSON 格式错误")
 
     def test_search_returns_retryable_status_when_index_is_unavailable(self) -> None:
         self.search_payload = ManticoreError("index is stale")
 
         response = self.client.post("/api/search", json={"query": "hello"})
 
-        self.assertEqual(503, response.status_code)
+        self.assertEqual(response.status_code, 503)
         self.assertEqual(
-            "搜索索引暂不可用，请稍后重试", response.get_json()["error"]
+            response.get_json()["error"], "搜索索引暂不可用，请稍后重试"
         )
 
     def test_search_compresses_large_json_for_gzip_clients(self) -> None:
@@ -485,8 +485,8 @@ class SearchRoutesValidationTests(unittest.TestCase):
             headers={"Accept-Encoding": "gzip"},
         )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual("gzip", response.headers.get("Content-Encoding"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers.get("Content-Encoding"), "gzip")
         self.assertIn("Accept-Encoding", response.headers.get("Vary", ""))
         payload = json.loads(gzip.decompress(response.data).decode("utf-8"))
         self.assertEqual("完整正文" * 1000, payload["items"][0]["title"])
@@ -499,7 +499,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
                 json={"query": "hello", "count_only": True},
                 environ_base={"REMOTE_ADDR": ip},
             )
-            self.assertEqual(200, response.status_code)
+            self.assertEqual(response.status_code, 200)
 
         response = self.client.post(
             "/api/search",
@@ -507,7 +507,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
             environ_base={"REMOTE_ADDR": ip},
         )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
 
     def test_search_count_only_requests_have_their_own_rate_limit(self) -> None:
         ip = "198.51.100.11"
@@ -517,7 +517,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
                 json={"query": "hello", "count_only": True},
                 environ_base={"REMOTE_ADDR": ip},
             )
-            self.assertEqual(200, response.status_code)
+            self.assertEqual(response.status_code, 200)
 
         response = self.client.post(
             "/api/search",
@@ -525,7 +525,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
             environ_base={"REMOTE_ADDR": ip},
         )
 
-        self.assertEqual(429, response.status_code)
+        self.assertEqual(response.status_code, 429)
 
     def test_search_rate_limiter_prunes_expired_client_keys(self) -> None:
         with search_routes_module._rate_lock:
@@ -541,7 +541,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
 class AppFactoryRuntimeInitTests(unittest.TestCase):
     def test_search_page_size_is_limited_to_fifty_complete_messages(self) -> None:
-        self.assertEqual(50, app_factory.PAGE_SIZE)
+        self.assertEqual(app_factory.PAGE_SIZE, 50)
 
     def test_create_app_requires_security_config_when_production_flag_is_enabled(self) -> None:
         with patch.dict(
@@ -601,7 +601,7 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
         ensure_db_mock.assert_called_once_with()
         listener_mock.assert_not_called()
         run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=False)
-        self.assertEqual(1, len(created_apps))
+        self.assertEqual(len(created_apps), 1)
         self.assertTrue(created_apps[0].extensions["tg_db_ready"])
 
     def test_debug_reloader_parent_does_not_start_runtime_workers(self) -> None:
@@ -623,7 +623,7 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
         create_app_mock.assert_called_once_with(init_db=False)
         ensure_db_mock.assert_not_called()
         run_mock.assert_called_once_with(host="127.0.0.1", port=9999, debug=True)
-        self.assertEqual(1, len(created_apps))
+        self.assertEqual(len(created_apps), 1)
         self.assertFalse(created_apps[0].extensions["tg_db_ready"])
 
     def test_debug_reloader_child_starts_runtime_workers(self) -> None:
@@ -644,7 +644,7 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
 
         create_app_mock.assert_called_once_with(init_db=True)
         ensure_db_mock.assert_called_once_with()
-        self.assertEqual(1, len(created_apps))
+        self.assertEqual(len(created_apps), 1)
         self.assertTrue(created_apps[0].extensions["tg_db_ready"])
 
     def test_db_free_routes_do_not_trigger_runtime_db_initialization(self) -> None:
@@ -666,14 +666,14 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
             static_response = client.get("/static/admin_login.js")
             missing_response = client.get("/not-a-route")
 
-        self.assertEqual(200, login_response.status_code)
-        self.assertEqual(200, auth_check_response.status_code)
-        self.assertEqual(302, admin_response.status_code)
-        self.assertEqual(302, clone_create_response.status_code)
-        self.assertEqual(302, clone_migrate_response.status_code)
-        self.assertEqual(302, clone_detail_response.status_code)
-        self.assertEqual(200, static_response.status_code)
-        self.assertEqual(404, missing_response.status_code)
+        self.assertEqual(login_response.status_code, 200)
+        self.assertEqual(auth_check_response.status_code, 200)
+        self.assertEqual(admin_response.status_code, 302)
+        self.assertEqual(clone_create_response.status_code, 302)
+        self.assertEqual(clone_migrate_response.status_code, 302)
+        self.assertEqual(clone_detail_response.status_code, 302)
+        self.assertEqual(static_response.status_code, 200)
+        self.assertEqual(missing_response.status_code, 404)
         ensure_db_mock.assert_not_called()
         self.assertFalse(app.extensions["tg_db_ready"])
 
@@ -690,8 +690,8 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
             response = client.get("/api/meta")
             second_response = client.get("/api/meta")
 
-        self.assertNotEqual(404, response.status_code)
-        self.assertNotEqual(404, second_response.status_code)
+        self.assertNotEqual(response.status_code, 404)
+        self.assertNotEqual(second_response.status_code, 404)
         ensure_db_mock.assert_called_once_with()
         self.assertTrue(app.extensions["tg_db_ready"])
 
@@ -709,7 +709,7 @@ class AppFactoryRuntimeInitTests(unittest.TestCase):
         with patch.object(app_factory, "_ensure_db") as ensure_db_mock:
             response = client.get("/api/admin/chats")
 
-        self.assertEqual(401, response.status_code)
+        self.assertEqual(response.status_code, 401)
         ensure_db_mock.assert_not_called()
         self.assertFalse(app.extensions["tg_db_ready"])
 
@@ -814,15 +814,15 @@ class ContextRoutesTests(unittest.TestCase):
     def test_context_api_returns_promo_flag_for_local_view(self) -> None:
         response = self.client.get("/api/chat/1/context?msg_id=10&direction=around")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(1, payload["items"][0]["is_promo"])
+        self.assertEqual(payload["items"][0]["is_promo"], 1)
 
     def test_context_page_accepts_signed_chat_id(self) -> None:
         response = self.client.get("/chat/-1002202633364?msg_id=11")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIn('data-chat-id="-1002202633364"', response.get_data(as_text=True))
 
     def test_context_api_accepts_signed_chat_id(self) -> None:
@@ -830,11 +830,11 @@ class ContextRoutesTests(unittest.TestCase):
             "/api/chat/-1002202633364/context?msg_id=11&direction=around"
         )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(-1002202633364, payload["items"][0]["chat_id"])
-        self.assertEqual("signed chat text", payload["items"][0]["content"])
+        self.assertEqual(payload["items"][0]["content"], "signed chat text")
 
 
 class _ConnStub:

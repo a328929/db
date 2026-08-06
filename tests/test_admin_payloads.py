@@ -74,10 +74,10 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         select_statements = [
             sql for sql in statements if sql.upper().startswith("SELECT")
         ]
-        self.assertEqual(200, status_code)
-        self.assertEqual(2, payload["chat_count"])
-        self.assertEqual(8, payload["message_count"])
-        self.assertEqual(1, len(select_statements))
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["chat_count"], 2)
+        self.assertEqual(payload["message_count"], 8)
+        self.assertEqual(len(select_statements), 1)
         self.assertIn("COUNT(*) AS chat_count", select_statements[0])
         self.assertIn("SUM(message_count)", select_statements[0])
 
@@ -108,22 +108,22 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
             payload = build_admin_sync_stats_payload(self.conn)
 
         self.assertTrue(payload["ok"])
-        self.assertEqual("live", payload["default_window_key"])
-        self.assertEqual("2026-06-28 11:55:00", payload["latest_message_created_at"])
+        self.assertEqual(payload["default_window_key"], "live")
+        self.assertEqual(payload["latest_message_created_at"], "2026-06-28 11:55:00")
         windows_by_key = {
             str(item["window_key"]): item for item in payload["windows"]
         }
         self.assertTrue(windows_by_key["live"]["is_live"])
-        self.assertEqual(4, windows_by_key["live"]["message_count"])
-        self.assertEqual(2, windows_by_key["live"]["chat_count"])
-        self.assertEqual(1, windows_by_key["10m"]["message_count"])
-        self.assertEqual(1, windows_by_key["10m"]["chat_count"])
-        self.assertEqual(2, windows_by_key["30m"]["message_count"])
-        self.assertEqual(1, windows_by_key["30m"]["chat_count"])
-        self.assertEqual(3, windows_by_key["2h"]["message_count"])
-        self.assertEqual(2, windows_by_key["2h"]["chat_count"])
-        self.assertEqual(4, windows_by_key["2d"]["message_count"])
-        self.assertEqual(2, windows_by_key["2d"]["chat_count"])
+        self.assertEqual(windows_by_key["live"]["message_count"], 4)
+        self.assertEqual(windows_by_key["live"]["chat_count"], 2)
+        self.assertEqual(windows_by_key["10m"]["message_count"], 1)
+        self.assertEqual(windows_by_key["10m"]["chat_count"], 1)
+        self.assertEqual(windows_by_key["30m"]["message_count"], 2)
+        self.assertEqual(windows_by_key["30m"]["chat_count"], 1)
+        self.assertEqual(windows_by_key["2h"]["message_count"], 3)
+        self.assertEqual(windows_by_key["2h"]["chat_count"], 2)
+        self.assertEqual(windows_by_key["2d"]["message_count"], 4)
+        self.assertEqual(windows_by_key["2d"]["chat_count"], 2)
 
     def test_sync_stats_uses_window_bounded_aggregates_without_multi_window_join(self) -> None:
         self.conn.executemany(
@@ -194,9 +194,9 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         payload = build_admin_sync_stats_payload(self.conn)
 
         self.assertTrue(payload["ok"])
-        self.assertEqual("", payload["latest_message_created_at"])
+        self.assertEqual(payload["latest_message_created_at"], "")
         self.assertTrue(payload["windows"])
-        self.assertEqual("live", payload["default_window_key"])
+        self.assertEqual(payload["default_window_key"], "live")
         self.assertTrue(
             all(int(item["message_count"]) == 0 for item in payload["windows"])
         )
@@ -242,7 +242,7 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
                 health_snapshot=health_snapshot,
             )
 
-        self.assertEqual("critical", payload["health"]["status"])
+        self.assertEqual(payload["health"]["status"], "critical")
         reason_codes = {item["code"] for item in payload["health"]["reasons"]}
         self.assertIn("listener_disconnected", reason_codes)
         self.assertIn("no_recent_ingest", reason_codes)
@@ -266,7 +266,7 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
             health_snapshot=health_snapshot,
         )
 
-        self.assertEqual("warning", payload["health"]["status"])
+        self.assertEqual(payload["health"]["status"], "warning")
         self.assertTrue(
             any(
                 item["code"] == "queue_backlog_warn"
@@ -291,10 +291,10 @@ class AdminPayloadPerformanceTests(unittest.TestCase):
         payload = build_admin_sync_live_messages_payload(self.conn, limit=10)
 
         self.assertTrue(payload["ok"])
-        self.assertEqual(2, len(payload["items"]))
-        self.assertEqual(2, payload["items"][0]["chat_id"])
-        self.assertEqual(201, payload["items"][0]["message_id"])
-        self.assertEqual("second message", payload["items"][0]["content_preview"])
+        self.assertEqual(len(payload["items"]), 2)
+        self.assertEqual(payload["items"][0]["chat_id"], 2)
+        self.assertEqual(payload["items"][0]["message_id"], 201)
+        self.assertEqual(payload["items"][0]["content_preview"], "second message")
 
 
 class AdminStorageHealthPayloadTests(unittest.TestCase):
@@ -372,13 +372,13 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         self.assertTrue(payload["database"]["path_configured"])
         self.assertGreater(payload["database"]["main_bytes"], 0)
         self.assertIn(payload["database"]["journal_mode"], {"delete", "wal"})
-        self.assertEqual(42, payload["counts"]["message_count"])
-        self.assertEqual(2, payload["counts"]["media_group_count"])
-        self.assertEqual(1, payload["counts"]["manticore_outbox_pending"])
+        self.assertEqual(payload["counts"]["message_count"], 42)
+        self.assertEqual(payload["counts"]["media_group_count"], 2)
+        self.assertEqual(payload["counts"]["manticore_outbox_pending"], 1)
         self.assertFalse(payload["indexes"]["manticore_ready"])
         self.assertEqual(
-            "cleanup",
             payload["maintenance"]["last_recorded_job"]["job_type"],
+            "cleanup",
         )
 
     def test_storage_health_handles_unconfigured_path_and_missing_wal(self) -> None:
@@ -408,8 +408,8 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
                 )
             finally:
                 conn.close()
-        self.assertEqual(0, payload["database"]["wal_bytes"])
-        self.assertEqual(0, payload["database"]["shm_bytes"])
+        self.assertEqual(payload["database"]["wal_bytes"], 0)
+        self.assertEqual(payload["database"]["shm_bytes"], 0)
 
     def test_storage_health_applies_threshold_boundaries_and_low_disk_actions(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -513,10 +513,10 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         )
         normalized = _normalize_config_values(raw)
 
-        self.assertEqual(100, normalized["db_health_size_critical_bytes"])
-        self.assertEqual(1, normalized["db_health_wal_warning_bytes"])
-        self.assertEqual(1, normalized["db_health_wal_critical_bytes"])
-        self.assertEqual(100, normalized["db_health_disk_free_critical_bytes"])
+        self.assertEqual(normalized["db_health_size_critical_bytes"], 100)
+        self.assertEqual(normalized["db_health_wal_warning_bytes"], 1)
+        self.assertEqual(normalized["db_health_wal_critical_bytes"], 1)
+        self.assertEqual(normalized["db_health_disk_free_critical_bytes"], 100)
 
 
 if __name__ == "__main__":

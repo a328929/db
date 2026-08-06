@@ -20,7 +20,6 @@ from tg_harvest.ingest.flood_wait import (
     flood_sleep_threshold_kwargs,
     flood_wait_seconds,
     format_retry_context,
-    is_transient_telegram_error,
     maybe_refresh_entity_cursor,
     raise_if_long_flood_wait,
     short_retry_sleep_seconds,
@@ -415,10 +414,7 @@ def _harvest_messages_for_entity(
                 raise RuntimeError(
                     f"网络或 RPC 错误重试耗尽，采集中断 (chat_id={chat_id}): {e}"
                 ) from e
-            if is_transient_telegram_error(e) or isinstance(e, RPCError):
-                sleep_seconds = short_retry_sleep_seconds(retry_count)
-            else:
-                sleep_seconds = short_retry_sleep_seconds(retry_count)
+            sleep_seconds = short_retry_sleep_seconds(retry_count)
             logging.warning(
                 "网络或 RPC 错误，准备重试: chat_id=%s %s error=%s",
                 chat_id,

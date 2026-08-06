@@ -118,7 +118,7 @@ class RecoveryRoutesTests(unittest.TestCase):
             "/api/admin/auth/login",
             json={"password": "secret"},
         )
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         return str(payload["csrf_token"])
@@ -127,29 +127,29 @@ class RecoveryRoutesTests(unittest.TestCase):
         with self._auth_config_patch():
             response = self.client.get("/admin/recovery")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Frecovery", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Frecovery")
 
     def test_recovery_candidates_api_includes_links_and_overview(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/api/admin/recovery")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(1, payload["overview"]["pending_count"])
+        self.assertEqual(payload["overview"]["pending_count"], 1)
         item = payload["items"][0]
-        self.assertEqual("Recoverable", item["chat_title"])
-        self.assertEqual("tg://resolve?domain=recoverable", item["telegram_app_link"])
-        self.assertEqual("https://t.me/recoverable", item["telegram_web_link"])
+        self.assertEqual(item["chat_title"], "Recoverable")
+        self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=recoverable")
+        self.assertEqual(item["telegram_web_link"], "https://t.me/recoverable")
 
     def test_recovery_scan_rejects_missing_csrf_token(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.post("/api/admin/recovery/scan")
 
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(response.status_code, 403)
         self.assertTrue(response.get_json()["csrf_required"])
 
     def test_recovery_scan_accepts_csrf_token(self) -> None:
@@ -160,9 +160,9 @@ class RecoveryRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
-        self.assertEqual(1, len(self.started_scans))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["job"], {"job_id": "job-1"})
+        self.assertEqual(len(self.started_scans), 1)
         self.assertIn(("job-1", "已接收 Session 群组恢复扫描请求"), self.logs)
 
     def test_recovery_add_starts_harvest_job_with_recovery_specific_route(self) -> None:
@@ -182,12 +182,13 @@ class RecoveryRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
-        self.assertEqual(1, len(self.started_harvests))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["job"], {"job_id": "job-1"})
+        self.assertEqual(len(self.started_harvests), 1)
         args, kwargs = self.started_harvests[0]
-        self.assertEqual(("job-1", "@recoverable"), args[:2])
+        self.assertEqual(args[:2], ("job-1", "@recoverable"))
         self.assertEqual(
+            kwargs["harvest_hint"],
             {
                 "chat_id": 1,
                 "chat_title": "Recoverable",
@@ -196,14 +197,13 @@ class RecoveryRoutesTests(unittest.TestCase):
                 "source_entity_id": -1001,
                 "source_access_hash": 9001,
             },
-            kwargs["harvest_hint"],
         )
         self.assertEqual(
+            self.logs[:2],
             [
                 ("job-1", "已接收恢复候选添加入库请求"),
                 ("job-1", "抓取目标：@recoverable"),
             ],
-            self.logs[:2],
         )
 
     def test_recovery_restore_selected_requires_confirmation(self) -> None:
@@ -215,8 +215,8 @@ class RecoveryRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
 
     def test_recovery_restore_selected_starts_job(self) -> None:
         with self._auth_config_patch():
@@ -231,12 +231,12 @@ class RecoveryRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
-        self.assertEqual(1, len(self.started_restores))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["job"], {"job_id": "job-1"})
+        self.assertEqual(len(self.started_restores), 1)
         _args, kwargs = self.started_restores[0]
-        self.assertEqual([1], kwargs["chat_ids"])
-        self.assertEqual("1 个恢复候选", kwargs["target_label"])
+        self.assertEqual(kwargs["chat_ids"], [1])
+        self.assertEqual(kwargs["target_label"], "1 个恢复候选")
 
 
 if __name__ == "__main__":

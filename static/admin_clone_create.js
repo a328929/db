@@ -287,15 +287,15 @@
       var title = document.createElement('span');
       var status = document.createElement('span');
       var detail = document.createElement('p');
-      var statusValue = String((capability && capability.status) || '').trim();
+      var statusValue = String(capability?.status || '').trim();
       item.className = 'clone-capability';
       head.className = 'clone-capability-head';
       title.className = 'clone-capability-title';
-      status.className = 'clone-capability-status is-' + statusValue.replace(/_/g, '-');
+      status.className = 'clone-capability-status is-' + statusValue.replaceAll('_', '-');
       detail.className = 'clone-capability-detail';
-      title.textContent = String((capability && capability.label) || '');
+      title.textContent = String(capability?.label || '');
       status.textContent = getCapabilityStatusLabel(statusValue);
-      detail.textContent = String((capability && capability.detail) || '');
+      detail.textContent = String(capability?.detail || '');
       head.appendChild(title);
       head.appendChild(status);
       item.appendChild(head);
@@ -313,10 +313,10 @@
   }
 
   function renderRecommendation(container, recommendation) {
-    var summary = String((recommendation && recommendation.summary) || '').trim();
+    var summary = String(recommendation?.summary || '').trim();
     if (!summary) return;
-    var level = String((recommendation && recommendation.level) || '').trim();
-    var mode = String((recommendation && recommendation.mode) || '').trim();
+    var level = String(recommendation?.level || '').trim();
+    var mode = String(recommendation?.mode || '').trim();
     var prefix = level ? '评估 ' + level : '评估';
     container.textContent = mode ? prefix + ' / ' + mode + '：' + summary : prefix + '：' + summary;
   }
@@ -328,18 +328,18 @@
   function findSourceChat(chatId) {
     var normalized = String(chatId || '').trim();
     return state.sourceChats.find(function (item) {
-      return String((item && item.chat_id) || '') === normalized;
+      return String(item?.chat_id || '') === normalized;
     }) || null;
   }
 
   function buildChatOptionText(item) {
-    var title = String((item && item.chat_title) || (item && item.chat_id) || '').trim();
-    return title + '（' + shared.formatNumber((item && item.message_count) || 0) + ' 条）';
+    var title = String(item?.chat_title || item?.chat_id || '').trim();
+    return title + '（' + shared.formatNumber(item?.message_count || 0) + ' 条）';
   }
 
   function inferTargetKindFromSource(chatType) {
     var value = String(chatType || '').trim().toLowerCase();
-    return value.indexOf('group') !== -1 || value === 'chat' ? 'megagroup' : 'channel';
+    return value.includes('group') || value === 'chat' ? 'megagroup' : 'channel';
   }
 
   function appendSummaryPair(container, label, value) {
@@ -368,8 +368,8 @@
   }
 
   function syncStageState(elements) {
-    elements.sourceStage.setAttribute('data-stage-state', state.report ? 'complete' : 'current');
-    elements.createStage.setAttribute('data-stage-state', state.report ? 'current' : 'pending');
+    elements.sourceStage.dataset.stageState = state.report ? 'complete' : 'current';
+    elements.createStage.dataset.stageState = state.report ? 'current' : 'pending';
   }
 
   function setBusy(elements, busy) {
@@ -392,19 +392,20 @@
 
   function isStartAllowed(elements) {
     if (state.busy || !state.report) return false;
-    if (!((state.report.account || {}).secondary_session_distinct)) return false;
+    if (!state.report.account?.secondary_session_distinct) return false;
     if (String(elements.targetTitleInput.value || '').trim().length <= 0) return false;
     return String(elements.confirmInput.value || '').trim() === String(state.report.confirm || '').trim();
   }
 
   async function fetchJSON(url, options) {
-    var requestOptions = Object.assign({}, options || {});
+    var requestOptions = { ...options };
     if (!requestOptions.method || String(requestOptions.method).toUpperCase() === 'GET') {
       requestOptions.timeoutMs = requestOptions.timeoutMs || DATABASE_READ_TIMEOUT_MS;
     }
-    return shared.fetchJSON(url, Object.assign(requestOptions, {
+    return shared.fetchJSON(url, {
+      ...requestOptions,
       onUnauthorized: sessionController.handleUnauthorizedResponse
-    }));
+    });
   }
 
   async function postJSON(url, payload) {
@@ -419,7 +420,7 @@
     },
     getElements: getElements,
     getPageElement: function (elements) {
-      return elements && elements.page ? elements.page : null;
+      return elements?.page || null;
     }
   });
 })();

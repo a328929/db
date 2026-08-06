@@ -127,22 +127,22 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
     def test_access_failure_classifier_excludes_transient_and_system_errors(self) -> None:
         self.assertEqual(
-            "access_denied",
             classify_chat_access_failure(RuntimeError("ChannelPrivateError")),
+            "access_denied",
         )
         self.assertEqual(
-            "entity_unavailable",
             classify_chat_access_failure(
                 ValueError("Could not find the input entity for PeerChannel")
             ),
+            "entity_unavailable",
         )
         self.assertEqual(
-            "",
             classify_chat_access_failure(
                 AccountFloodWaitError(seconds=90, threshold_seconds=30)
             ),
+            "",
         )
-        self.assertEqual("", classify_chat_access_failure(RuntimeError("disk full")))
+        self.assertEqual(classify_chat_access_failure(RuntimeError("disk full")), "")
 
     def test_load_admin_update_rows_sorts_by_last_message_time_desc(self) -> None:
         conn = sqlite3.connect(":memory:")
@@ -211,8 +211,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             conn.close()
 
         self.assertEqual(
-            [2, 1, 3],
             [int(row["chat_id"]) for row in rows],
+            [2, 1, 3],
         )
 
     def test_admin_update_effective_concurrency_caps_each_account_to_one_worker(
@@ -222,15 +222,15 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             configured_concurrency=4,
             active_account_count=2,
         )
-        self.assertEqual(1, per_account)
-        self.assertEqual(2, effective)
+        self.assertEqual(per_account, 1)
+        self.assertEqual(effective, 2)
 
         per_account, effective = _admin_update_effective_concurrency(
             configured_concurrency=4,
             active_account_count=1,
         )
-        self.assertEqual(4, per_account)
-        self.assertEqual(4, effective)
+        self.assertEqual(per_account, 4)
+        self.assertEqual(effective, 4)
 
     def test_admin_update_account_start_delay_applies_gap_per_account(self) -> None:
         next_start_at: dict[str, float] = {}
@@ -241,8 +241,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             gap_seconds=0.5,
             now=100.0,
         )
-        self.assertEqual(0.0, wait)
-        self.assertEqual(100.5, next_start_at["primary"])
+        self.assertEqual(wait, 0.0)
+        self.assertEqual(next_start_at["primary"], 100.5)
 
         wait = _admin_update_account_start_delay(
             next_start_at,
@@ -250,8 +250,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             gap_seconds=0.5,
             now=100.2,
         )
-        self.assertAlmostEqual(0.3, wait, places=6)
-        self.assertEqual(101.0, next_start_at["primary"])
+        self.assertAlmostEqual(wait, 0.3, places=6)
+        self.assertEqual(next_start_at["primary"], 101.0)
 
         wait = _admin_update_account_start_delay(
             next_start_at,
@@ -259,8 +259,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             gap_seconds=0.5,
             now=100.2,
         )
-        self.assertEqual(0.0, wait)
-        self.assertEqual(100.7, next_start_at["secondary"])
+        self.assertEqual(wait, 0.0)
+        self.assertEqual(next_start_at["secondary"], 100.7)
 
     def test_chat_message_count_reads_chat_summary_not_messages_count(self) -> None:
         statements = []
@@ -281,8 +281,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         count = _admin_get_chat_message_count(lambda: _Conn(), 1)
 
-        self.assertEqual(42, count)
-        self.assertEqual(1, len(statements))
+        self.assertEqual(count, 42)
+        self.assertEqual(len(statements), 1)
         self.assertIn("message_count", statements[0])
         self.assertIn("FROM chats", statements[0])
         self.assertNotIn("COUNT(*)", statements[0])
@@ -361,7 +361,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             finally:
                 coordinator.close()
 
-        self.assertEqual(0, counters.written)
+        self.assertEqual(counters.written, 0)
         self.assertEqual(set(), finalize_mock.call_args.kwargs["touched_groups"])
         self.assertTrue(
             finalize_mock.call_args.kwargs["skip_postprocess_if_unchanged"]
@@ -396,8 +396,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             finally:
                 coordinator.close()
 
-        self.assertEqual(1, counters.written)
-        self.assertEqual({7001}, finalize_mock.call_args.kwargs["touched_groups"])
+        self.assertEqual(counters.written, 1)
+        self.assertEqual(finalize_mock.call_args.kwargs["touched_groups"], {7001})
 
     def test_all_chat_update_reports_partial_completion_when_one_worker_fails(self) -> None:
         rows = [
@@ -568,7 +568,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual([1, 2], submitted_chat_ids)
+        self.assertEqual(submitted_chat_ids, [1, 2])
         self.assertTrue(
             any("按数据库最后一条消息发送时间从新到旧逐一尝试更新" in line for line in logs)
         )
@@ -655,13 +655,13 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(2, probe_mock.call_count)
+        self.assertEqual(probe_mock.call_count, 2)
         self.assertEqual(
+            harvest_progress,
             [
                 (1, 5054, "[1/2] one (ID=1) 正在采集"),
                 (2, 6060, "[2/2] two (ID=2) 正在采集"),
             ],
-            harvest_progress,
         )
         self.assertTrue(any("已启用探测模式" in line for line in logs))
 
@@ -748,12 +748,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self.assertTrue(ok)
         probe_mock.assert_not_called()
         self.assertEqual(
+            harvest_progress,
             [
                 (1, None, "正在采集"),
                 (2, None, "正在采集"),
                 (3, None, "正在采集"),
             ],
-            harvest_progress,
         )
         self.assertFalse(any("已启用探测模式" in line for line in logs))
 
@@ -855,12 +855,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(
+            harvest_calls,
             [
                 ("main_sess", 1),
                 ("secondary_sess", 2),
                 ("main_sess", 3),
             ],
-            harvest_calls,
         )
         self.assertTrue(any("第二账号已加入批量更新调度" in line for line in logs))
         self.assertTrue(any("账号数：2" in line for line in logs))
@@ -963,12 +963,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(
+            harvest_calls,
             [
                 ("main_sess", 1),
                 ("main_sess", 2),
                 ("secondary_sess", 3),
             ],
-            harvest_calls,
         )
         self.assertTrue(any("缺少公开用户名" in line for line in logs))
 
@@ -1071,12 +1071,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(
+            harvest_calls,
             [
                 ("main_sess", 1),
                 ("secondary_sess", 2),
                 ("main_sess", 2),
             ],
-            harvest_calls,
         )
         self.assertTrue(any("第二账号更新失败，切换其他账号重试" in line for line in logs))
         self.assertTrue(any("成功 2 个，失败 0 个" in line for line in logs))
@@ -1179,7 +1179,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual([("main_sess", 1), ("secondary_sess", 1)], harvest_calls)
+        self.assertEqual(harvest_calls, [("main_sess", 1), ("secondary_sess", 1)])
         self.assertTrue(any("主账号更新失败，切换其他账号重试" in line for line in logs))
         self.assertTrue(any("已切换账号完成采集" in line for line in logs))
 
@@ -1204,12 +1204,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             idx for idx, account in assignments.items() if account.key == "secondary"
         }
         self.assertIn(1, secondary_indexes)
-        self.assertEqual(2, len(secondary_indexes))
-        self.assertEqual(1, counts["secondary_cached"])
-        self.assertEqual(1, counts["secondary_public"])
-        self.assertEqual(1, counts["secondary_public_eligible"])
-        self.assertEqual(3, counts["secondary_public_candidates"])
-        self.assertEqual(2, counts["secondary_public_skipped"])
+        self.assertEqual(len(secondary_indexes), 2)
+        self.assertEqual(counts["secondary_cached"], 1)
+        self.assertEqual(counts["secondary_public"], 1)
+        self.assertEqual(counts["secondary_public_eligible"], 1)
+        self.assertEqual(counts["secondary_public_candidates"], 3)
+        self.assertEqual(counts["secondary_public_skipped"], 2)
 
     def test_all_chat_update_assignment_can_disable_secondary_public_warmup(
         self,
@@ -1229,79 +1229,79 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         )
 
         self.assertTrue(all(account.key == "primary" for account in assignments.values()))
-        self.assertEqual(0, counts["secondary"])
-        self.assertEqual(0, counts["secondary_public"])
-        self.assertEqual(0, counts["secondary_public_eligible"])
-        self.assertEqual(2, counts["secondary_public_candidates"])
-        self.assertEqual(2, counts["secondary_public_skipped"])
+        self.assertEqual(counts["secondary"], 0)
+        self.assertEqual(counts["secondary_public"], 0)
+        self.assertEqual(counts["secondary_public_eligible"], 0)
+        self.assertEqual(counts["secondary_public_candidates"], 2)
+        self.assertEqual(counts["secondary_public_skipped"], 2)
 
     def test_auto_secondary_public_resolve_limit_scales_with_large_queue(self) -> None:
         self.assertEqual(
-            0,
             _auto_secondary_public_resolve_limit(
                 secondary_cached_row_count=0,
                 total_rows=0,
             ),
+            0,
         )
         self.assertEqual(
-            30,
             _auto_secondary_public_resolve_limit(
                 secondary_cached_row_count=0,
                 total_rows=60,
             ),
+            30,
         )
         self.assertEqual(
-            156,
             _auto_secondary_public_resolve_limit(
                 secondary_cached_row_count=0,
                 total_rows=320,
             ),
+            156,
         )
         self.assertEqual(
-            171,
             _auto_secondary_public_resolve_limit(
                 secondary_cached_row_count=25,
                 total_rows=400,
             ),
+            171,
         )
         self.assertEqual(
-            155,
             _auto_secondary_public_resolve_limit(
                 secondary_cached_row_count=120,
                 total_rows=480,
             ),
+            155,
         )
 
     def test_admin_update_secondary_target_count_limits_primary_share_on_large_queue(
         self,
     ) -> None:
-        self.assertEqual(30, _admin_update_primary_soft_cap(60))
-        self.assertEqual(186, _admin_update_primary_soft_cap(320))
-        self.assertEqual(0, _admin_update_secondary_public_resolve_reserve(60))
-        self.assertEqual(22, _admin_update_secondary_public_resolve_reserve(320))
+        self.assertEqual(_admin_update_primary_soft_cap(60), 30)
+        self.assertEqual(_admin_update_primary_soft_cap(320), 186)
+        self.assertEqual(_admin_update_secondary_public_resolve_reserve(60), 0)
+        self.assertEqual(_admin_update_secondary_public_resolve_reserve(320), 22)
         self.assertEqual(
-            134,
             _admin_update_secondary_target_count(
                 total_rows=320,
                 secondary_eligible=320,
                 secondary_cached_eligible=0,
             ),
+            134,
         )
         self.assertEqual(
-            168,
             _admin_update_secondary_target_count(
                 total_rows=400,
                 secondary_eligible=400,
                 secondary_cached_eligible=25,
             ),
+            168,
         )
         self.assertEqual(
-            116,
             _admin_update_secondary_target_count(
                 total_rows=240,
                 secondary_eligible=134,
                 secondary_cached_eligible=80,
             ),
+            116,
         )
 
     def test_all_chat_update_large_dual_queue_shifts_more_load_to_secondary(self) -> None:
@@ -1326,13 +1326,13 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         secondary_indexes = {
             idx for idx, account in assignments.items() if account.key == "secondary"
         }
-        self.assertEqual(134, len(secondary_indexes))
-        self.assertEqual(186, counts["primary"])
-        self.assertEqual(134, counts["secondary"])
-        self.assertEqual(186, counts["primary_soft_cap"])
-        self.assertEqual(134, counts["secondary_target"])
-        self.assertEqual(134, counts["secondary_public"])
-        self.assertEqual(164, counts["secondary_public_skipped"])
+        self.assertEqual(len(secondary_indexes), 134)
+        self.assertEqual(counts["primary"], 186)
+        self.assertEqual(counts["secondary"], 134)
+        self.assertEqual(counts["primary_soft_cap"], 186)
+        self.assertEqual(counts["secondary_target"], 134)
+        self.assertEqual(counts["secondary_public"], 134)
+        self.assertEqual(counts["secondary_public_skipped"], 164)
 
     def test_all_chat_update_allows_secondary_public_username_resolve(self) -> None:
         rows = [
@@ -1432,8 +1432,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(["two_name"], secondary_username_calls)
-        self.assertEqual([("main_sess", 1), ("secondary_sess", 2)], harvest_calls)
+        self.assertEqual(secondary_username_calls, ["two_name"])
+        self.assertEqual(harvest_calls, [("main_sess", 1), ("secondary_sess", 2)])
         self.assertTrue(any("双账号协同策略" in line for line in logs))
 
     def test_all_chat_update_auto_warms_secondary_public_username_budget(
@@ -1535,8 +1535,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(["two_name"], secondary_username_calls)
-        self.assertEqual([("main_sess", 1), ("secondary_sess", 2)], harvest_calls)
+        self.assertEqual(secondary_username_calls, ["two_name"])
+        self.assertEqual(harvest_calls, [("main_sess", 1), ("secondary_sess", 2)])
         self.assertTrue(
             any("公开 username 候选" in line for line in logs),
             logs,
@@ -1644,8 +1644,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         self.assertTrue(ok)
         self.assertEqual(
-            [("main_sess", 1), ("secondary_sess", 1)],
             harvest_calls,
+            [("main_sess", 1), ("secondary_sess", 1)],
         )
         self.assertTrue(any("主账号 进入长等待冷却" in line for line in logs))
         self.assertTrue(any("已切换账号完成采集" in line for line in logs))
@@ -1874,15 +1874,15 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(["two_name", "four_name"], secondary_username_calls)
+        self.assertEqual(secondary_username_calls, ["two_name", "four_name"])
         self.assertEqual(
+            harvest_calls,
             [
                 ("main_sess", 1),
                 ("secondary_sess", 2),
                 ("main_sess", 3),
                 ("secondary_sess", 4),
             ],
-            harvest_calls,
         )
         self.assertTrue(
             any(abs(seconds - 4.5) < 0.05 for seconds in sleep_calls),
@@ -1987,7 +1987,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual([1, 2, 3], harvest_calls)
+        self.assertEqual(harvest_calls, [1, 2, 3])
         self.assertTrue(any("等待约 2s 后继续启动剩余群组" in line for line in logs))
         self.assertTrue(any("成功 2 个，失败 0 个，暂缓 1 个" in line for line in logs))
 
@@ -1995,25 +1995,25 @@ class AdminUpdateRunnerTests(unittest.TestCase):
         self,
     ) -> None:
         self.assertEqual(
-            0.25,
             _admin_update_start_gap_seconds(
                 SimpleNamespace(admin_update_min_chat_start_gap_seconds=None),
                 active_account_count=1,
             ),
+            0.25,
         )
         self.assertEqual(
-            1.25,
             _admin_update_start_gap_seconds(
                 SimpleNamespace(admin_update_min_chat_start_gap_seconds=None),
                 active_account_count=2,
             ),
+            1.25,
         )
         self.assertEqual(
-            0.5,
             _admin_update_start_gap_seconds(
                 SimpleNamespace(admin_update_min_chat_start_gap_seconds=0.5),
                 active_account_count=2,
             ),
+            0.5,
         )
 
     def test_admin_update_secondary_username_gap_seconds_defaults_to_auto(self) -> None:
@@ -2023,35 +2023,34 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
         )
         self.assertEqual(
-            4.5,
             _admin_update_secondary_username_gap_seconds(
                 SimpleNamespace(admin_update_secondary_username_gap_seconds=4.5)
             ),
+            4.5,
         )
 
     def test_admin_update_effective_start_gap_seconds_progressively_slows_down(
         self,
     ) -> None:
         self.assertEqual(
-            1.0,
             _admin_update_effective_start_gap_seconds(
                 base_gap_seconds=1.0,
                 started_chat_count=10,
                 active_account_count=2,
                 account_key="primary",
             ),
+            1.0,
         )
         self.assertEqual(
-            2.0,
             _admin_update_effective_start_gap_seconds(
                 base_gap_seconds=1.0,
                 started_chat_count=250,
                 active_account_count=2,
                 account_key="primary",
             ),
+            2.0,
         )
         self.assertEqual(
-            3.0,
             _admin_update_effective_start_gap_seconds(
                 base_gap_seconds=1.0,
                 started_chat_count=5,
@@ -2059,24 +2058,25 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 account_key="secondary",
                 warmup_username_resolve=True,
             ),
+            3.0,
         )
         self.assertEqual(
-            4.0,
             _admin_update_effective_start_gap_seconds(
                 base_gap_seconds=1.25,
                 started_chat_count=370,
                 active_account_count=2,
                 account_key="primary",
             ),
+            4.0,
         )
         self.assertEqual(
-            2.5,
             _admin_update_effective_start_gap_seconds(
                 base_gap_seconds=0.25,
                 started_chat_count=650,
                 active_account_count=1,
                 account_key="primary",
             ),
+            2.5,
         )
 
     def test_all_chat_update_stops_submitting_when_all_accounts_long_cooldown(
@@ -2168,7 +2168,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual([1], harvest_calls)
+        self.assertEqual(harvest_calls, [1])
         self.assertTrue(any("停止启动剩余群组" in line for line in logs))
         self.assertTrue(any("暂缓 1 个" in line for line in logs))
         self.assertTrue(any("未启动 2 个" in line for line in logs))
@@ -2255,7 +2255,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual([1, 2], sorted(submitted_chat_ids))
+        self.assertEqual(sorted(submitted_chat_ids), [1, 2])
         self.assertTrue(any("已收到停止请求" in line for line in logs))
         self.assertTrue(any("未启动 2 个" in line for line in logs))
 
@@ -2329,10 +2329,10 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             )
 
         self.assertTrue(ok)
-        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertEqual(len(_CoordinatorStub.instances), 1)
         self.assertEqual(
-            None,
             _CoordinatorStub.instances[0].chat_starts[0]["chat_username"],
+            None,
         )
 
     def test_single_chat_update_streams_batches_to_write_coordinator(self) -> None:
@@ -2438,23 +2438,23 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 account_label="主账号",
             )
 
-        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertEqual(len(_CoordinatorStub.instances), 1)
         coordinator = _CoordinatorStub.instances[0]
-        self.assertEqual([1], coordinator.registered)
-        self.assertEqual(1, len(coordinator.batches))
-        self.assertEqual([1], coordinator.waited)
+        self.assertEqual(coordinator.registered, [1])
+        self.assertEqual(len(coordinator.batches), 1)
+        self.assertEqual(coordinator.waited, [1])
         self.assertTrue(coordinator.closed)
-        self.assertEqual(None, coordinator.chat_starts[0]["chat_username"])
+        self.assertEqual(coordinator.chat_starts[0]["chat_username"], None)
         self.assertTrue(coordinator.finalized[0]["skip_postprocess_if_unchanged"])
         self.assertFalse(coordinator.finalized[0]["enable_dedupe"])
         self.assertTrue(any("准备更新群组" in line for line in append_log))
         self.assertTrue(any("群组连接成功" in line for line in append_log))
         self.assertTrue(any("边抓取边写入" in line for line in append_log))
         self.assertTrue(any("增量更新完成" in line for line in append_log))
-        self.assertEqual(2, progress_mock.call_count)
+        self.assertEqual(progress_mock.call_count, 2)
         self.assertEqual(
-            [{"progress_total": 999, "progress_prefix": "[1/1] chat-1 (ID=1) 正在采集"}],
             progress_kwargs,
+            [{"progress_total": 999, "progress_prefix": "[1/1] chat-1 (ID=1) 正在采集"}],
         )
 
     def test_process_single_chat_update_can_skip_progress_probe(self) -> None:
@@ -2555,8 +2555,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
         probe_mock.assert_not_called()
         self.assertEqual(
-            [{"progress_total": None, "progress_prefix": "正在采集"}],
             progress_kwargs,
+            [{"progress_total": None, "progress_prefix": "正在采集"}],
         )
         self.assertTrue(any("增量更新完成" in line for line in append_log))
 
@@ -2620,13 +2620,13 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 enable_dedupe=False,
             )
 
-        self.assertEqual([7], coordinator.registered)
-        self.assertEqual(1, len(coordinator.batches))
-        self.assertEqual(1, len(coordinator.finalized))
-        self.assertEqual(1, coordinator.finalized[0]["counters"].written)
-        self.assertEqual({7001}, coordinator.finalized[0]["touched_groups"])
+        self.assertEqual(coordinator.registered, [7])
+        self.assertEqual(len(coordinator.batches), 1)
+        self.assertEqual(len(coordinator.finalized), 1)
+        self.assertEqual(coordinator.finalized[0]["counters"].written, 1)
+        self.assertEqual(coordinator.finalized[0]["touched_groups"], {7001})
         self.assertFalse(coordinator.finalized[0]["enable_dedupe"])
-        self.assertEqual([7], coordinator.waited)
+        self.assertEqual(coordinator.waited, [7])
 
     def test_streaming_helper_binds_client_event_loop_for_single_chat_harvest(
         self,
@@ -2677,9 +2677,9 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                     enable_dedupe=False,
                 )
 
-            self.assertEqual([True], observed)
+            self.assertEqual(observed, [True])
             self.assertIs(asyncio.get_event_loop(), previous_loop)
-            self.assertEqual(1, len(coordinator.finalized))
+            self.assertEqual(len(coordinator.finalized), 1)
         finally:
             asyncio.set_event_loop(None)
             client_loop.close()
@@ -2701,8 +2701,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             asyncio.set_event_loop(previous_loop)
             entity = resolve_chat_entity(_Client(), 123)
 
-            self.assertEqual(123, entity.id)
-            self.assertEqual([True], observed)
+            self.assertEqual(entity.id, 123)
+            self.assertEqual(observed, [True])
             self.assertIs(asyncio.get_event_loop(), previous_loop)
         finally:
             asyncio.set_event_loop(None)
@@ -2734,8 +2734,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                     scope="test-resolve",
                 )
 
-            self.assertEqual([expected_entity], entities)
-            self.assertEqual([True], observed)
+            self.assertEqual(entities, [expected_entity])
+            self.assertEqual(observed, [True])
             self.assertIs(asyncio.get_event_loop(), previous_loop)
         finally:
             asyncio.set_event_loop(None)
@@ -2819,8 +2819,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
 
             self.assertTrue(used_ranges)
             self.assertEqual(
-                [("primary", True), ("secondary", True)],
                 observed,
+                [("primary", True), ("secondary", True)],
             )
             self.assertTrue(stream_ranges_mock.called)
             self.assertIs(asyncio.get_event_loop(), previous_loop)
@@ -2910,12 +2910,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 enable_dedupe=False,
             )
 
-        self.assertEqual("primary", calls[0][0])
+        self.assertEqual(calls[0][0], "primary")
         self.assertTrue(all(call[0] == "secondary" for call in calls[1:]))
-        self.assertEqual(2, result.counters.written)
-        self.assertEqual([99], coordinator.registered)
-        self.assertEqual(1, len(coordinator.finalized))
-        self.assertEqual(2, coordinator.finalized[0]["counters"].written)
+        self.assertEqual(result.counters.written, 2)
+        self.assertEqual(coordinator.registered, [99])
+        self.assertEqual(len(coordinator.finalized), 1)
+        self.assertEqual(coordinator.finalized[0]["counters"].written, 2)
 
     def test_range_streaming_binds_client_event_loop_in_worker_threads(self) -> None:
         class _CoordinatorStub:
@@ -2981,12 +2981,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
             primary_loop.close()
             secondary_loop.close()
 
-        self.assertEqual(2, result.counters.written)
+        self.assertEqual(result.counters.written, 2)
         self.assertEqual(
-            [("primary", True), ("secondary", True)],
             sorted(observed),
+            [("primary", True), ("secondary", True)],
         )
-        self.assertEqual(1, len(coordinator.finalized))
+        self.assertEqual(len(coordinator.finalized), 1)
 
     def test_harvest_job_runner_streams_new_targets_through_shared_writer(self) -> None:
         statuses = []
@@ -3070,10 +3070,10 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
-        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertEqual(statuses, ["running", "done"])
+        self.assertEqual(len(_CoordinatorStub.instances), 1)
         self.assertTrue(_CoordinatorStub.instances[0].closed)
-        self.assertEqual(2, len(stream_calls))
+        self.assertEqual(len(stream_calls), 2)
         self.assertTrue(
             all(
                 call["write_coordinator"] is _CoordinatorStub.instances[0]
@@ -3191,10 +3191,10 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
+        self.assertEqual(statuses, ["running", "done"])
         self.assertEqual(
-            [("main_sess", 11), ("secondary_sess", 11)],
             stream_calls,
+            [("main_sess", 11), ("secondary_sess", 11)],
         )
         self.assertTrue(_CoordinatorStub.instances[0].closed)
         self.assertTrue(any("主账号新增采集失败" in line for line in logs))
@@ -3309,20 +3309,20 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
-        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertEqual(statuses, ["running", "done"])
+        self.assertEqual(len(_CoordinatorStub.instances), 1)
         self.assertTrue(_CoordinatorStub.instances[0].closed)
-        self.assertEqual(2, probe_mock.call_count)
+        self.assertEqual(probe_mock.call_count, 2)
         self.assertTrue(
             all(
                 call.kwargs["min_history_message_id"] == 6000
                 for call in probe_mock.call_args_list
             )
         )
-        self.assertEqual(1, stream_ranges_mock.call_count)
+        self.assertEqual(stream_ranges_mock.call_count, 1)
         self.assertFalse(stream_single_mock.called)
-        self.assertEqual(6000, stream_ranges_mock.call_args.kwargs["latest_message_id"])
-        self.assertEqual(777, stream_ranges_mock.call_args.kwargs["chunk_size"])
+        self.assertEqual(stream_ranges_mock.call_args.kwargs["latest_message_id"], 6000)
+        self.assertEqual(stream_ranges_mock.call_args.kwargs["chunk_size"], 777)
         self.assertTrue(any("双账号区间拉取" in line for line in logs))
         self.assertTrue(any(kwargs.get("stage") == "done" for _, kwargs in progress_calls))
 
@@ -3421,12 +3421,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
-        self.assertEqual(1, len(_CoordinatorStub.instances))
+        self.assertEqual(statuses, ["running", "done"])
+        self.assertEqual(len(_CoordinatorStub.instances), 1)
         self.assertTrue(_CoordinatorStub.instances[0].closed)
-        self.assertEqual(1, probe_mock.call_count)
+        self.assertEqual(probe_mock.call_count, 1)
         self.assertFalse(stream_ranges_mock.called)
-        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertEqual(stream_single_mock.call_count, 1)
         self.assertIs(stream_single_mock.call_args.kwargs["client"], primary_client)
         self.assertTrue(any("第二账号解析目标触发长等待" in line for line in logs))
         self.assertTrue(any("回退主账号单账号拉取" in line for line in logs))
@@ -3517,9 +3517,9 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
-        self.assertEqual(2, resolve_mock.call_count)
-        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertEqual(statuses, ["running", "done"])
+        self.assertEqual(resolve_mock.call_count, 2)
+        self.assertEqual(stream_single_mock.call_count, 1)
         self.assertIs(stream_single_mock.call_args.kwargs["client"], secondary_client)
         self.assertIs(stream_single_mock.call_args.kwargs["entity"], secondary_entity)
         self.assertFalse(stream_ranges_mock.called)
@@ -3615,8 +3615,8 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual(["running", "done"], statuses)
-        self.assertEqual(1, stream_single_mock.call_count)
+        self.assertEqual(statuses, ["running", "done"])
+        self.assertEqual(stream_single_mock.call_count, 1)
         self.assertIs(stream_single_mock.call_args.kwargs["client"], secondary_client)
         self.assertIs(stream_single_mock.call_args.kwargs["entity"], secondary_entity)
         self.assertFalse(stream_ranges_mock.called)
@@ -3669,21 +3669,21 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
 
-        self.assertEqual([primary_entity], entities)
+        self.assertEqual(entities, [primary_entity])
         self.assertTrue(any("第二账号解析并在主账号确认" in line for line in logs))
 
 
 class HarvestProgressTests(unittest.TestCase):
     def test_format_harvest_progress_message_with_total(self) -> None:
         self.assertEqual(
-            "正在采集 1000/25000",
             _format_harvest_progress_message(1000, 25000),
+            "正在采集 1000/25000",
         )
 
     def test_format_harvest_progress_message_clamps_over_total(self) -> None:
         self.assertEqual(
-            "正在采集 25000/25000",
             _format_harvest_progress_message(26000, 25000),
+            "正在采集 25000/25000",
         )
 
 
@@ -3748,7 +3748,7 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             [(1, 105), (1, 106), (1, 107), (1, 999)],
         )
 
-        self.assertEqual({7001, 7002}, grouped_ids)
+        self.assertEqual(grouped_ids, {7001, 7002})
 
     def test_unsearchable_cleanup_targets_media_with_only_identity_metadata(self) -> None:
         cur = self.conn.cursor()
@@ -3774,7 +3774,7 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(1, target_count)
+        self.assertEqual(target_count, 1)
 
     def test_unsearchable_cleanup_targets_broken_media_placeholders(self) -> None:
         cur = self.conn.cursor()
@@ -3800,7 +3800,7 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(1, target_count)
+        self.assertEqual(target_count, 1)
 
     def test_cleanup_targets_table_supports_runner_call_signature(self) -> None:
         cur = self.conn.cursor()
@@ -3820,7 +3820,7 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(1, target_count)
+        self.assertEqual(target_count, 1)
 
     def test_keyword_cleanup_treats_like_wildcards_as_literals(self) -> None:
         cur = self.conn.cursor()
@@ -3844,9 +3844,9 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             _build_cleanup_like_patterns("%"),
         )
 
-        self.assertEqual(1, target_count)
+        self.assertEqual(target_count, 1)
         cur.execute("SELECT message_id FROM temp_cleanup_targets")
-        self.assertEqual([211], [int(row["message_id"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["message_id"]) for row in cur.fetchall()], [211])
 
     def test_unsearchable_cleanup_targets_blank_album_members_with_media_metadata(self) -> None:
         cur = self.conn.cursor()
@@ -3881,9 +3881,9 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(2, target_count)
+        self.assertEqual(target_count, 2)
         cur.execute("SELECT message_id FROM temp_cleanup_targets")
-        self.assertEqual([221, 222], [int(row["message_id"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["message_id"]) for row in cur.fetchall()], [221, 222])
 
     def test_unsearchable_cleanup_keeps_filename_search_text(self) -> None:
         cur = self.conn.cursor()
@@ -3919,7 +3919,7 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(0, target_count)
+        self.assertEqual(target_count, 0)
 
     def test_unsearchable_cleanup_targets_blank_non_media_messages(self) -> None:
         cur = self.conn.cursor()
@@ -3944,9 +3944,9 @@ class SearchableMediaCleanupTests(unittest.TestCase):
             "",
         )
 
-        self.assertEqual(2, target_count)
+        self.assertEqual(target_count, 2)
         cur.execute("SELECT message_id FROM temp_cleanup_targets")
-        self.assertEqual([240, 242], [int(row["message_id"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["message_id"]) for row in cur.fetchall()], [240, 242])
 
 
 class AdminRunnerHelperTests(unittest.TestCase):
@@ -3986,19 +3986,19 @@ class AdminRunnerHelperTests(unittest.TestCase):
                 error_prefix="执行失败：",
             )
 
-        self.assertEqual(["running", "done", "error"], statuses)
+        self.assertEqual(statuses, ["running", "done", "error"])
         self.assertTrue(any("任务状态持久化失败" in message for message in logs))
 
     def test_admin_error_message_maps_known_telegram_errors(self) -> None:
         self.assertEqual(
-            "触发 Telegram 频控限制，请稍后再试",
             admin_error_message(RuntimeError("FloodWaitError: retry later")),
+            "触发 Telegram 频控限制，请稍后再试",
         )
 
     def test_admin_error_message_keeps_unknown_error_context(self) -> None:
         self.assertEqual(
-            "RuntimeError: boom",
             admin_error_message(RuntimeError("boom")),
+            "RuntimeError: boom",
         )
 
     def test_disconnect_worker_client_closes_attached_event_loop(self) -> None:
@@ -4131,12 +4131,12 @@ class PersistentAdminJobsTests(unittest.TestCase):
 
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual("running", snapshot["status"])
-        self.assertEqual(2, snapshot["log_count"])
-        self.assertEqual(2, snapshot["last_seq"])
+        self.assertEqual(snapshot["status"], "running")
+        self.assertEqual(snapshot["log_count"], 2)
+        self.assertEqual(snapshot["last_seq"], 2)
         self.assertEqual(
-            ["任务已创建（占位）", "line-2"],
             [item["message"] for item in logs or []],
+            ["任务已创建（占位）", "line-2"],
         )
 
     def test_snapshot_row_uses_indexed_log_aggregates_without_join_group(self) -> None:
@@ -4159,8 +4159,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
 
         self.assertIsNotNone(row)
         assert row is not None
-        self.assertEqual(2, int(row["log_count"]))
-        self.assertEqual(2, int(row["last_seq"]))
+        self.assertEqual(int(row["log_count"]), 2)
+        self.assertEqual(int(row["last_seq"]), 2)
         snapshot_sql = next(
             sql
             for sql in statements
@@ -4197,10 +4197,10 @@ class PersistentAdminJobsTests(unittest.TestCase):
         snapshot = _admin_job_get_snapshot(job_id)
         logs = _admin_job_get_logs(job_id, after_seq=0) or []
 
-        self.assertEqual(1, recovered)
+        self.assertEqual(recovered, 1)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual("error", snapshot["status"])
+        self.assertEqual(snapshot["status"], "error")
         self.assertTrue(
             any("进程重启或退出而中断" in item["message"] for item in logs),
         )
@@ -4213,10 +4213,10 @@ class PersistentAdminJobsTests(unittest.TestCase):
         recovered = _admin_recover_interrupted_jobs()
         snapshot = _admin_job_get_snapshot(job_id)
 
-        self.assertEqual(0, recovered)
+        self.assertEqual(recovered, 0)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual("running", snapshot["status"])
+        self.assertEqual(snapshot["status"], "running")
 
     def test_request_job_stop_marks_active_job(self) -> None:
         job = _admin_job_create("update", target_chat_id=None, target_label="all")
@@ -4254,10 +4254,10 @@ class PersistentAdminJobsTests(unittest.TestCase):
             recovered = _admin_recover_interrupted_jobs()
         snapshot = _admin_job_get_snapshot(job_id)
 
-        self.assertEqual(1, recovered)
+        self.assertEqual(recovered, 1)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual("error", snapshot["status"])
+        self.assertEqual(snapshot["status"], "error")
 
     def test_recover_interrupted_jobs_keeps_fresh_foreign_live_owner(self) -> None:
         admin_jobs_runtime.configure_admin_job_runtime("old-runtime")
@@ -4275,10 +4275,10 @@ class PersistentAdminJobsTests(unittest.TestCase):
             recovered = _admin_recover_interrupted_jobs()
 
         snapshot = _admin_job_get_snapshot(job_id)
-        self.assertEqual(0, recovered)
+        self.assertEqual(recovered, 0)
         self.assertIsNotNone(snapshot)
         assert snapshot is not None
-        self.assertEqual("running", snapshot["status"])
+        self.assertEqual(snapshot["status"], "running")
 
     def test_log_and_stop_request_do_not_take_over_job_owner(self) -> None:
         admin_jobs_runtime.configure_admin_job_runtime("owner-runtime")
@@ -4301,7 +4301,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
             ).fetchone()
         finally:
             conn.close()
-        self.assertEqual("owner-runtime", owner[0])
+        self.assertEqual(owner[0], "owner-runtime")
         self.assertEqual(os.getpid(), owner[1])
         self.assertTrue(owner[2])
 
@@ -4318,7 +4318,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         self.assertIsNone(second_job)
         self.assertIsNotNone(second_existing)
         assert second_existing is not None
-        self.assertEqual("cleanup", second_existing["job_type"])
+        self.assertEqual(second_existing["job_type"], "cleanup")
 
     def test_try_create_exclusive_job_keeps_fresh_previous_runtime_job_as_conflict(self) -> None:
         admin_jobs_runtime.configure_admin_job_runtime("old-runtime")
@@ -4340,7 +4340,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         old_snapshot = _admin_job_get_snapshot(old_job_id)
         self.assertIsNotNone(old_snapshot)
         assert old_snapshot is not None
-        self.assertEqual("running", old_snapshot["status"])
+        self.assertEqual(old_snapshot["status"], "running")
 
     def test_try_create_exclusive_job_recovers_stale_job_before_conflict_check(self) -> None:
         old_job = _admin_job_create("cleanup", target_chat_id=None, target_label="old")
@@ -4372,7 +4372,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         old_snapshot = _admin_job_get_snapshot(old_job_id)
         self.assertIsNotNone(old_snapshot)
         assert old_snapshot is not None
-        self.assertEqual("error", old_snapshot["status"])
+        self.assertEqual(old_snapshot["status"], "error")
 
     def test_has_any_active_job_keeps_fresh_running_job_active(self) -> None:
         job = _admin_job_create("cleanup", target_chat_id=None, target_label="fresh")
@@ -4406,7 +4406,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         old_snapshot = _admin_job_get_snapshot(old_job_id)
         self.assertIsNotNone(old_snapshot)
         assert old_snapshot is not None
-        self.assertEqual("error", old_snapshot["status"])
+        self.assertEqual(old_snapshot["status"], "error")
 
     def test_interrupted_clone_job_marks_migration_record_error(self) -> None:
         job = _admin_job_create(
@@ -4478,7 +4478,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(1, _admin_recover_interrupted_jobs())
+        self.assertEqual(_admin_recover_interrupted_jobs(), 1)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -4493,8 +4493,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual("error", migration["status"])
-        self.assertEqual("interrupted", migration["phase"])
+        self.assertEqual(migration["status"], "error")
+        self.assertEqual(migration["phase"], "interrupted")
         self.assertIn("服务进程重启或退出", migration["error_message"])
         self.assertTrue(migration["completed_at"])
 
@@ -4512,7 +4512,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        self.assertEqual(_admin_recover_interrupted_jobs(), 0)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -4526,8 +4526,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual("error", reconciled["status"])
-        self.assertEqual("interrupted", reconciled["phase"])
+        self.assertEqual(reconciled["status"], "error")
+        self.assertEqual(reconciled["phase"], "interrupted")
         self.assertIn("所属后台任务已失败", reconciled["error_message"])
 
         conn = sqlite3.connect(self.db_path)
@@ -4545,7 +4545,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        self.assertEqual(_admin_recover_interrupted_jobs(), 0)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -4559,8 +4559,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual("error", missing_job_reconciled["status"])
-        self.assertEqual("interrupted", missing_job_reconciled["phase"])
+        self.assertEqual(missing_job_reconciled["status"], "error")
+        self.assertEqual(missing_job_reconciled["phase"], "interrupted")
         self.assertIn(
             "所属后台任务已失败",
             missing_job_reconciled["error_message"],
@@ -4621,7 +4621,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(1, _admin_recover_interrupted_jobs())
+        self.assertEqual(_admin_recover_interrupted_jobs(), 1)
 
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
@@ -4633,8 +4633,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
                 WHERE run_id = 'run-delete-interrupted'
                 """
             ).fetchone()
-            self.assertEqual("error", interrupted["status"])
-            self.assertEqual("interrupted", interrupted["phase"])
+            self.assertEqual(interrupted["status"], "error")
+            self.assertEqual(interrupted["phase"], "interrupted")
             self.assertIn("服务进程重启或退出", interrupted["error_message"])
             self.assertEqual(job_id, interrupted["deletion_job_id"])
 
@@ -4649,7 +4649,7 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual(0, _admin_recover_interrupted_jobs())
+        self.assertEqual(_admin_recover_interrupted_jobs(), 0)
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         try:
@@ -4663,8 +4663,8 @@ class PersistentAdminJobsTests(unittest.TestCase):
         finally:
             conn.close()
 
-        self.assertEqual("error", reconciled["status"])
-        self.assertEqual("interrupted", reconciled["phase"])
+        self.assertEqual(reconciled["status"], "error")
+        self.assertEqual(reconciled["phase"], "interrupted")
         self.assertIn("所属后台任务已失败", reconciled["error_message"])
 
 
@@ -4694,7 +4694,7 @@ class AdminJobLogHandlerTests(unittest.TestCase):
                 job_log_passthrough_enabled.reset(passthrough_token)
                 job_context.reset(job_token)
 
-        self.assertEqual([], messages)
+        self.assertEqual(messages, [])
 
 
 class _RecordingLock:
@@ -4744,12 +4744,12 @@ class WriteConsistencyTests(unittest.TestCase):
         with patch("tg_harvest.storage.connection.DB_WRITE_LOCK", lock):
             refresh_chat_message_counts(self.conn, [1])
 
-        self.assertEqual(1, lock.acquired)
-        self.assertEqual(1, lock.released)
+        self.assertEqual(lock.acquired, 1)
+        self.assertEqual(lock.released, 1)
 
         cur = self.conn.cursor()
         cur.execute("SELECT message_count FROM chats WHERE chat_id = 1")
-        self.assertEqual(1, int(cur.fetchone()["message_count"]))
+        self.assertEqual(int(cur.fetchone()["message_count"]), 1)
 
     def test_refresh_chat_message_counts_chunks_large_chat_id_sets(self) -> None:
         setlimit = getattr(self.conn, "setlimit", None)
@@ -4772,10 +4772,10 @@ class WriteConsistencyTests(unittest.TestCase):
             setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
 
         self.assertEqual(
-            0,
             self.conn.execute(
                 "SELECT COUNT(*) FROM chats WHERE chat_id > 1 AND message_count <> 0"
             ).fetchone()[0],
+            0,
         )
 
     def test_dedupe_promotional_duplicates_uses_global_write_lock(self) -> None:
@@ -4787,8 +4787,8 @@ class WriteConsistencyTests(unittest.TestCase):
             )
 
         self.assertEqual((0, 0, 0, 0, set()), (deleted, solo, group_txt, group_med, affected_groups))
-        self.assertEqual(1, lock.acquired)
-        self.assertEqual(1, lock.released)
+        self.assertEqual(lock.acquired, 1)
+        self.assertEqual(lock.released, 1)
 
     def test_dedupe_deletes_every_target_across_batches(self) -> None:
         rows = [
@@ -4834,9 +4834,9 @@ class WriteConsistencyTests(unittest.TestCase):
         self.assertEqual((501, 1, 0, 0, set()), (deleted, solo, group_txt, group_med, affected_groups))
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM messages WHERE dedupe_hash = 'hash-all'")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute("SELECT COUNT(*) AS c FROM dedupe_actions WHERE dedupe_hash = 'hash-all'")
-        self.assertEqual(501, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 501)
 
     def test_batch_upsert_removes_stale_media_when_message_becomes_text(self) -> None:
         media_message = (
@@ -4904,12 +4904,12 @@ class WriteConsistencyTests(unittest.TestCase):
             "SELECT has_media, msg_type FROM messages WHERE chat_id = 1 AND message_id = 900"
         )
         message_row = cur.fetchone()
-        self.assertEqual(0, int(message_row["has_media"]))
-        self.assertEqual("TEXT", message_row["msg_type"])
+        self.assertEqual(int(message_row["has_media"]), 0)
+        self.assertEqual(message_row["msg_type"], "TEXT")
         cur.execute(
             "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id = 900"
         )
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
 
     def test_batch_upsert_treats_string_zero_as_non_media(self) -> None:
         media_message = (
@@ -5017,7 +5017,7 @@ class WriteConsistencyTests(unittest.TestCase):
             [media_row],
         )
 
-        self.assertEqual(1, result.persisted_change_count)
+        self.assertEqual(result.persisted_change_count, 1)
         self.assertIsNone(
             self.conn.execute(
                 "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 903"
@@ -5075,7 +5075,7 @@ class WriteConsistencyTests(unittest.TestCase):
             [],
         )
 
-        self.assertEqual(0, result.persisted_change_count)
+        self.assertEqual(result.persisted_change_count, 0)
         self.assertIsNotNone(
             self.conn.execute(
                 "SELECT 1 FROM message_media WHERE chat_id = 1 AND message_id = 901"
@@ -5143,7 +5143,7 @@ class WriteConsistencyTests(unittest.TestCase):
 
         result = batch_upsert(self.conn, [message_row], [])
 
-        self.assertEqual(1, result.persisted_change_count)
+        self.assertEqual(result.persisted_change_count, 1)
         self.assertTrue(self.conn.in_transaction)
         self.assertIsNotNone(
             self.conn.execute(
@@ -5154,10 +5154,10 @@ class WriteConsistencyTests(unittest.TestCase):
         # its change and the nested batch.
         self.conn.rollback()
         self.assertEqual(
-            "Chat 1",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "Chat 1",
         )
         self.assertIsNone(
             self.conn.execute(
@@ -5214,10 +5214,10 @@ class WriteConsistencyTests(unittest.TestCase):
 
         self.assertTrue(self.conn.in_transaction)
         self.assertEqual(
-            "caller failure change",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "caller failure change",
         )
         self.assertIsNone(
             self.conn.execute(
@@ -5226,10 +5226,10 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         self.conn.commit()
         self.assertEqual(
-            "caller failure change",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "caller failure change",
         )
 
     def test_batch_upsert_refreshes_chat_message_summary(self) -> None:
@@ -5284,7 +5284,7 @@ class WriteConsistencyTests(unittest.TestCase):
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
         )
         chat_row = cur.fetchone()
-        self.assertEqual(3, int(chat_row["message_count"]))
+        self.assertEqual(int(chat_row["message_count"]), 3)
         self.assertTrue(str(chat_row["last_message_created_at"] or ""))
 
     def test_batch_upsert_skips_identical_message_rows(self) -> None:
@@ -5328,7 +5328,7 @@ class WriteConsistencyTests(unittest.TestCase):
             self.conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0]
         )
         self.assertEqual(sequence_before, sequence_after)
-        self.assertEqual(0, audit_count)
+        self.assertEqual(audit_count, 0)
 
         edited_row = list(message_row)
         edited_row[5] = "edited"
@@ -5342,8 +5342,8 @@ class WriteConsistencyTests(unittest.TestCase):
         content = self.conn.execute(
             "SELECT content FROM messages WHERE chat_id = 1 AND message_id = 10"
         ).fetchone()[0]
-        self.assertEqual(1, audit_count)
-        self.assertEqual("edited", content)
+        self.assertEqual(audit_count, 1)
+        self.assertEqual(content, "edited")
 
     def test_batch_upsert_reports_old_and_new_grouped_ids(self) -> None:
         stored = self.conn.execute(
@@ -5360,12 +5360,12 @@ class WriteConsistencyTests(unittest.TestCase):
         first_row = list(stored)
         first_row[10] = 77
         first_result = batch_upsert(self.conn, [tuple(first_row)], [])
-        self.assertEqual({77}, first_result.affected_grouped_ids)
+        self.assertEqual(first_result.affected_grouped_ids, {77})
 
         second_row = list(first_row)
         second_row[10] = 88
         second_result = batch_upsert(self.conn, [tuple(second_row)], [])
-        self.assertEqual({77, 88}, second_result.affected_grouped_ids)
+        self.assertEqual(second_result.affected_grouped_ids, {77, 88})
 
     def test_batch_upsert_reports_exact_media_changes(self) -> None:
         message_row = (
@@ -5407,10 +5407,10 @@ class WriteConsistencyTests(unittest.TestCase):
 
         first = batch_upsert(self.conn, [message_row], [media_row])
         unchanged = batch_upsert(self.conn, [message_row], [media_row])
-        self.assertEqual({700}, first.affected_grouped_ids)
-        self.assertEqual(1, first.persisted_change_count)
+        self.assertEqual(first.affected_grouped_ids, {700})
+        self.assertEqual(first.persisted_change_count, 1)
         self.assertEqual(set(), unchanged.affected_grouped_ids)
-        self.assertEqual(0, unchanged.persisted_change_count)
+        self.assertEqual(unchanged.persisted_change_count, 0)
 
         self.conn.execute(
             "UPDATE message_media SET grouped_id = NULL "
@@ -5421,8 +5421,8 @@ class WriteConsistencyTests(unittest.TestCase):
         changed_media[11] = None
         changed_media[12] = "fp-2"
         changed = batch_upsert(self.conn, [], [tuple(changed_media)])
-        self.assertEqual({700}, changed.affected_grouped_ids)
-        self.assertEqual(1, changed.persisted_change_count)
+        self.assertEqual(changed.affected_grouped_ids, {700})
+        self.assertEqual(changed.persisted_change_count, 1)
 
     def test_batch_upsert_reports_group_changes_when_album_message_moves_or_leaves(self) -> None:
         message_row = (
@@ -5450,14 +5450,14 @@ class WriteConsistencyTests(unittest.TestCase):
         moved = list(message_row)
         moved[10] = 702
         moved_result = batch_upsert(self.conn, [tuple(moved)], [])
-        self.assertEqual({701, 702}, moved_result.affected_grouped_ids)
+        self.assertEqual(moved_result.affected_grouped_ids, {701, 702})
 
         left = list(moved)
         left[9] = "TEXT"
         left[10] = None
         left[11] = 0
         left_result = batch_upsert(self.conn, [tuple(left)], [])
-        self.assertEqual({702}, left_result.affected_grouped_ids)
+        self.assertEqual(left_result.affected_grouped_ids, {702})
 
     @unittest.skip("SQLite search indexes were removed")
     def test_batch_upsert_repairs_an_absent_fts_document_without_message_update(self) -> None:
@@ -5491,7 +5491,7 @@ class WriteConsistencyTests(unittest.TestCase):
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ("hello",),
         ).fetchall()
-        self.assertEqual([int(stored[18])], [int(row[0]) for row in matches])
+        self.assertEqual([int(row[0]) for row in matches], [int(stored[18])])
 
     @unittest.skip("SQLite search indexes were removed")
     def test_batch_upsert_repairs_fts_when_docsize_shadow_row_is_missing(self) -> None:
@@ -5520,12 +5520,12 @@ class WriteConsistencyTests(unittest.TestCase):
 
         result = batch_upsert(self.conn, [message_row], [])
 
-        self.assertEqual(1, result.persisted_change_count)
+        self.assertEqual(result.persisted_change_count, 1)
         matches = self.conn.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ("hello",),
         ).fetchall()
-        self.assertEqual([int(stored[18])], [int(row[0]) for row in matches])
+        self.assertEqual([int(row[0]) for row in matches], [int(stored[18])])
 
     @unittest.skip("SQLite search indexes were removed")
     def test_batch_upsert_does_not_refresh_with_stale_fts_update_trigger(self) -> None:
@@ -5585,24 +5585,24 @@ class WriteConsistencyTests(unittest.TestCase):
 
         result = batch_upsert(self.conn, [tuple(stored)], [])
 
-        self.assertEqual(0, result.persisted_change_count)
+        self.assertEqual(result.persisted_change_count, 0)
         self.assertEqual(
-            0,
             self.conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0],
+            0,
         )
         self.assertEqual(
-            [],
             self.conn.execute(
                 "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'raw'"
             ).fetchall(),
+            [],
         )
         self.assertEqual(
-            1,
             len(
                 self.conn.execute(
                     "SELECT rowid FROM messages_fts WHERE messages_fts MATCH 'normalized'"
                 ).fetchall()
             ),
+            1,
         )
 
     @unittest.skip("SQLite search indexes were removed")
@@ -5655,8 +5655,8 @@ class WriteConsistencyTests(unittest.TestCase):
 
             batch_upsert(conn, [message_row], [])
             self.assertEqual(
-                0,
                 conn.execute("SELECT COUNT(*) FROM message_update_audit").fetchone()[0],
+                0,
             )
         finally:
             conn.close()
@@ -5715,12 +5715,12 @@ class WriteConsistencyTests(unittest.TestCase):
             conn.commit()
 
             result = batch_upsert(conn, [message_row], [])
-            self.assertEqual(0, result.persisted_change_count)
+            self.assertEqual(result.persisted_change_count, 0)
             self.assertEqual(
-                0,
                 conn.execute(
                     "SELECT COUNT(*) FROM message_update_audit"
                 ).fetchone()[0],
+                0,
             )
         finally:
             conn.close()
@@ -5805,13 +5805,13 @@ class WriteConsistencyTests(unittest.TestCase):
         stale_media_deletes = [
             sql for sql in statements if sql.startswith("DELETE FROM message_media")
         ]
-        self.assertEqual(1, len(set(stale_media_deletes)))
+        self.assertEqual(len(set(stale_media_deletes)), 1)
         self.assertIn("(chat_id, message_id) IN", stale_media_deletes[0])
         cur = self.conn.cursor()
         cur.execute(
             "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id >= 2000"
         )
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
 
     def test_delete_chat_data_uses_one_global_write_lock_for_whole_transaction(self) -> None:
         self.conn.execute(
@@ -5840,21 +5840,21 @@ class WriteConsistencyTests(unittest.TestCase):
         with patch("tg_harvest.storage.connection.DB_WRITE_LOCK", lock):
             deleted = _delete_chat_data(self.conn, 1)
 
-        self.assertEqual(1, deleted)
-        self.assertEqual(1, lock.acquired)
-        self.assertEqual(1, lock.released)
+        self.assertEqual(deleted, 1)
+        self.assertEqual(lock.acquired, 1)
+        self.assertEqual(lock.released, 1)
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 1")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 1")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute(
             "SELECT operation FROM manticore_search_outbox WHERE pk = ?",
             (message_pk,),
         )
-        self.assertEqual("delete", cur.fetchone()["operation"])
+        self.assertEqual(cur.fetchone()["operation"], "delete")
         cur.execute("SELECT COUNT(*) AS c FROM admin_recovery_chats WHERE chat_id = 1")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
 
     @unittest.skip("SQLite search indexes were removed")
     def test_delete_chat_data_bulk_path_keeps_fts_clean_and_restores_triggers(self) -> None:
@@ -5869,21 +5869,21 @@ class WriteConsistencyTests(unittest.TestCase):
                 "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
                 ("hello",),
             )
-            self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+            self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [1])
         finally:
             cur.close()
 
         with patch("tg_harvest.admin_jobs.runners.DELETE_CHAT_FAST_PATH_THRESHOLD", 1):
             deleted = _delete_chat_data(self.conn, 1)
 
-        self.assertEqual(1, deleted)
+        self.assertEqual(deleted, 1)
         cur = self.conn.cursor()
         try:
             cur.execute(
                 "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
                 ("hello",),
             )
-            self.assertEqual([], cur.fetchall())
+            self.assertEqual(cur.fetchall(), [])
             cur.execute(
                 """
                 SELECT name
@@ -5893,8 +5893,8 @@ class WriteConsistencyTests(unittest.TestCase):
                 """
             )
             self.assertEqual(
-                {"trg_messages_fts_delete", "trg_message_terms_delete"},
                 {row["name"] for row in cur.fetchall()},
+                {"trg_messages_fts_delete", "trg_message_terms_delete"},
             )
         finally:
             cur.close()
@@ -5912,7 +5912,7 @@ class WriteConsistencyTests(unittest.TestCase):
         with patch("tg_harvest.admin_jobs.runners.DELETE_CHAT_FAST_PATH_THRESHOLD", 1):
             deleted = _delete_chat_data(self.conn, 1)
 
-        self.assertEqual(1, deleted)
+        self.assertEqual(deleted, 1)
         self.assertTrue(self.conn.in_transaction)
         self.assertIsNone(
             self.conn.execute(
@@ -5922,10 +5922,10 @@ class WriteConsistencyTests(unittest.TestCase):
         self.conn.rollback()
 
         self.assertEqual(
-            "Chat 1",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "Chat 1",
         )
         self.assertIsNotNone(
             self.conn.execute(
@@ -5933,7 +5933,6 @@ class WriteConsistencyTests(unittest.TestCase):
             ).fetchone()
         )
         self.assertEqual(
-            [1],
             [
                 int(row["rowid"])
                 for row in self.conn.execute(
@@ -5941,6 +5940,7 @@ class WriteConsistencyTests(unittest.TestCase):
                     ("hello",),
                 ).fetchall()
             ],
+            [1],
         )
         trigger_names = {
             row["name"]
@@ -5954,7 +5954,7 @@ class WriteConsistencyTests(unittest.TestCase):
             ).fetchall()
         }
         self.assertEqual(
-            {"trg_messages_fts_delete", "trg_message_terms_delete"}, trigger_names
+            trigger_names, {"trg_messages_fts_delete", "trg_message_terms_delete"}
         )
 
     def test_delete_chat_data_failure_keeps_outer_transaction_and_triggers(self) -> None:
@@ -5971,10 +5971,10 @@ class WriteConsistencyTests(unittest.TestCase):
 
         self.assertTrue(self.conn.in_transaction)
         self.assertEqual(
-            "caller failed delete",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "caller failed delete",
         )
         self.assertIsNotNone(
             self.conn.execute(
@@ -6037,23 +6037,23 @@ class WriteConsistencyTests(unittest.TestCase):
 
         stats = _delete_empty_chats_data(self.conn)
 
-        self.assertEqual(2, stats["deleted_chats"])
+        self.assertEqual(stats["deleted_chats"], 2)
         cur = self.conn.cursor()
         try:
             cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 2")
-            self.assertEqual(0, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 0)
             cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 3")
-            self.assertEqual(1, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 1)
             cur.execute("SELECT COUNT(*) AS c FROM chats WHERE chat_id = 4")
-            self.assertEqual(0, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 0)
             cur.execute("SELECT COUNT(*) AS c FROM messages WHERE chat_id = 3")
-            self.assertEqual(1, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 1)
             cur.execute("SELECT COUNT(*) AS c FROM media_groups WHERE chat_id = 2")
-            self.assertEqual(0, int(cur.fetchone()["c"]))
+            self.assertEqual(int(cur.fetchone()["c"]), 0)
             cur.execute(
                 "SELECT chat_id FROM admin_recovery_chats ORDER BY chat_id ASC"
             )
-            self.assertEqual([3], [int(row["chat_id"]) for row in cur.fetchall()])
+            self.assertEqual([int(row["chat_id"]) for row in cur.fetchall()], [3])
         finally:
             cur.close()
 
@@ -6068,7 +6068,7 @@ class WriteConsistencyTests(unittest.TestCase):
 
         stats = _delete_empty_chats_data(self.conn)
 
-        self.assertEqual(1, stats["deleted_chats"])
+        self.assertEqual(stats["deleted_chats"], 1)
         self.assertTrue(self.conn.in_transaction)
         self.assertIsNone(
             self.conn.execute(
@@ -6077,10 +6077,10 @@ class WriteConsistencyTests(unittest.TestCase):
         )
         self.conn.rollback()
         self.assertEqual(
-            "Chat 1",
             self.conn.execute(
                 "SELECT chat_title FROM chats WHERE chat_id = 1"
             ).fetchone()[0],
+            "Chat 1",
         )
         self.assertIsNotNone(
             self.conn.execute(
@@ -6181,7 +6181,7 @@ class AdminJobLoggingLockRegressionTests(unittest.TestCase):
         finally:
             root_logger.removeHandler(handler)
 
-        self.assertEqual([], handler.errors)
+        self.assertEqual(handler.errors, [])
         self.assertGreaterEqual(self._side_log_count(), 2)
 
     def test_dedupe_does_not_log_while_write_tx_is_open(self) -> None:
@@ -6210,7 +6210,7 @@ class AdminJobLoggingLockRegressionTests(unittest.TestCase):
         finally:
             root_logger.removeHandler(handler)
 
-        self.assertEqual([], handler.errors)
+        self.assertEqual(handler.errors, [])
         self.assertGreaterEqual(self._side_log_count(), 1)
 
     def test_cleanup_batches_commit_before_appending_progress_logs(self) -> None:
@@ -6268,7 +6268,7 @@ class AdminJobLoggingLockRegressionTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(2, deleted)
+        self.assertEqual(deleted, 2)
         self.assertGreaterEqual(self._side_log_count(), 1)
 
     def test_cleanup_refreshes_partially_deleted_media_groups(self) -> None:
@@ -6335,7 +6335,7 @@ class AdminJobLoggingLockRegressionTests(unittest.TestCase):
         finally:
             cur.close()
 
-        self.assertEqual(1, deleted)
+        self.assertEqual(deleted, 1)
         cur = self.conn.cursor()
         try:
             cur.execute(
@@ -6347,10 +6347,10 @@ class AdminJobLoggingLockRegressionTests(unittest.TestCase):
             )
             row = cur.fetchone()
             self.assertIsNotNone(row)
-            self.assertEqual(1, int(row["item_count"]))
-            self.assertEqual(20, int(row["first_message_id"]))
-            self.assertEqual(20, int(row["last_message_id"]))
-            self.assertEqual("keep", row["captions_concat"])
+            self.assertEqual(int(row["item_count"]), 1)
+            self.assertEqual(int(row["first_message_id"]), 20)
+            self.assertEqual(int(row["last_message_id"]), 20)
+            self.assertEqual(row["captions_concat"], "keep")
         finally:
             cur.close()
 

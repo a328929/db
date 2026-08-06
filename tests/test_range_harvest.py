@@ -94,9 +94,9 @@ class RangeHarvestRetryTests(unittest.TestCase):
                 account_label="secondary",
             )
 
-        self.assertEqual(3, counters.written)
+        self.assertEqual(counters.written, 3)
         self.assertEqual(set(), touched_groups)
-        self.assertEqual([([12, 11, 10], [])], written_batches)
+        self.assertEqual(written_batches, [([12, 11, 10], [])])
         backoff_mock.assert_called_once_with(1, required_wait_seconds=4)
         sleep_mock.assert_called_once_with(4.5)
 
@@ -111,9 +111,9 @@ class RangeHarvestRetryTests(unittest.TestCase):
         ):
             latest_id = read_latest_message_id(client, SimpleNamespace(id=1))
 
-        self.assertEqual(25, latest_id)
+        self.assertEqual(latest_id, 25)
         retry_mock.assert_called_once()
-        self.assertEqual("history-latest-id", retry_mock.call_args.kwargs["scope"])
+        self.assertEqual(retry_mock.call_args.kwargs["scope"], "history-latest-id")
 
     def test_sqlite_write_failure_stops_range_without_retrying_telegram(self) -> None:
         client = _FakeClient([[_FakeMessage(12)]])
@@ -133,7 +133,7 @@ class RangeHarvestRetryTests(unittest.TestCase):
                 account_label="secondary",
             )
 
-        self.assertEqual(1, len(client.iter_calls))
+        self.assertEqual(len(client.iter_calls), 1)
 
     def test_probe_history_access_retries_latest_and_range_probes(self) -> None:
         client = _FakeClient([])
@@ -160,7 +160,7 @@ class RangeHarvestRetryTests(unittest.TestCase):
             )
 
         self.assertEqual(HistoryAccessProbeResult(True, 100, ""), result)
-        self.assertEqual(2, retry_mock.call_count)
+        self.assertEqual(retry_mock.call_count, 2)
 
 
 if __name__ == "__main__":

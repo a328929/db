@@ -73,14 +73,14 @@ class CloneMediaResolverTests(unittest.TestCase):
             scan_radius=25,
         )
 
-        self.assertIs(True, result["ok"])
-        self.assertEqual("api_group_expanded", result["resolution"])
+        self.assertIs(result["ok"], True)
+        self.assertEqual(result["resolution"], "api_group_expanded")
         self.assertEqual(list(range(70, 131)), result["message_ids"])
         self.assertLess(
             result["api_window_item_count"],
             result["api_expanded_item_count"],
         )
-        self.assertEqual("album", result["copy_strategy"])
+        self.assertEqual(result["copy_strategy"], "album")
         self.assertNotIn(69, result["message_ids"])
         self.assertNotIn(131, result["message_ids"])
 
@@ -102,10 +102,10 @@ class CloneMediaResolverTests(unittest.TestCase):
             scan_radius=0,
         )
 
-        self.assertIs(True, result["ok"])
-        self.assertEqual([50, 51, 52], result["message_ids"])
-        self.assertEqual(7002, result["grouped_id"])
-        self.assertEqual("api_group_expanded", result["resolution"])
+        self.assertIs(result["ok"], True)
+        self.assertEqual(result["message_ids"], [50, 51, 52])
+        self.assertEqual(result["grouped_id"], 7002)
+        self.assertEqual(result["resolution"], "api_group_expanded")
 
     def test_clone_media_group_resolver_uses_catalog_group_when_anchor_is_gone(self):
         client = _ResolverClient(
@@ -125,9 +125,9 @@ class CloneMediaResolverTests(unittest.TestCase):
             expected_grouped_id=7002,
         )
 
-        self.assertIs(True, result["ok"])
-        self.assertEqual(7002, result["grouped_id"])
-        self.assertEqual([50, 52], result["message_ids"])
+        self.assertIs(result["ok"], True)
+        self.assertEqual(result["grouped_id"], 7002)
+        self.assertEqual(result["message_ids"], [50, 52])
 
     def test_clone_media_message_resolver_retries_transient_error(self):
         client = _RetryOnceResolverClient([_media_message(51, grouped_id=7002)])
@@ -138,10 +138,10 @@ class CloneMediaResolverTests(unittest.TestCase):
         ) as retry_mock:
             result = clone_api_resolve_media_message(client, "source", 51)
 
-        self.assertIs(True, result["ok"])
-        self.assertEqual(51, result["message_id"])
-        self.assertEqual(1, len(client.calls))
-        self.assertEqual("clone-media-single-message", retry_mock.call_args.kwargs["scope"])
+        self.assertIs(result["ok"], True)
+        self.assertEqual(result["message_id"], 51)
+        self.assertEqual(len(client.calls), 1)
+        self.assertEqual(retry_mock.call_args.kwargs["scope"], "clone-media-single-message")
 
     def test_clone_media_group_resolver_uses_retry_scopes(self):
         client = _ResolverClient(
@@ -166,7 +166,7 @@ class CloneMediaResolverTests(unittest.TestCase):
         ):
             result = clone_api_resolve_media_group(client, "source", [51], scan_radius=0)
 
-        self.assertIs(True, result["ok"])
+        self.assertIs(result["ok"], True)
         self.assertIn("clone-media-group-anchors", scopes)
         self.assertIn("clone-media-group-window", scopes)
         self.assertIn("clone-media-group-expand", scopes)

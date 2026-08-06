@@ -10,6 +10,7 @@ from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
     _configure_telethon_session_sqlite,
     _copy_session_storage,
+    _ensure_base_session_valid,
 )
 
 
@@ -64,13 +65,13 @@ class WorkerSessionCleanupTests(unittest.TestCase):
 
             _copy_session_storage(str(base_name), str(worker_name))
 
-            self.assertEqual("fresh-base", worker_path.read_text(encoding="utf-8"))
-            self.assertEqual(0o600, stat.S_IMODE(base_path.stat().st_mode))
-            self.assertEqual(0o600, stat.S_IMODE(worker_path.stat().st_mode))
+            self.assertEqual(worker_path.read_text(encoding="utf-8"), "fresh-base")
+            self.assertEqual(stat.S_IMODE(base_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(worker_path.stat().st_mode), 0o600)
             worker_wal_path = Path(f"{worker_path}-wal")
-            self.assertEqual("fresh-wal", worker_wal_path.read_text(encoding="utf-8"))
-            self.assertEqual(0o600, stat.S_IMODE(base_wal_path.stat().st_mode))
-            self.assertEqual(0o600, stat.S_IMODE(worker_wal_path.stat().st_mode))
+            self.assertEqual(worker_wal_path.read_text(encoding="utf-8"), "fresh-wal")
+            self.assertEqual(stat.S_IMODE(base_wal_path.stat().st_mode), 0o600)
+            self.assertEqual(stat.S_IMODE(worker_wal_path.stat().st_mode), 0o600)
 
     def test_cleanup_merges_worker_entities_back_into_base_session(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -99,10 +100,10 @@ class WorkerSessionCleanupTests(unittest.TestCase):
             )
 
             entities = _read_entities(base_path)
-            self.assertEqual("new_name", entities[1][2])
-            self.assertEqual("worker-new", entities[1][4])
-            self.assertEqual(200, entities[1][5])
-            self.assertEqual("fresh_name", entities[2][2])
+            self.assertEqual(entities[1][2], "new_name")
+            self.assertEqual(entities[1][4], "worker-new")
+            self.assertEqual(entities[1][5], 200)
+            self.assertEqual(entities[2][2], "fresh_name")
             self.assertFalse(worker_path.exists())
 
     def test_cleanup_preserves_newer_base_entity_metadata(self) -> None:
@@ -131,9 +132,9 @@ class WorkerSessionCleanupTests(unittest.TestCase):
             )
 
             entities = _read_entities(base_path)
-            self.assertEqual("stable_name", entities[1][2])
-            self.assertEqual("base-newer", entities[1][4])
-            self.assertEqual(300, entities[1][5])
+            self.assertEqual(entities[1][2], "stable_name")
+            self.assertEqual(entities[1][4], "base-newer")
+            self.assertEqual(entities[1][5], 300)
 
     def test_cleanup_removes_all_worker_session_artifacts_after_merge(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -173,8 +174,8 @@ class WorkerSessionCleanupTests(unittest.TestCase):
         _configure_telethon_session_sqlite(client)
 
         self.assertEqual(
-            ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=30000"],
             statements,
+            ["PRAGMA journal_mode=WAL", "PRAGMA busy_timeout=30000"],
         )
 
     def test_configure_telethon_session_sqlite_swallows_sqlite_failures(self) -> None:
@@ -188,6 +189,25 @@ class WorkerSessionCleanupTests(unittest.TestCase):
             _configure_telethon_session_sqlite(client)
 
         self.assertTrue(debug_mock.called)
+
+    def test_ensure_base_session_valid_reports_connection_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            logs = []
+            cfg = SimpleNamespace(
+                session_name=str(Path(tmpdir) / "primary"),
+                api_id=1,
+                api_hash="hash",
+            )
+            with patch("tg_harvest.admin_jobs.sessions.TelegramClient") as client_cls:
+                client_cls.return_value.connect.side_effect = ConnectionError("offline")
+                valid = _ensure_base_session_valid(
+                    cfg,
+                    "job-1",
+                    lambda _job_id, message: logs.append(message),
+                )
+
+        self.assertFalse(valid)
+        self.assertEqual(logs, ["连接 Telegram 失败: offline"])
 
 
 if __name__ == "__main__":

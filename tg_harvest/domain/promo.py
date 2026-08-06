@@ -31,7 +31,24 @@ logger = logging.getLogger(__name__)
 
 # 混淆检测模式：匹配带干扰字符的常见关键词（如 v-x, t.m.e）
 RE_OBFUSCATED_CONTACT = re.compile(
-    r"(?:v[\s\W_]*x|w[\s\W_]*x|t[\s\W_]*\.?[\s\W_]*m[\s\W_]*\.?[\s\W_]*e)", re.I
+    r"(?:v[\W_]*x|w[\W_]*x|t[\W_]*m[\W_]*e)", re.I
+)
+
+_PROMO_HIT_KEYS = (
+    "url",
+    "obf_tg",
+    "invite",
+    "mention",
+    "wechat",
+    "qq",
+    "phone",
+    "contact_id",
+    "kw",
+    "cta",
+    "comp_tg",
+    "comp_wx",
+    "comp_qq",
+    "obf_raw",
 )
 
 _DEFAULT_PROMO_SCORES = {
@@ -283,25 +300,7 @@ CTA_WORDS_COMPACT = _make_compact_set(CTA_WORDS)
 def _get_hit_stats(text: str) -> dict[str, int]:
     """提取文本中的各类引流信号命中统计"""
     if not text:
-        return {
-            k: 0
-            for k in [
-                "url",
-                "obf_tg",
-                "invite",
-                "mention",
-                "wechat",
-                "qq",
-                "phone",
-                "contact_id",
-                "kw",
-                "cta",
-                "comp_tg",
-                "comp_wx",
-                "comp_qq",
-                "obf_raw",
-            ]
-        }
+        return dict.fromkeys(_PROMO_HIT_KEYS, 0)
 
     s_light = _light_normalize(text)
     s_compact = _compact_for_detection(text)
@@ -390,6 +389,14 @@ def _is_protected_caption(
 
     # 逻辑 2: 文案长度在阈值内，且关键词/提及数极低
     return len(text) <= guard_len and hits["kw"] <= 1 and hits["mention"] <= 1
+
+
+def _media_group_dedupe_hash(pure_hash: str, media_sig_hash: str) -> str:
+    if pure_hash:
+        return pure_hash
+    if not media_sig_hash:
+        return ""
+    return "gm:" + media_sig_hash
 
 
 # =========================
@@ -515,9 +522,7 @@ def build_group_promo_features(
         pure_hash = ""
         if text:
             pure_hash = build_single_promo_features(text, "GROUP", True, cfg)["pure_hash"]
-        dedupe_hash = (
-            pure_hash if pure_hash else (("gm:" + media_sig_hash) if media_sig_hash else "")
-        )
+        dedupe_hash = _media_group_dedupe_hash(pure_hash, media_sig_hash)
         return {
             "is_promo": 0,
             "promo_score": 0,
@@ -538,7 +543,7 @@ def build_group_promo_features(
             "guard_reason": "EMPTY_MEDIA_GROUP_CAPTION",
             "caption_norm": "",
             "pure_hash": "",
-            "dedupe_hash": ("gm:" + media_sig_hash) if media_sig_hash else "",
+            "dedupe_hash": _media_group_dedupe_hash("", media_sig_hash),
         }
 
     text = captions_concat.strip()
@@ -565,9 +570,7 @@ def build_group_promo_features(
     )
 
     pure_hash = base_feat["pure_hash"]
-    dedupe_hash = (
-        pure_hash if pure_hash else (("gm:" + media_sig_hash) if media_sig_hash else "")
-    )
+    dedupe_hash = _media_group_dedupe_hash(pure_hash, media_sig_hash)
 
     return {
         "is_promo": is_promo,

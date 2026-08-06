@@ -184,7 +184,7 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         updates = self.conn.execute(
             "SELECT chat_id FROM sync_state_update_audit"
         ).fetchall()
-        self.assertEqual([], updates)
+        self.assertEqual(updates, [])
 
     def test_refresh_chat_states_handles_large_active_chat_sets(self) -> None:
         setlimit = getattr(self.conn, "setlimit", None)
@@ -216,10 +216,10 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         finally:
             setlimit(sqlite3.SQLITE_LIMIT_VARIABLE_NUMBER, previous_limit)
 
-        self.assertEqual(1000, result["active_chat_count"])
+        self.assertEqual(result["active_chat_count"], 1000)
         self.assertEqual(
-            1000,
             self.conn.execute("SELECT COUNT(*) FROM sync_chat_state").fetchone()[0],
+            1000,
         )
 
     def test_pending_merge_generation_and_dirty_generation_survives_in_flight(self) -> None:
@@ -254,8 +254,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             now_text="2026-07-03 00:01:00",
             limit=1,
         )[0]
-        self.assertEqual(2, task.event_count)
-        self.assertEqual(2, task.generation)
+        self.assertEqual(task.event_count, 2)
+        self.assertEqual(task.generation, 2)
 
         enqueue_observation(
             self.conn,
@@ -271,9 +271,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         row = self.conn.execute(
             "SELECT generation, dirty_generation, in_flight FROM sync_pending_updates WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(3, row["generation"])
-        self.assertEqual(3, row["dirty_generation"])
-        self.assertEqual(1, row["in_flight"])
+        self.assertEqual(row["generation"], 3)
+        self.assertEqual(row["dirty_generation"], 3)
+        self.assertEqual(row["in_flight"], 1)
 
         complete_pending_update(
             self.conn,
@@ -292,9 +292,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             "SELECT generation, dirty_generation, in_flight FROM sync_pending_updates WHERE chat_id = 1"
         ).fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual(3, row["generation"])
-        self.assertEqual(0, row["dirty_generation"])
-        self.assertEqual(0, row["in_flight"])
+        self.assertEqual(row["generation"], 3)
+        self.assertEqual(row["dirty_generation"], 0)
+        self.assertEqual(row["in_flight"], 0)
 
     def test_complete_pending_update_without_dirty_generation_clears_pending(self) -> None:
         self._refresh_states()
@@ -337,9 +337,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT status, local_last_id, failure_count FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual("idle", state["status"])
-        self.assertEqual(11, state["local_last_id"])
-        self.assertEqual(0, state["failure_count"])
+        self.assertEqual(state["status"], "idle")
+        self.assertEqual(state["local_last_id"], 11)
+        self.assertEqual(state["failure_count"], 0)
 
     def test_failed_claim_rolls_back_lease_and_keeps_event_pending(self) -> None:
         self._refresh_states()
@@ -378,9 +378,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT status FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(0, pending["in_flight"])
-        self.assertEqual(1, pending["generation"])
-        self.assertEqual("pending", state["status"])
+        self.assertEqual(pending["in_flight"], 0)
+        self.assertEqual(pending["generation"], 1)
+        self.assertEqual(state["status"], "pending")
 
     def test_failed_completion_does_not_confirm_newer_event_generation(self) -> None:
         self._refresh_states()
@@ -445,11 +445,11 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT status, local_last_id FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(2, pending["generation"])
-        self.assertEqual(2, pending["dirty_generation"])
-        self.assertEqual(1, pending["in_flight"])
-        self.assertEqual("updating", state["status"])
-        self.assertEqual(10, state["local_last_id"])
+        self.assertEqual(pending["generation"], 2)
+        self.assertEqual(pending["dirty_generation"], 2)
+        self.assertEqual(pending["in_flight"], 1)
+        self.assertEqual(state["status"], "updating")
+        self.assertEqual(state["local_last_id"], 10)
 
     def test_recover_in_flight_task_preserves_new_generation_and_quiet_delay(self) -> None:
         self._refresh_states()
@@ -470,7 +470,7 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             now_text="2026-07-03 00:01:00",
             limit=1,
         )
-        self.assertEqual(1, len(claimed))
+        self.assertEqual(len(claimed), 1)
 
         enqueue_observation(
             self.conn,
@@ -492,11 +492,11 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         ).fetchone()
 
         self.assertEqual(
-            1,
             recover_in_flight_pending_updates(
                 self.conn,
                 now_text="2026-07-03 00:01:10",
             ),
+            1,
         )
 
         pending = self.conn.execute(
@@ -517,10 +517,10 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         self.assertEqual(
             before_recovery["dirty_generation"], pending["dirty_generation"]
         )
-        self.assertEqual(0, pending["in_flight"])
-        self.assertEqual(0, pending["in_flight_generation"])
+        self.assertEqual(pending["in_flight"], 0)
+        self.assertEqual(pending["in_flight_generation"], 0)
         self.assertEqual(before_recovery["due_at"], pending["due_at"])
-        self.assertEqual("pending", state["status"])
+        self.assertEqual(state["status"], "pending")
         self.assertEqual(before_recovery["due_at"], state["next_update_at"])
 
         resumed = claim_due_pending_updates(
@@ -528,7 +528,7 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             now_text=str(pending["due_at"]),
             limit=1,
         )
-        self.assertEqual(1, len(resumed))
+        self.assertEqual(len(resumed), 1)
         self.assertEqual(pending["generation"], resumed[0].in_flight_generation)
 
     def test_recover_in_flight_task_requeues_elapsed_work_immediately(self) -> None:
@@ -552,8 +552,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
 
         recovery_now = "2026-07-03 00:02:00"
         self.assertEqual(
-            1,
             recover_in_flight_pending_updates(self.conn, now_text=recovery_now),
+            1,
         )
         pending = self.conn.execute(
             """
@@ -562,10 +562,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE chat_id = 1
             """
         ).fetchone()
-        self.assertEqual(0, pending["in_flight"])
-        self.assertEqual(recovery_now, pending["due_at"])
+        self.assertEqual(pending["in_flight"], 0)
+        self.assertEqual(pending["due_at"], recovery_now)
         self.assertEqual(
-            1,
             len(
                 claim_due_pending_updates(
                     self.conn,
@@ -573,6 +572,7 @@ class SyncSchedulerStorageTests(unittest.TestCase):
                     limit=1,
                 )
             ),
+            1,
         )
 
     def test_recovery_releases_account_slots_with_reclaimed_work(self) -> None:
@@ -604,8 +604,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            1,
             recover_in_flight_pending_updates(self.conn, now_text=now),
+            1,
         )
         row = self.conn.execute(
             """
@@ -614,8 +614,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE account_key = 'primary'
             """
         ).fetchone()
-        self.assertEqual(0, row["in_flight_count"])
-        self.assertEqual(now, row["updated_at"])
+        self.assertEqual(row["in_flight_count"], 0)
+        self.assertEqual(row["updated_at"], now)
 
     def test_recovery_preserves_live_or_unattributed_account_slots(self) -> None:
         now = "2026-07-03 00:02:00"
@@ -629,8 +629,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         )
 
         self.assertEqual(
-            0,
             recover_in_flight_pending_updates(self.conn, now_text=now),
+            0,
         )
         row = self.conn.execute(
             """
@@ -639,8 +639,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE account_key = 'primary'
             """
         ).fetchone()
-        self.assertEqual(2, row["in_flight_count"])
-        self.assertEqual("2026-07-03 00:01:00", row["updated_at"])
+        self.assertEqual(row["in_flight_count"], 2)
+        self.assertEqual(row["updated_at"], "2026-07-03 00:01:00")
 
     def test_recovery_keeps_work_owned_by_a_live_local_process(self) -> None:
         self._refresh_states()
@@ -663,15 +663,15 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             owner_pid=os.getpid(),
             owner_host="local-test-host",
         )
-        self.assertEqual(1, len(claimed))
+        self.assertEqual(len(claimed), 1)
 
         self.assertEqual(
-            0,
             recover_in_flight_pending_updates(
                 self.conn,
                 now_text="2026-07-03 00:02:00",
                 local_host="local-test-host",
             ),
+            0,
         )
         pending = self.conn.execute(
             """
@@ -680,8 +680,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE chat_id = 1
             """
         ).fetchone()
-        self.assertEqual(1, pending["in_flight"])
-        self.assertEqual("live-worker", pending["in_flight_owner_instance_id"])
+        self.assertEqual(pending["in_flight"], 1)
+        self.assertEqual(pending["in_flight_owner_instance_id"], "live-worker")
 
     def test_recovery_reclaims_dead_local_owner_and_clears_lease(self) -> None:
         self._refresh_states()
@@ -704,19 +704,19 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             owner_pid=12345,
             owner_host="local-test-host",
         )
-        self.assertEqual(1, len(claimed))
+        self.assertEqual(len(claimed), 1)
 
         with patch(
             "tg_harvest.storage.sync_scheduler._process_is_alive",
             return_value=False,
         ):
             self.assertEqual(
-                1,
                 recover_in_flight_pending_updates(
                     self.conn,
                     now_text="2026-07-03 00:02:00",
                     local_host="local-test-host",
                 ),
+                1,
             )
         pending = self.conn.execute(
             """
@@ -729,10 +729,10 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE chat_id = 1
             """
         ).fetchone()
-        self.assertEqual(0, pending["in_flight"])
-        self.assertEqual("", pending["in_flight_owner_instance_id"])
-        self.assertEqual(0, pending["in_flight_owner_pid"])
-        self.assertEqual("", pending["in_flight_owner_host"])
+        self.assertEqual(pending["in_flight"], 0)
+        self.assertEqual(pending["in_flight_owner_instance_id"], "")
+        self.assertEqual(pending["in_flight_owner_pid"], 0)
+        self.assertEqual(pending["in_flight_owner_host"], "")
 
     def test_recovery_leaves_remote_owner_for_its_runtime(self) -> None:
         self._refresh_states()
@@ -761,18 +761,18 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             return_value=False,
         ):
             self.assertEqual(
-                0,
                 recover_in_flight_pending_updates(
                     self.conn,
                     now_text="2026-07-03 00:02:00",
                     local_host="local-test-host",
                 ),
+                0,
             )
         self.assertEqual(
-            1,
             self.conn.execute(
                 "SELECT in_flight FROM sync_pending_updates WHERE chat_id = 1"
             ).fetchone()[0],
+            1,
         )
 
     def test_old_owner_cannot_complete_a_task_reclaimed_by_another_runtime(self) -> None:
@@ -827,7 +827,7 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             WHERE chat_id = 1
             """
         ).fetchone()
-        self.assertEqual(1, pending["in_flight"])
+        self.assertEqual(pending["in_flight"], 1)
         self.assertEqual(new_task.in_flight_owner_instance_id, pending["in_flight_owner_instance_id"])
 
     def test_fail_pending_update_keeps_task_with_backoff(self) -> None:
@@ -870,11 +870,11 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT status, failure_count, last_failure_message FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(0, pending["in_flight"])
-        self.assertEqual("2026-07-03 00:02:50", pending["due_at"])
-        self.assertEqual("backoff", state["status"])
-        self.assertEqual(1, state["failure_count"])
-        self.assertEqual("FloodWait 90s", state["last_failure_message"])
+        self.assertEqual(pending["in_flight"], 0)
+        self.assertEqual(pending["due_at"], "2026-07-03 00:02:50")
+        self.assertEqual(state["status"], "backoff")
+        self.assertEqual(state["failure_count"], 1)
+        self.assertEqual(state["last_failure_message"], "FloodWait 90s")
 
     def test_deactivate_chat_clears_pending_and_keeps_audit_state(self) -> None:
         self._refresh_states()
@@ -900,9 +900,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT status, is_active, priority_score FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual("deleted", state["status"])
-        self.assertEqual(0, state["is_active"])
-        self.assertEqual(0, state["priority_score"])
+        self.assertEqual(state["status"], "deleted")
+        self.assertEqual(state["is_active"], 0)
+        self.assertEqual(state["priority_score"], 0)
 
     def test_scheduler_summary_reports_pending_and_membership_counts(self) -> None:
         self._refresh_states()
@@ -930,13 +930,13 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         )
 
         self.assertTrue(summary["enabled"])
-        self.assertEqual(1, summary["pending_count"])
-        self.assertEqual(1, summary["due_count"])
+        self.assertEqual(summary["pending_count"], 1)
+        self.assertEqual(summary["due_count"], 1)
         membership_counts = {
             item["scope"]: item["count"] for item in summary["membership_counts"]
         }
-        self.assertEqual(1, membership_counts[MembershipScope.BOTH_JOINED])
-        self.assertEqual("disabled", summary["model"]["backend"])
+        self.assertEqual(membership_counts[MembershipScope.BOTH_JOINED], 1)
+        self.assertEqual(summary["model"]["backend"], "disabled")
 
     def test_model_training_records_torch_unavailable_state(self) -> None:
         self._refresh_states()
@@ -948,12 +948,12 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             result = train_sync_model(self.conn, _cfg(sync_ai_enabled=1))
 
         self.assertFalse(result["trained"])
-        self.assertEqual("torch_unavailable", result["backend"])
+        self.assertEqual(result["backend"], "torch_unavailable")
         row = self.conn.execute(
             "SELECT backend, state_json FROM sync_model_state WHERE model_key = ?",
             ("temporal_batch_predictor",),
         ).fetchone()
-        self.assertEqual("torch_unavailable", row["backend"])
+        self.assertEqual(row["backend"], "torch_unavailable")
         self.assertIn("torch_unavailable", row["state_json"])
 
     def test_model_shadow_prediction_does_not_override_heuristic_decision(self) -> None:
@@ -989,9 +989,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual("heuristic_with_model_shadow", decision.source)
-        self.assertEqual(30, decision.quiet_delay_seconds)
-        self.assertEqual("2026-07-03 00:00:30", decision.due_at)
+        self.assertEqual(decision.source, "heuristic_with_model_shadow")
+        self.assertEqual(decision.quiet_delay_seconds, 30)
+        self.assertEqual(decision.due_at, "2026-07-03 00:00:30")
 
     def test_shadow_forces_observation_even_if_model_reports_active(self) -> None:
         self._refresh_states()
@@ -1030,8 +1030,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual("heuristic_with_model_shadow", decision.source)
-        self.assertEqual(30, decision.quiet_delay_seconds)
+        self.assertEqual(decision.source, "heuristic_with_model_shadow")
+        self.assertEqual(decision.quiet_delay_seconds, 30)
 
     def test_active_model_prediction_overrides_due_at_with_bounds(self) -> None:
         self._refresh_states()
@@ -1070,10 +1070,10 @@ class SyncSchedulerStorageTests(unittest.TestCase):
                 ),
             )
 
-        self.assertEqual("torch_model_active", decision.source)
-        self.assertEqual(60, decision.quiet_delay_seconds)
-        self.assertEqual("2026-07-03 00:01:00", decision.due_at)
-        self.assertEqual(250.0, decision.priority_score)
+        self.assertEqual(decision.source, "torch_model_active")
+        self.assertEqual(decision.quiet_delay_seconds, 60)
+        self.assertEqual(decision.due_at, "2026-07-03 00:01:00")
+        self.assertEqual(decision.priority_score, 250.0)
 
     def test_complete_pending_update_backfills_remote_last_id_from_local_last_id(self) -> None:
         self._refresh_states()
@@ -1111,8 +1111,8 @@ class SyncSchedulerStorageTests(unittest.TestCase):
         state = self.conn.execute(
             "SELECT local_last_id, remote_last_id FROM sync_chat_state WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(15, state["local_last_id"])
-        self.assertEqual(15, state["remote_last_id"])
+        self.assertEqual(state["local_last_id"], 15)
+        self.assertEqual(state["remote_last_id"], 15)
 
     def test_build_update_preflight_reports_capacity_and_budget(self) -> None:
         payload = build_update_preflight(
@@ -1134,9 +1134,9 @@ class SyncSchedulerStorageTests(unittest.TestCase):
             },
         )
         self.assertTrue(payload["ok"])
-        self.assertEqual(2, payload["account_capacity"]["configured"])
-        self.assertEqual(1, payload["account_capacity"]["available"])
-        self.assertEqual(1, payload["strategy"]["secondary_public_resolve_budget"])
+        self.assertEqual(payload["account_capacity"]["configured"], 2)
+        self.assertEqual(payload["account_capacity"]["available"], 1)
+        self.assertEqual(payload["strategy"]["secondary_public_resolve_budget"], 1)
 
 
 

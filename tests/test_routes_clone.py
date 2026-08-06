@@ -639,7 +639,7 @@ class CloneRoutesTests(unittest.TestCase):
             "/api/admin/auth/login",
             json={"password": "secret"},
         )
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         return str(payload["csrf_token"])
@@ -648,49 +648,49 @@ class CloneRoutesTests(unittest.TestCase):
         with self._auth_config_patch():
             response = self.client.get("/admin/clone")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Fclone", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Fclone")
 
     def test_clone_runs_manage_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/clone/runs/manage")
 
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(response.status_code, 302)
         self.assertEqual(
-            "/admin/login?next=%2Fadmin%2Fclone%2Fruns%2Fmanage",
             response.location,
+            "/admin/login?next=%2Fadmin%2Fclone%2Fruns%2Fmanage",
         )
 
     def test_clone_run_detail_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/clone/runs/detail?run_id=run-existing")
 
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(response.status_code, 302)
         self.assertEqual(
-            "/admin/login?next=%2Fadmin%2Fclone%2Fruns%2Fdetail%3Frun_id%3Drun-existing",
             response.location,
+            "/admin/login?next=%2Fadmin%2Fclone%2Fruns%2Fdetail%3Frun_id%3Drun-existing",
         )
 
     def test_clone_create_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/clone/create")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Fclone%2Fcreate", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Fclone%2Fcreate")
 
     def test_clone_migrate_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/clone/migrate")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Fclone%2Fmigrate", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Fclone%2Fmigrate")
 
     def test_clone_hub_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/clone")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("克隆工作台", body)
         self.assertIn("创建副本", body)
@@ -702,7 +702,7 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/clone/create")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("创建副本", body)
         self.assertIn('data-clone-mode="create"', body)
@@ -713,18 +713,18 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/clone/migrate")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/clone/runs/manage", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/clone/runs/manage")
 
     def test_clone_migrate_page_redirects_to_requested_record_execution_center(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/clone/migrate?run_id=run-existing")
 
-        self.assertEqual(302, response.status_code)
+        self.assertEqual(response.status_code, 302)
         self.assertEqual(
-            "/admin/clone/runs/detail?run_id=run-existing",
             response.location,
+            "/admin/clone/runs/detail?run_id=run-existing",
         )
 
     def test_clone_runs_manage_page_renders_when_authenticated(self) -> None:
@@ -732,7 +732,7 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/clone/runs/manage")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("克隆记录目录", body)
         self.assertIn("打开记录", body)
@@ -742,7 +742,7 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/admin/clone/runs/detail?run_id=run-existing")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         body = response.get_data(as_text=True)
         self.assertIn("克隆记录中心", body)
         self.assertIn("在线预检与继续迁移", body)
@@ -753,10 +753,11 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/workbench")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
+            payload["summary"],
             {
                 "total": 1,
                 "creating": 0,
@@ -764,14 +765,13 @@ class CloneRoutesTests(unittest.TestCase):
                 "created": 1,
                 "failed": 0,
             },
-            payload["summary"],
         )
-        self.assertEqual("migrate", payload["focus"]["step"])
-        self.assertEqual("ready", payload["focus"]["state"])
-        self.assertEqual("run-existing", payload["focus"]["run"]["run_id"])
+        self.assertEqual(payload["focus"]["step"], "migrate")
+        self.assertEqual(payload["focus"]["state"], "ready")
+        self.assertEqual(payload["focus"]["run"]["run_id"], "run-existing")
         self.assertEqual(
-            "/admin/clone/runs/detail?run_id=run-existing",
             payload["focus"]["action"]["href"],
+            "/admin/clone/runs/detail?run_id=run-existing",
         )
 
     def test_clone_workbench_api_prioritizes_running_message_migration(self) -> None:
@@ -791,11 +791,11 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/workbench")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         focus = response.get_json()["focus"]
-        self.assertEqual("migrate", focus["step"])
-        self.assertEqual("active", focus["state"])
-        self.assertEqual("查看迁移进度", focus["action"]["label"])
+        self.assertEqual(focus["step"], "migrate")
+        self.assertEqual(focus["state"], "active")
+        self.assertEqual(focus["action"]["label"], "查看迁移进度")
 
     def test_clone_workbench_prioritizes_incomplete_message_reset(self) -> None:
         self.clone_runs[0]["phase"] = "message_reset_required"
@@ -804,13 +804,13 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/workbench")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         focus = response.get_json()["focus"]
-        self.assertEqual("attention", focus["state"])
-        self.assertEqual("继续完整清空", focus["action"]["label"])
+        self.assertEqual(focus["state"], "attention")
+        self.assertEqual(focus["action"]["label"], "继续完整清空")
         self.assertEqual(
-            "/admin/clone/runs/messages/delete?run_id=run-existing",
             focus["action"]["href"],
+            "/admin/clone/runs/messages/delete?run_id=run-existing",
         )
 
     def test_clone_chats_api_includes_telegram_links(self) -> None:
@@ -818,13 +818,13 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/chats")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(1, payload["count"])
+        self.assertEqual(payload["count"], 1)
         item = payload["items"][0]
-        self.assertEqual("Source", item["chat_title"])
-        self.assertEqual("tg://resolve?domain=source", item["telegram_app_link"])
-        self.assertEqual("https://t.me/source", item["telegram_web_link"])
+        self.assertEqual(item["chat_title"], "Source")
+        self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=source")
+        self.assertEqual(item["telegram_web_link"], "https://t.me/source")
         self.assertTrue(item["has_public_link"])
 
     def test_clone_runs_api_includes_source_and_target_links(self) -> None:
@@ -832,37 +832,37 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs?source_chat_id=100")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(1, payload["total"])
+        self.assertEqual(payload["total"], 1)
         self.assertNotIn("count", payload)
         item = payload["items"][0]
-        self.assertEqual("run-existing", item["run_id"])
-        self.assertEqual("Source Existing Copy", item["target_title"])
-        self.assertEqual("tg://resolve?domain=source", item["source_telegram_app_link"])
-        self.assertEqual("tg://openmessage?chat_id=777", item["target_telegram_app_link"])
+        self.assertEqual(item["run_id"], "run-existing")
+        self.assertEqual(item["target_title"], "Source Existing Copy")
+        self.assertEqual(item["source_telegram_app_link"], "tg://resolve?domain=source")
+        self.assertEqual(item["target_telegram_app_link"], "tg://openmessage?chat_id=777")
 
     def test_clone_runs_api_returns_recent_runs_without_source_filter(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs?limit=20")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("run-existing", payload["items"][0]["run_id"])
-        self.assertEqual(1, payload["total"])
+        self.assertEqual(payload["items"][0]["run_id"], "run-existing")
+        self.assertEqual(payload["total"], 1)
         self.assertNotIn("count", payload)
-        self.assertEqual(20, payload["limit"])
-        self.assertEqual(0, payload["offset"])
+        self.assertEqual(payload["limit"], 20)
+        self.assertEqual(payload["offset"], 0)
 
     def test_clone_runs_api_can_skip_unused_total_count(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs?limit=20&include_total=0")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("run-existing", payload["items"][0]["run_id"])
+        self.assertEqual(payload["items"][0]["run_id"], "run-existing")
         self.assertNotIn("total", payload)
 
     def test_clone_runs_api_supports_manage_filters(self) -> None:
@@ -883,10 +883,10 @@ class CloneRoutesTests(unittest.TestCase):
                 "/api/admin/clone/runs?status=error&q=broken&limit=20&offset=0"
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(1, payload["total"])
-        self.assertEqual("run-error", payload["items"][0]["run_id"])
+        self.assertEqual(payload["total"], 1)
+        self.assertEqual(payload["items"][0]["run_id"], "run-error")
 
     def test_clone_run_detail_api_returns_manage_payload(self) -> None:
         self.created_clone_migrations.append(
@@ -918,13 +918,13 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/run-existing/detail")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("run-existing", payload["run"]["run_id"])
-        self.assertEqual("migration-timeline", payload["migration"]["migration_id"])
-        self.assertEqual("DELETE-CLONE-RUN:run-existing", payload["delete_confirm"])
-        self.assertEqual(1, payload["mapping_summary"]["total"])
-        self.assertEqual(1, len(payload["recent_mappings"]))
+        self.assertEqual(payload["run"]["run_id"], "run-existing")
+        self.assertEqual(payload["migration"]["migration_id"], "migration-timeline")
+        self.assertEqual(payload["delete_confirm"], "DELETE-CLONE-RUN:run-existing")
+        self.assertEqual(payload["mapping_summary"]["total"], 1)
+        self.assertEqual(len(payload["recent_mappings"]), 1)
 
     def test_clone_run_messages_api_filters_errors(self) -> None:
         self.clone_message_mappings.extend(
@@ -952,11 +952,11 @@ class CloneRoutesTests(unittest.TestCase):
                 "/api/admin/clone/runs/run-existing/messages?status=error"
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(1, payload["total"])
+        self.assertEqual(payload["total"], 1)
         self.assertNotIn("count", payload)
-        self.assertEqual(2, payload["items"][0]["source_message_id"])
+        self.assertEqual(payload["items"][0]["source_message_id"], 2)
 
     def test_clone_run_delete_requires_confirm(self) -> None:
         with self._auth_config_patch():
@@ -967,9 +967,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={"X-CSRF-Token": csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
-        self.assertEqual([], self.deleted_clone_run_ids)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
+        self.assertEqual(self.deleted_clone_run_ids, [])
 
     def test_clone_run_delete_starts_target_and_local_cleanup_job(self) -> None:
         with self._auth_config_patch():
@@ -980,17 +980,17 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={"X-CSRF-Token": csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("clone_target_delete", payload["job"]["job_type"])
+        self.assertEqual(payload["job"]["job_type"], "clone_target_delete")
         self.assertTrue(payload["deletion"]["target_delete_requested"])
-        self.assertEqual("run-existing", payload["deletion"]["run_id"])
-        self.assertEqual([], self.deleted_clone_run_ids)
-        self.assertEqual(1, len(self.started_target_delete_jobs))
+        self.assertEqual(payload["deletion"]["run_id"], "run-existing")
+        self.assertEqual(self.deleted_clone_run_ids, [])
+        self.assertEqual(len(self.started_target_delete_jobs), 1)
         args, kwargs = self.started_target_delete_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
-        self.assertEqual(777, kwargs["clone_run"]["target_chat_id"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["clone_run"]["run_id"], "run-existing")
+        self.assertEqual(kwargs["clone_run"]["target_chat_id"], 777)
 
     def test_clone_run_delete_rejects_related_active_migration(self) -> None:
         self.created_clone_migrations.append(
@@ -1012,12 +1012,12 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(409, response.status_code)
+        self.assertEqual(response.status_code, 409)
         payload = response.get_json()
-        self.assertEqual("关联克隆任务仍在执行，不能删除本地记录", payload["error"])
-        self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
-        self.assertEqual([], self.deleted_clone_run_ids)
-        self.assertEqual([], self.started_target_delete_jobs)
+        self.assertEqual(payload["error"], "关联克隆任务仍在执行，不能删除本地记录")
+        self.assertEqual(payload["active_job"]["job_id"], "job-migration-active")
+        self.assertEqual(self.deleted_clone_run_ids, [])
+        self.assertEqual(self.started_target_delete_jobs, [])
 
     def test_clone_run_delete_rejects_active_deletion_owner_token(self) -> None:
         self.clone_runs[0]["status"] = "deleting"
@@ -1032,10 +1032,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(409, response.status_code)
+        self.assertEqual(response.status_code, 409)
         payload = response.get_json()
-        self.assertEqual("job-delete-active", payload["active_job"]["job_id"])
-        self.assertEqual([], self.started_target_delete_jobs)
+        self.assertEqual(payload["active_job"]["job_id"], "job-delete-active")
+        self.assertEqual(self.started_target_delete_jobs, [])
 
     def test_clone_run_message_delete_starts_second_account_job(self) -> None:
         with self._auth_config_patch():
@@ -1053,25 +1053,25 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("clone_message_delete", payload["job"]["job_type"])
-        self.assertEqual("range", payload["deletion"]["mode"])
+        self.assertEqual(payload["job"]["job_type"], "clone_message_delete")
+        self.assertEqual(payload["deletion"]["mode"], "range")
         self.assertEqual(
-            "target_message_id_range",
             payload["deletion"]["selection_scope"],
+            "target_message_id_range",
         )
         self.assertFalse(payload["deletion"]["updates_clone_state"])
-        self.assertEqual(801, payload["deletion"]["requested_count"])
-        self.assertEqual(50, payload["deletion"]["delete_delay_ms"])
-        self.assertEqual(1, len(self.started_message_delete_jobs))
+        self.assertEqual(payload["deletion"]["requested_count"], 801)
+        self.assertEqual(payload["deletion"]["delete_delay_ms"], 50)
+        self.assertEqual(len(self.started_message_delete_jobs), 1)
         args, kwargs = self.started_message_delete_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
-        self.assertEqual("range", kwargs["selection"].mode)
-        self.assertEqual(200, kwargs["selection"].first_message_id)
-        self.assertEqual(1000, kwargs["selection"].last_message_id)
-        self.assertEqual(50, kwargs["delete_delay_ms"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["clone_run"]["run_id"], "run-existing")
+        self.assertEqual(kwargs["selection"].mode, "range")
+        self.assertEqual(kwargs["selection"].first_message_id, 200)
+        self.assertEqual(kwargs["selection"].last_message_id, 1000)
+        self.assertEqual(kwargs["delete_delay_ms"], 50)
         self.assertTrue(callable(kwargs["get_conn_fn"]))
 
     def test_clone_run_message_range_delete_requires_exact_confirm_code(self) -> None:
@@ -1083,10 +1083,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.started_message_delete_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
+        self.assertEqual(self.created_jobs, [])
+        self.assertEqual(self.started_message_delete_jobs, [])
 
     def test_clone_run_message_delete_rejects_invalid_selection_before_job_creation(self) -> None:
         with self._auth_config_patch():
@@ -1097,9 +1097,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
+        self.assertEqual(response.status_code, 400)
         self.assertIn("起始消息 ID", response.get_json()["error"])
-        self.assertEqual([], self.started_message_delete_jobs)
+        self.assertEqual(self.started_message_delete_jobs, [])
 
     def test_clone_run_message_reset_requires_exact_confirm_code(self) -> None:
         with self._auth_config_patch():
@@ -1110,10 +1110,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.started_message_delete_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
+        self.assertEqual(self.created_jobs, [])
+        self.assertEqual(self.started_message_delete_jobs, [])
 
     def test_clone_run_message_reset_starts_complete_reset_job(self) -> None:
         with self._auth_config_patch():
@@ -1127,19 +1127,19 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("clone_message_reset", payload["job"]["job_type"])
-        self.assertEqual("all", payload["reset"]["mode"])
+        self.assertEqual(payload["job"]["job_type"], "clone_message_reset")
+        self.assertEqual(payload["reset"]["mode"], "all")
         self.assertTrue(payload["reset"]["preserves_target"])
         self.assertTrue(payload["reset"]["preserves_preflight_plan"])
-        self.assertEqual(1, len(self.started_message_delete_jobs))
+        self.assertEqual(len(self.started_message_delete_jobs), 1)
         args, kwargs = self.started_message_delete_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("run-existing", kwargs["clone_run"]["run_id"])
-        self.assertEqual("all", kwargs["selection"].mode)
-        self.assertEqual(0, kwargs["selection"].requested_count)
-        self.assertEqual(75, kwargs["delete_delay_ms"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["clone_run"]["run_id"], "run-existing")
+        self.assertEqual(kwargs["selection"].mode, "all")
+        self.assertEqual(kwargs["selection"].requested_count, 0)
+        self.assertEqual(kwargs["delete_delay_ms"], 75)
 
     def test_clone_run_message_reset_rejects_related_active_migration(self) -> None:
         self.created_clone_migrations.append(
@@ -1161,15 +1161,15 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(409, response.status_code)
+        self.assertEqual(response.status_code, 409)
         payload = response.get_json()
         self.assertEqual(
-            "关联克隆任务仍在执行，不能完整清空",
             payload["error"],
+            "关联克隆任务仍在执行，不能完整清空",
         )
-        self.assertEqual("job-migration-active", payload["active_job"]["job_id"])
-        self.assertEqual([], self.created_jobs)
-        self.assertEqual([], self.started_message_delete_jobs)
+        self.assertEqual(payload["active_job"]["job_id"], "job-migration-active")
+        self.assertEqual(self.created_jobs, [])
+        self.assertEqual(self.started_message_delete_jobs, [])
 
     def test_incomplete_message_reset_blocks_partial_delete_but_allows_retry(self) -> None:
         self.clone_runs[0]["phase"] = "message_reset_required"
@@ -1187,10 +1187,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(409, partial_response.status_code)
+        self.assertEqual(partial_response.status_code, 409)
         self.assertIn("只能重试完整清空", partial_response.get_json()["error"])
-        self.assertEqual(200, reset_response.status_code)
-        self.assertEqual("clone_message_reset", reset_response.get_json()["job"]["job_type"])
+        self.assertEqual(reset_response.status_code, 200)
+        self.assertEqual(reset_response.get_json()["job"]["job_type"], "clone_message_reset")
 
     def test_incomplete_message_reset_blocks_preflight_and_timeline_migration(self) -> None:
         self.clone_runs[0]["phase"] = "message_reset_required"
@@ -1209,11 +1209,11 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(409, preflight_response.status_code)
-        self.assertEqual(400, migration_response.status_code)
+        self.assertEqual(preflight_response.status_code, 409)
+        self.assertEqual(migration_response.status_code, 400)
         self.assertIn("完整清空尚未完成", migration_response.get_json()["error"])
-        self.assertEqual([], self.started_deep_preflight_jobs)
-        self.assertEqual([], self.started_timeline_migration_jobs)
+        self.assertEqual(self.started_deep_preflight_jobs, [])
+        self.assertEqual(self.started_timeline_migration_jobs, [])
 
     def test_clone_message_delete_page_accepts_authenticated_record_link(self) -> None:
         with self._auth_config_patch():
@@ -1222,7 +1222,7 @@ class CloneRoutesTests(unittest.TestCase):
                 "/admin/clone/runs/messages/delete?run_id=run-existing"
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIn("克隆消息删除与回退", response.get_data(as_text=True))
 
     def test_clone_run_target_message_count_reads_remote_snapshot(self) -> None:
@@ -1238,18 +1238,18 @@ class CloneRoutesTests(unittest.TestCase):
                 "/api/admin/clone/runs/run-existing/target-message-count"
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(4321, response.get_json()["message_count"])
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["message_count"], 4321)
         load_count.assert_called_once()
         clone_run = load_count.call_args.args[0]
-        self.assertEqual(777, clone_run["target_chat_id"])
+        self.assertEqual(clone_run["target_chat_id"], 777)
 
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/run-existing/plan")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIsNone(response.get_json()["plan"])
 
     def test_clone_run_plan_rejects_missing_run(self) -> None:
@@ -1257,20 +1257,20 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/missing-run/plan")
 
-        self.assertEqual(404, response.status_code)
-        self.assertEqual("克隆运行记录不存在", response.get_json()["error"])
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "克隆运行记录不存在")
 
     def test_clone_run_api_returns_lightweight_record(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/run-existing")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("run-existing", payload["run"]["run_id"])
+        self.assertEqual(payload["run"]["run_id"], "run-existing")
         self.assertEqual(
-            "tg://resolve?domain=source",
             payload["run"]["source_telegram_app_link"],
+            "tg://resolve?domain=source",
         )
 
     def test_clone_run_migration_returns_null_when_absent(self) -> None:
@@ -1278,7 +1278,7 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/run-existing/migration")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertIsNone(payload["migration"])
         self.assertIsNone(payload["timeline_migration"])
@@ -1287,11 +1287,11 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertNotIn("media_migration", payload)
         self.assertNotIn("preview", payload)
         self.assertNotIn("media_preview", payload)
-        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
+        self.assertEqual(payload["timeline_preview"]["assessment_state"], "deferred")
         self.assertFalse(payload["timeline_preview"]["can_migrate_timeline"])
         self.assertEqual(
-            ["请先执行在线深度预检并生成迁移计划"],
             payload["timeline_preview"]["readiness_reasons"],
+            ["请先执行在线深度预检并生成迁移计划"],
         )
 
     def test_clone_deep_preflight_rejects_missing_csrf_token(self) -> None:
@@ -1302,7 +1302,7 @@ class CloneRoutesTests(unittest.TestCase):
                 json={},
             )
 
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(response.status_code, 403)
         self.assertTrue(response.get_json()["csrf_required"])
 
     def test_clone_deep_preflight_rejects_missing_run(self) -> None:
@@ -1314,9 +1314,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(404, response.status_code)
-        self.assertEqual("克隆运行记录不存在", response.get_json()["error"])
-        self.assertEqual([], self.started_deep_preflight_jobs)
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "克隆运行记录不存在")
+        self.assertEqual(self.started_deep_preflight_jobs, [])
 
     def test_clone_deep_preflight_creates_plan_and_starts_job(self) -> None:
         with self._auth_config_patch():
@@ -1327,32 +1327,32 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertEqual(
+            payload["job"],
             {
                 "job_id": "job-clone-1",
                 "job_type": "clone_deep_preflight",
                 "status": "queued",
             },
-            payload["job"],
         )
         self.assertEqual(
+            self.created_jobs[0],
             {
                 "job_type": "clone_deep_preflight",
                 "target_chat_id": 100,
                 "target_label": "Source -> Source Existing Copy",
             },
-            self.created_jobs[0],
         )
-        self.assertEqual(1, len(self.created_clone_plans))
-        self.assertEqual("job-clone-1", self.created_clone_plans[0]["plan_id"])
-        self.assertEqual("run-existing", self.created_clone_plans[0]["run_id"])
-        self.assertEqual(1, len(self.started_deep_preflight_jobs))
+        self.assertEqual(len(self.created_clone_plans), 1)
+        self.assertEqual(self.created_clone_plans[0]["plan_id"], "job-clone-1")
+        self.assertEqual(self.created_clone_plans[0]["run_id"], "run-existing")
+        self.assertEqual(len(self.started_deep_preflight_jobs), 1)
         args, kwargs = self.started_deep_preflight_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("run-existing", kwargs["run_id"])
-        self.assertEqual("job-clone-1", kwargs["plan_id"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["run_id"], "run-existing")
+        self.assertEqual(kwargs["plan_id"], "job-clone-1")
         self.assertIn(("job-clone-1", "已接收克隆深度预检请求"), self.logs)
 
     def test_clone_deep_preflight_marks_job_error_when_plan_creation_fails(self) -> None:
@@ -1365,9 +1365,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("plan boom", response.get_json()["error"])
-        self.assertEqual([], self.started_deep_preflight_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "plan boom")
+        self.assertEqual(self.started_deep_preflight_jobs, [])
         self.assertIn(("job-clone-1", "error"), self.status_updates)
         self.assertIn(
             ("job-clone-1", "克隆迁移计划创建失败，任务未启动"),
@@ -1384,34 +1384,34 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
+        self.assertEqual(payload["timeline_preview"]["assessment_state"], "deferred")
         self.assertEqual(
+            payload["job"],
             {
                 "job_id": "job-clone-1",
                 "job_type": "clone_timeline_migration",
                 "status": "queued",
             },
-            payload["job"],
         )
-        self.assertEqual(1, len(self.created_clone_migrations))
+        self.assertEqual(len(self.created_clone_migrations), 1)
         migration = self.created_clone_migrations[0]
-        self.assertEqual("timeline_replay", migration["mode"])
-        self.assertEqual("text:primary; media:primary", migration["target_write_account"])
-        self.assertEqual(20, migration["requested_limit"])
-        self.assertEqual(1000, migration["send_delay_ms"])
-        self.assertEqual(0, migration["text_total"])
-        self.assertEqual(0, migration["media_total"])
-        self.assertEqual(0, migration["media_group_total"])
-        self.assertEqual(1, len(self.started_timeline_migration_jobs))
+        self.assertEqual(migration["mode"], "timeline_replay")
+        self.assertEqual(migration["target_write_account"], "text:primary; media:primary")
+        self.assertEqual(migration["requested_limit"], 20)
+        self.assertEqual(migration["send_delay_ms"], 1000)
+        self.assertEqual(migration["text_total"], 0)
+        self.assertEqual(migration["media_total"], 0)
+        self.assertEqual(migration["media_group_total"], 0)
+        self.assertEqual(len(self.started_timeline_migration_jobs), 1)
         args, kwargs = self.started_timeline_migration_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("run-existing", kwargs["run_id"])
-        self.assertEqual("plan-ready", kwargs["plan_id"])
-        self.assertEqual("job-clone-1", kwargs["migration_id"])
-        self.assertEqual(20, kwargs["message_limit"])
-        self.assertEqual(1000, kwargs["send_delay_ms"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["run_id"], "run-existing")
+        self.assertEqual(kwargs["plan_id"], "plan-ready")
+        self.assertEqual(kwargs["migration_id"], "job-clone-1")
+        self.assertEqual(kwargs["message_limit"], 20)
+        self.assertEqual(kwargs["send_delay_ms"], 1000)
 
     def test_clone_timeline_migration_marks_job_error_when_record_creation_fails(
         self,
@@ -1426,9 +1426,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("migration boom", response.get_json()["error"])
-        self.assertEqual([], self.started_timeline_migration_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "migration boom")
+        self.assertEqual(self.started_timeline_migration_jobs, [])
         self.assertIn(("job-clone-1", "error"), self.status_updates)
         self.assertIn(
             ("job-clone-1", "完整时间线迁移记录创建失败，任务未启动"),
@@ -1445,15 +1445,15 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(1, len(self.created_clone_migrations))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.created_clone_migrations), 1)
         migration = self.created_clone_migrations[0]
-        self.assertEqual("timeline_replay", migration["mode"])
+        self.assertEqual(migration["mode"], "timeline_replay")
         self.assertEqual(
-            "text:secondary; media:primary->relay->secondary",
             migration["target_write_account"],
+            "text:secondary; media:primary->relay->secondary",
         )
-        self.assertEqual(1, len(self.started_timeline_migration_jobs))
+        self.assertEqual(len(self.started_timeline_migration_jobs), 1)
 
     def test_clone_timeline_migration_defers_incomplete_relay_check_to_job(self) -> None:
         plan = self._create_relay_done_plan()
@@ -1467,10 +1467,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(1, len(self.created_jobs))
-        self.assertEqual(1, len(self.created_clone_migrations))
-        self.assertEqual(1, len(self.started_timeline_migration_jobs))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.created_jobs), 1)
+        self.assertEqual(len(self.created_clone_migrations), 1)
+        self.assertEqual(len(self.started_timeline_migration_jobs), 1)
 
     def test_clone_timeline_migration_defers_no_remaining_check_to_job(self) -> None:
         self._create_done_plan()
@@ -1487,10 +1487,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
-        self.assertEqual(1, len(self.created_jobs))
-        self.assertEqual(1, len(self.created_clone_migrations))
-        self.assertEqual(1, len(self.started_timeline_migration_jobs))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.created_jobs), 1)
+        self.assertEqual(len(self.created_clone_migrations), 1)
+        self.assertEqual(len(self.started_timeline_migration_jobs), 1)
 
     def test_clone_migration_payload_includes_timeline_preview(self) -> None:
         self._create_done_plan()
@@ -1534,14 +1534,14 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertIn("timeline_preview", payload)
         self.assertIn("timeline_migration", payload)
         self.assertIn("task_report", payload)
         self.assertIn("group_progress", payload)
-        self.assertEqual("timeline_replay", payload["timeline_migration"]["mode"])
-        self.assertEqual("deferred", payload["timeline_preview"]["assessment_state"])
+        self.assertEqual(payload["timeline_migration"]["mode"], "timeline_replay")
+        self.assertEqual(payload["timeline_preview"]["assessment_state"], "deferred")
 
     def test_clone_migration_payload_keeps_task_report_and_group_progress_separate(
         self,
@@ -1577,13 +1577,13 @@ class CloneRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/clone/runs/run-existing/migration")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
-        self.assertEqual(200, payload["task_report"]["processed"])
-        self.assertEqual(200, payload["task_report"]["media"]["sent"])
-        self.assertEqual(200, payload["task_report"]["requested_limit"])
-        self.assertEqual(14130, payload["group_progress"]["messages_total"])
-        self.assertEqual("verified", payload["group_progress"]["assessment_state"])
+        self.assertEqual(payload["task_report"]["processed"], 200)
+        self.assertEqual(payload["task_report"]["media"]["sent"], 200)
+        self.assertEqual(payload["task_report"]["requested_limit"], 200)
+        self.assertEqual(payload["group_progress"]["messages_total"], 14130)
+        self.assertEqual(payload["group_progress"]["assessment_state"], "verified")
 
     def test_clone_preflight_rejects_missing_csrf_token(self) -> None:
         with self._auth_config_patch():
@@ -1593,7 +1593,7 @@ class CloneRoutesTests(unittest.TestCase):
                 json={"chat_id": 100},
             )
 
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(response.status_code, 403)
         self.assertTrue(response.get_json()["csrf_required"])
 
     def test_clone_preflight_returns_report(self) -> None:
@@ -1605,10 +1605,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         report = response.get_json()["report"]
-        self.assertEqual("CLONE:STRUCTURE:100", report["confirm"])
-        self.assertEqual("Source 副本", report["target"]["default_title"])
+        self.assertEqual(report["confirm"], "CLONE:STRUCTURE:100")
+        self.assertEqual(report["target"]["default_title"], "Source 副本")
 
     def test_clone_job_requires_matching_confirmation(self) -> None:
         with self._auth_config_patch():
@@ -1619,9 +1619,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
-        self.assertEqual([], self.started_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
+        self.assertEqual(self.started_jobs, [])
 
     def test_clone_job_rejects_blocked_second_account(self) -> None:
         self.secondary_ready = False
@@ -1633,9 +1633,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("第二账号未就绪，不能开始结构克隆", response.get_json()["error"])
-        self.assertEqual([], self.started_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "第二账号未就绪，不能开始结构克隆")
+        self.assertEqual(self.started_jobs, [])
 
     def test_clone_job_starts_structure_clone_thread(self) -> None:
         with self._auth_config_patch():
@@ -1651,36 +1651,36 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertEqual(
+            response.get_json()["job"],
             {
                 "job_id": "job-clone-1",
                 "job_type": "clone_structure",
                 "status": "queued",
             },
-            response.get_json()["job"],
         )
         self.assertEqual(
+            self.created_jobs[0],
             {
                 "job_type": "clone_structure",
                 "target_chat_id": 100,
                 "target_label": "Source Backup",
             },
-            self.created_jobs[0],
         )
-        self.assertEqual(1, len(self.started_jobs))
-        self.assertEqual(1, len(self.created_clone_runs))
-        self.assertEqual("job-clone-1", self.created_clone_runs[0]["run_id"])
-        self.assertEqual("Source Backup", self.created_clone_runs[0]["target_title"])
+        self.assertEqual(len(self.started_jobs), 1)
+        self.assertEqual(len(self.created_clone_runs), 1)
+        self.assertEqual(self.created_clone_runs[0]["run_id"], "job-clone-1")
+        self.assertEqual(self.created_clone_runs[0]["target_title"], "Source Backup")
         payload = response.get_json()
-        self.assertEqual("job-clone-1", payload["clone_run"]["run_id"])
-        self.assertEqual("queued", payload["clone_run"]["status"])
+        self.assertEqual(payload["clone_run"]["run_id"], "job-clone-1")
+        self.assertEqual(payload["clone_run"]["status"], "queued")
         args, kwargs = self.started_jobs[0]
-        self.assertEqual(("job-clone-1",), args)
-        self.assertEqual("job-clone-1", kwargs["clone_run_id"])
-        self.assertEqual(100, kwargs["source_chat_id"])
-        self.assertEqual("Source Backup", kwargs["target_title"])
-        self.assertEqual("megagroup", kwargs["target_kind"])
+        self.assertEqual(args, ("job-clone-1",))
+        self.assertEqual(kwargs["clone_run_id"], "job-clone-1")
+        self.assertEqual(kwargs["source_chat_id"], 100)
+        self.assertEqual(kwargs["target_title"], "Source Backup")
+        self.assertEqual(kwargs["target_kind"], "megagroup")
         self.assertIn(("job-clone-1", "已接收结构克隆请求"), self.logs)
 
     def test_clone_job_marks_job_error_when_thread_start_fails(self) -> None:
@@ -1698,10 +1698,10 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(500, response.status_code)
-        self.assertEqual("克隆任务启动失败", response.get_json()["error"])
-        self.assertEqual([], self.started_jobs)
-        self.assertEqual(1, len(self.created_clone_runs))
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json()["error"], "克隆任务启动失败")
+        self.assertEqual(self.started_jobs, [])
+        self.assertEqual(len(self.created_clone_runs), 1)
         self.assertIn(("job-clone-1", "error"), self.status_updates)
         self.assertIn(
             ("job-clone-1", "克隆任务启动失败，任务未启动"),
@@ -1723,9 +1723,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("run boom", response.get_json()["error"])
-        self.assertEqual([], self.started_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "run boom")
+        self.assertEqual(self.started_jobs, [])
         self.assertIn(("job-clone-1", "error"), self.status_updates)
         self.assertIn(
             ("job-clone-1", "克隆运行记录创建失败，任务未启动"),
@@ -1745,9 +1745,9 @@ class CloneRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(400, response.status_code)
-        self.assertEqual("target_kind 参数必须为 channel 或 megagroup", response.get_json()["error"])
-        self.assertEqual([], self.started_jobs)
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["error"], "target_kind 参数必须为 channel 或 megagroup")
+        self.assertEqual(self.started_jobs, [])
 
 
 if __name__ == "__main__":

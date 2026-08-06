@@ -103,7 +103,7 @@ class ChannelRoutesTests(unittest.TestCase):
             "/api/admin/auth/login",
             json={"password": "secret"},
         )
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         return str(payload["csrf_token"])
@@ -113,33 +113,33 @@ class ChannelRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/channels")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         item = response.get_json()["channels"][0]
-        self.assertEqual("tg://resolve?domain=public", item["telegram_app_link"])
-        self.assertEqual("https://t.me/public", item["telegram_web_link"])
-        self.assertEqual("2026-01-02 00:00:00", item["last_message_at"])
+        self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=public")
+        self.assertEqual(item["telegram_web_link"], "https://t.me/public")
+        self.assertEqual(item["last_message_at"], "2026-01-02 00:00:00")
         self.assertTrue(item["has_public_link"])
 
     def test_channels_page_redirects_to_login_when_unauthenticated(self) -> None:
         with self._auth_config_patch():
             response = self.client.get("/admin/channels")
 
-        self.assertEqual(302, response.status_code)
-        self.assertEqual("/admin/login?next=%2Fadmin%2Fchannels", response.location)
+        self.assertEqual(response.status_code, 302)
+        self.assertEqual(response.location, "/admin/login?next=%2Fadmin%2Fchannels")
 
     def test_channels_page_renders_when_authenticated(self) -> None:
         with self._auth_config_patch():
             self._login_admin()
             response = self.client.get("/admin/channels")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         self.assertIn("频道管理", response.get_data(as_text=True))
 
     def test_channel_scan_routes_reject_unauthenticated_requests(self) -> None:
         with self._auth_config_patch():
             response = self.client.post("/api/admin/channels/restricted/scan")
 
-        self.assertEqual(401, response.status_code)
+        self.assertEqual(response.status_code, 401)
         self.assertTrue(response.get_json()["auth_required"])
 
     def test_channel_scan_routes_reject_missing_csrf_token(self) -> None:
@@ -147,7 +147,7 @@ class ChannelRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.post("/api/admin/channels/restricted/scan")
 
-        self.assertEqual(403, response.status_code)
+        self.assertEqual(response.status_code, 403)
         self.assertTrue(response.get_json()["csrf_required"])
 
     def test_channel_scan_routes_accept_real_login_and_csrf_token(self) -> None:
@@ -164,8 +164,8 @@ class ChannelRoutesTests(unittest.TestCase):
                         endpoint,
                         headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
                     )
-                    self.assertEqual(200, response.status_code)
-                    self.assertEqual({"job_id": "job-1"}, response.get_json()["job"])
+                    self.assertEqual(response.status_code, 200)
+                    self.assertEqual(response.get_json()["job"], {"job_id": "job-1"})
 
     def test_removed_absent_channels_routes_return_not_found(self) -> None:
         with self._auth_config_patch():
@@ -176,8 +176,8 @@ class ChannelRoutesTests(unittest.TestCase):
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
 
-        self.assertEqual(404, get_response.status_code)
-        self.assertEqual(404, scan_response.status_code)
+        self.assertEqual(get_response.status_code, 404)
+        self.assertEqual(scan_response.status_code, 404)
 
 
     def test_restricted_channels_api_includes_telegram_links(self) -> None:
@@ -185,16 +185,16 @@ class ChannelRoutesTests(unittest.TestCase):
             self._login_admin()
             response = self.client.get("/api/admin/channels/restricted")
 
-        self.assertEqual(200, response.status_code)
+        self.assertEqual(response.status_code, 200)
         item = response.get_json()["items"][0]
-        self.assertEqual("Restricted", item["chat_title"])
-        self.assertEqual("tg://resolve?domain=restricted", item["telegram_app_link"])
-        self.assertEqual("https://t.me/restricted", item["telegram_web_link"])
+        self.assertEqual(item["chat_title"], "Restricted")
+        self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=restricted")
+        self.assertEqual(item["telegram_web_link"], "https://t.me/restricted")
         self.assertTrue(item["has_public_link"])
-        self.assertEqual("porn", item["restriction_reasons"])
-        self.assertEqual("restricted", item["risk_flags"])
-        self.assertEqual("joined", item["membership_scope"])
-        self.assertEqual("2026-03-01 00:00:00", item["last_message_at"])
+        self.assertEqual(item["restriction_reasons"], "porn")
+        self.assertEqual(item["risk_flags"], "restricted")
+        self.assertEqual(item["membership_scope"], "joined")
+        self.assertEqual(item["last_message_at"], "2026-03-01 00:00:00")
 
 
 if __name__ == "__main__":

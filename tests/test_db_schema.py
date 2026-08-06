@@ -7,7 +7,11 @@ from unittest.mock import patch
 import tg_harvest.app.factory as app_factory
 from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
-from tg_harvest.storage.schema import create_schema
+from tg_harvest.storage.schema import (
+    _column_sql_has_dynamic_datetime_default,
+    _sqlite_add_column_sql,
+    create_schema,
+)
 
 
 class DbSchemaMigrationTests(unittest.TestCase):
@@ -17,6 +21,15 @@ class DbSchemaMigrationTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
+
+    def test_dynamic_datetime_default_detection_handles_whitespace_and_quotes(self) -> None:
+        column_sql = 'created_at TEXT NOT NULL DEFAULT ( datetime ( "now" ) )'
+
+        self.assertTrue(_column_sql_has_dynamic_datetime_default(column_sql))
+        self.assertEqual(
+            _sqlite_add_column_sql(column_sql),
+            "created_at TEXT NOT NULL DEFAULT ''",
+        )
 
     def test_create_schema_removes_legacy_search_helper_column_and_indexes(self) -> None:
         cur = self.conn.cursor()
@@ -352,8 +365,8 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
         )
         row = cur.fetchone()
-        self.assertEqual(2, int(row["message_count"]))
-        self.assertEqual("2026-06-28 11:55:00", row["last_message_created_at"])
+        self.assertEqual(int(row["message_count"]), 2)
+        self.assertEqual(row["last_message_created_at"], "2026-06-28 11:55:00")
 
     def test_refresh_chat_message_counts_repairs_legacy_non_numeric_summary(self) -> None:
         # Older non-STRICT databases could contain arbitrary text in the
@@ -393,17 +406,17 @@ class DbSchemaMigrationTests(unittest.TestCase):
         # Legacy callers can provide a default tuple-row connection.
         self.conn.row_factory = None
         cur = self.conn.cursor()
-        self.assertEqual(2, _refresh_chat_message_counts(cur))
+        self.assertEqual(_refresh_chat_message_counts(cur), 2)
         row = self.conn.execute(
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
         ).fetchone()
-        self.assertEqual(2, int(row[0]))
-        self.assertEqual("2026-06-28 11:55:00", row[1])
+        self.assertEqual(int(row[0]), 2)
+        self.assertEqual(row[1], "2026-06-28 11:55:00")
         empty_row = self.conn.execute(
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 2"
         ).fetchone()
-        self.assertEqual(0, int(empty_row[0]))
-        self.assertEqual("", empty_row[1])
+        self.assertEqual(int(empty_row[0]), 0)
+        self.assertEqual(empty_row[1], "")
 
     def test_sync_live_messages_query_uses_created_at_index_without_temp_sort(self) -> None:
         create_schema(self.conn, detect_sqlite_features(self.conn))
@@ -865,10 +878,10 @@ class DbSchemaMigrationTests(unittest.TestCase):
             WHERE run_id = 'legacy'
             """
         ).fetchone()
-        self.assertNotEqual(0, int(migrated["target_random_id"]))
-        self.assertEqual("not_required", migrated["source_hop_status"])
-        self.assertEqual("pending", migrated["target_hop_status"])
-        self.assertEqual("not_required", migrated["cleanup_status"])
+        self.assertNotEqual(int(migrated["target_random_id"]), 0)
+        self.assertEqual(migrated["source_hop_status"], "not_required")
+        self.assertEqual(migrated["target_hop_status"], "pending")
+        self.assertEqual(migrated["cleanup_status"], "not_required")
         self.assertTrue(migrated["created_at"])
         self.assertTrue(migrated["updated_at"])
 
@@ -896,7 +909,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
             """
         ).fetchone()
         self.assertIsNotNone(row)
-        self.assertEqual("", row["deletion_job_id"])
+        self.assertEqual(row["deletion_job_id"], "")
 
     def test_create_schema_replaces_stale_named_index_definitions(self) -> None:
         feats = detect_sqlite_features(self.conn)
@@ -928,7 +941,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute(
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_messages_fts_%'"
         )
-        self.assertEqual([], [row["name"] for row in cur.fetchall()])
+        self.assertEqual([row["name"] for row in cur.fetchall()], [])
 
         cur.execute("INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Chat 1')")
         cur.execute(
@@ -981,7 +994,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"normtarget"',),
         )
-        self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [1])
 
     @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_rebuilds_nonempty_incomplete_fts_index(self) -> None:
@@ -1011,23 +1024,23 @@ class DbSchemaMigrationTests(unittest.TestCase):
         self.conn.commit()
 
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
-        self.assertEqual(1, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 1)
         cur.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"missingneedle"',),
         )
-        self.assertEqual([], cur.fetchall())
+        self.assertEqual(cur.fetchall(), [])
 
         create_schema(self.conn, feats)
 
         self.assertTrue(has_fts(self.conn))
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
-        self.assertEqual(2, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 2)
         cur.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"missingneedle"',),
         )
-        self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [2])
 
     @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_replaces_stale_message_search_queue_triggers(self) -> None:
@@ -1071,13 +1084,13 @@ class DbSchemaMigrationTests(unittest.TestCase):
         cur.execute(
             "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_queue_length'"
         )
-        self.assertEqual("1", str(cur.fetchone()["value"]))
+        self.assertEqual(str(cur.fetchone()["value"]), "1")
 
-        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+        self.assertEqual(drain_message_search_terms_rebuild_queue(self.conn), 1)
         cur.execute(
             "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_queue_length'"
         )
-        self.assertEqual("0", str(cur.fetchone()["value"]))
+        self.assertEqual(str(cur.fetchone()["value"]), "0")
 
     def test_ensure_configured_db_uses_cfg_for_connection_and_schema(self) -> None:
         cfg = SimpleNamespace(
@@ -1154,20 +1167,20 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'trg_messages_fts_%'"
         )
         self.assertEqual(
+            sorted(row["name"] for row in cur.fetchall()),
             [
                 "trg_messages_fts_delete",
                 "trg_messages_fts_insert",
                 "trg_messages_fts_update",
             ],
-            sorted(row["name"] for row in cur.fetchall()),
         )
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
-        self.assertEqual(1, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 1)
         cur.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"missingneedle"',),
         )
-        self.assertEqual([], cur.fetchall())
+        self.assertEqual(cur.fetchall(), [])
 
         cur.execute(
             """
@@ -1182,18 +1195,18 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"freshneedle"',),
         )
-        self.assertEqual([3], [int(row["rowid"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [3])
 
         create_schema(self.conn, feats, force_heal_fts=1, skip_fts_auto_heal=1)
 
         self.assertTrue(has_fts(self.conn))
         cur.execute("SELECT COUNT(*) AS c FROM messages_fts_docsize")
-        self.assertEqual(3, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 3)
         cur.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"missingneedle"',),
         )
-        self.assertEqual([2], [int(row["rowid"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [2])
 
     @unittest.skip("SQLite search indexes were removed")
     def test_fts_rebuild_triggers_cover_changes_between_batches(self) -> None:
@@ -1255,12 +1268,12 @@ class DbSchemaMigrationTests(unittest.TestCase):
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"updatedneedle"',),
         )
-        self.assertEqual([1], [int(row["rowid"]) for row in cur.fetchall()])
+        self.assertEqual([int(row["rowid"]) for row in cur.fetchall()], [1])
         cur.execute(
             "SELECT rowid FROM messages_fts WHERE messages_fts MATCH ?",
             ('"originalneedle"',),
         )
-        self.assertEqual([], cur.fetchall())
+        self.assertEqual(cur.fetchall(), [])
 
 @unittest.skip("SQLite search indexes were removed")
 class StorageAccessFtsDetectionTests(unittest.TestCase):
@@ -1384,9 +1397,9 @@ class SearchResultMapperTests(unittest.TestCase):
         row = cur.fetchone()
 
         items = _map_search_items([row])
-        self.assertEqual(1, len(items))
-        self.assertEqual("/open/telegram?chat_id=100&message_id=200", items[0]["link"])
-        self.assertEqual(0, items[0]["is_promo"])
+        self.assertEqual(len(items), 1)
+        self.assertEqual(items[0]["link"], "/open/telegram?chat_id=100&message_id=200")
+        self.assertEqual(items[0]["is_promo"], 0)
         self.assertIsNone(items[0]["file_size"])
         conn.close()
 
@@ -1395,20 +1408,20 @@ class SearchResultMapperTests(unittest.TestCase):
 class MessageSearchTermExtractionTests(unittest.TestCase):
     def test_extract_cjk_bigrams_keeps_distinct_adjacent_cjk_pairs(self) -> None:
         self.assertEqual(
-            ["福利", "利姬"],
             extract_cjk_bigrams("福利姬"),
+            ["福利", "利姬"],
         )
 
     def test_extract_cjk_bigrams_ignores_non_cjk_pairs(self) -> None:
         self.assertEqual(
-            ["福利"],
             extract_cjk_bigrams("#福利A福利"),
+            ["福利"],
         )
 
     def test_extract_cjk_search_terms_includes_unigrams_and_bigrams(self) -> None:
         self.assertEqual(
-            ["福", "利", "姬", "福利", "利姬"],
             extract_cjk_search_terms("福利姬"),
+            ["福", "利", "姬", "福利", "利姬"],
         )
 
 
@@ -1444,15 +1457,15 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         self.conn.commit()
 
         cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
-        self.assertEqual("insert", cur.fetchone()["reason"])
+        self.assertEqual(cur.fetchone()["reason"], "insert")
 
         drained = drain_message_search_terms_rebuild_queue(self.conn)
-        self.assertEqual(1, drained)
+        self.assertEqual(drained, 1)
 
         cur.execute("SELECT term FROM message_search_terms ORDER BY term")
         self.assertEqual(
-            ["利", "利姬", "姬", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
+            ["利", "利姬", "姬", "福", "福利"],
         )
 
     def test_empty_message_does_not_enqueue_search_term_rebuild(self) -> None:
@@ -1468,7 +1481,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         self.conn.commit()
 
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms_rebuild_queue")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
 
     def test_known_empty_current_index_skips_redundant_full_rebuild(self) -> None:
         cur = self.conn.cursor()
@@ -1481,7 +1494,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
             """
         )
         self.conn.commit()
-        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+        self.assertEqual(drain_message_search_terms_rebuild_queue(self.conn), 1)
 
         with patch(
             "tg_harvest.storage.search_terms._sync_message_search_terms_from_scratch"
@@ -1496,7 +1509,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
             WHERE key = 'cjk_terms_has_terms'
             """
         )
-        self.assertEqual("0", cur.fetchone()["value"])
+        self.assertEqual(cur.fetchone()["value"], "0")
 
     def test_update_content_norm_enqueues_rebuild(self) -> None:
         cur = self.conn.cursor()
@@ -1517,7 +1530,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         self.conn.commit()
 
         cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
-        self.assertEqual("update", cur.fetchone()["reason"])
+        self.assertEqual(cur.fetchone()["reason"], "update")
 
     def test_clearing_search_text_enqueues_rebuild_and_removes_terms(self) -> None:
         cur = self.conn.cursor()
@@ -1530,7 +1543,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
             """
         )
         self.conn.commit()
-        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+        self.assertEqual(drain_message_search_terms_rebuild_queue(self.conn), 1)
 
         cur.execute(
             """
@@ -1542,11 +1555,11 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         self.conn.commit()
 
         cur.execute("SELECT reason FROM message_search_terms_rebuild_queue")
-        self.assertEqual("update", cur.fetchone()["reason"])
-        self.assertEqual(1, drain_message_search_terms_rebuild_queue(self.conn))
+        self.assertEqual(cur.fetchone()["reason"], "update")
+        self.assertEqual(drain_message_search_terms_rebuild_queue(self.conn), 1)
 
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
 
     def test_schema_migrates_v2_terms_for_cleared_messages_without_full_rebuild(
         self,
@@ -1585,11 +1598,11 @@ class MessageSearchTermQueueTests(unittest.TestCase):
         rebuild_mock.assert_not_called()
 
         cur.execute("SELECT COUNT(*) AS c FROM message_search_terms")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute(
             "SELECT value FROM message_search_terms_meta WHERE key = 'cjk_terms_version'"
         )
-        self.assertEqual("3", cur.fetchone()["value"])
+        self.assertEqual(cur.fetchone()["value"], "3")
 
     def test_schema_rebuilds_partially_committed_v2_terms(self) -> None:
         cur = self.conn.cursor()
@@ -1627,8 +1640,8 @@ class MessageSearchTermQueueTests(unittest.TestCase):
 
         cur.execute("SELECT term FROM message_search_terms ORDER BY term")
         self.assertEqual(
-            ["会", "会员", "利", "员", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
+            ["会", "会员", "利", "员", "福", "福利"],
         )
         self.assertTrue(message_search_terms_are_current(self.conn))
 
@@ -1668,8 +1681,8 @@ class MessageSearchTermQueueTests(unittest.TestCase):
 
         cur.execute("SELECT term FROM message_search_terms ORDER BY term")
         self.assertEqual(
-            ["利", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
+            ["利", "福", "福利"],
         )
         cur.execute(
             "SELECT 1 FROM message_search_terms_meta WHERE key = 'cjk_terms_rebuild_state'"
@@ -1702,8 +1715,8 @@ class MessageSearchTermQueueTests(unittest.TestCase):
 
         cur.execute("SELECT term FROM message_search_terms ORDER BY term")
         self.assertEqual(
-            ["利", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
+            ["利", "福", "福利"],
         )
         self.assertTrue(message_search_terms_are_current(self.conn))
 
@@ -1744,8 +1757,8 @@ class MessageSearchTermQueueTests(unittest.TestCase):
 
         cur.execute("SELECT term FROM message_search_terms ORDER BY term")
         self.assertEqual(
-            ["利", "福", "福利"],
             [row["term"] for row in cur.fetchall()],
+            ["利", "福", "福利"],
         )
         cur.execute(
             """
@@ -1754,7 +1767,7 @@ class MessageSearchTermQueueTests(unittest.TestCase):
             WHERE key IN ('cjk_terms_backfill_mode', 'cjk_terms_backfill_last_pk')
             """
         )
-        self.assertEqual(0, cur.fetchone()["c"])
+        self.assertEqual(cur.fetchone()["c"], 0)
         self.assertTrue(message_search_terms_are_current(self.conn))
 
 

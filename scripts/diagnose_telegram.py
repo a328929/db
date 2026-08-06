@@ -42,36 +42,36 @@ def _probe_socket() -> bool:
 
 
 def _check_config() -> bool:
-    CFG, _TelegramClient = _runtime_deps()
+    cfg, _ = _runtime_deps()
     _print_header("配置检查")
     ok = True
-    if not CFG.api_id:
+    if not cfg.api_id:
         print("[FAIL] TG_API_ID 未配置")
         ok = False
     else:
-        print(f"[OK] TG_API_ID={CFG.api_id}")
+        print(f"[OK] TG_API_ID={cfg.api_id}")
 
-    if not CFG.api_hash:
+    if not cfg.api_hash:
         print("[FAIL] TG_API_HASH 未配置")
         ok = False
     else:
         print("[OK] TG_API_HASH 已配置")
 
-    print(f"[INFO] Session 名称: {CFG.session_name}")
-    print(f"[INFO] Session 文件: {Path(f'{CFG.session_name}.session').resolve()}")
+    print(f"[INFO] Session 名称: {cfg.session_name}")
+    print(f"[INFO] Session 文件: {Path(f'{cfg.session_name}.session').resolve()}")
     return ok
 
 
 def _check_telethon() -> bool:
     from tg_harvest.runtime.paths import secure_session_artifacts
 
-    CFG, TelegramClient = _runtime_deps()
+    cfg, telegram_client = _runtime_deps()
     _print_header("Telegram 鉴权检查")
     try:
-        with TelegramClient(
-            CFG.session_name, CFG.api_id, CFG.api_hash, receive_updates=False
+        with telegram_client(
+            cfg.session_name, cfg.api_id, cfg.api_hash, receive_updates=False
         ) as client:
-            secure_session_artifacts(CFG.session_name)
+            secure_session_artifacts(cfg.session_name)
             if not client.is_user_authorized():
                 print("[FAIL] 已连接 Telegram，但当前 session 未授权或已失效")
                 return False

@@ -15,7 +15,7 @@ class ClonePlanDomainTests(unittest.TestCase):
         )
 
         self.assertFalse(readiness["can_migrate_timeline"])
-        self.assertEqual(["plan_missing"], readiness["reason_codes"])
+        self.assertEqual(readiness["reason_codes"], ["plan_missing"])
 
     def test_timeline_readiness_blocks_when_relay_is_incomplete(self) -> None:
         plan = {
@@ -101,14 +101,14 @@ class ClonePlanDomainTests(unittest.TestCase):
         )
 
         self.assertTrue(readiness["can_migrate_timeline"])
-        self.assertEqual([], readiness["reason_codes"])
-        self.assertEqual("secondary", readiness["text_account"])
+        self.assertEqual(readiness["reason_codes"], [])
+        self.assertEqual(readiness["text_account"], "secondary")
         self.assertEqual(
-            "primary->relay->secondary",
             readiness["media_execution_account"],
+            "primary->relay->secondary",
         )
-        self.assertEqual("primary", readiness["media_source_account"])
-        self.assertEqual("secondary", readiness["media_target_account"])
+        self.assertEqual(readiness["media_source_account"], "primary")
+        self.assertEqual(readiness["media_target_account"], "secondary")
 
 
 if __name__ == "__main__":

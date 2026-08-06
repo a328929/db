@@ -97,11 +97,11 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
-            [("job-1", "已接收抓取目标：@example_group")],
             self.logs,
+            [("job-1", "已接收抓取目标：@example_group")],
         )
-        self.assertEqual(1, len(self.started_harvests))
-        self.assertEqual(("job-1", "@example_group"), self.started_harvests[0]["args"])
+        self.assertEqual(len(self.started_harvests), 1)
+        self.assertEqual(self.started_harvests[0]["args"], ("job-1", "@example_group"))
 
     def test_harvest_marks_job_error_when_thread_start_fails(self) -> None:
         status_updates = []
@@ -123,9 +123,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
                 self.handler
             )
 
-        self.assertEqual(500, status_code)
-        self.assertEqual("任务启动失败", response.get_json()["error"])
-        self.assertEqual([("job-1", "error")], status_updates)
+        self.assertEqual(status_code, 500)
+        self.assertEqual(response.get_json()["error"], "任务启动失败")
+        self.assertEqual(status_updates, [("job-1", "error")])
         self.assertIn(("job-1", "后台任务启动失败，已标记为失败"), self.logs)
 
     def test_update_all_success_starts_job_with_all_scope(self) -> None:
@@ -141,14 +141,14 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
+            self.logs,
             [
                 ("job-1", "已接收增量更新请求"),
                 ("job-1", "目标范围：全部群聊"),
             ],
-            self.logs,
         )
-        self.assertEqual(1, len(self.started_updates))
-        self.assertEqual(("job-1", "all", "全部群聊"), self.started_updates[0]["args"])
+        self.assertEqual(len(self.started_updates), 1)
+        self.assertEqual(self.started_updates[0]["args"], ("job-1", "all", "全部群聊"))
 
     def test_update_single_chat_success_starts_job_with_resolved_target(self) -> None:
         with self.app.test_request_context(
@@ -163,14 +163,14 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
+            self.logs,
             [
                 ("job-1", "已接收增量更新请求"),
                 ("job-1", "目标群组：chat-42 (42)"),
             ],
-            self.logs,
         )
-        self.assertEqual(1, len(self.started_updates))
-        self.assertEqual(("job-1", 42, "chat-42"), self.started_updates[0]["args"])
+        self.assertEqual(len(self.started_updates), 1)
+        self.assertEqual(self.started_updates[0]["args"], ("job-1", 42, "chat-42"))
 
     def test_update_preflight_returns_summary(self) -> None:
         with patch(
@@ -189,17 +189,17 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             )
 
         payload = response.get_json()
-        self.assertEqual(200, status_code)
+        self.assertEqual(status_code, 200)
         self.assertTrue(payload["ok"])
-        self.assertEqual(5, payload["target"]["target_count"])
-        self.assertEqual("all", preflight_mock.call_args.kwargs["chat_id"])
+        self.assertEqual(payload["target"]["target_count"], 5)
+        self.assertEqual(preflight_mock.call_args.kwargs["chat_id"], "all")
 
     def test_cleanup_empty_requires_json_body(self) -> None:
         with self.app.test_request_context("/api/admin/jobs/cleanup-empty", method="POST"):
             response, status_code = self.handler.api_admin_job_create_cleanup_empty.__wrapped__(self.handler)
 
-        self.assertEqual(400, status_code)
-        self.assertEqual("请求必须为 JSON", response.get_json()["error"])
+        self.assertEqual(status_code, 400)
+        self.assertEqual(response.get_json()["error"], "请求必须为 JSON")
 
     def test_cleanup_empty_chat_scope_returns_not_found_for_unknown_chat(self) -> None:
         self.handler.admin_get_chat_brief_fn = lambda _conn, _chat_id: None
@@ -211,8 +211,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         ):
             response, status_code = self.handler.api_admin_job_create_cleanup_empty.__wrapped__(self.handler)
 
-        self.assertEqual(404, status_code)
-        self.assertEqual("chat_id 不存在", response.get_json()["error"])
+        self.assertEqual(status_code, 404)
+        self.assertEqual(response.get_json()["error"], "chat_id 不存在")
 
     def test_cleanup_empty_success_uses_shared_scope_resolution(self) -> None:
         with self.app.test_request_context(
@@ -225,22 +225,22 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
+            payload["request"],
             {
                 "scope": "chat",
                 "chat_id": 42,
                 "target_label": "chat-42",
             },
-            payload["request"],
         )
-        self.assertEqual(1, len(self.started_jobs))
-        self.assertEqual("chat-42", self.started_jobs[0]["target_label"])
+        self.assertEqual(len(self.started_jobs), 1)
+        self.assertEqual(self.started_jobs[0]["target_label"], "chat-42")
         self.assertEqual(
+            self.logs,
             [
                 ("job-1", "已接收不可搜索数据清理请求"),
                 ("job-1", "作用范围：当前群组"),
                 ("job-1", "目标：chat-42 (42)"),
             ],
-            self.logs,
         )
 
     def test_delete_returns_conflict_response_from_shared_helper(self) -> None:
@@ -257,9 +257,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             response, status_code = self.handler.api_admin_job_create_delete.__wrapped__(self.handler)
 
         payload = response.get_json()
-        self.assertEqual(409, status_code)
-        self.assertEqual("当前已有进行中的任务，请等待完成后再试", payload["error"])
-        self.assertEqual("existing-1", payload["existing_job"]["job_id"])
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"], "当前已有进行中的任务，请等待完成后再试")
+        self.assertEqual(payload["existing_job"]["job_id"], "existing-1")
 
     def test_delete_requires_server_side_confirmation(self) -> None:
         with self.app.test_request_context(
@@ -269,8 +269,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         ):
             response, status_code = self.handler.api_admin_job_create_delete.__wrapped__(self.handler)
 
-        self.assertEqual(400, status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+        self.assertEqual(status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
 
     def test_delete_empty_chats_requires_server_side_confirmation(self) -> None:
         with self.app.test_request_context(
@@ -284,8 +284,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
                 )
             )
 
-        self.assertEqual(400, status_code)
-        self.assertEqual("confirm 参数不匹配", response.get_json()["error"])
+        self.assertEqual(status_code, 400)
+        self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
 
     def test_delete_empty_chats_success_starts_job(self) -> None:
         with self.app.test_request_context(
@@ -300,11 +300,11 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         payload = response.get_json()
         self.assertTrue(payload["ok"])
         self.assertEqual(
-            [("job-1", "已接收零消息群组删除请求")],
             self.logs,
+            [("job-1", "已接收零消息群组删除请求")],
         )
-        self.assertEqual(1, len(self.started_jobs))
-        self.assertEqual(("job-1",), self.started_jobs[0]["args"])
+        self.assertEqual(len(self.started_jobs), 1)
+        self.assertEqual(self.started_jobs[0]["args"], ("job-1",))
 
     def test_active_job_returns_current_snapshot(self) -> None:
         self.handler.admin_get_active_job_fn = lambda: {
@@ -322,7 +322,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual("job-active", payload["job"]["job_id"])
+        self.assertEqual(payload["job"]["job_id"], "job-active")
 
     def test_sync_stats_reads_payload_from_service(self) -> None:
         self.handler.build_admin_sync_stats_payload_fn = lambda _conn, **_kwargs: {
@@ -336,8 +336,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual("10m", payload["windows"][0]["window_key"])
-        self.assertEqual(3, payload["windows"][0]["message_count"])
+        self.assertEqual(payload["windows"][0]["window_key"], "10m")
+        self.assertEqual(payload["windows"][0]["message_count"], 3)
 
     def test_sync_live_messages_reads_payload_from_service(self) -> None:
         self.handler.build_admin_sync_live_messages_payload_fn = lambda _conn, **_kwargs: {
@@ -355,8 +355,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(1, payload["items"][0]["chat_id"])
-        self.assertEqual(101, payload["items"][0]["message_id"])
+        self.assertEqual(payload["items"][0]["chat_id"], 1)
+        self.assertEqual(payload["items"][0]["message_id"], 101)
 
     def test_storage_health_reads_readonly_payload_from_service(self) -> None:
         calls = []
@@ -376,8 +376,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual("warning", payload["status"])
-        self.assertEqual(1024, payload["database"]["main_bytes"])
+        self.assertEqual(payload["status"], "warning")
+        self.assertEqual(payload["database"]["main_bytes"], 1024)
         self.assertEqual(self.handler.cfg, calls[0]["cfg"])
 
     def test_storage_health_route_keeps_admin_authentication_boundary(self) -> None:
@@ -385,7 +385,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         response = self.app.test_client().get("/api/admin/storage-health")
 
-        self.assertEqual(401, response.status_code)
+        self.assertEqual(response.status_code, 401)
         self.assertTrue(response.get_json()["auth_required"])
 
     def test_sync_diagnose_returns_payload_from_service(self) -> None:
@@ -402,9 +402,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             )
 
         payload = response.get_json()
-        self.assertEqual(200, status_code)
+        self.assertEqual(status_code, 200)
         self.assertTrue(payload["ok"])
-        self.assertEqual(1, payload["triggered"])
+        self.assertEqual(payload["triggered"], 1)
 
     def test_sync_scheduler_returns_scheduler_summary(self) -> None:
         with patch(
@@ -420,8 +420,8 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(2, payload["scheduler"]["pending_count"])
-        self.assertEqual(1, build_summary.call_count)
+        self.assertEqual(payload["scheduler"]["pending_count"], 2)
+        self.assertEqual(build_summary.call_count, 1)
 
     def test_sync_chats_returns_filtered_scheduler_rows(self) -> None:
         with patch(
@@ -439,11 +439,11 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(7, payload["items"][0]["chat_id"])
-        self.assertEqual("both_joined", list_chats.call_args.kwargs["membership"])
-        self.assertEqual("pending", list_chats.call_args.kwargs["status"])
-        self.assertEqual(20, list_chats.call_args.kwargs["limit"])
-        self.assertEqual(5, list_chats.call_args.kwargs["offset"])
+        self.assertEqual(payload["items"][0]["chat_id"], 7)
+        self.assertEqual(list_chats.call_args.kwargs["membership"], "both_joined")
+        self.assertEqual(list_chats.call_args.kwargs["status"], "pending")
+        self.assertEqual(list_chats.call_args.kwargs["limit"], 20)
+        self.assertEqual(list_chats.call_args.kwargs["offset"], 5)
 
     def test_sync_chat_probe_uses_listener_runtime(self) -> None:
         runtime = SimpleNamespace(
@@ -467,9 +467,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             )
 
         payload = response.get_json()
-        self.assertEqual(200, status_code)
+        self.assertEqual(status_code, 200)
         self.assertTrue(payload["ok"])
-        self.assertEqual(42, payload["items"][0]["chat_id"])
+        self.assertEqual(payload["items"][0]["chat_id"], 42)
 
     def test_sync_model_reset_returns_reset_payload(self) -> None:
         with patch(
@@ -502,7 +502,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
 
         payload = response.get_json()
         self.assertTrue(payload["ok"])
-        self.assertEqual(["job-1"], stop_calls)
+        self.assertEqual(stop_calls, ["job-1"])
         self.assertIn(
             ("job-1", "已收到停止请求，当前群组完成后停止派发新群组"),
             self.logs,

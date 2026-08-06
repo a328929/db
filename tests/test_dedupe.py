@@ -66,17 +66,17 @@ class DedupeBatchDeletionTests(unittest.TestCase):
         )
         cur = self.conn.cursor()
         cur.execute("SELECT COUNT(*) AS c FROM messages WHERE dedupe_hash = 'hash-all'")
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute(
             "SELECT COUNT(*) AS c FROM dedupe_actions WHERE dedupe_hash = 'hash-all'"
         )
-        self.assertEqual(501, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 501)
         cur.execute(
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
         )
         chat_row = cur.fetchone()
-        self.assertEqual(0, int(chat_row["message_count"]))
-        self.assertEqual("", chat_row["last_message_created_at"])
+        self.assertEqual(int(chat_row["message_count"]), 0)
+        self.assertEqual(chat_row["last_message_created_at"], "")
 
     def test_dedupe_deletes_message_media_without_foreign_key_pragmas(self) -> None:
         self.conn.execute("PRAGMA foreign_keys=OFF")
@@ -127,18 +127,18 @@ class DedupeBatchDeletionTests(unittest.TestCase):
             )
         )
 
-        self.assertEqual(2, deleted)
+        self.assertEqual(deleted, 2)
         cur = self.conn.cursor()
         cur.execute(
             "SELECT COUNT(*) AS c FROM message_media WHERE chat_id = 1 AND message_id IN (200, 201)"
         )
-        self.assertEqual(0, int(cur.fetchone()["c"]))
+        self.assertEqual(int(cur.fetchone()["c"]), 0)
         cur.execute(
             "SELECT message_count, last_message_created_at FROM chats WHERE chat_id = 1"
         )
         chat_row = cur.fetchone()
-        self.assertEqual(0, int(chat_row["message_count"]))
-        self.assertEqual("", chat_row["last_message_created_at"])
+        self.assertEqual(int(chat_row["message_count"]), 0)
+        self.assertEqual(chat_row["last_message_created_at"], "")
 
 
 if __name__ == "__main__":

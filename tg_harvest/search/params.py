@@ -9,6 +9,7 @@ _DATE_SEPARATED_RE = re.compile(r"^(\d{4})[-/.](\d{1,2})[-/.](\d{1,2})$")
 _MEDIA_DURATION_RE = re.compile(
     r"(?P<open>[【\[])\s*(?P<body>\d{1,3}(?:[：:]\d{1,2}){1,2})\s*(?P<close>[】\]])"
 )
+_MEDIA_DURATION_FORMAT_ERROR = "视频时长格式错误，请使用【HH:MM:SS】或【MM:SS】"
 
 
 @dataclass
@@ -77,12 +78,12 @@ def _parse_date_bound(value: Any, *, field_label: str, end_exclusive: bool) -> i
 def _parse_media_duration_token(body: str) -> int:
     parts = [part.strip() for part in re.split(r"[：:]", str(body or "").strip()) if part.strip()]
     if len(parts) not in {2, 3}:
-        raise ValueError("视频时长格式错误，请使用【HH:MM:SS】或【MM:SS】")
+        raise ValueError(_MEDIA_DURATION_FORMAT_ERROR)
 
     try:
         numbers = [int(part) for part in parts]
     except ValueError as exc:
-        raise ValueError("视频时长格式错误，请使用【HH:MM:SS】或【MM:SS】") from exc
+        raise ValueError(_MEDIA_DURATION_FORMAT_ERROR) from exc
 
     if len(numbers) == 2:
         hours = 0
@@ -91,7 +92,7 @@ def _parse_media_duration_token(body: str) -> int:
         hours, minutes, seconds = numbers
 
     if minutes < 0 or minutes >= 60 or seconds < 0 or seconds >= 60 or hours < 0:
-        raise ValueError("视频时长格式错误，请使用【HH:MM:SS】或【MM:SS】")
+        raise ValueError(_MEDIA_DURATION_FORMAT_ERROR)
 
     return hours * 3600 + minutes * 60 + seconds
 
@@ -136,14 +137,48 @@ def _cleanup_query_after_duration_removal(text: str) -> str:
     q = q.replace("＋", "+").replace("／", "/").replace("－", "-")
     while q != previous:
         previous = q
-        q = re.sub(r"^\s*[+/\-]+\s*", "", q)
-        q = re.sub(r"\s*[+/\-]+\s*$", "", q)
-        q = re.sub(r"(?<=\()\s*[+/\-]+\s*(?=[)\s])", "", q)
-        q = re.sub(r"\s*[+/\-]+\s*(?=[)\s])", " ", q)
-        q = re.sub(r"(?<=[\s(])[+/\-]+(?=\s|$)", " ", q)
-        q = re.sub(r"\(\s*\)", " ", q)
-        q = re.sub(r"\s+", " ", q).strip()
+        q = _strip_query_operator_edges(q)
+        q = _replace_orphaned_query_operators(q)
+        q = " ".join(q.split())
+        q = q.replace("()", " ").replace("( )", " ")
     return q
+
+
+_QUERY_OPERATOR_CHARS = frozenset("+/-")
+
+
+def _strip_query_operator_edges(text: str) -> str:
+    start = 0
+    end = len(text)
+    while start < end and (
+        text[start].isspace() or text[start] in _QUERY_OPERATOR_CHARS
+    ):
+        start += 1
+    while end > start and (
+        text[end - 1].isspace() or text[end - 1] in _QUERY_OPERATOR_CHARS
+    ):
+        end -= 1
+    return text[start:end]
+
+
+def _replace_orphaned_query_operators(text: str) -> str:
+    parts: list[str] = []
+    index = 0
+    while index < len(text):
+        if text[index] not in _QUERY_OPERATOR_CHARS:
+            parts.append(text[index])
+            index += 1
+            continue
+
+        end = index + 1
+        while end < len(text) and text[end] in _QUERY_OPERATOR_CHARS:
+            end += 1
+        if end == len(text) or text[end].isspace() or text[end] == ")":
+            parts.append(" ")
+        else:
+            parts.append(text[index:end])
+        index = end
+    return "".join(parts)
 
 
 def _parse_search_params(data: dict[str, Any]) -> SearchParams:

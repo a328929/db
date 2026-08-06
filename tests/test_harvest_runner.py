@@ -106,19 +106,19 @@ def _message_stream(*events):
 
 class HarvestRunnerIterMessagesKwargsTests(unittest.TestCase):
     def test_iter_messages_kwargs_keep_telethon_default_when_wait_time_is_auto(self) -> None:
-        self.assertEqual({"reverse": True}, _build_iter_messages_kwargs(0))
+        self.assertEqual(_build_iter_messages_kwargs(0), {"reverse": True})
         self.assertEqual(
-            {"reverse": True, "min_id": 10}, _build_iter_messages_kwargs(10)
+            _build_iter_messages_kwargs(10), {"reverse": True, "min_id": 10}
         )
 
     def test_iter_messages_kwargs_can_override_history_wait_time(self) -> None:
         self.assertEqual(
-            {"reverse": True, "min_id": 10, "wait_time": 0.2},
             _build_iter_messages_kwargs(10, history_wait_time=0.2),
+            {"reverse": True, "min_id": 10, "wait_time": 0.2},
         )
         self.assertEqual(
-            {"reverse": True, "wait_time": 0.0},
             _build_iter_messages_kwargs(0, history_wait_time=-1),
+            {"reverse": True, "wait_time": 0.0},
         )
 
 
@@ -126,23 +126,23 @@ class FloodWaitHelpersTests(unittest.TestCase):
     def test_exponential_backoff_respects_required_wait_floor(self) -> None:
         with patch("tg_harvest.ingest.flood_wait.random.uniform", return_value=0.75):
             self.assertEqual(
-                10.75,
                 exponential_backoff_seconds(1, required_wait_seconds=10),
+                10.75,
             )
             self.assertEqual(
-                4.75,
                 exponential_backoff_seconds(2, required_wait_seconds=0),
+                4.75,
             )
 
     def test_short_retry_sleep_seconds_uses_compact_jitter_window(self) -> None:
         with patch("tg_harvest.ingest.flood_wait.random.uniform", return_value=0.4):
-            self.assertEqual(2.4, short_retry_sleep_seconds(1))
-            self.assertEqual(4.4, short_retry_sleep_seconds(2))
+            self.assertEqual(short_retry_sleep_seconds(1), 2.4)
+            self.assertEqual(short_retry_sleep_seconds(2), 4.4)
 
     def test_format_retry_context_is_stable(self) -> None:
         self.assertEqual(
-            "retry=2/3 wait=4.25s",
             format_retry_context(retry_index=2, max_retries=3, wait_seconds=4.25),
+            "retry=2/3 wait=4.25s",
         )
 
 
@@ -186,11 +186,11 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
 
         self.assertFalse(first_sync)
         self.assertEqual(
-            [{"reverse": True, "min_id": 10}, {"reverse": True, "min_id": 12}],
             client.iter_calls,
+            [{"reverse": True, "min_id": 10}, {"reverse": True, "min_id": 12}],
         )
-        self.assertEqual([[11, 12], [13]], [call[0] for call in batch_calls])
-        self.assertEqual(3, counters.written)
+        self.assertEqual([call[0] for call in batch_calls], [[11, 12], [13]])
+        self.assertEqual(counters.written, 3)
 
     def test_unchanged_grouped_rescan_does_not_report_touched_group(self) -> None:
         client = _FakeClient([_message_stream(_GroupedMessage(11, 9001))])
@@ -206,7 +206,7 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             )
 
         self.assertFalse(first_sync)
-        self.assertEqual(0, counters.written)
+        self.assertEqual(counters.written, 0)
         self.assertEqual(set(), touched_groups)
 
     def test_retry_exhaustion_raises_instead_of_succeeding_silently(self) -> None:
@@ -229,12 +229,12 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
 
         batch_upsert_mock.assert_not_called()
         self.assertEqual(
+            client.iter_calls,
             [
                 {"reverse": True, "min_id": 10},
                 {"reverse": True, "min_id": 10},
                 {"reverse": True, "min_id": 10},
             ],
-            client.iter_calls,
         )
 
     def test_long_flood_wait_raises_switch_signal_without_sleeping(self) -> None:
@@ -253,8 +253,8 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
         ) as sleep_mock, self.assertRaises(AccountFloodWaitError) as caught:
             _harvest_messages_for_entity(self.conn, client, object(), 42)
 
-        self.assertEqual(70, caught.exception.seconds)
-        self.assertEqual(30, caught.exception.threshold_seconds)
+        self.assertEqual(caught.exception.seconds, 70)
+        self.assertEqual(caught.exception.threshold_seconds, 30)
         sleep_mock.assert_not_called()
         batch_upsert_mock.assert_not_called()
 
@@ -281,7 +281,7 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             )
 
         self.assertFalse(first_sync)
-        self.assertEqual(1, counters.written)
+        self.assertEqual(counters.written, 1)
         backoff_mock.assert_called_once_with(1, required_wait_seconds=3)
         sleep_mock.assert_called_once_with(3.75)
 
@@ -307,8 +307,8 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
             )
 
         self.assertFalse(first_sync)
-        self.assertEqual(2, counters.written)
-        self.assertEqual([([11, 12], [])], delegated_batches)
+        self.assertEqual(counters.written, 2)
+        self.assertEqual(delegated_batches, [([11, 12], [])])
         batch_upsert_mock.assert_not_called()
 
     def test_sqlite_batch_write_failure_stops_without_telegram_retry(self) -> None:
@@ -332,7 +332,7 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
                 write_batch_fn=failing_writer,
             )
 
-        self.assertEqual(1, len(client.iter_calls))
+        self.assertEqual(len(client.iter_calls), 1)
         self.assertTrue(any("消息写入失败" in line for line in captured.output))
 
     def test_parse_failure_aborts_chat_harvest_instead_of_silently_skipping(self) -> None:
@@ -403,7 +403,7 @@ class HarvestRunnerReliabilityTests(unittest.TestCase):
                 self.conn, client, object(), 42
             )
 
-        self.assertEqual(1, counters.written)
+        self.assertEqual(counters.written, 1)
         refresh_mock.assert_called_once()
         retry_sleep_mock.assert_called_once_with(1)
         sleep_mock.assert_called_once_with(2.25)
