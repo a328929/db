@@ -5,6 +5,12 @@ from collections.abc import Callable, Iterable
 from contextlib import suppress
 from typing import Any
 
+from tg_harvest.admin_jobs.common import start_admin_job_thread
+from tg_harvest.admin_jobs.framework import (
+    AdminJobContext,
+    AdminJobResult,
+    admin_job,
+)
 from tg_harvest.config import CFG
 from tg_harvest.domain.normalize import normalize_search_term
 from tg_harvest.ingest.media_groups import _refresh_media_groups_for_cursor
@@ -467,14 +473,6 @@ def _execute_cleanup_deletion_batches(
 # ============================================================================
 # Admin Job Framework Integration
 # ============================================================================
-
-from tg_harvest.admin_jobs.framework import (
-    AdminJobContext,
-    AdminJobResult,
-    admin_job,
-)
-from tg_harvest.admin_jobs.common import start_admin_job_thread
-
 
 @admin_job(name="数据清理", requires_client=False)
 def _admin_cleanup_job_runner(

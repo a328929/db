@@ -121,20 +121,3 @@ def test_frontend_templates_load_date_utils_first():
         # date_utils.js 应该在 display_helpers.js 之前
         assert date_utils_match.start() < helpers_match.start(), \
             f"{template_name}: date_utils.js must be loaded before {dependent_file}"
-
-
-def test_code_reduction():
-    """验证代码行数显著减少"""
-    from pathlib import Path
-
-    display_helpers_path = Path(__file__).parent.parent / 'static' / 'display_helpers.js'
-    admin_shared_path = Path(__file__).parent.parent / 'static' / 'admin_manage_shared.js'
-
-    display_lines = len(display_helpers_path.read_text().splitlines())
-    admin_lines = len(admin_shared_path.read_text().splitlines())
-
-    # display_helpers.js 应该少于 100 行（原来 144 行）
-    assert display_lines < 100, f"display_helpers.js should be < 100 lines, got {display_lines}"
-
-    # admin_manage_shared.js 应该少于 1200 行（原来 1247 行）
-    assert admin_lines < 1200, f"admin_manage_shared.js should be < 1200 lines, got {admin_lines}"

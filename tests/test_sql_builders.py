@@ -7,9 +7,9 @@ except ImportError:
 
 from tg_harvest.storage.sql_builders import (
     build_batch_case_update,
-    build_status_transition_update,
     build_conditional_set_clauses,
     build_in_flight_state_update,
+    build_status_transition_update,
 )
 
 
@@ -120,7 +120,7 @@ class TestBuildBatchCaseUpdate:
                     match_field='id',
                     case_updates={}
                 )
-                assert False, "Should have raised ValueError"
+                raise AssertionError("Should have raised ValueError")
             except ValueError as e:
                 assert "case_updates cannot be empty" in str(e)
 
@@ -140,7 +140,7 @@ class TestBuildBatchCaseUpdate:
                     match_field='id',
                     case_updates={1: {}, 2: {}}
                 )
-                assert False, "Should have raised ValueError"
+                raise AssertionError("Should have raised ValueError")
             except ValueError as e:
                 assert "No fields to update" in str(e)
 

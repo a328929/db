@@ -1,9 +1,10 @@
+from __future__ import annotations
+
 import logging
 import re
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, replace
-from types import SimpleNamespace
 from typing import Any
 
 from tg_harvest.admin_jobs.common import (
@@ -21,6 +22,12 @@ from tg_harvest.admin_jobs.framework import (
     AdminJobContext,
     AdminJobResult,
     admin_job,
+)
+from tg_harvest.admin_jobs.inventory_constants import (
+    DEFAULT_FLOOD_WAIT_THRESHOLD,
+    DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS,
+    DEFAULT_PUBLIC_RESOLVE_LIMIT,
+    PUBLIC_ENTITY_BATCH_SIZE,
 )
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
@@ -48,12 +55,7 @@ from tg_harvest.storage.channel_management import (
     replace_missing_chat_scan_results,
     replace_restricted_chat_scan_results,
 )
-from tg_harvest.admin_jobs.inventory_constants import (
-    PUBLIC_ENTITY_BATCH_SIZE,
-    DEFAULT_PUBLIC_RESOLVE_LIMIT,
-    DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS,
-    DEFAULT_FLOOD_WAIT_THRESHOLD,
-)
+
 
 def _scan_joined_restricted_chats(
     *,
@@ -663,11 +665,11 @@ def _scan_missing_chat_rows(
             job_id=job_id,
             worker_suffix="missing_chats",
             admin_job_append_log_fn=admin_job_append_log_fn,
-            scan_fn=lambda client: find_missing_joined_chats(
+            scan_fn=lambda client, account_key=account.key: find_missing_joined_chats(
                 client.iter_dialogs(),
                 known_chat_ids,
                 include_unavailable=True,
-                source_account=account.key,
+                source_account=account_key,
             ),
         )
         if account_rows is None:

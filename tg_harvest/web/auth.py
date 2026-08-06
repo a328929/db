@@ -8,10 +8,12 @@ from urllib.parse import urlencode, urlsplit
 
 from flask import current_app, jsonify, redirect, request, session
 
+from tg_harvest.web.ip_utils import get_client_ip
 from tg_harvest.web.responses import json_error, require_json_dict
 
 ADMIN_LOGIN_FAILURE_LIMIT = 10
 ADMIN_LOGIN_FAILURE_WINDOW_SEC = 5 * 60
+ADMIN_LOGIN_FAILURE_MAX_TRACKED_KEYS = 10_000
 ADMIN_CSRF_HEADER = "X-CSRF-Token"
 ADMIN_CSRF_SESSION_KEY = "admin_csrf_token"
 DEFAULT_ADMIN_PAGE_PATH = "/admin/manage"
@@ -34,7 +36,7 @@ _admin_login_failure_lock = threading.Lock()
 
 
 def _admin_login_client_key() -> str:
-    return request.remote_addr or "unknown"
+    return get_client_ip(request)
 
 
 def _prune_expired_login_failures_locked(now: float) -> None:
@@ -52,6 +54,13 @@ def _admin_login_is_limited(client_key: str) -> bool:
     now = time.time()
     with _admin_login_failure_lock:
         _prune_expired_login_failures_locked(now)
+        if client_key not in _admin_login_failure_tracker and len(
+            _admin_login_failure_tracker
+        ) >= ADMIN_LOGIN_FAILURE_MAX_TRACKED_KEYS:
+            # Fail closed once the in-process tracker is full. Evicting an
+            # active bucket would let an attacker reset its failure window by
+            # generating many distinct client addresses.
+            return True
         history = _admin_login_failure_tracker.setdefault(client_key, deque())
         return len(history) >= ADMIN_LOGIN_FAILURE_LIMIT
 
@@ -60,6 +69,10 @@ def _admin_login_record_failure(client_key: str) -> None:
     now = time.time()
     with _admin_login_failure_lock:
         _prune_expired_login_failures_locked(now)
+        if client_key not in _admin_login_failure_tracker and len(
+            _admin_login_failure_tracker
+        ) >= ADMIN_LOGIN_FAILURE_MAX_TRACKED_KEYS:
+            return
         history = _admin_login_failure_tracker.setdefault(client_key, deque())
         history.append(now)
 

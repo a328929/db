@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import sqlite3
 import threading
@@ -26,6 +28,7 @@ _SYNC_BATCH_SIZE = 1000
 _SYNC_IDLE_SECONDS = 2.0
 _SYNC_ERROR_BACKOFF_SECONDS = 30.0
 _SYNC_VALIDATION_INTERVAL_SECONDS = 600.0
+_VALIDATION_SAMPLE_SIDE_SIZE = 32
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,78 @@ def build_manticore_document(row: Any) -> dict[str, Any] | None:
         "file_size": int(row["file_size"] or 0),
         "duration_sec": int(row["duration_sec"] or 0),
         "is_promo": int(row["is_promo"] or 0),
+    }
+
+
+def _load_validation_sample(
+    conn: sqlite3.Connection,
+    *,
+    side_size: int = _VALIDATION_SAMPLE_SIDE_SIZE,
+) -> dict[int, dict[str, Any]]:
+    """Load a bounded first/last message sample using the sync projection."""
+    rows_by_pk: dict[int, Any] = {}
+    cur = conn.cursor()
+    try:
+        for order in ("ASC", "DESC"):
+            cur.execute(
+                """
+                SELECT
+                    m.pk AS message_pk,
+                    COALESCE(NULLIF(m.content_norm, ''), m.content, '') AS content,
+                    m.chat_id,
+                    m.message_id,
+                    m.msg_date_ts,
+                    m.msg_type,
+                    m.is_promo,
+                    COALESCE(mm.file_size, 0) AS file_size,
+                    COALESCE(mm.duration_sec, 0) AS duration_sec
+                FROM messages m
+                LEFT JOIN message_media mm
+                  ON mm.chat_id = m.chat_id AND mm.message_id = m.message_id
+                ORDER BY m.pk """
+                + order
+                + " LIMIT ?",
+                (max(1, int(side_size)),),
+            )
+            for row in cur.fetchall():
+                rows_by_pk[int(row["message_pk"])] = row
+    finally:
+        cur.close()
+
+    documents: dict[int, dict[str, Any]] = {}
+    for pk, row in rows_by_pk.items():
+        document = build_manticore_document(row)
+        if document is not None:
+            documents[pk] = document
+    return documents
+
+
+def _document_digest(documents: dict[int, dict[str, Any]]) -> str:
+    digest = hashlib.blake2b(digest_size=16)
+    for document_id in sorted(documents):
+        payload = json.dumps(
+            {"id": int(document_id), "document": documents[document_id]},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8", "surrogatepass")
+        digest.update(payload)
+        digest.update(b"\n")
+    return digest.hexdigest()
+
+
+def _normalize_index_document(document: Any) -> dict[str, Any]:
+    if not isinstance(document, dict):
+        raise ValueError("Manticore sample document is not an object")
+    return {
+        "content": str(document.get("content") or ""),
+        "chat_id": int(document.get("chat_id") or 0),
+        "message_id": int(document.get("message_id") or 0),
+        "msg_date_ts": int(document.get("msg_date_ts") or 0),
+        "type_code": int(document.get("type_code") or 0),
+        "file_size": int(document.get("file_size") or 0),
+        "duration_sec": int(document.get("duration_sec") or 0),
+        "is_promo": int(document.get("is_promo") or 0),
     }
 
 
@@ -195,6 +270,10 @@ def validate_manticore_state(
     sqlite_count: int | None = None
     manticore_count: int | None = None
     outbox_pending: int | None = None
+    source_sample_digest = ""
+    manticore_sample_digest = ""
+    sample_consistent = True
+    validation_error = ""
     try:
         client.ensure_table()
         with closing(get_conn_fn()) as conn:
@@ -203,9 +282,23 @@ def validate_manticore_state(
                 conn.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}").fetchone()[0] or 0
             )
             manticore_count = client.document_count()
+            source_documents = _load_validation_sample(conn)
+            source_sample_digest = _document_digest(source_documents)
+            sample_documents_fn = getattr(client, "sample_documents", None)
+            if callable(sample_documents_fn):
+                raw_index_documents = sample_documents_fn(list(source_documents))
+                index_documents = {
+                    int(document_id): _normalize_index_document(document)
+                    for document_id, document in raw_index_documents.items()
+                }
+                manticore_sample_digest = _document_digest(index_documents)
+                sample_consistent = source_sample_digest == manticore_sample_digest
+                if not sample_consistent:
+                    validation_error = "Manticore consistency sample mismatch"
             ready = (
                 sqlite_count == manticore_count
                 and outbox_pending == 0
+                and sample_consistent
             )
             record_manticore_validation(
                 conn,
@@ -214,6 +307,9 @@ def validate_manticore_state(
                 sqlite_count=sqlite_count,
                 manticore_count=manticore_count,
                 outbox_pending=outbox_pending,
+                error=validation_error,
+                source_sample_digest=source_sample_digest,
+                manticore_sample_digest=manticore_sample_digest,
             )
             return ready
     except Exception as exc:
@@ -228,6 +324,8 @@ def validate_manticore_state(
                     manticore_count=manticore_count,
                     outbox_pending=outbox_pending,
                     error=str(exc),
+                    source_sample_digest=source_sample_digest,
+                    manticore_sample_digest=manticore_sample_digest,
                 )
         except Exception:
             logging.exception("记录 Manticore 状态校验失败信息时发生数据库错误")
@@ -284,9 +382,9 @@ def _manticore_validation_is_due(
 
 def _manticore_sync_worker() -> None:
     table_ready = False
-    # Application startup performs an exact validation before this worker is
-    # configured. Normal outbox traffic must not turn that expensive audit
-    # into a per-batch operation.
+    # Application startup performs a bounded consistency validation before this
+    # worker is configured. Normal outbox traffic must not turn that audit into
+    # a per-batch operation.
     last_validated_at = time.monotonic()
     while True:
         with _SYNC_LOCK:

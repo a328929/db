@@ -29,6 +29,12 @@ TOKEN_LPAREN = "LPAREN"
 TOKEN_RPAREN = "RPAREN"
 _START_TOKENS = {TOKEN_TERM, TOKEN_PHRASE, TOKEN_NOT, TOKEN_LPAREN}
 
+# Keep the parser permissive for ordinary boolean searches while bounding the
+# amount of work a backend has to do for deliberately broad expressions.
+MAX_SEARCH_EXPR_NODES = 128
+MAX_SEARCH_EXPR_OR_BRANCHES = 32
+MAX_SEARCH_EXPR_WILDCARDS = 8
+
 
 @dataclass(frozen=True)
 class ExprToken:
@@ -118,7 +124,41 @@ def parse_query(raw_query: str) -> SearchExprNode | None:
         raise ValueError("搜索表达式过长")
 
     parser = _SearchExprParser(lex_query(raw_query))
-    return parser.parse()
+    expr = parser.parse()
+    _validate_expr_limits(expr)
+    return expr
+
+
+def _expr_limits(node: SearchExprNode) -> tuple[int, int, int]:
+    """Return ``(nodes, wildcards, max_or_branches)`` for an expression."""
+    nodes = 1
+    wildcards = (
+        sum(character in "*?" for character in node.value)
+        if node.kind == TOKEN_TERM
+        else 0
+    )
+    if node.left is None and node.right is None:
+        return nodes, wildcards, 1
+
+    left_metrics = _expr_limits(node.left) if node.left is not None else (0, 0, 0)
+    right_metrics = _expr_limits(node.right) if node.right is not None else (0, 0, 0)
+    nodes += left_metrics[0] + right_metrics[0]
+    wildcards += left_metrics[1] + right_metrics[1]
+    if node.kind == TOKEN_OR:
+        or_branches = left_metrics[2] + right_metrics[2]
+    else:
+        or_branches = max(left_metrics[2], right_metrics[2])
+    return nodes, wildcards, max(or_branches, left_metrics[2], right_metrics[2])
+
+
+def _validate_expr_limits(expr: SearchExprNode) -> None:
+    nodes, wildcards, max_or_branches = _expr_limits(expr)
+    if nodes > MAX_SEARCH_EXPR_NODES:
+        raise ValueError("搜索表达式结构过于复杂")
+    if max_or_branches > MAX_SEARCH_EXPR_OR_BRANCHES:
+        raise ValueError("搜索表达式 OR 分支过多")
+    if wildcards > MAX_SEARCH_EXPR_WILDCARDS:
+        raise ValueError("搜索表达式通配符过多")
 
 
 class _SearchExprParser:

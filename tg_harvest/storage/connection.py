@@ -1,10 +1,11 @@
 import logging
 import sqlite3
 import threading
+from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from tg_harvest.runtime import paths as _runtime_paths
 

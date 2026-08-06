@@ -1,57 +1,68 @@
-"""客户端IP地址获取和验证工具"""
+"""客户端 IP 地址获取和验证工具。"""
 
 import ipaddress
 import os
 
+_TRUSTED_PROXY_CIDRS_ENV = "TG_TRUST_PROXY_CIDRS"
+
+
+def _trusted_proxy_networks() -> tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...]:
+    """Read the explicitly configured reverse-proxy address ranges.
+
+    Invalid entries are ignored so a malformed deployment setting fails closed:
+    no request header is trusted unless its direct peer matches a valid network.
+    """
+    networks: list[ipaddress.IPv4Network | ipaddress.IPv6Network] = []
+    raw_value = os.getenv(_TRUSTED_PROXY_CIDRS_ENV, "")
+    for raw_network in raw_value.split(","):
+        candidate = raw_network.strip()
+        if not candidate:
+            continue
+        try:
+            networks.append(ipaddress.ip_network(candidate, strict=False))
+        except ValueError:
+            continue
+    return tuple(networks)
+
+
+def _is_trusted_proxy(
+    address: str,
+    networks: tuple[ipaddress.IPv4Network | ipaddress.IPv6Network, ...],
+) -> bool:
+    try:
+        parsed_address = ipaddress.ip_address(address)
+    except ValueError:
+        return False
+    return any(parsed_address in network for network in networks)
+
 
 def get_client_ip(request) -> str:
+    """Return the client address while trusting XFF only from known proxies.
+
+    ``TG_TRUST_PROXY_CIDRS`` accepts a comma-separated list of IP addresses or
+    CIDRs. When it is empty, malformed, or the immediate peer is not in one of
+    those networks, request headers are ignored. This deliberately replaces the
+    former boolean trust switch, which allowed direct clients to forge XFF.
     """
-    获取客户端真实IP地址，优先使用X-Forwarded-For。
-
-    安全考虑：
-    1. 只在配置了可信代理时才使用X-Forwarded-For
-    2. 从右向左解析，取第一个非内部IP（最后一个代理添加的）
-    3. 验证IP格式，防止注入攻击
-
-    Args:
-        request: Flask request对象
-
-    Returns:
-        客户端IP地址字符串
-    """
-    # 直连场景：直接使用 remote_addr
     remote_addr = request.remote_addr or "unknown"
-
-    # 检查是否配置了可信代理（通过环境变量）
-    # TG_TRUST_PROXY=1 表示信任反向代理
-    trust_proxy = os.getenv("TG_TRUST_PROXY", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-    if not trust_proxy:
+    trusted_networks = _trusted_proxy_networks()
+    if not trusted_networks or not _is_trusted_proxy(remote_addr, trusted_networks):
         return remote_addr
 
-    # 读取 X-Forwarded-For 头部
     forwarded_for = request.headers.get("X-Forwarded-For", "").strip()
     if not forwarded_for:
         return remote_addr
 
-    # X-Forwarded-For 格式: client, proxy1, proxy2
-    # 从右向左找第一个非内部IP（即最后一个代理看到的客户端IP）
-    ips = [ip.strip() for ip in forwarded_for.split(",")]
-
-    # 反向遍历，跳过内部IP
-    for ip in reversed(ips):
-        if not ip:
+    # XFF is client, proxy1, proxy2. Strip only proxy hops configured above;
+    # the first remaining valid address is the address seen by the trusted edge.
+    for candidate in reversed(forwarded_for.split(",")):
+        candidate = candidate.strip()
+        if not candidate or not is_valid_ip_format(candidate):
             continue
-        # 简单验证IP格式（防止注入）
-        if is_valid_ip_format(ip) and not is_internal_ip(ip):
-            return ip
+        if _is_trusted_proxy(candidate, trusted_networks):
+            continue
+        return candidate
 
-    # 如果所有IP都是内部IP或无效，回退到 remote_addr
     return remote_addr
 
 

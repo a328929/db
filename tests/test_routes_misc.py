@@ -15,8 +15,10 @@ from flask import Flask
 import tg_harvest.app.factory as app_factory
 import tg_harvest.web.auth as auth_module
 import tg_harvest.web.routes.search as search_routes_module
+from tg_harvest.search.manticore_client import ManticoreError
 from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.web.auth import register_auth_routes
+from tg_harvest.web.responses import MAX_JSON_BODY_BYTES
 from tg_harvest.web.routes.context import register_context_routes
 from tg_harvest.web.routes.pages import register_page_routes
 from tg_harvest.web.routes.search import register_search_routes
@@ -36,6 +38,16 @@ class AuthRoutesValidationTests(unittest.TestCase):
 
         self.assertEqual(400, response.status_code)
         self.assertEqual("请求必须为 JSON", response.get_json()["error"])
+
+    def test_login_rejects_oversized_json_body(self) -> None:
+        response = self.client.post(
+            "/api/admin/auth/login",
+            data='{"password":"x"}' + " " * MAX_JSON_BODY_BYTES,
+            content_type="application/json",
+        )
+
+        self.assertEqual(413, response.status_code)
+        self.assertEqual("请求体过大", response.get_json()["error"])
 
     def test_login_rejects_non_object_json(self) -> None:
         response = self.client.post("/api/admin/auth/login", json=["bad"])
@@ -159,6 +171,20 @@ class AuthRoutesValidationTests(unittest.TestCase):
         self.assertEqual(429, response.status_code)
         self.assertEqual("登录失败次数过多，请稍后再试", response.get_json()["error"])
 
+    def test_login_rate_limiter_rejects_new_keys_at_capacity(self) -> None:
+        with auth_module._admin_login_failure_lock:
+            auth_module._admin_login_failure_tracker.clear()
+        try:
+            with patch.object(
+                auth_module, "ADMIN_LOGIN_FAILURE_MAX_TRACKED_KEYS", 1
+            ):
+                self.assertFalse(auth_module._admin_login_is_limited("first"))
+                auth_module._admin_login_record_failure("first")
+                self.assertTrue(auth_module._admin_login_is_limited("second"))
+        finally:
+            with auth_module._admin_login_failure_lock:
+                auth_module._admin_login_failure_tracker.clear()
+
     def test_successful_login_clears_prior_failures(self) -> None:
         ip = "203.0.113.11"
         with patch(
@@ -187,6 +213,37 @@ class AuthRoutesValidationTests(unittest.TestCase):
             )
 
         self.assertEqual(403, response.status_code)
+
+    def test_proxy_clients_have_independent_login_failure_buckets(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {"TG_TRUST_PROXY_CIDRS": "127.0.0.1/32"},
+        ), patch(
+            "tg_harvest.web.auth._get_auth_config",
+            return_value=SimpleNamespace(admin_password="secret", admin_session_expiry=60),
+        ):
+            for _ in range(auth_module.ADMIN_LOGIN_FAILURE_LIMIT):
+                response = self.client.post(
+                    "/api/admin/auth/login",
+                    json={"password": "bad"},
+                    environ_base={
+                        "REMOTE_ADDR": "127.0.0.1",
+                        "HTTP_X_FORWARDED_FOR": "203.0.113.20",
+                    },
+                )
+                self.assertEqual(403, response.status_code)
+
+            response = self.client.post(
+                "/api/admin/auth/login",
+                json={"password": "secret"},
+                environ_base={
+                    "REMOTE_ADDR": "127.0.0.1",
+                    "HTTP_X_FORWARDED_FOR": "203.0.113.21",
+                },
+            )
+
+        self.assertEqual(200, response.status_code)
+        self.assertTrue(response.get_json()["ok"])
 
     def test_login_rate_limiter_prunes_expired_client_keys(self) -> None:
         with auth_module._admin_login_failure_lock:
@@ -386,9 +443,14 @@ class SearchRoutesValidationTests(unittest.TestCase):
             max_count=50000000,
             map_search_items_fn=lambda rows, detail_level="lite": rows,
             parse_search_params_fn=lambda data: data,
-            search_payload_service_fn=lambda *_args, **_kwargs: self.search_payload,
+            search_payload_service_fn=self._search_payload_service,
         )
         self.client = self.app.test_client()
+
+    def _search_payload_service(self, *_args, **_kwargs):
+        if isinstance(self.search_payload, Exception):
+            raise self.search_payload
+        return self.search_payload
 
     def test_search_rejects_non_json_requests(self) -> None:
         response = self.client.post("/api/search", data="query=hello")
@@ -401,6 +463,16 @@ class SearchRoutesValidationTests(unittest.TestCase):
 
         self.assertEqual(400, response.status_code)
         self.assertEqual("请求 JSON 格式错误", response.get_json()["error"])
+
+    def test_search_returns_retryable_status_when_index_is_unavailable(self) -> None:
+        self.search_payload = ManticoreError("index is stale")
+
+        response = self.client.post("/api/search", json={"query": "hello"})
+
+        self.assertEqual(503, response.status_code)
+        self.assertEqual(
+            "搜索索引暂不可用，请稍后重试", response.get_json()["error"]
+        )
 
     def test_search_compresses_large_json_for_gzip_clients(self) -> None:
         self.search_payload = {

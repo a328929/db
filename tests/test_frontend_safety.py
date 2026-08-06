@@ -13,20 +13,25 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("display_helpers.js", context_template)
 
     def test_shared_display_time_formatter_uses_shanghai_timezone(self) -> None:
-        source = (ROOT / "static" / "display_helpers.js").read_text(
+        date_source = (ROOT / "static" / "date_utils.js").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Asia/Shanghai", source)
-        self.assertIn("formatToParts", source)
-        self.assertIn("parseUtcDateTime", source)
-        self.assertIn("formatShanghaiDateTime", source)
-        self.assertIn("formatDateTime", source)
+        helpers_source = (ROOT / "static" / "display_helpers.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Asia/Shanghai", date_source)
+        self.assertIn("formatToParts", date_source)
+        self.assertIn("parseUtcDateTime", date_source)
+        self.assertIn("formatShanghaiDateTime", date_source)
+        self.assertIn("formatDateTime", date_source)
+        self.assertIn("TgHarvestDateUtils", helpers_source)
 
     def test_shared_display_time_formatter_renders_beijing_time(self) -> None:
         script = """
         const fs = require('fs');
         const vm = require('vm');
-        const source = fs.readFileSync('static/display_helpers.js', 'utf8');
+        const source = fs.readFileSync('static/date_utils.js', 'utf8')
+          + '\\n' + fs.readFileSync('static/display_helpers.js', 'utf8');
         const sandbox = {
           window: {},
           document: {},
@@ -85,20 +90,25 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn(".admin-log-placeholder {", styles)
 
     def test_shared_admin_time_formatter_uses_shanghai_timezone(self) -> None:
-        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+        date_source = (ROOT / "static" / "date_utils.js").read_text(
             encoding="utf-8"
         )
-        self.assertIn("Asia/Shanghai", source)
-        self.assertIn("formatToParts", source)
-        self.assertIn("parseUtcDateTime", source)
-        self.assertIn("formatShanghaiDateTime", source)
-        self.assertNotIn("replace('+00:00', '')", source)
+        shared_source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("Asia/Shanghai", date_source)
+        self.assertIn("formatToParts", date_source)
+        self.assertIn("parseUtcDateTime", date_source)
+        self.assertIn("formatShanghaiDateTime", date_source)
+        self.assertIn("TgHarvestDateUtils", shared_source)
+        self.assertNotIn("replace('+00:00', '')", shared_source)
 
     def test_shared_admin_time_formatter_renders_beijing_time(self) -> None:
         script = """
         const fs = require('fs');
         const vm = require('vm');
-        const source = fs.readFileSync('static/admin_manage_shared.js', 'utf8');
+        const source = fs.readFileSync('static/date_utils.js', 'utf8')
+          + '\\n' + fs.readFileSync('static/admin_manage_shared.js', 'utf8');
         const sandbox = {
           window: {},
           document: {},
@@ -192,6 +202,7 @@ class FrontendSafetyTests(unittest.TestCase):
         script = r"""
         const fs = require('fs');
         const vm = require('vm');
+        const domSource = fs.readFileSync('static/dom_utils.js', 'utf8');
         const source = fs.readFileSync('static/admin_sync.js', 'utf8');
         const closingMarker = '\n})();';
         const closingIndex = source.lastIndexOf(closingMarker);
@@ -236,7 +247,7 @@ class FrontendSafetyTests(unittest.TestCase):
         };
         sandbox.window = sandbox;
         sandbox.AdminManageShared = shared;
-        vm.runInNewContext(instrumented, sandbox);
+        vm.runInNewContext(domSource + '\n' + instrumented, sandbox);
         const hooks = sandbox.__syncHealthTestHooks;
         const formatted = hooks.formatByteSize(Number.MAX_SAFE_INTEGER);
         if (!formatted.endsWith('TiB') || formatted === '未知') {
@@ -724,8 +735,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn('/^[1-9]\\d*$/.test', source)
         self.assertIn("Number.isSafeInteger(parsedChatId)", source)
         self.assertIn("Number.isSafeInteger(parsedMsgId)", source)
-        self.assertIn('document.getElementById("loadBeforeBtn").disabled = true', source)
-        self.assertIn('document.getElementById("loadAfterBtn").disabled = true', source)
+        self.assertIn("if (beforeBtn) beforeBtn.disabled = true;", source)
+        self.assertIn("if (afterBtn) afterBtn.disabled = true;", source)
 
     def test_page_templates_load_page_specific_stylesheets(self) -> None:
         context_template = (ROOT / "templates" / "context.html").read_text(encoding="utf-8")

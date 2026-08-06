@@ -6,7 +6,12 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tg_harvest.search.browse_service import sqlite_browse_payload_service
-from tg_harvest.search.expression import parse_query
+from tg_harvest.search.expression import (
+    MAX_SEARCH_EXPR_NODES,
+    MAX_SEARCH_EXPR_OR_BRANCHES,
+    MAX_SEARCH_EXPR_WILDCARDS,
+    parse_query,
+)
 from tg_harvest.search.manticore_client import ManticoreClient, ManticoreError
 from tg_harvest.search.manticore_service import (
     compile_manticore_match,
@@ -27,6 +32,7 @@ from tg_harvest.storage.manticore_outbox import (
     set_manticore_index_status,
 )
 from tg_harvest.storage.schema import create_schema
+from tg_harvest.web.routes import search as search_routes_module
 
 
 class _Response:
@@ -85,6 +91,22 @@ class ManticoreClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ManticoreClient(table="messages; DROP TABLE messages")
 
+    def test_sample_documents_extracts_indexed_sources(self):
+        client = ManticoreClient()
+        response = _Response(
+            {
+                "hits": {
+                    "hits": [
+                        {"_id": 7, "_source": {"content": "sample", "chat_id": 1}}
+                    ]
+                }
+            }
+        )
+        with patch("urllib.request.urlopen", return_value=response):
+            documents = client.sample_documents([7, 7, 0])
+
+        self.assertEqual({7: {"content": "sample", "chat_id": 1}}, documents)
+
 
 class ManticoreExpressionTests(unittest.TestCase):
     def test_boolean_expression_is_compiled_to_manticore_syntax(self):
@@ -123,7 +145,7 @@ class ManticoreExpressionTests(unittest.TestCase):
         # 前缀通配
         self.assertEqual("*test", compile_manticore_match(parse_query("*test")))
 
-        # 全通配
+        # 包含实际词项的前后通配
         self.assertEqual("*test*", compile_manticore_match(parse_query("*test*")))
 
         # 中间通配
@@ -133,9 +155,19 @@ class ManticoreExpressionTests(unittest.TestCase):
         self.assertEqual("te?t", compile_manticore_match(parse_query("te?t")))
 
     def test_special_chars_in_wildcard_mode(self):
-        """包含通配符时，% 仍需转义"""
-        # % 在通配符查询中也要转义
+        """通配模式中仍需转义 Manticore 控制字符"""
         self.assertEqual("100\\%*", compile_manticore_match(parse_query("100%*")))
+
+    def test_manticore_control_characters_are_escaped(self):
+        self.assertEqual(r"alpha\|beta", compile_manticore_match(parse_query("alpha|beta")))
+        self.assertEqual(r"\@content", compile_manticore_match(parse_query("@content")))
+        self.assertEqual(r"foo\&bar", compile_manticore_match(parse_query("foo&bar")))
+
+    def test_bare_wildcard_is_rejected(self):
+        with self.assertRaisesRegex(ValueError, "至少一个普通字符"):
+            compile_manticore_match(parse_query("*"))
+        with self.assertRaisesRegex(ValueError, "至少一个普通字符"):
+            compile_manticore_match(parse_query("??"))
 
 
 class SearchRateLimitTests(unittest.TestCase):
@@ -144,33 +176,53 @@ class SearchRateLimitTests(unittest.TestCase):
     def test_get_client_ip_without_proxy(self):
         """无代理时应返回 remote_addr"""
         from unittest.mock import Mock
+
         from tg_harvest.web.ip_utils import get_client_ip
 
         mock_request = Mock()
         mock_request.remote_addr = "192.168.1.100"
         mock_request.headers = {}
 
-        # 未配置 TG_TRUST_PROXY 时应使用 remote_addr
-        ip = get_client_ip(mock_request)
+        with patch.dict("os.environ", {"TG_TRUST_PROXY_CIDRS": ""}):
+            ip = get_client_ip(mock_request)
         self.assertEqual("192.168.1.100", ip)
 
     def test_get_client_ip_with_trusted_proxy(self):
         """配置了可信代理时应解析 X-Forwarded-For"""
         from unittest.mock import Mock, patch
+
         from tg_harvest.web.ip_utils import get_client_ip
 
         mock_request = Mock()
         mock_request.remote_addr = "127.0.0.1"
         mock_request.headers = {"X-Forwarded-For": "8.8.8.8, 10.0.0.1"}
 
-        with patch.dict("os.environ", {"TG_TRUST_PROXY": "1"}):
+        with patch.dict(
+            "os.environ",
+            {"TG_TRUST_PROXY_CIDRS": "127.0.0.1/32,10.0.0.0/8"},
+        ):
             ip = get_client_ip(mock_request)
-            # 应该获取到真实客户端IP（跳过内部IP 10.0.0.1）
             self.assertEqual("8.8.8.8", ip)
+
+    def test_untrusted_peer_cannot_forge_forwarded_for(self):
+        from unittest.mock import Mock, patch
+
+        from tg_harvest.web.ip_utils import get_client_ip
+
+        mock_request = Mock()
+        mock_request.remote_addr = "203.0.113.10"
+        mock_request.headers = {"X-Forwarded-For": "8.8.8.8"}
+
+        with patch.dict(
+            "os.environ",
+            {"TG_TRUST_PROXY": "1", "TG_TRUST_PROXY_CIDRS": "127.0.0.1/32"},
+        ):
+            self.assertEqual("203.0.113.10", get_client_ip(mock_request))
 
     def test_get_client_ip_filters_internal_addresses(self):
         """应该过滤内部IP地址"""
         from unittest.mock import Mock, patch
+
         from tg_harvest.web.ip_utils import get_client_ip
 
         mock_request = Mock()
@@ -182,7 +234,14 @@ class SearchRateLimitTests(unittest.TestCase):
             ("8.8.8.8, 1.1.1.1, 10.0.0.1", "1.1.1.1"),  # 取最后一个非内部IP
         ]
 
-        with patch.dict("os.environ", {"TG_TRUST_PROXY": "1"}):
+        with patch.dict(
+            "os.environ",
+            {
+                "TG_TRUST_PROXY_CIDRS": (
+                    "127.0.0.1/32,10.0.0.0/8,192.168.0.0/16"
+                )
+            },
+        ):
             for forwarded_for, expected in test_cases:
                 mock_request.headers = {"X-Forwarded-For": forwarded_for}
                 ip = get_client_ip(mock_request)
@@ -191,6 +250,7 @@ class SearchRateLimitTests(unittest.TestCase):
     def test_get_client_ip_validates_format(self):
         """应该验证IP格式，拒绝无效输入"""
         from unittest.mock import Mock, patch
+
         from tg_harvest.web.ip_utils import get_client_ip
 
         mock_request = Mock()
@@ -203,12 +263,23 @@ class SearchRateLimitTests(unittest.TestCase):
             "../etc/passwd",
         ]
 
-        with patch.dict("os.environ", {"TG_TRUST_PROXY": "1"}):
+        with patch.dict("os.environ", {"TG_TRUST_PROXY_CIDRS": "127.0.0.1/32"}):
             for invalid_ip in invalid_ips:
                 mock_request.headers = {"X-Forwarded-For": invalid_ip}
                 ip = get_client_ip(mock_request)
                 # 无效IP应回退到 remote_addr
                 self.assertEqual("127.0.0.1", ip, f"Should reject: {invalid_ip}")
+
+    def test_search_rate_tracker_rejects_new_keys_at_capacity(self):
+        with search_routes_module._rate_lock:
+            search_routes_module._search_rate_tracker.clear()
+        try:
+            with patch.object(search_routes_module, "SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS", 1):
+                self.assertFalse(search_routes_module._is_rate_limited("first"))
+                self.assertTrue(search_routes_module._is_rate_limited("second"))
+        finally:
+            with search_routes_module._rate_lock:
+                search_routes_module._search_rate_tracker.clear()
 
     def test_is_internal_ip_detection(self):
         """测试内部IP检测逻辑"""
@@ -281,6 +352,19 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         query_chinese_1001 = "福利" * 500 + "测"
         with self.assertRaisesRegex(ValueError, "搜索表达式过长"):
             parse_query(query_chinese_1001)
+
+    def test_expression_complexity_limits(self):
+        many_terms = "+".join("x" for _ in range(MAX_SEARCH_EXPR_NODES))
+        with self.assertRaisesRegex(ValueError, "结构过于复杂"):
+            parse_query(many_terms)
+
+        many_or_terms = "/".join("x" for _ in range(MAX_SEARCH_EXPR_OR_BRANCHES + 1))
+        with self.assertRaisesRegex(ValueError, "OR 分支过多"):
+            parse_query(many_or_terms)
+
+        many_wildcards = " ".join("x*" for _ in range(MAX_SEARCH_EXPR_WILDCARDS + 1))
+        with self.assertRaisesRegex(ValueError, "通配符过多"):
+            parse_query(many_wildcards)
 
     def test_unclosed_quote_raises_error(self):
         """未闭合的引号应该报错"""
@@ -526,6 +610,37 @@ class ManticoreOutboxTests(unittest.TestCase):
         self.assertEqual("upsert", row["operation"])
         self.assertEqual(3, row["revision"])
 
+    def test_moving_media_requeues_both_old_and_new_messages(self):
+        first_pk = self._insert_message()
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts,
+                content, content_norm, msg_type
+            ) VALUES (1, 11, 'date', 101, 'Second', 'second', 'TEXT')
+            """
+        )
+        self.conn.execute(
+            """
+            INSERT INTO message_media(chat_id, message_id, file_size, duration_sec)
+            VALUES (1, 10, 123, 9)
+            """
+        )
+        self.conn.commit()
+        self.conn.execute(f"DELETE FROM {OUTBOX_TABLE}")
+        self.conn.execute(
+            "UPDATE message_media SET message_id = 11 WHERE message_id = 10"
+        )
+        self.conn.commit()
+
+        rows = self.conn.execute(
+            f"SELECT pk, operation FROM {OUTBOX_TABLE} ORDER BY pk"
+        ).fetchall()
+        self.assertEqual(
+            [(first_pk, "upsert"), (first_pk + 1, "upsert")],
+            [tuple(row) for row in rows],
+        )
+
     def test_index_status_requires_an_explicit_completed_rebuild(self):
         self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
         set_manticore_index_status(self.conn, "tg_messages", "building")
@@ -533,6 +648,16 @@ class ManticoreOutboxTests(unittest.TestCase):
             "building", get_manticore_index_status(self.conn, "tg_messages")
         )
         set_manticore_index_status(self.conn, "tg_messages", "ready")
+        self.assertTrue(manticore_index_is_ready(self.conn, "tg_messages"))
+
+    def test_pending_outbox_disables_ready_index_until_it_is_drained(self):
+        set_manticore_index_status(self.conn, "tg_messages", "ready")
+        self.assertTrue(manticore_index_is_ready(self.conn, "tg_messages"))
+
+        self._insert_message()
+        self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
+
+        self.assertEqual(1, drain_manticore_outbox(self.conn, _FakeManticoreClient()))
         self.assertTrue(manticore_index_is_ready(self.conn, "tg_messages"))
 
     def test_delete_overwrites_pending_upsert(self):
@@ -658,6 +783,18 @@ class ManticoreValidationTests(unittest.TestCase):
         def document_count(self):
             return self.count
 
+    class SampleClient(Client):
+        def __init__(self, count, sample):
+            super().__init__(count)
+            self.sample = sample
+
+        def sample_documents(self, document_ids):
+            return {
+                int(document_id): self.sample[int(document_id)]
+                for document_id in document_ids
+                if int(document_id) in self.sample
+            }
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "validation.db"
@@ -711,6 +848,72 @@ class ManticoreValidationTests(unittest.TestCase):
                 "0",
                 get_manticore_meta(
                     conn, "manticore:tg_messages:manticore_document_count"
+                ),
+            )
+        finally:
+            conn.close()
+
+    def test_same_counts_with_mismatched_sample_stay_stale(self):
+        client = self.SampleClient(
+            1,
+            {
+                1: {
+                    "content": "wrong",
+                    "chat_id": 1,
+                    "message_id": 1,
+                    "msg_date_ts": 1,
+                    "type_code": 1,
+                    "file_size": 0,
+                    "duration_sec": 0,
+                    "is_promo": 0,
+                }
+            },
+        )
+
+        self.assertFalse(validate_manticore_state(self._connect, client))
+        conn = self._connect()
+        try:
+            self.assertEqual(
+                "Manticore consistency sample mismatch",
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:last_validation_error"
+                ),
+            )
+            self.assertFalse(manticore_index_is_ready(conn, "tg_messages"))
+        finally:
+            conn.close()
+
+    def test_matching_sample_restores_ready_status(self):
+        client = self.SampleClient(
+            1,
+            {
+                1: {
+                    "content": "",
+                    "chat_id": 1,
+                    "message_id": 1,
+                    "msg_date_ts": 1,
+                    "type_code": 1,
+                    "file_size": 0,
+                    "duration_sec": 0,
+                    "is_promo": 0,
+                }
+            },
+        )
+
+        self.assertTrue(validate_manticore_state(self._connect, client))
+        conn = self._connect()
+        try:
+            self.assertTrue(
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:source_sample_digest"
+                )
+            )
+            self.assertEqual(
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:source_sample_digest"
+                ),
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:manticore_sample_digest"
                 ),
             )
         finally:
@@ -810,6 +1013,34 @@ class ManticoreServiceTests(unittest.TestCase):
         self.assertEqual("Visible", payload["items"][0]["content"])
         self.assertIn('MATCH(\'"福利"\')', client.sql[0])
         self.assertIn("ORDER BY msg_date_ts DESC", client.sql[0])
+
+    def test_stale_manticore_hit_marks_index_unavailable(self):
+        self.conn.execute(f"DELETE FROM {OUTBOX_TABLE}")
+        set_manticore_index_status(self.conn, "tg_messages", "ready")
+        client = _FakeManticoreClient(
+            [
+                {
+                    "hits": {
+                        "total": 1,
+                        "total_relation": "eq",
+                        "hits": [{"_id": self.pk + 100, "_source": {}}],
+                    }
+                }
+            ]
+        )
+
+        with self.assertRaisesRegex(ManticoreError, "absent from SQLite"):
+            manticore_search_payload_service(
+                self.conn,
+                self._params(),
+                client=client,
+                page_size=100,
+                max_count=50000000,
+                max_matches=1000000,
+                map_search_items_fn=lambda rows: rows,
+            )
+
+        self.assertFalse(manticore_index_is_ready(self.conn, "tg_messages"))
 
     def test_page_query_reuses_manticore_total_when_count_is_deferred(self):
         client = _FakeManticoreClient(

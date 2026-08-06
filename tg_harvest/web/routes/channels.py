@@ -1,7 +1,6 @@
 import sqlite3
 from contextlib import closing
-
-from typing import Any, Callable
+from typing import Any
 
 from flask import jsonify, render_template
 

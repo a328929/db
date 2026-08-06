@@ -10,6 +10,7 @@ _TRIGGER_NAMES = (
     "trg_manticore_messages_delete",
     "trg_manticore_media_insert",
     "trg_manticore_media_update",
+    "trg_manticore_media_update_old",
     "trg_manticore_media_delete",
 )
 
@@ -75,7 +76,21 @@ def get_manticore_index_status(conn: sqlite3.Connection, table: str) -> str:
 
 
 def manticore_index_is_ready(conn: sqlite3.Connection, table: str) -> bool:
-    return get_manticore_index_status(conn, table) == "ready"
+    """Return true only when a validated index has no pending source changes.
+
+    SQLite triggers enqueue Manticore updates in the same transaction as a
+    message or media mutation. The persisted status may still read ``ready``
+    until the worker drains that queue, so checking it alone can expose a
+    short window of stale full-text results.
+    """
+    try:
+        if get_manticore_index_status(conn, table) != "ready":
+            return False
+        return conn.execute(f"SELECT 1 FROM {OUTBOX_TABLE} LIMIT 1").fetchone() is None
+    except sqlite3.Error:
+        # Missing or unreadable synchronization metadata must never enable a
+        # backend whose freshness cannot be established.
+        return False
 
 
 def set_manticore_meta(conn: sqlite3.Connection, key: str, value: object) -> None:
@@ -103,6 +118,8 @@ def record_manticore_validation(
     manticore_count: int | None,
     outbox_pending: int | None,
     error: str = "",
+    source_sample_digest: str = "",
+    manticore_sample_digest: str = "",
 ) -> None:
     now = datetime.now(UTC).replace(microsecond=0).isoformat()
     values = {
@@ -118,6 +135,8 @@ def record_manticore_validation(
             "" if outbox_pending is None else int(outbox_pending)
         ),
         f"manticore:{table}:last_validation_error": error[:500],
+        f"manticore:{table}:source_sample_digest": source_sample_digest,
+        f"manticore:{table}:manticore_sample_digest": manticore_sample_digest,
     }
     conn.executemany(
         f"""
@@ -199,6 +218,19 @@ def configure_manticore_outbox_triggers(
         WHERE chat_id = new.chat_id AND message_id = new.message_id
     ) BEGIN
         {_queue_upsert_sql(media_pk, 'upsert')}
+    END
+    """)
+    cur.execute(f"""
+    CREATE TRIGGER trg_manticore_media_update_old
+    AFTER UPDATE OF file_size, duration_sec, media_kind, grouped_id,
+                    chat_id, message_id
+    ON message_media
+    WHEN (old.chat_id IS NOT new.chat_id OR old.message_id IS NOT new.message_id)
+     AND EXISTS (
+        SELECT 1 FROM messages
+        WHERE chat_id = old.chat_id AND message_id = old.message_id
+    ) BEGIN
+        {_queue_upsert_sql("(SELECT pk FROM messages WHERE chat_id = old.chat_id AND message_id = old.message_id)", 'upsert')}
     END
     """)
     cur.execute(f"""

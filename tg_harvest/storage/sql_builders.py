@@ -9,17 +9,16 @@ This module provides reusable SQL builders for common patterns found in the stor
 All builders return (sql_string, params_tuple) for use with cursor.execute().
 """
 
-import sqlite3
-from typing import Any, Optional
+from typing import Any
 
 
 def build_batch_case_update(
     table: str,
     match_field: str,
     case_updates: dict[Any, dict[str, Any]],
-    set_fields: Optional[dict[str, Any]] = None,
-    where_conditions: Optional[dict[str, Any]] = None,
-    where_clauses: Optional[list[str]] = None,
+    set_fields: dict[str, Any] | None = None,
+    where_conditions: dict[str, Any] | None = None,
+    where_clauses: list[str] | None = None,
 ) -> tuple[str, tuple]:
     """Build batch UPDATE with CASE statements for different values per row.
 
@@ -122,9 +121,9 @@ def build_status_transition_update(
     table: str,
     status_field: str,
     new_status: str,
-    set_fields: Optional[dict[str, Any]] = None,
-    increment_fields: Optional[list[str]] = None,
-    where_conditions: Optional[dict[str, Any]] = None,
+    set_fields: dict[str, Any] | None = None,
+    increment_fields: list[str] | None = None,
+    where_conditions: dict[str, Any] | None = None,
 ) -> tuple[str, tuple]:
     """Build UPDATE for status transitions with related field changes.
 
@@ -240,11 +239,11 @@ def build_conditional_set_clauses(
 def build_in_flight_state_update(
     table: str,
     in_flight: bool,
-    generation: Optional[int] = None,
-    owner_instance_id: Optional[str] = None,
-    owner_pid: Optional[int] = None,
-    owner_host: Optional[str] = None,
-    where_conditions: Optional[dict[str, Any]] = None,
+    generation: int | None = None,
+    owner_instance_id: str | None = None,
+    owner_pid: int | None = None,
+    owner_host: str | None = None,
+    where_conditions: dict[str, Any] | None = None,
 ) -> tuple[str, tuple]:
     """Build UPDATE for in-flight tracking state changes.
 

@@ -38,6 +38,7 @@ from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
     create_exclusive_job_or_response,
     created_job_snapshot_response,
+    json_body_is_too_large,
     json_error,
     logged_json_error,
     require_json_dict,
@@ -201,6 +202,8 @@ def _parse_optional_nonnegative_int(
 
 
 def _parse_timeline_migration_options():
+    if json_body_is_too_large():
+        return None, json_error("请求体过大", 413)
     data = request.get_json(silent=True) if request.is_json else {}
     if data is None:
         data = {}

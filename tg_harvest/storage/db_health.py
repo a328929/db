@@ -305,6 +305,8 @@ def build_database_health_payload(
         "manticore_document_count",
         "outbox_pending",
         "last_validation_error",
+        "source_sample_digest",
+        "manticore_sample_digest",
     )
     manticore_validation = {
         ("last_error" if key == "last_validation_error" else key): (
@@ -439,7 +441,7 @@ def build_database_health_payload(
             message="Manticore 搜索索引尚未就绪，搜索服务不可用。",
             action="检查 Manticore 服务、全量回填状态和同步队列。",
         )
-    elif manticore_outbox_pending > 0:
+    if manticore_outbox_pending > 0:
         _append_reason(
             reasons,
             actions,

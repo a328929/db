@@ -1,7 +1,6 @@
 import logging
 from collections.abc import Callable
 from contextlib import suppress
-from types import SimpleNamespace
 from typing import Any
 
 from telethon.tl.functions.channels import CreateChannelRequest

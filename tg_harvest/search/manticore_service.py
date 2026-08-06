@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import re
 import sqlite3
+from contextlib import suppress
 from typing import Any
 
 from tg_harvest.search.data_version import (
@@ -10,44 +11,44 @@ from tg_harvest.search.data_version import (
     read_database_fingerprint,
 )
 from tg_harvest.search.expression import SearchExprNode, parse_query
-from tg_harvest.search.manticore_client import ManticoreClient
+from tg_harvest.search.manticore_client import ManticoreClient, ManticoreError
 from tg_harvest.search.params import SearchParams, split_query_media_duration
+from tg_harvest.storage.manticore_outbox import set_manticore_index_status
 
 _CJK_RE = re.compile(
     r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\U00020000-\U0002ceaf]"
 )
+_MANTICORE_MATCH_SPECIAL_CHARS = frozenset('!"$%&\'()<>@^|~\\')
+_WILDCARD_CHARS = frozenset("*?")
 
-def _escape_match_text(value: str) -> str:
-    return str(value or "").replace("\\", "\\\\").replace('"', '\\"')
+
+def _escape_match_text(value: str, *, preserve_wildcards: bool = False) -> str:
+    """Escape Manticore operators not represented by the application parser."""
+    escaped: list[str] = []
+    for character in str(value or ""):
+        if character in _WILDCARD_CHARS and preserve_wildcards:
+            escaped.append(character)
+        elif character in _MANTICORE_MATCH_SPECIAL_CHARS or character in _WILDCARD_CHARS:
+            escaped.append(f"\\{character}")
+        else:
+            escaped.append(character)
+    return "".join(escaped)
 
 
 def _compile_match_term(node: SearchExprNode) -> str:
     value = str(node.value or "")
-    escaped = _escape_match_text(value)
 
     # 短语、中文或包含空格：使用精确短语匹配
     if node.kind == "PHRASE" or _CJK_RE.search(value) or any(ch.isspace() for ch in value):
-        return f'"{escaped}"'
+        return f'"{_escape_match_text(value)}"'
 
-    # 检查用户是否显式使用通配符
-    has_user_wildcard = "*" in value or "?" in value
-
-    # 如果用户已指定通配符，保留它们（不转义）
+    has_user_wildcard = any(character in _WILDCARD_CHARS for character in value)
     if has_user_wildcard:
-        # 只转义 % (Manticore特殊字符)，保留 * 和 ?
-        escaped = escaped.replace("%", "\\%")
-        return escaped
+        if not any(character not in _WILDCARD_CHARS for character in value):
+            raise ValueError("通配符查询必须包含至少一个普通字符")
+        return _escape_match_text(value, preserve_wildcards=True)
 
-    # 用户未指定通配符：转义所有特殊字符，使用精确匹配
-    escaped = escaped.replace("*", "\\*").replace("?", "\\?").replace("%", "\\%")
-
-    # 单字符词：精确匹配
-    if len(value) < 2:
-        return escaped
-
-    # 普通词：默认精确匹配（不自动添加通配符）
-    # 用户如需模糊匹配，可以手动输入 test* 或 *test* 或 *test
-    return escaped
+    return _escape_match_text(value)
 
 
 def compile_manticore_match(expr: SearchExprNode | None) -> str:
@@ -210,6 +211,22 @@ def _hydrate_rows(conn: sqlite3.Connection, ids: list[int]) -> list[dict[str, An
         cur.close()
 
 
+def _raise_for_stale_manticore_hits(
+    conn: sqlite3.Connection,
+    *,
+    client: ManticoreClient,
+    requested_ids: list[int],
+    hydrated_rows: list[dict[str, Any]],
+) -> None:
+    if len(hydrated_rows) == len(requested_ids):
+        return
+    with suppress(sqlite3.Error):
+        set_manticore_index_status(conn, client.table, "stale")
+    raise ManticoreError(
+        "Manticore index returned messages that are absent from SQLite"
+    )
+
+
 def manticore_search_payload_service(
     conn: sqlite3.Connection,
     params: SearchParams,
@@ -303,6 +320,12 @@ def manticore_search_payload_service(
         math.ceil(total / page_size) if total is not None and total > 0 else 0
     )
     rows = _hydrate_rows(conn, ids)
+    _raise_for_stale_manticore_hits(
+        conn,
+        client=client,
+        requested_ids=ids,
+        hydrated_rows=rows,
+    )
     payload = {
         "ok": True,
         "query": params.raw_query,

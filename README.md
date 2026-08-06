@@ -59,8 +59,9 @@ bash start_web.sh
 - `TG_MANTICORE_BEARER_TOKEN`: 可选 HTTP Bearer Token，只从环境读取
 - `TG_MANTICORE_SYNC_BATCH_SIZE`: outbox 单批同步数量，默认 `1000`
 - `TG_MANTICORE_SYNC_INTERVAL_SECONDS`: 空闲时同步轮询秒数，默认 `2`
-- `TG_MANTICORE_VALIDATION_INTERVAL_SECONDS`: SQLite 与 Manticore 全量一致性校验间隔，默认 `600`
+- `TG_MANTICORE_VALIDATION_INTERVAL_SECONDS`: SQLite 与 Manticore 数量及首尾样本一致性校验间隔，默认 `600`
 - `TG_MANTICORE_MAX_MATCHES`: Manticore 单次搜索内部匹配上限，默认 `1000000`
+- `TG_TRUST_PROXY_CIDRS`: 可选、逗号分隔的可信反向代理 IP/CIDR；只有请求直连地址命中该列表时才读取 `X-Forwarded-For`。例如 `127.0.0.1,10.0.0.0/24,2001:db8::/32`。未设置时安全地忽略该请求头；旧的 `TG_TRUST_PROXY` 开关不再单独启用信任。
 - `TG_SEARCH_MAX_BROWSABLE_RESULTS`: 关键词搜索和空关键词浏览的分页窗口，默认 `100000`（每页 50 条时最多 2000 页）
 - `TG_ADMIN_PASSWORD`: 管理页密码，必须显式设置；未设置时后台登录会被拒绝
 - `FLASK_SECRET_KEY`: Flask session 签名密钥，建议显式设置以避免重启后登录态失效

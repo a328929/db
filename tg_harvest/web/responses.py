@@ -6,6 +6,8 @@ from typing import Any
 
 from flask import jsonify, request
 
+MAX_JSON_BODY_BYTES = 256 * 1024
+
 
 def json_error(message: Any, status_code: int, **extra: Any):
     payload = {"ok": False, "error": str(message)}
@@ -13,9 +15,17 @@ def json_error(message: Any, status_code: int, **extra: Any):
     return jsonify(payload), int(status_code)
 
 
+def json_body_is_too_large() -> bool:
+    content_length = request.content_length
+    return content_length is not None and int(content_length) > MAX_JSON_BODY_BYTES
+
+
 def require_json_dict():
     if not request.is_json:
         return None, json_error("请求必须为 JSON", 400)
+
+    if json_body_is_too_large():
+        return None, json_error("请求体过大", 413)
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):

@@ -7,6 +7,7 @@ from typing import Any
 
 from flask import jsonify, request
 
+from tg_harvest.search.manticore_client import ManticoreError
 from tg_harvest.web.ip_utils import get_client_ip
 from tg_harvest.web.responses import json_error, logged_json_error, require_json_dict
 
@@ -15,6 +16,7 @@ from tg_harvest.web.responses import json_error, logged_json_error, require_json
 SEARCH_RATE_LIMIT = 20
 SEARCH_COUNT_ONLY_RATE_LIMIT = 60
 SEARCH_WINDOW_SEC = 60
+SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS = 10_000
 _search_rate_tracker: dict[str, deque] = {}
 _rate_lock = threading.Lock()
 _SEARCH_GZIP_MIN_BYTES = 1024
@@ -56,6 +58,11 @@ def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
     with _rate_lock:
         _prune_expired_rate_limit_keys_locked(now)
         if tracker_key not in _search_rate_tracker:
+            if len(_search_rate_tracker) >= SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS:
+                # Refuse new identities instead of evicting active buckets. An
+                # attacker cannot use high-cardinality addresses to reset their
+                # own limit or make this in-process tracker grow unboundedly.
+                return True
             _search_rate_tracker[tracker_key] = deque()
 
         history = _search_rate_tracker[tracker_key]
@@ -123,5 +130,7 @@ def register_search_routes(
         except (ValueError, TypeError) as exc:
             message = str(exc).strip() or "参数格式错误"
             return json_error(message, 400)
+        except ManticoreError:
+            return json_error("搜索索引暂不可用，请稍后重试", 503)
         except Exception:
             return logged_json_error(logger, "系统异常", "系统异常")

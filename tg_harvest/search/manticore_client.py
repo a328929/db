@@ -138,6 +138,34 @@ class ManticoreClient:
             return 0
         return max(0, int(source.get("count") or 0))
 
+    def sample_documents(self, document_ids: list[int]) -> dict[int, dict[str, Any]]:
+        """Return indexed fields for a bounded consistency sample."""
+        ids = sorted({int(document_id) for document_id in document_ids if int(document_id) > 0})
+        if not ids:
+            return {}
+        id_list = ",".join(str(document_id) for document_id in ids)
+        payload = self.execute_select(
+            f"SELECT id, content, chat_id, message_id, msg_date_ts, "
+            f"type_code, file_size, duration_sec, is_promo FROM {self.table} "
+            f"WHERE id IN ({id_list})"
+        )
+        hits = payload.get("hits")
+        raw_hits = hits.get("hits") if isinstance(hits, dict) else None
+        if not isinstance(raw_hits, list):
+            raise ManticoreError("Unexpected Manticore sample response")
+        documents: dict[int, dict[str, Any]] = {}
+        for hit in raw_hits:
+            if not isinstance(hit, dict):
+                continue
+            try:
+                document_id = int(hit.get("_id") or 0)
+            except (TypeError, ValueError):
+                continue
+            source = hit.get("_source")
+            if document_id > 0 and isinstance(source, dict):
+                documents[document_id] = dict(source)
+        return documents
+
     def bulk(self, operations: list[dict[str, Any]]) -> None:
         if not operations:
             return

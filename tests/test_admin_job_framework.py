@@ -5,10 +5,7 @@ Tests AdminJobContext, ProgressTracker, AdminJobResult, and @admin_job decorator
 """
 
 import sqlite3
-import threading
-import time
-from contextlib import closing
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import Mock, call, patch
 
 import pytest
 
@@ -19,7 +16,6 @@ from tg_harvest.admin_jobs.framework import (
     _format_error,
     admin_job,
 )
-
 
 # =============================================================================
 # Test AdminJobResult
@@ -212,7 +208,8 @@ def test_db():
 
 def test_query_returns_dict_rows(test_db):
     """Test that query() returns list of dicts."""
-    get_conn_fn = lambda: test_db
+    def get_conn_fn():
+        return test_db
     log_fn = Mock()
     set_status_fn = Mock()
     update_fn = Mock()
@@ -237,7 +234,8 @@ def test_query_returns_dict_rows(test_db):
 
 def test_query_empty_result(test_db):
     """Test query with no results."""
-    get_conn_fn = lambda: test_db
+    def get_conn_fn():
+        return test_db
     log_fn = Mock()
     set_status_fn = Mock()
     update_fn = Mock()
@@ -260,8 +258,8 @@ def test_query_empty_result(test_db):
 def test_execute_with_commit():
     """Test that execute() commits on success."""
     # Use a file-based database so we can verify commits across connections
-    import tempfile
     import os
+    import tempfile
 
     db_fd, db_path = tempfile.mkstemp()
     try:
@@ -346,7 +344,8 @@ def test_execute_with_rollback(test_db):
 
 def test_get_connection(test_db):
     """Test get_connection() returns raw connection."""
-    get_conn_fn = lambda: test_db
+    def get_conn_fn():
+        return test_db
     log_fn = Mock()
     set_status_fn = Mock()
     update_fn = Mock()
@@ -470,26 +469,28 @@ def test_decorator_with_client():
     cfg = Mock()
     mock_client = Mock()
 
-    with patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create:
-        with patch("tg_harvest.admin_jobs.framework._disconnect_worker_client") as mock_disconnect:
-            with patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session") as mock_cleanup:
-                mock_create.return_value = mock_client
+    with (
+        patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create,
+        patch("tg_harvest.admin_jobs.framework._disconnect_worker_client") as mock_disconnect,
+        patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session") as mock_cleanup,
+    ):
+        mock_create.return_value = mock_client
 
-                client_job(
-                    "job_client",
-                    cfg=cfg,
-                    get_conn_fn=get_conn_fn,
-                    admin_job_set_status_fn=set_status_fn,
-                    admin_job_append_log_fn=append_log_fn,
-                )
+        client_job(
+            "job_client",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-                # Verify client lifecycle
-                mock_create.assert_called_once()
-                mock_disconnect.assert_called_once_with(mock_client)
-                mock_cleanup.assert_called_once()
+        # Verify client lifecycle
+        mock_create.assert_called_once()
+        mock_disconnect.assert_called_once_with(mock_client)
+        mock_cleanup.assert_called_once()
 
-                # Verify success logging
-                append_log_fn.assert_any_call("job_client", "Telegram 客户端连接成功")
+        # Verify success logging
+        append_log_fn.assert_any_call("job_client", "Telegram 客户端连接成功")
 
 
 def test_decorator_heartbeat_lifecycle():
@@ -506,21 +507,23 @@ def test_decorator_heartbeat_lifecycle():
     mock_stop_event = Mock()
     mock_thread = Mock()
 
-    with patch("tg_harvest.admin_jobs.framework.start_admin_job_heartbeat") as mock_start:
-        with patch("tg_harvest.admin_jobs.framework.finish_job_heartbeat") as mock_finish:
-            mock_start.return_value = (mock_stop_event, mock_thread)
+    with (
+        patch("tg_harvest.admin_jobs.framework.start_admin_job_heartbeat") as mock_start,
+        patch("tg_harvest.admin_jobs.framework.finish_job_heartbeat") as mock_finish,
+    ):
+        mock_start.return_value = (mock_stop_event, mock_thread)
 
-            heartbeat_job(
-                "job_hb",
-                cfg=cfg,
-                get_conn_fn=get_conn_fn,
-                admin_job_set_status_fn=set_status_fn,
-                admin_job_append_log_fn=append_log_fn,
-            )
+        heartbeat_job(
+            "job_hb",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-            # Verify heartbeat lifecycle
-            mock_start.assert_called_once_with("job_hb")
-            mock_finish.assert_called_once_with(mock_stop_event, mock_thread)
+        # Verify heartbeat lifecycle
+        mock_start.assert_called_once_with("job_hb")
+        mock_finish.assert_called_once_with(mock_stop_event, mock_thread)
 
 
 def test_decorator_status_transitions():
@@ -642,20 +645,22 @@ def test_decorator_resource_cleanup():
     mock_stop_event = Mock()
     mock_thread = Mock()
 
-    with patch("tg_harvest.admin_jobs.framework.start_admin_job_heartbeat") as mock_start:
-        with patch("tg_harvest.admin_jobs.framework.finish_job_heartbeat") as mock_finish:
-            mock_start.return_value = (mock_stop_event, mock_thread)
+    with (
+        patch("tg_harvest.admin_jobs.framework.start_admin_job_heartbeat") as mock_start,
+        patch("tg_harvest.admin_jobs.framework.finish_job_heartbeat") as mock_finish,
+    ):
+        mock_start.return_value = (mock_stop_event, mock_thread)
 
-            cleanup_job_with_hb(
-                "job_with_hb",
-                cfg=cfg,
-                get_conn_fn=get_conn_fn,
-                admin_job_set_status_fn=set_status_fn,
-                admin_job_append_log_fn=append_log_fn,
-            )
+        cleanup_job_with_hb(
+            "job_with_hb",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-            # Verify cleanup happens with heartbeat
-            mock_finish.assert_called_once_with(mock_stop_event, mock_thread)
+        # Verify cleanup happens with heartbeat
+        mock_finish.assert_called_once_with(mock_stop_event, mock_thread)
 
 
 def test_decorator_client_cleanup_on_error():
@@ -670,22 +675,24 @@ def test_decorator_client_cleanup_on_error():
     cfg = Mock()
     mock_client = Mock()
 
-    with patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create:
-        with patch("tg_harvest.admin_jobs.framework._disconnect_worker_client") as mock_disconnect:
-            with patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session") as mock_cleanup:
-                mock_create.return_value = mock_client
+    with (
+        patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create,
+        patch("tg_harvest.admin_jobs.framework._disconnect_worker_client") as mock_disconnect,
+        patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session") as mock_cleanup,
+    ):
+        mock_create.return_value = mock_client
 
-                client_error_job(
-                    "job_client_error",
-                    cfg=cfg,
-                    get_conn_fn=get_conn_fn,
-                    admin_job_set_status_fn=set_status_fn,
-                    admin_job_append_log_fn=append_log_fn,
-                )
+        client_error_job(
+            "job_client_error",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-                # Verify client was cleaned up even though job failed
-                mock_disconnect.assert_called_once_with(mock_client)
-                mock_cleanup.assert_called_once()
+        # Verify client was cleaned up even though job failed
+        mock_disconnect.assert_called_once_with(mock_client)
+        mock_cleanup.assert_called_once()
 
 
 def test_decorator_progress_tracking():

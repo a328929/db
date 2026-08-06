@@ -375,7 +375,7 @@ class AdminStorageHealthPayloadTests(unittest.TestCase):
         self.assertEqual(42, payload["counts"]["message_count"])
         self.assertEqual(2, payload["counts"]["media_group_count"])
         self.assertEqual(1, payload["counts"]["manticore_outbox_pending"])
-        self.assertTrue(payload["indexes"]["manticore_ready"])
+        self.assertFalse(payload["indexes"]["manticore_ready"])
         self.assertEqual(
             "cleanup",
             payload["maintenance"]["last_recorded_job"]["job_type"],

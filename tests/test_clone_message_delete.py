@@ -264,7 +264,7 @@ def test_range_message_delete_submits_ids_in_ascending_batches():
     assert all(call[2] is True for call in client.delete_calls)
     assert load_tail_selection.call_count == 0
     assert rewind_mappings.call_count == 0
-    assert any("区间清理不会修改克隆映射" in message for message in logs)
+    assert any("区间删除不会修改克隆映射" in message for message in logs)
     assert any("克隆映射未修改" in message for message in logs)
 
 

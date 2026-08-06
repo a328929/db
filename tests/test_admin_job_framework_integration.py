@@ -5,9 +5,6 @@ Tests real-world usage scenarios with migrated tasks and error handling.
 """
 
 import sqlite3
-import time
-from contextlib import closing
-from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 import pytest
@@ -17,7 +14,6 @@ from tg_harvest.admin_jobs.framework import (
     AdminJobResult,
     admin_job,
 )
-
 
 # =============================================================================
 # Test Database Setup
@@ -95,8 +91,8 @@ def integration_db():
 
 def test_recovery_restore_with_framework(integration_db):
     """Test recovery restore task using framework."""
-    import tempfile
     import os
+    import tempfile
 
     # Use file-based DB since execute() closes connections
     db_fd, db_path = tempfile.mkstemp()
@@ -181,7 +177,10 @@ def test_recovery_restore_with_framework(integration_db):
         # Execute the job
         set_status_fn = Mock(return_value=True)
         append_log_fn = Mock()
-        get_conn_fn = lambda: sqlite3.connect(db_path)
+
+        def get_conn_fn():
+            return sqlite3.connect(db_path)
+
         cfg = Mock()
 
         test_recovery_restore(
@@ -216,8 +215,8 @@ def test_recovery_restore_with_framework(integration_db):
 
 def test_missing_chats_scan_with_framework(integration_db):
     """Test missing chats scan using framework."""
-    import tempfile
     import os
+    import tempfile
 
     # Use file-based DB
     db_fd, db_path = tempfile.mkstemp()
@@ -279,7 +278,10 @@ def test_missing_chats_scan_with_framework(integration_db):
 
         set_status_fn = Mock(return_value=True)
         append_log_fn = Mock()
-        get_conn_fn = lambda: sqlite3.connect(db_path)
+
+        def get_conn_fn():
+            return sqlite3.connect(db_path)
+
         cfg = Mock()
 
         test_missing_chats(
@@ -323,7 +325,10 @@ def test_restricted_chats_scan_with_framework(integration_db):
 
     set_status_fn = Mock(return_value=True)
     append_log_fn = Mock()
-    get_conn_fn = lambda: integration_db
+
+    def get_conn_fn():
+        return integration_db
+
     cfg = Mock()
 
     test_restricted_scan(
@@ -362,23 +367,25 @@ def test_framework_backward_compatibility():
     get_conn_fn = Mock()
     cfg = Mock()
 
-    with patch("tg_harvest.admin_jobs.framework._admin_job_stop_requested") as mock_stop:
-        with patch("tg_harvest.admin_jobs.framework._admin_job_update_progress") as mock_progress:
-            mock_stop.return_value = False
+    with (
+        patch("tg_harvest.admin_jobs.framework._admin_job_stop_requested") as mock_stop,
+        patch("tg_harvest.admin_jobs.framework._admin_job_update_progress") as mock_progress,
+    ):
+        mock_stop.return_value = False
 
-            compat_job(
-                "job_compat",
-                cfg=cfg,
-                get_conn_fn=get_conn_fn,
-                admin_job_set_status_fn=set_status_fn,
-                admin_job_append_log_fn=append_log_fn,
-            )
+        compat_job(
+            "job_compat",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-            # Verify all infrastructure was used correctly
-            assert set_status_fn.called
-            assert append_log_fn.called
-            assert mock_progress.called
-            assert mock_stop.called
+        # Verify all infrastructure was used correctly
+        assert set_status_fn.called
+        assert append_log_fn.called
+        assert mock_progress.called
+        assert mock_stop.called
 
 
 # =============================================================================
@@ -398,7 +405,10 @@ def test_database_error_handling(integration_db):
 
     set_status_fn = Mock(return_value=True)
     append_log_fn = Mock()
-    get_conn_fn = lambda: integration_db
+
+    def get_conn_fn():
+        return integration_db
+
     cfg = Mock()
 
     db_error_job(
@@ -433,29 +443,31 @@ def test_client_connection_error():
     cfg = Mock()
 
     # Mock client creation to fail
-    with patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create:
-        with patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session"):
-            mock_create.side_effect = RuntimeError("Connection failed")
+    with (
+        patch("tg_harvest.admin_jobs.framework._create_isolated_worker_client") as mock_create,
+        patch("tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session"),
+    ):
+        mock_create.side_effect = RuntimeError("Connection failed")
 
-            client_error_job(
-                "job_client_error",
-                cfg=cfg,
-                get_conn_fn=get_conn_fn,
-                admin_job_set_status_fn=set_status_fn,
-                admin_job_append_log_fn=append_log_fn,
-            )
+        client_error_job(
+            "job_client_error",
+            cfg=cfg,
+            get_conn_fn=get_conn_fn,
+            admin_job_set_status_fn=set_status_fn,
+            admin_job_append_log_fn=append_log_fn,
+        )
 
-            # Verify error was logged
-            log_messages = [call[0][1] for call in append_log_fn.call_args_list]
-            assert any("客户端连接失败" in msg for msg in log_messages)
-            assert any("Connection failed" in msg for msg in log_messages)
+        # Verify error was logged
+        log_messages = [call[0][1] for call in append_log_fn.call_args_list]
+        assert any("客户端连接失败" in msg for msg in log_messages)
+        assert any("Connection failed" in msg for msg in log_messages)
 
-            # Verify error status
-            error_status_set = any(
-                call[0] == ("job_client_error", "error")
-                for call in set_status_fn.call_args_list
-            )
-            assert error_status_set
+        # Verify error status
+        error_status_set = any(
+            call[0] == ("job_client_error", "error")
+            for call in set_status_fn.call_args_list
+        )
+        assert error_status_set
 
 
 def test_stop_signal_respected(integration_db):
@@ -480,7 +492,10 @@ def test_stop_signal_respected(integration_db):
 
     set_status_fn = Mock(return_value=True)
     append_log_fn = Mock()
-    get_conn_fn = lambda: integration_db
+
+    def get_conn_fn():
+        return integration_db
+
     cfg = Mock()
 
     # Mock stop request to return True after a few checks
@@ -531,7 +546,10 @@ def test_progress_updates_logged(integration_db):
 
     set_status_fn = Mock(return_value=True)
     append_log_fn = Mock()
-    get_conn_fn = lambda: integration_db
+
+    def get_conn_fn():
+        return integration_db
+
     cfg = Mock()
 
     with patch("tg_harvest.admin_jobs.framework._admin_job_update_progress") as mock_progress:
@@ -556,8 +574,8 @@ def test_progress_updates_logged(integration_db):
 
 def test_transaction_rollback_on_error(integration_db):
     """Test that database transactions rollback on error."""
-    import tempfile
     import os
+    import tempfile
 
     # Use file-based DB
     db_fd, db_path = tempfile.mkstemp()
@@ -594,7 +612,10 @@ def test_transaction_rollback_on_error(integration_db):
 
         set_status_fn = Mock(return_value=True)
         append_log_fn = Mock()
-        get_conn_fn = lambda: sqlite3.connect(db_path)
+
+        def get_conn_fn():
+            return sqlite3.connect(db_path)
+
         cfg = Mock()
 
         transaction_test_job(

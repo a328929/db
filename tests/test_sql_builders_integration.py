@@ -7,17 +7,17 @@ from pathlib import Path
 from tg_harvest.storage.clone_state_media_transfers import (
     ensure_clone_media_transfers,
     mark_clone_media_transfer_source_hop_sent,
-    mark_clone_media_transfer_target_hop_sent,
     mark_clone_media_transfer_target_hop_observed,
+    mark_clone_media_transfer_target_hop_sent,
 )
 
 
 def _create_test_db():
     """Create a temporary database with required schema."""
-    tmpfile = tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.db')
-    tmpfile.close()
+    with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".db") as tmpfile:
+        db_path = tmpfile.name
 
-    conn = sqlite3.connect(tmpfile.name)
+    conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row  # Enable column name access
     cur = conn.cursor()
 
