@@ -9,10 +9,16 @@ from unittest.mock import Mock, patch
 
 import pytest
 
+from tg_harvest.admin_jobs.cleanup import _admin_start_cleanup_job_thread
 from tg_harvest.admin_jobs.framework import (
     AdminJobContext,
     AdminJobResult,
     admin_job,
+)
+from tg_harvest.admin_jobs.recovery import _admin_start_recovery_restore_job_thread
+from tg_harvest.admin_jobs.runners import (
+    _admin_start_cleanup_empty_job_thread,
+    _admin_start_delete_job_thread,
 )
 
 # =============================================================================
@@ -82,6 +88,136 @@ def integration_db():
     conn.commit()
     yield conn
     conn.close()
+
+
+class _ThreadJobConnection:
+    def __init__(self) -> None:
+        self.cursor_value = Mock()
+        self.closed = False
+
+    def cursor(self):
+        return self.cursor_value
+
+    def commit(self) -> None:
+        return None
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _run_production_job_thread(start_fn, **business_kwargs):
+    statuses = []
+    logs = []
+    connection = _ThreadJobConnection()
+
+    def set_status(job_id, status):
+        statuses.append((job_id, status))
+        return True
+
+    with (
+        patch(
+            "tg_harvest.admin_jobs.framework.start_admin_job_heartbeat",
+            return_value=(Mock(), Mock()),
+        ),
+        patch("tg_harvest.admin_jobs.framework.finish_job_heartbeat"),
+        patch("tg_harvest.admin_jobs.framework._admin_job_update_progress"),
+    ):
+        thread = start_fn(
+            "job-contract",
+            cfg=Mock(),
+            get_conn_fn=lambda: connection,
+            admin_job_set_status_fn=set_status,
+            admin_job_append_log_fn=lambda job_id, message: logs.append(
+                (job_id, str(message))
+            ),
+            **business_kwargs,
+        )
+        thread.join(timeout=5)
+
+    assert not thread.is_alive()
+    assert statuses == [
+        ("job-contract", "running"),
+        ("job-contract", "done"),
+    ]
+    assert not any("执行失败" in message for _job_id, message in logs)
+    assert connection.closed
+    return logs
+
+
+def test_delete_production_thread_forwards_business_arguments():
+    with (
+        patch(
+            "tg_harvest.admin_jobs.runners._count_chat_related_rows",
+            return_value={"messages": 3, "media_rows": 1, "media_groups": 1},
+        ),
+        patch(
+            "tg_harvest.admin_jobs.runners._delete_chat_data", return_value=3
+        ) as delete_chat_data,
+    ):
+        logs = _run_production_job_thread(
+            _admin_start_delete_job_thread,
+            chat_id=7,
+            chat_title="Chat 7",
+        )
+
+    delete_chat_data.assert_called_once()
+    assert any("目标=Chat 7，群组ID=7" in message for _job_id, message in logs)
+
+
+@pytest.mark.parametrize(
+    ("start_fn", "business_kwargs", "expected_mode"),
+    [
+        (
+            _admin_start_cleanup_job_thread,
+            {
+                "keyword": "spam",
+                "scope": "all",
+                "chat_id": None,
+                "target_label": "全部数据",
+            },
+            "keyword",
+        ),
+        (
+            _admin_start_cleanup_empty_job_thread,
+            {
+                "scope": "chat",
+                "chat_id": 7,
+                "target_label": "Chat 7",
+            },
+            "empty_media",
+        ),
+    ],
+)
+def test_cleanup_production_threads_forward_business_arguments(
+    start_fn,
+    business_kwargs,
+    expected_mode,
+):
+    with patch(
+        "tg_harvest.admin_jobs.cleanup._build_cleanup_targets_table",
+        return_value=0,
+    ) as build_targets:
+        _run_production_job_thread(start_fn, **business_kwargs)
+
+    assert build_targets.call_args.args[1] == expected_mode
+
+
+def test_recovery_production_thread_forwards_business_arguments():
+    with patch(
+        "tg_harvest.admin_jobs.recovery.recover_chats_from_candidates",
+        return_value={
+            "candidate_count": 1,
+            "recovered_count": 1,
+            "skipped_count": 0,
+        },
+    ) as recover_chats:
+        _run_production_job_thread(
+            _admin_start_recovery_restore_job_thread,
+            chat_ids=[7],
+            target_label="1 个恢复候选",
+        )
+
+    assert recover_chats.call_args.kwargs["chat_ids"] == [7]
 
 
 # =============================================================================

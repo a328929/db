@@ -330,11 +330,11 @@ def admin_job(
             return AdminJobResult(success=True)
     """
 
-    def decorator(func: Callable[[AdminJobContext], AdminJobResult]) -> Callable:
+    def decorator(func: Callable[..., AdminJobResult]) -> Callable:
         @wraps(func)
         def wrapper(
             job_id: str,
-            *,
+            *business_args: Any,
             cfg: Any,
             get_conn_fn: Callable[[], sqlite3.Connection],
             admin_job_set_status_fn: Callable[[str, str], bool],
@@ -388,7 +388,7 @@ def admin_job(
                 )
 
                 # 5. Call business logic function
-                result = func(context)
+                result = func(context, *business_args, **kwargs)
 
                 # 6. Handle result
                 if result.success:

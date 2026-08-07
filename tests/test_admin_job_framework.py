@@ -454,6 +454,45 @@ def test_decorator_basic_job():
     append_log_fn.assert_any_call("job_123", "Done")
 
 
+def test_decorator_forwards_business_arguments():
+    received = {}
+
+    @admin_job(name="Delete Chat", requires_client=False, heartbeat=False)
+    def delete_chat_job(
+        ctx: AdminJobContext,
+        operation: str,
+        *,
+        chat_id: int,
+        chat_title: str,
+    ) -> AdminJobResult:
+        received.update(
+            operation=operation,
+            chat_id=chat_id,
+            chat_title=chat_title,
+        )
+        return AdminJobResult(success=True, message="Deleted")
+
+    set_status_fn = Mock(return_value=True)
+
+    delete_chat_job(
+        "job_delete",
+        "delete",
+        chat_id=7,
+        chat_title="Chat 7",
+        cfg=Mock(),
+        get_conn_fn=Mock(),
+        admin_job_set_status_fn=set_status_fn,
+        admin_job_append_log_fn=Mock(),
+    )
+
+    assert received == {
+        "operation": "delete",
+        "chat_id": 7,
+        "chat_title": "Chat 7",
+    }
+    assert set_status_fn.call_args_list[-1] == call("job_delete", "done")
+
+
 def test_decorator_with_client():
     """Test decorator with job requiring Telegram client."""
     @admin_job(name="Client Job", requires_client=True, heartbeat=False)
