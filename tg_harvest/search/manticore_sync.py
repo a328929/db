@@ -11,7 +11,10 @@ from contextlib import closing
 from dataclasses import dataclass
 from typing import Any
 
-from tg_harvest.search.manticore_client import ManticoreClient
+from tg_harvest.search.manticore_client import (
+    MANTICORE_STORED_DOCUMENT_FIELDS,
+    ManticoreClient,
+)
 from tg_harvest.storage.manticore_outbox import (
     OUTBOX_TABLE,
     manticore_index_is_ready,
@@ -27,6 +30,8 @@ _SYNC_CLIENT: ManticoreClient | None = None
 _SYNC_BATCH_SIZE = 1000
 _SYNC_IDLE_SECONDS = 2.0
 _SYNC_ERROR_BACKOFF_SECONDS = 30.0
+_SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS = 60.0
+_SYNC_RECOVERY_VALIDATION_MAX_INTERVAL_SECONDS = 600.0
 _SYNC_VALIDATION_INTERVAL_SECONDS = 600.0
 _VALIDATION_SAMPLE_SIDE_SIZE = 32
 
@@ -73,7 +78,7 @@ def _load_validation_sample(
     *,
     side_size: int = _VALIDATION_SAMPLE_SIDE_SIZE,
 ) -> dict[int, dict[str, Any]]:
-    """Load a bounded first/last message sample using the sync projection."""
+    """Load a bounded first/last sample using Manticore-readable attributes."""
     rows_by_pk: dict[int, Any] = {}
     cur = conn.cursor()
     try:
@@ -107,7 +112,7 @@ def _load_validation_sample(
     for pk, row in rows_by_pk.items():
         document = build_manticore_document(row)
         if document is not None:
-            documents[pk] = document
+            documents[pk] = _validation_projection(document)
     return documents
 
 
@@ -125,18 +130,12 @@ def _document_digest(documents: dict[int, dict[str, Any]]) -> str:
     return digest.hexdigest()
 
 
-def _normalize_index_document(document: Any) -> dict[str, Any]:
+def _validation_projection(document: Any) -> dict[str, int]:
     if not isinstance(document, dict):
         raise ValueError("Manticore sample document is not an object")
     return {
-        "content": str(document.get("content") or ""),
-        "chat_id": int(document.get("chat_id") or 0),
-        "message_id": int(document.get("message_id") or 0),
-        "msg_date_ts": int(document.get("msg_date_ts") or 0),
-        "type_code": int(document.get("type_code") or 0),
-        "file_size": int(document.get("file_size") or 0),
-        "duration_sec": int(document.get("duration_sec") or 0),
-        "is_promo": int(document.get("is_promo") or 0),
+        field: int(document.get(field) or 0)
+        for field in MANTICORE_STORED_DOCUMENT_FIELDS
     }
 
 
@@ -288,7 +287,7 @@ def validate_manticore_state(
             if callable(sample_documents_fn):
                 raw_index_documents = sample_documents_fn(list(source_documents))
                 index_documents = {
-                    int(document_id): _normalize_index_document(document)
+                    int(document_id): _validation_projection(document)
                     for document_id, document in raw_index_documents.items()
                 }
                 manticore_sample_digest = _document_digest(index_documents)
@@ -372,12 +371,36 @@ def _manticore_validation_is_due(
     now: float,
     last_validated_at: float,
     interval_seconds: float,
-    drained_total: int,
     index_ready: bool,
+    recovery_interval_seconds: float = (
+        _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS
+    ),
 ) -> bool:
-    if drained_total > 0 and not index_ready:
-        return True
-    return now - last_validated_at >= interval_seconds
+    elapsed = now - last_validated_at
+    if not index_ready:
+        recovery_due_after = min(
+            _SYNC_RECOVERY_VALIDATION_MAX_INTERVAL_SECONDS,
+            max(
+                _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS,
+                float(recovery_interval_seconds),
+            ),
+        )
+        return elapsed >= recovery_due_after
+    return elapsed >= interval_seconds
+
+
+def _next_recovery_validation_interval(
+    current_interval_seconds: float, *, validation_ready: bool
+) -> float:
+    if validation_ready:
+        return _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS
+    return min(
+        _SYNC_RECOVERY_VALIDATION_MAX_INTERVAL_SECONDS,
+        max(
+            _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS,
+            float(current_interval_seconds) * 2,
+        ),
+    )
 
 
 def _manticore_sync_worker() -> None:
@@ -386,6 +409,9 @@ def _manticore_sync_worker() -> None:
     # worker is configured. Normal outbox traffic must not turn that audit into
     # a per-batch operation.
     last_validated_at = time.monotonic()
+    recovery_validation_interval = (
+        _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS
+    )
     while True:
         with _SYNC_LOCK:
             get_conn_fn = _SYNC_GET_CONN_FN
@@ -402,32 +428,41 @@ def _manticore_sync_worker() -> None:
             if not table_ready:
                 client.ensure_table()
                 table_ready = True
-            drained_total = 0
+            index_ready = False
             while True:
                 with closing(get_conn_fn()) as conn:
                     drained = drain_manticore_outbox(
                         conn, client, batch_size=batch_size
                     )
+                    if drained <= 0:
+                        index_ready = manticore_index_is_ready(conn, client.table)
                 if drained <= 0:
                     break
-                drained_total += drained
                 time.sleep(0.02)
             now = time.monotonic()
-            recovery_validation_due = False
-            if drained_total > 0:
-                with closing(get_conn_fn()) as conn:
-                    recovery_validation_due = not manticore_index_is_ready(
-                        conn, client.table
-                    )
             if _manticore_validation_is_due(
                 now=now,
                 last_validated_at=last_validated_at,
                 interval_seconds=validation_interval_seconds,
-                drained_total=drained_total,
-                index_ready=not recovery_validation_due,
+                index_ready=index_ready,
+                recovery_interval_seconds=recovery_validation_interval,
             ):
-                validate_manticore_state(get_conn_fn, client)
+                validation_ready = validate_manticore_state(get_conn_fn, client)
                 last_validated_at = now
+                if validation_ready:
+                    recovery_validation_interval = _next_recovery_validation_interval(
+                        recovery_validation_interval, validation_ready=True
+                    )
+                elif index_ready:
+                    # A healthy index just failed its periodic audit. Give the
+                    # first recovery attempt the advertised minimum delay.
+                    recovery_validation_interval = (
+                        _SYNC_RECOVERY_VALIDATION_MIN_INTERVAL_SECONDS
+                    )
+                else:
+                    recovery_validation_interval = _next_recovery_validation_interval(
+                        recovery_validation_interval, validation_ready=False
+                    )
         except Exception:
             table_ready = False
             logging.exception("Manticore 搜索索引后台同步失败")

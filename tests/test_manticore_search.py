@@ -1,7 +1,9 @@
+import io
 import json
 import sqlite3
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
@@ -19,6 +21,7 @@ from tg_harvest.search.manticore_service import (
 )
 from tg_harvest.search.manticore_sync import (
     _manticore_validation_is_due,
+    _next_recovery_validation_interval,
     drain_manticore_outbox,
     validate_manticore_state,
 )
@@ -91,21 +94,63 @@ class ManticoreClientTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             ManticoreClient(table="messages; DROP TABLE messages")
 
-    def test_sample_documents_extracts_indexed_sources(self):
+    def test_sample_documents_extracts_stored_sources(self):
         client = ManticoreClient()
         response = _Response(
             {
                 "hits": {
                     "hits": [
-                        {"_id": 7, "_source": {"content": "sample", "chat_id": 1}}
+                        {
+                            "_id": 7,
+                            "_source": {
+                                "chat_id": 1,
+                                "message_id": 2,
+                                "msg_date_ts": 3,
+                                "type_code": 1,
+                                "file_size": 4,
+                                "duration_sec": 5,
+                                "is_promo": 0,
+                            },
+                        }
                     ]
                 }
             }
         )
-        with patch("urllib.request.urlopen", return_value=response):
-            documents = client.sample_documents([7, 7, 0])
+        with patch("urllib.request.urlopen", return_value=response) as urlopen:
+            documents = client.sample_documents(range(1, 65))
 
-        self.assertEqual(documents, {7: {"content": "sample", "chat_id": 1}})
+        self.assertEqual(
+            documents,
+            {
+                7: {
+                    "chat_id": 1,
+                    "message_id": 2,
+                    "msg_date_ts": 3,
+                    "type_code": 1,
+                    "file_size": 4,
+                    "duration_sec": 5,
+                    "is_promo": 0,
+                }
+            },
+        )
+        sql = urlopen.call_args.args[0].data.decode()
+        self.assertNotIn("content", sql.lower())
+        self.assertIn("LIMIT 64", sql)
+
+    def test_http_error_body_is_preserved_for_diagnostics(self):
+        client = ManticoreClient()
+        error = urllib.error.HTTPError(
+            client.base_url,
+            500,
+            "Internal Server Error",
+            {},
+            io.BytesIO(b'{"error":"field is not stored"}'),
+        )
+        with patch("urllib.request.urlopen", side_effect=error), self.assertRaisesRegex(
+            ManticoreError, "field is not stored"
+        ):
+            client.execute_select("SELECT 1")
+        self.assertTrue(error.fp.closed)
 
 
 class ManticoreExpressionTests(unittest.TestCase):
@@ -858,9 +903,8 @@ class ManticoreValidationTests(unittest.TestCase):
             1,
             {
                 1: {
-                    "content": "wrong",
                     "chat_id": 1,
-                    "message_id": 1,
+                    "message_id": 99,
                     "msg_date_ts": 1,
                     "type_code": 1,
                     "file_size": 0,
@@ -925,7 +969,6 @@ class ManticoreValidationTests(unittest.TestCase):
                 now=130.0,
                 last_validated_at=100.0,
                 interval_seconds=600.0,
-                drained_total=2000,
                 index_ready=True,
             )
         )
@@ -936,18 +979,72 @@ class ManticoreValidationTests(unittest.TestCase):
                 now=700.0,
                 last_validated_at=100.0,
                 interval_seconds=600.0,
-                drained_total=0,
                 index_ready=True,
             )
         )
         self.assertTrue(
             _manticore_validation_is_due(
-                now=130.0,
+                now=160.0,
                 last_validated_at=100.0,
                 interval_seconds=600.0,
-                drained_total=1,
                 index_ready=False,
             )
+        )
+
+    def test_stale_validation_is_rate_limited(self):
+        self.assertFalse(
+            _manticore_validation_is_due(
+                now=159.0,
+                last_validated_at=100.0,
+                interval_seconds=600.0,
+                index_ready=False,
+            )
+        )
+        self.assertTrue(
+            _manticore_validation_is_due(
+                now=160.0,
+                last_validated_at=100.0,
+                interval_seconds=600.0,
+                index_ready=False,
+            )
+        )
+
+    def test_recovery_validation_does_not_follow_short_normal_interval(self):
+        self.assertFalse(
+            _manticore_validation_is_due(
+                now=190.0,
+                last_validated_at=100.0,
+                interval_seconds=60.0,
+                recovery_interval_seconds=120.0,
+                index_ready=False,
+            )
+        )
+        self.assertTrue(
+            _manticore_validation_is_due(
+                now=220.0,
+                last_validated_at=100.0,
+                interval_seconds=60.0,
+                recovery_interval_seconds=120.0,
+                index_ready=False,
+            )
+        )
+
+    def test_recovery_validation_backoff_is_bounded_and_resets(self):
+        interval = 60.0
+        sequence = []
+        for _ in range(5):
+            sequence.append(interval)
+            interval = _next_recovery_validation_interval(
+                interval, validation_ready=False
+            )
+        self.assertEqual(sequence, [60.0, 120.0, 240.0, 480.0, 600.0])
+        self.assertEqual(
+            _next_recovery_validation_interval(600.0, validation_ready=False),
+            600.0,
+        )
+        self.assertEqual(
+            _next_recovery_validation_interval(600.0, validation_ready=True),
+            60.0,
         )
 
 

@@ -3175,26 +3175,12 @@ def _clear_sync_scheduler_state_for_chat_targets(cur: Any, target_table: str) ->
         )
 
 
-def _prepare_delete_chat_message_targets(cur: Any, chat_id: int) -> int:
-    cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
-    cur.execute(
-        """
-        CREATE TEMP TABLE temp_delete_chat_messages (
-            pk INTEGER PRIMARY KEY,
-            message_id INTEGER NOT NULL
-        )
-        """
-    )
-    cur.execute(
-        """
-        INSERT INTO temp_delete_chat_messages(pk, message_id)
-        SELECT pk, message_id
-        FROM messages
-        WHERE chat_id = ?
-        """,
-        (int(chat_id),),
-    )
-    cur.execute("SELECT COUNT(*) FROM temp_delete_chat_messages")
+def _count_chat_messages_for_delete(cur: Any, chat_id: int) -> int:
+    # The former SQLite FTS bulk path needed a snapshot of message IDs. Search
+    # consistency is now provided by the Manticore outbox delete trigger, so
+    # materializing every row into a TEMP table only duplicates work for large
+    # chats and creates avoidable temp-database pressure.
+    cur.execute("SELECT COUNT(*) FROM messages WHERE chat_id = ?", (int(chat_id),))
     return int(cur.fetchone()[0] or 0)
 
 
@@ -3259,7 +3245,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         else:
             cur.execute(f"SAVEPOINT {savepoint_name}")
         transaction_started = True
-        deleted_messages = _prepare_delete_chat_message_targets(cur, chat_id)
+        deleted_messages = _count_chat_messages_for_delete(cur, chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_chat_access_risks", chat_id)
@@ -3275,7 +3261,6 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         cur.execute("DELETE FROM message_media WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM messages WHERE chat_id = ?", (chat_id,))
         cur.execute("DELETE FROM chats WHERE chat_id = ?", (chat_id,))
-        cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
         if owns_transaction:
             conn.commit()
         else:
@@ -3288,8 +3273,6 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         rollback_scope()
         raise
     finally:
-        with suppress(Exception):
-            cur.execute("DROP TABLE IF EXISTS temp_delete_chat_messages")
         cur.close()
 
 

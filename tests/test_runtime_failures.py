@@ -5878,6 +5878,12 @@ class WriteConsistencyTests(unittest.TestCase):
         self.assertEqual(cur.fetchone()["operation"], "delete")
         cur.execute("SELECT COUNT(*) AS c FROM admin_recovery_chats WHERE chat_id = 1")
         self.assertEqual(int(cur.fetchone()["c"]), 0)
+        self.assertIsNone(
+            cur.execute(
+                "SELECT 1 FROM sqlite_temp_master "
+                "WHERE type = 'table' AND name = 'temp_delete_chat_messages'"
+            ).fetchone()
+        )
 
     @unittest.skip("SQLite search indexes were removed")
     def test_delete_chat_data_bulk_path_keeps_fts_clean_and_restores_triggers(self) -> None:

@@ -452,6 +452,32 @@ class SearchRoutesValidationTests(unittest.TestCase):
             raise self.search_payload
         return self.search_payload
 
+    def test_sqlite_busy_detection_prefers_error_code_and_supports_legacy_text(self):
+        self.assertTrue(
+            search_routes_module._is_sqlite_busy_error(
+                sqlite3.OperationalError("database table is locked")
+            )
+        )
+        self.assertTrue(
+            search_routes_module._is_sqlite_busy_error(
+                sqlite3.OperationalError("database schema is busy")
+            )
+        )
+        self.assertFalse(
+            search_routes_module._is_sqlite_busy_error(
+                sqlite3.OperationalError("connection busy while opening database")
+            )
+        )
+
+        class _ExtendedOperationalError(sqlite3.OperationalError):
+            sqlite_errorcode = sqlite3.SQLITE_CONSTRAINT
+
+        self.assertFalse(
+            search_routes_module._is_sqlite_busy_error(
+                _ExtendedOperationalError("database is locked")
+            )
+        )
+
     def test_search_rejects_non_json_requests(self) -> None:
         response = self.client.post("/api/search", data="query=hello")
 
@@ -470,9 +496,32 @@ class SearchRoutesValidationTests(unittest.TestCase):
         response = self.client.post("/api/search", json={"query": "hello"})
 
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(
-            response.get_json()["error"], "搜索索引暂不可用，请稍后重试"
-        )
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "搜索索引暂不可用，请稍后重试")
+        self.assertEqual(payload["code"], "search_index_unavailable")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["retry_after_seconds"], 60)
+        self.assertEqual(response.headers["Retry-After"], "60")
+
+    def test_search_classifies_sqlite_busy_as_retryable_database_error(self) -> None:
+        self.search_payload = sqlite3.OperationalError("database is locked")
+
+        response = self.client.post("/api/search", json={"query": "hello"})
+
+        self.assertEqual(response.status_code, 503)
+        payload = response.get_json()
+        self.assertEqual(payload["code"], "database_busy")
+        self.assertTrue(payload["retryable"])
+        self.assertEqual(payload["retry_after_seconds"], 15)
+        self.assertEqual(response.headers["Retry-After"], "15")
+
+    def test_search_does_not_mark_unrelated_database_errors_retryable(self) -> None:
+        self.search_payload = sqlite3.OperationalError("no such table: messages")
+
+        response = self.client.post("/api/search", json={"query": "hello"})
+
+        self.assertEqual(response.status_code, 500)
+        self.assertEqual(response.get_json(), {"error": "系统异常", "ok": False})
 
     def test_search_compresses_large_json_for_gzip_clients(self) -> None:
         self.search_payload = {

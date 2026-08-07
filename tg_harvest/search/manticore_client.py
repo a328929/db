@@ -8,10 +8,34 @@ from dataclasses import dataclass
 from typing import Any
 
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+MANTICORE_STORED_DOCUMENT_FIELDS = (
+    "chat_id",
+    "message_id",
+    "msg_date_ts",
+    "type_code",
+    "file_size",
+    "duration_sec",
+    "is_promo",
+)
 
 
 class ManticoreError(RuntimeError):
     pass
+
+
+def _http_error_detail(exc: urllib.error.HTTPError) -> str:
+    try:
+        raw_payload = exc.read(4096)
+        payload = json.loads(raw_payload.decode("utf-8"))
+        detail = payload.get("error") if isinstance(payload, dict) else ""
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        detail = ""
+    finally:
+        exc.close()
+    normalized = " ".join(str(detail or "").split())
+    if normalized:
+        return f"HTTP {exc.code}: {normalized[:500]}"
+    return f"HTTP {exc.code}: {exc.reason}"
 
 
 def validate_table_name(value: str) -> str:
@@ -50,6 +74,10 @@ class ManticoreClient:
                 request, timeout=self.timeout_seconds
             ) as response:
                 payload = response.read()
+        except urllib.error.HTTPError as exc:
+            raise ManticoreError(
+                f"Manticore request failed: {_http_error_detail(exc)}"
+            ) from exc
         except (urllib.error.URLError, TimeoutError, OSError) as exc:
             raise ManticoreError(f"Manticore request failed: {exc}") from exc
 
@@ -139,15 +167,15 @@ class ManticoreClient:
         return max(0, int(source.get("count") or 0))
 
     def sample_documents(self, document_ids: list[int]) -> dict[int, dict[str, Any]]:
-        """Return indexed fields for a bounded consistency sample."""
+        """Return stored attributes for a bounded consistency sample."""
         ids = sorted({int(document_id) for document_id in document_ids if int(document_id) > 0})
         if not ids:
             return {}
         id_list = ",".join(str(document_id) for document_id in ids)
+        stored_fields = ", ".join(MANTICORE_STORED_DOCUMENT_FIELDS)
         payload = self.execute_select(
-            f"SELECT id, content, chat_id, message_id, msg_date_ts, "
-            f"type_code, file_size, duration_sec, is_promo FROM {self.table} "
-            f"WHERE id IN ({id_list})"
+            f"SELECT id, {stored_fields} FROM {self.table} "
+            f"WHERE id IN ({id_list}) LIMIT {len(ids)}"
         )
         hits = payload.get("hits")
         raw_hits = hits.get("hits") if isinstance(hits, dict) else None

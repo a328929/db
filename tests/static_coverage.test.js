@@ -68,6 +68,131 @@ function loadScript(relativePath, sandbox, hookSource = '') {
   vm.runInNewContext(source, sandbox, { filename });
 }
 
+test('search errors preserve backend semantics and explicit retry policy', async () => {
+  const sandbox = createSandbox();
+  const responses = [];
+  sandbox.fetch = async () => responses.shift();
+  loadScript(
+    'static/app.js',
+    sandbox,
+    'window.__searchErrorTestHooks = { fetchSearchResult: _fetchSearchResult };'
+  );
+  const fetchSearchResult = sandbox.__searchErrorTestHooks.fetchSearchResult;
+
+  responses.push({
+    ok: false,
+    status: 503,
+    headers: { get(name) { return name === 'Retry-After' ? '3' : null; } },
+    async json() {
+      return {
+        error: '搜索索引暂不可用，请稍后重试',
+        code: 'search_index_unavailable',
+        retryable: true,
+        retry_after_seconds: 60
+      };
+    }
+  });
+  await assert.rejects(fetchSearchResult({ query: 'test' }), (error) => {
+    assert.equal(error.message, '搜索索引暂不可用，请稍后重试');
+    assert.equal(error.shouldRetry, true);
+    assert.equal(error.retryDelay, 3000);
+    return true;
+  });
+
+  responses.push({
+    ok: false,
+    status: 503,
+    headers: { get() { return '15'; } },
+    async json() {
+      return { error: '数据库繁忙，请稍后重试', code: 'database_busy', retryable: true };
+    }
+  });
+  await assert.rejects(fetchSearchResult({ query: 'test' }), (error) => {
+    assert.equal(error.message, '数据库繁忙，请稍后重试');
+    assert.equal(error.shouldRetry, true);
+    return true;
+  });
+
+  responses.push({
+    ok: false,
+    status: 500,
+    headers: { get() { return null; } },
+    async json() { return { error: '系统异常' }; }
+  });
+  await assert.rejects(fetchSearchResult({ query: 'test' }), (error) => {
+    assert.equal(error.message, '系统异常');
+    assert.equal(error.shouldRetry, false);
+    assert.equal(error.retryDelay, 0);
+    return true;
+  });
+});
+
+test('admin fetch errors preserve backend code and retry metadata', async () => {
+  const sandbox = createSandbox();
+  const responses = [];
+  sandbox.fetch = async () => responses.shift();
+  loadScript(
+    'static/admin_manage_shared.js',
+    sandbox,
+    'window.__adminErrorTestHooks = { fetchJSON: AdminManageShared.fetchJSON };'
+  );
+  const fetchJSON = sandbox.__adminErrorTestHooks.fetchJSON;
+
+  responses.push({
+    ok: false,
+    status: 503,
+    headers: { get(name) { return name === 'Retry-After' ? '7' : null; } },
+    async json() {
+      return {
+        ok: false,
+        code: 'search_index_unavailable',
+        retryable: true,
+        retry_after_seconds: 60
+      };
+    }
+  });
+  await assert.rejects(fetchJSON('/api/admin/sync'), (error) => {
+    assert.equal(error.message, '搜索索引暂不可用，请稍后重试');
+    assert.equal(error.code, 'search_index_unavailable');
+    assert.equal(error.retryable, true);
+    assert.equal(error.retryAfterSeconds, 7);
+    assert.equal(error.retry_after_seconds, 7);
+    assert.equal(error.statusCode, 503);
+    return true;
+  });
+
+  responses.push({
+    ok: false,
+    status: 503,
+    headers: { get() { return null; } },
+    async json() {
+      return { ok: false, code: 'database_busy', retryable: true, retry_after_seconds: 15 };
+    }
+  });
+  await assert.rejects(fetchJSON('/api/admin/sync'), (error) => {
+    assert.equal(error.message, '数据库繁忙，请稍后重试');
+    assert.equal(error.code, 'database_busy');
+    assert.equal(error.retryable, true);
+    assert.equal(error.retryAfterSeconds, 15);
+    return true;
+  });
+
+  responses.push({
+    ok: false,
+    status: 500,
+    headers: { get() { return null; } },
+    async json() { return { ok: false, error: '系统异常' }; }
+  });
+  await assert.rejects(fetchJSON('/api/admin/sync'), (error) => {
+    assert.equal(error.message, '系统异常');
+    assert.equal(error.code, '');
+    assert.equal(error.retryable, false);
+    assert.equal(error.retryAfterSeconds, 0);
+    assert.equal(error.statusCode, 500);
+    return true;
+  });
+});
+
 test('shared admin helpers exercise the modernized string and log handling', () => {
   const sandbox = createSandbox();
   sandbox.TgHarvestDateUtils = { formatDateTime(value) { return String(value || ''); } };

@@ -1063,21 +1063,74 @@
     }
   }
 
-  function buildResponseErrorMessage(response, payload) {
-    var serverMessage = '';
-    if (payload && typeof payload.error === 'string' && payload.error.trim()) {
-      serverMessage = payload.error.trim();
+  function readRetryAfterSeconds(response, payload) {
+    var candidates = [];
+    if (
+      response
+      && response.headers
+      && typeof response.headers.get === 'function'
+    ) {
+      candidates.push(response.headers.get('Retry-After'));
     }
+    candidates.push(payload && payload.retry_after_seconds);
+
+    for (var i = 0; i < candidates.length; i += 1) {
+      var seconds = Number(candidates[i]);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.max(1, Math.min(Math.trunc(seconds), 300));
+      }
+    }
+    return 0;
+  }
+
+  function responseErrorMessageForCode(code) {
+    if (code === 'database_busy') {
+      return '数据库繁忙，请稍后重试';
+    }
+    if (code === 'search_index_unavailable') {
+      return '搜索索引暂不可用，请稍后重试';
+    }
+    return '';
+  }
+
+  function buildResponseErrorDetails(response, payload) {
+    var code = payload && typeof payload.code === 'string'
+      ? payload.code.trim()
+      : '';
+    var serverMessage = payload && typeof payload.error === 'string'
+      ? payload.error.trim()
+      : '';
+    var message = serverMessage || responseErrorMessageForCode(code);
+
+    if (!message && response.status === 429) {
+      message = '请求太快了，请稍等一会儿再试';
+    }
+    if (!message && response.status === 503) {
+      message = '服务暂不可用，请稍后再试';
+    }
+    if (!message && response.status === 500) {
+      message = '系统异常';
+    }
+    if (!message) {
+      message = '操作失败 (HTTP ' + response.status + ')';
+    }
+
+    return {
+      message: message,
+      code: code,
+      retryable: !!(payload && payload.retryable === true),
+      retryAfterSeconds: readRetryAfterSeconds(response, payload)
+    };
+  }
+
+  function buildResponseErrorMessage(response, payload) {
+    var serverMessage = payload && typeof payload.error === 'string'
+      ? payload.error.trim()
+      : '';
     if (serverMessage) {
       return serverMessage;
     }
-    if (response.status === 429) {
-      return '请求太快了，请稍等一会儿再试';
-    }
-    if (response.status === 500 || response.status === 503) {
-      return '系统异常，请 15 秒后再试';
-    }
-    return '操作失败 (HTTP ' + response.status + ')';
+    return buildResponseErrorDetails(response, payload).message;
   }
 
   async function fetchJSON(url, options) {
@@ -1127,10 +1180,15 @@
         throw new Error('未授权，请先登录');
       }
 
-      throw new Error(buildResponseErrorMessage(
-        response,
-        await readResponseErrorPayload(response)
-      ));
+      var errorPayload = await readResponseErrorPayload(response);
+      var errorDetails = buildResponseErrorDetails(response, errorPayload);
+      var responseError = new Error(errorDetails.message);
+      responseError.code = errorDetails.code;
+      responseError.retryable = errorDetails.retryable;
+      responseError.retryAfterSeconds = errorDetails.retryAfterSeconds;
+      responseError.retry_after_seconds = errorDetails.retryAfterSeconds;
+      responseError.statusCode = response.status;
+      throw responseError;
     }
 
     try {

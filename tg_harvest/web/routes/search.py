@@ -1,4 +1,5 @@
 import gzip
+import sqlite3
 import threading
 import time
 from collections import deque
@@ -20,6 +21,31 @@ SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS = 10_000
 _search_rate_tracker: dict[str, deque] = {}
 _rate_lock = threading.Lock()
 _SEARCH_GZIP_MIN_BYTES = 1024
+_SEARCH_INDEX_RETRY_AFTER_SECONDS = 60
+_DATABASE_BUSY_RETRY_AFTER_SECONDS = 15
+
+
+def _retryable_error(message: str, *, code: str, retry_after_seconds: int):
+    response, status_code = json_error(
+        message,
+        503,
+        code=code,
+        retryable=True,
+        retry_after_seconds=retry_after_seconds,
+    )
+    response.headers["Retry-After"] = str(retry_after_seconds)
+    return response, status_code
+
+
+def _is_sqlite_busy_error(exc: sqlite3.OperationalError) -> bool:
+    error_code = getattr(exc, "sqlite_errorcode", None)
+    if isinstance(error_code, int):
+        primary_code = error_code & 0xFF
+        return primary_code in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}
+    message = str(exc).strip().lower()
+    return message.startswith("database") and (
+        "locked" in message or "busy" in message
+    )
 
 
 def _compress_search_response(response):
@@ -121,6 +147,20 @@ def register_search_routes(
             message = str(exc).strip() or "参数格式错误"
             return json_error(message, 400)
         except ManticoreError:
-            return json_error("搜索索引暂不可用，请稍后重试", 503)
+            return _retryable_error(
+                "搜索索引暂不可用，请稍后重试",
+                code="search_index_unavailable",
+                retry_after_seconds=_SEARCH_INDEX_RETRY_AFTER_SECONDS,
+            )
+        except sqlite3.OperationalError as exc:
+            if _is_sqlite_busy_error(exc):
+                return _retryable_error(
+                    "数据库繁忙，请稍后重试",
+                    code="database_busy",
+                    retry_after_seconds=_DATABASE_BUSY_RETRY_AFTER_SECONDS,
+                )
+            return logged_json_error(logger, "数据库查询异常", "系统异常")
+        except sqlite3.Error:
+            return logged_json_error(logger, "数据库查询异常", "系统异常")
         except Exception:
             return logged_json_error(logger, "系统异常", "系统异常")

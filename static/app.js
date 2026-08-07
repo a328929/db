@@ -590,6 +590,20 @@
     return cached;
   }
 
+  function _retryDelayMs(response, errorPayload) {
+    const retryAfterHeader = response.headers && typeof response.headers.get === "function"
+      ? response.headers.get("Retry-After")
+      : null;
+    const candidates = [retryAfterHeader, errorPayload?.retry_after_seconds];
+    for (const candidate of candidates) {
+      const seconds = Number(candidate);
+      if (Number.isFinite(seconds) && seconds > 0) {
+        return Math.max(1000, Math.min(seconds * 1000, 300000));
+      }
+    }
+    return 15000;
+  }
+
   async function _fetchSearchResult(payload) {
     const resp = await fetch("/api/search", {
       method: "POST",
@@ -601,28 +615,24 @@
     });
 
     if (!resp.ok) {
-      let errorMessage = `错误 ${resp.status}: `;
-      let shouldRetry = false;
-      let retryDelay = 0;
-
-      if (resp.status === 429) {
-          errorMessage = "搜索太频繁啦，请稍等一分钟再试。";
-      } else if (resp.status === 500 || resp.status === 503) {
-          errorMessage = "数据库繁忙，将在 15 秒后自动重试...";
-          shouldRetry = true;
-          retryDelay = 15000;
-      } else {
-          try {
-            const errorPayload = await resp.json();
-            if (errorPayload && typeof errorPayload.error === "string") {
-              errorMessage += errorPayload.error;
-            } else {
-              errorMessage += "系统响应异常";
-            }
-          } catch (_ignored) {
-            errorMessage += "未知错误";
-          }
+      let errorPayload = null;
+      try {
+        errorPayload = await resp.json();
+      } catch (_ignored) {
+        errorPayload = null;
       }
+
+      const serverMessage = errorPayload && typeof errorPayload.error === "string"
+        ? errorPayload.error.trim()
+        : "";
+      const fallbackMessage = resp.status === 429
+        ? "查询过于频繁，请稍后再试"
+        : resp.status === 500
+          ? "系统异常"
+          : `请求失败（错误 ${resp.status}）`;
+      const errorMessage = serverMessage || fallbackMessage;
+      const shouldRetry = !!(errorPayload && errorPayload.retryable === true);
+      const retryDelay = shouldRetry ? _retryDelayMs(resp, errorPayload) : 0;
 
       const error = new Error(errorMessage);
       error.shouldRetry = shouldRetry;
