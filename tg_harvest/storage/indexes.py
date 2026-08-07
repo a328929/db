@@ -9,6 +9,12 @@ _UNIQUE_CONSTRAINT_DUPLICATE_INDEXES = (
     ),
 )
 
+_UNUSED_INDEXES = (
+    "idx_messages_sender",
+    "idx_media_kind",
+    "idx_media_mime",
+)
+
 
 def _index_columns(cur: sqlite3.Cursor, index_name: str) -> tuple[str, ...]:
     cur.execute(f"PRAGMA index_info({index_name})")
@@ -37,6 +43,8 @@ def _has_equivalent_unique_index(
 
 
 def _drop_redundant_indexes(cur: sqlite3.Cursor) -> None:
+    for index_name in _UNUSED_INDEXES:
+        cur.execute(f"DROP INDEX IF EXISTS {index_name}")
     for index_name, table_name, expected_columns in (
         _UNIQUE_CONSTRAINT_DUPLICATE_INDEXES
     ):
@@ -127,13 +135,7 @@ def _create_message_indexes(cur: sqlite3.Cursor) -> None:
         "ON messages(chat_id, is_promo, promo_score DESC, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
-    # 发送者与消息类型聚合索引（支持筛选）
-    _ensure_index(
-        cur,
-        "idx_messages_sender",
-        "CREATE INDEX idx_messages_sender "
-        "ON messages(chat_id, sender_id, msg_date_ts DESC, message_id DESC, pk DESC)"
-    )
+    # 消息类型聚合索引（支持筛选）
     _ensure_index(
         cur,
         "idx_messages_type",
@@ -247,19 +249,6 @@ def _create_media_indexes(cur: sqlite3.Cursor) -> None:
         "ON message_media(duration_sec DESC, chat_id DESC, message_id DESC)"
     )
 
-    # 类型与元数据过滤索引
-    _ensure_index(
-        cur,
-        "idx_media_kind",
-        "CREATE INDEX idx_media_kind "
-        "ON message_media(chat_id, media_kind)"
-    )
-    _ensure_index(
-        cur,
-        "idx_media_mime",
-        "CREATE INDEX idx_media_mime "
-        "ON message_media(chat_id, mime_type)"
-    )
     _ensure_index(
         cur,
         "idx_media_grouped_id",

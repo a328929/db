@@ -997,6 +997,34 @@ class DbSchemaMigrationTests(unittest.TestCase):
         plan_text = " ".join(str(row[3]) for row in plan)
         self.assertIn(unique_index, plan_text)
 
+    def test_create_schema_removes_indexes_unused_by_project_queries(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        self.conn.executescript(
+            """
+            CREATE INDEX idx_messages_sender
+            ON messages(chat_id, sender_id, msg_date_ts DESC, message_id DESC, pk DESC);
+            CREATE INDEX idx_media_kind ON message_media(chat_id, media_kind);
+            CREATE INDEX idx_media_mime ON message_media(chat_id, mime_type);
+            """
+        )
+
+        create_schema(self.conn, feats)
+
+        index_names = {
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        self.assertTrue(
+            {
+                "idx_messages_sender",
+                "idx_media_kind",
+                "idx_media_mime",
+            }.isdisjoint(index_names)
+        )
+
     def test_redundant_index_cleanup_requires_equivalent_unique_index(self) -> None:
         self.conn.execute(
             """
