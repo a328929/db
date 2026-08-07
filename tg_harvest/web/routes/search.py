@@ -3,11 +3,11 @@ import threading
 import time
 from collections import deque
 from contextlib import closing
-from typing import Any
 
 from flask import jsonify, request
 
 from tg_harvest.search.manticore_client import ManticoreError
+from tg_harvest.search.params import parse_bool_flag
 from tg_harvest.web.ip_utils import get_client_ip
 from tg_harvest.web.responses import json_error, logged_json_error, require_json_dict
 
@@ -73,18 +73,6 @@ def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
         return False
 
 
-def _request_flag_is_true(value: Any) -> bool:
-    if isinstance(value, bool):
-        return value
-    if value is None:
-        return False
-    if isinstance(value, (int, float)):
-        return bool(value)
-    if isinstance(value, str):
-        return value.strip().lower() in {"1", "true", "yes", "on"}
-    return False
-
-
 def register_search_routes(
     app,
     *,
@@ -106,7 +94,9 @@ def register_search_routes(
         # 但 count_only 仍会触发数据库统计，必须单独限流，避免被直接调用拖垮数据库。
         ip = get_client_ip(request)
         rate_bucket = (
-            "count_only" if _request_flag_is_true(data.get("count_only")) else "search"
+            "count_only"
+            if parse_bool_flag(data.get("count_only"), default=False)
+            else "search"
         )
         if _is_rate_limited(ip, bucket=rate_bucket):
             return json_error("查询过于频繁，请稍后再试", 429)

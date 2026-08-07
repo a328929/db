@@ -496,7 +496,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
         for _ in range(search_routes_module.SEARCH_RATE_LIMIT + 5):
             response = self.client.post(
                 "/api/search",
-                json={"query": "hello", "count_only": True},
+                json={"query": "hello", "count_only": "yes"},
                 environ_base={"REMOTE_ADDR": ip},
             )
             self.assertEqual(response.status_code, 200)

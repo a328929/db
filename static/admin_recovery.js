@@ -662,7 +662,7 @@
         chat_username: item.chat_username || '',
         source_session: item.source_session || '',
         source_entity_id: item.source_entity_id || '',
-        source_access_hash: item.source_access_hash || ''
+        source_access_hash: String(item.source_access_hash || '')
       });
       var jobId = getCreatedJobId(data);
       appendLog(elements, '添加入库任务已创建：' + jobId);

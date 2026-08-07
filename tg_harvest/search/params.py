@@ -28,7 +28,7 @@ class SearchParams:
     duration_sec: int | None = None
 
 
-def _parse_bool(value: Any, *, default: bool = False) -> bool:
+def parse_bool_flag(value: Any, *, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     if value is None:
@@ -194,8 +194,8 @@ def _parse_search_params(data: dict[str, Any]) -> SearchParams:
     chat_id_raw = data.get("chat_id", "all")
     chat_id = None if str(chat_id_raw).lower() == "all" else int(chat_id_raw)
 
-    skip_count = _parse_bool(data.get("skip_count", False), default=False)
-    count_only = _parse_bool(data.get("count_only", False), default=False)
+    skip_count = parse_bool_flag(data.get("skip_count", False), default=False)
+    count_only = parse_bool_flag(data.get("count_only", False), default=False)
     start_ts = _parse_date_bound(
         data.get("start_date", ""), field_label="开始日期", end_exclusive=False
     )

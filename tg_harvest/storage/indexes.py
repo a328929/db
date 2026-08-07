@@ -1,6 +1,48 @@
 import re
 import sqlite3
 
+_UNIQUE_CONSTRAINT_DUPLICATE_INDEXES = (
+    (
+        "idx_admin_clone_message_map_source",
+        "admin_clone_message_map",
+        ("run_id", "source_chat_id", "source_message_id", "chunk_index", "mode"),
+    ),
+)
+
+
+def _index_columns(cur: sqlite3.Cursor, index_name: str) -> tuple[str, ...]:
+    cur.execute(f"PRAGMA index_info({index_name})")
+    return tuple(
+        str(row["name"] if isinstance(row, sqlite3.Row) else row[2])
+        for row in cur.fetchall()
+    )
+
+
+def _has_equivalent_unique_index(
+    cur: sqlite3.Cursor,
+    table_name: str,
+    expected_columns: tuple[str, ...],
+) -> bool:
+    cur.execute(f"PRAGMA index_list({table_name})")
+    for row in cur.fetchall():
+        is_unique = bool(row["unique"] if isinstance(row, sqlite3.Row) else row[2])
+        origin = str(row["origin"] if isinstance(row, sqlite3.Row) else row[3])
+        is_partial = bool(row["partial"] if isinstance(row, sqlite3.Row) else row[4])
+        if not is_unique or origin != "u" or is_partial:
+            continue
+        index_name = str(row["name"] if isinstance(row, sqlite3.Row) else row[1])
+        if _index_columns(cur, index_name) == expected_columns:
+            return True
+    return False
+
+
+def _drop_redundant_indexes(cur: sqlite3.Cursor) -> None:
+    for index_name, table_name, expected_columns in (
+        _UNIQUE_CONSTRAINT_DUPLICATE_INDEXES
+    ):
+        if _has_equivalent_unique_index(cur, table_name, expected_columns):
+            cur.execute(f"DROP INDEX IF EXISTS {index_name}")
+
 
 def _normalize_index_sql(sql: str) -> str:
     return re.sub(r"\s+", " ", str(sql or "").strip()).lower()
@@ -448,14 +490,6 @@ def _create_admin_clone_migration_indexes(cur: sqlite3.Cursor) -> None:
     )
     _ensure_index(
         cur,
-        "idx_admin_clone_message_map_source",
-        "CREATE INDEX idx_admin_clone_message_map_source "
-        "ON admin_clone_message_map("
-        "run_id, source_chat_id, source_message_id, chunk_index, mode"
-        ")",
-    )
-    _ensure_index(
-        cur,
         "idx_admin_clone_message_map_migration",
         "CREATE INDEX idx_admin_clone_message_map_migration "
         "ON admin_clone_message_map(migration_id, status, updated_at DESC)",
@@ -568,6 +602,7 @@ def _create_sync_scheduler_indexes(cur: sqlite3.Cursor) -> None:
 
 
 def _create_indexes(cur: sqlite3.Cursor) -> None:
+    _drop_redundant_indexes(cur)
     _create_chat_indexes(cur)
     _create_message_indexes(cur)
     _create_media_indexes(cur)

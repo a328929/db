@@ -15,6 +15,19 @@ from tg_harvest.web.responses import (
 from tg_harvest.web.routes.chat_links import with_chat_links
 
 
+def _with_recovery_candidate_contract(
+    rows,
+    build_telegram_chat_link_bundle_fn,
+) -> list[dict]:
+    items = with_chat_links(rows, build_telegram_chat_link_bundle_fn)
+    for item in items:
+        raw_access_hash = item.get("source_access_hash")
+        item["source_access_hash"] = (
+            "" if raw_access_hash in (None, "") else str(int(raw_access_hash))
+        )
+    return items
+
+
 def _parse_restore_chat_ids(payload: dict) -> tuple[list[int] | None, object | None]:
     raw_chat_ids = payload.get("chat_ids")
     if raw_chat_ids is None:
@@ -256,7 +269,7 @@ def register_recovery_routes(
             return jsonify(
                 {
                     "ok": True,
-                    "items": with_chat_links(
+                    "items": _with_recovery_candidate_contract(
                         items,
                         services.build_telegram_chat_link_bundle_fn,
                     ),

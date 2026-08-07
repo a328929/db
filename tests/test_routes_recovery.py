@@ -61,7 +61,7 @@ class RecoveryRoutesTests(unittest.TestCase):
                     "is_public": 1,
                     "source_session": "my_session.session",
                     "source_entity_id": -1001,
-                    "source_access_hash": 9001,
+                    "source_access_hash": 9007199254740993,
                     "availability_reason": "",
                     "session_entity_date": "2026-04-01 10:00:00",
                     "session_entity_ts": 1775037600,
@@ -142,6 +142,7 @@ class RecoveryRoutesTests(unittest.TestCase):
         self.assertEqual(payload["overview"]["pending_count"], 1)
         item = payload["items"][0]
         self.assertEqual(item["chat_title"], "Recoverable")
+        self.assertEqual(item["source_access_hash"], "9007199254740993")
         self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=recoverable")
         self.assertEqual(item["telegram_web_link"], "https://t.me/recoverable")
 
@@ -178,7 +179,7 @@ class RecoveryRoutesTests(unittest.TestCase):
                     "chat_username": "recoverable",
                     "source_session": "my_session.session",
                     "source_entity_id": -1001,
-                    "source_access_hash": 9001,
+                    "source_access_hash": "9007199254740993",
                 },
                 headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
             )
@@ -196,7 +197,7 @@ class RecoveryRoutesTests(unittest.TestCase):
                 "chat_username": "recoverable",
                 "source_session": "my_session.session",
                 "source_entity_id": -1001,
-                "source_access_hash": 9001,
+                "source_access_hash": 9007199254740993,
             },
         )
         self.assertEqual(

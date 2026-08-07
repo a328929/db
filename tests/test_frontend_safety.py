@@ -983,7 +983,10 @@ class FrontendSafetyTests(unittest.TestCase):
     def test_admin_recovery_uses_dedicated_add_route(self) -> None:
         source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
         self.assertIn("/api/admin/recovery/add", source)
-        self.assertIn("source_access_hash: item.source_access_hash || ''", source)
+        self.assertIn(
+            "source_access_hash: String(item.source_access_hash || '')",
+            source,
+        )
         self.assertNotIn("/api/admin/jobs/harvest", source)
 
     def test_card_action_buttons_have_item_specific_accessible_names(self) -> None:

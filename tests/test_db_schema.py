@@ -7,6 +7,7 @@ from unittest.mock import patch
 import tg_harvest.app.factory as app_factory
 from tg_harvest.search.result_mapper import _map_search_items
 from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
+from tg_harvest.storage.indexes import _drop_redundant_indexes
 from tg_harvest.storage.schema import (
     _column_sql_has_dynamic_datetime_default,
     _sqlite_add_column_sql,
@@ -938,6 +939,94 @@ class DbSchemaMigrationTests(unittest.TestCase):
         index_sql = str(cur.fetchone()["sql"])
         self.assertIn("dedupe_eligible", index_sql)
         self.assertNotIn("item_count DESC", index_sql)
+
+    def test_create_schema_removes_index_duplicating_unique_constraint(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        self.conn.execute(
+            """
+            CREATE INDEX idx_admin_clone_message_map_source
+            ON admin_clone_message_map(
+                run_id, source_chat_id, source_message_id, chunk_index, mode
+            )
+            """
+        )
+        self.conn.commit()
+
+        create_schema(self.conn, feats)
+
+        indexes = {
+            str(row[1]): str(row[3])
+            for row in self.conn.execute(
+                "PRAGMA index_list(admin_clone_message_map)"
+            ).fetchall()
+        }
+        self.assertNotIn("idx_admin_clone_message_map_source", indexes)
+        unique_index = next(
+            name for name, origin in indexes.items() if origin == "u"
+        )
+        unique_columns = tuple(
+            str(row[2])
+            for row in self.conn.execute(
+                f"PRAGMA index_info({unique_index})"
+            ).fetchall()
+        )
+        self.assertEqual(
+            unique_columns,
+            (
+                "run_id",
+                "source_chat_id",
+                "source_message_id",
+                "chunk_index",
+                "mode",
+            ),
+        )
+
+        plan = self.conn.execute(
+            """
+            EXPLAIN QUERY PLAN
+            SELECT id
+            FROM admin_clone_message_map
+            WHERE run_id = 'run-1'
+              AND source_chat_id = 1
+              AND source_message_id = 2
+              AND chunk_index = 0
+              AND mode = 'text_replay'
+            """
+        ).fetchall()
+        plan_text = " ".join(str(row[3]) for row in plan)
+        self.assertIn(unique_index, plan_text)
+
+    def test_redundant_index_cleanup_requires_equivalent_unique_index(self) -> None:
+        self.conn.execute(
+            """
+            CREATE TABLE admin_clone_message_map (
+                run_id TEXT NOT NULL,
+                source_chat_id INTEGER NOT NULL,
+                source_message_id INTEGER NOT NULL,
+                chunk_index INTEGER NOT NULL,
+                mode TEXT NOT NULL
+            )
+            """
+        )
+        self.conn.execute(
+            """
+            CREATE INDEX idx_admin_clone_message_map_source
+            ON admin_clone_message_map(
+                run_id, source_chat_id, source_message_id, chunk_index, mode
+            )
+            """
+        )
+
+        _drop_redundant_indexes(self.conn.cursor())
+
+        indexes = {
+            str(row[1])
+            for row in self.conn.execute(
+                "PRAGMA index_list(admin_clone_message_map)"
+            ).fetchall()
+        }
+        self.assertIn("idx_admin_clone_message_map_source", indexes)
 
     def test_schema_without_fts5_does_not_install_broken_fts_triggers(self) -> None:
         feats = SimpleNamespace(supports_strict=False, supports_fts5=False)
