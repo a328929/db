@@ -10,6 +10,7 @@ from tg_harvest.admin_jobs.framework import (
     AdminJobContext,
     AdminJobResult,
     admin_job,
+    legacy_admin_job_log_adapter,
 )
 from tg_harvest.config import CFG
 from tg_harvest.domain.normalize import normalize_search_term
@@ -545,7 +546,7 @@ def _admin_cleanup_job_runner(
             cur,
             ctx.job_id,
             target_count,
-            ctx.log,
+            legacy_admin_job_log_adapter(ctx),
             cleanup_mode=cleanup_mode,
         )
 

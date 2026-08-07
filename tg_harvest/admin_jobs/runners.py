@@ -3439,7 +3439,11 @@ def _count_chat_related_rows(conn: Any, chat_id: int) -> dict[str, int]:
 
 def _admin_start_delete_job_thread(job_id, chat_id, chat_title, **kwargs) -> Any:
     return start_admin_job_thread(
-        _admin_delete_job_runner, job_id, chat_id, chat_title, **kwargs
+        _admin_delete_job_runner,
+        job_id,
+        chat_id=chat_id,
+        chat_title=chat_title,
+        **kwargs,
     )
 
 

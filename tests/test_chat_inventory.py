@@ -3,9 +3,11 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tg_harvest.admin_jobs.channel_inventory import (
+    _admin_restricted_chats_scan_job_runner,
     _merge_restricted_chat_row,
     _scan_restricted_chat_rows,
 )
+from tg_harvest.admin_jobs.framework import legacy_admin_job_log_adapter
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
@@ -102,6 +104,83 @@ class _RestrictionReason:
         self.text = text
         self.reason = reason
         self.platform = platform
+
+
+def test_legacy_admin_job_log_adapter_forwards_message_to_context():
+    messages = []
+    append_log = legacy_admin_job_log_adapter(SimpleNamespace(log=messages.append))
+
+    append_log("job-risk", "正在扫描风险状态")
+
+    assert messages == ["正在扫描风险状态"]
+
+
+def test_restricted_job_runner_uses_context_log_adapter():
+    messages = []
+    connection = SimpleNamespace(close=lambda: None)
+    context = SimpleNamespace(
+        job_id="job-risk",
+        config=SimpleNamespace(),
+        log=messages.append,
+        progress=SimpleNamespace(
+            start=lambda **_kwargs: None,
+            update=lambda **_kwargs: None,
+            finish=lambda: None,
+        ),
+        get_connection=lambda: connection,
+    )
+
+    def fake_scan_rows(**kwargs):
+        kwargs["admin_job_append_log_fn"](
+            kwargs["job_id"],
+            "正在连接主账号并扫描已加入会话风险标记...",
+        )
+        return []
+
+    with (
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory._scan_restricted_chat_rows",
+            side_effect=fake_scan_rows,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory.replace_restricted_chat_scan_results",
+            return_value=0,
+        ),
+    ):
+        result = _admin_restricted_chats_scan_job_runner.__wrapped__(context)
+
+    assert result.success
+    assert messages == [
+        "正在连接主账号并扫描已加入会话风险标记...",
+        "正在保存扫描结果...",
+    ]
+
+
+def test_restricted_scan_preserves_phase_one_error_when_no_clients_returned():
+    def fake_call_with_conn(_get_conn_fn, _fn, *_args, **_kwargs):
+        return []
+
+    with (
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory.call_with_conn",
+            side_effect=fake_call_with_conn,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.channel_inventory._scan_joined_restricted_chats",
+            side_effect=RuntimeError("phase one failed"),
+        ),
+    ):
+        try:
+            _scan_restricted_chat_rows(
+                cfg=SimpleNamespace(),
+                get_conn_fn=lambda: None,
+                admin_job_append_log_fn=lambda *_args: None,
+                job_id="job-risk",
+            )
+        except RuntimeError as exc:
+            assert str(exc) == "phase one failed"
+        else:
+            raise AssertionError("Expected the phase-one error to be raised")
 
 
 def test_find_missing_joined_chats_filters_and_sorts():

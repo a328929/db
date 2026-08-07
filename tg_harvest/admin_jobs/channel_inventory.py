@@ -22,6 +22,7 @@ from tg_harvest.admin_jobs.framework import (
     AdminJobContext,
     AdminJobResult,
     admin_job,
+    legacy_admin_job_log_adapter,
 )
 from tg_harvest.admin_jobs.inventory_constants import (
     DEFAULT_FLOOD_WAIT_THRESHOLD,
@@ -759,6 +760,7 @@ def _scan_restricted_chat_rows(
         sort="message_count_desc",
     )
     previous_rows = call_with_conn(get_conn_fn, list_restricted_chat_scan_results)
+    active_clients: list[tuple[_ScanAccount, Any, str]] = []
 
     try:
         # Phase 1: Scan joined chats
@@ -942,7 +944,7 @@ def _admin_missing_chats_scan_job_runner(ctx: AdminJobContext) -> AdminJobResult
     rows = _scan_missing_chat_rows(
         cfg=ctx.config,
         get_conn_fn=lambda: ctx.get_connection(),
-        admin_job_append_log_fn=ctx.log,
+        admin_job_append_log_fn=legacy_admin_job_log_adapter(ctx),
         job_id=ctx.job_id,
     )
 
@@ -996,7 +998,7 @@ def _admin_restricted_chats_scan_job_runner(ctx: AdminJobContext) -> AdminJobRes
     rows = _scan_restricted_chat_rows(
         cfg=ctx.config,
         get_conn_fn=lambda: ctx.get_connection(),
-        admin_job_append_log_fn=ctx.log,
+        admin_job_append_log_fn=legacy_admin_job_log_adapter(ctx),
         job_id=ctx.job_id,
     )
 

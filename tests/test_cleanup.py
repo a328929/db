@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 from tg_harvest.admin_jobs.cleanup import (
+    _admin_cleanup_job_runner,
     _build_cleanup_like_patterns,
     _build_cleanup_targets_table,
     _execute_cleanup_deletion_batches,
@@ -86,6 +87,37 @@ class CleanupWriteLockTests(unittest.TestCase):
         self.assertEqual(lock.acquired, lock.released)
         self.assertTrue(log_lock_states)
         self.assertFalse(any(log_lock_states))
+
+    def test_unsearchable_cleanup_runner_adapts_context_logging(self) -> None:
+        self.conn.execute(
+            """
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                content, content_norm, has_media, is_promo, dedupe_eligible
+            )
+            VALUES (1, 20, '2026-01-01 00:00:00', 20, 'PHOTO', '', '', 1, 0, 0)
+            """
+        )
+        self.conn.commit()
+        messages = []
+        context = SimpleNamespace(
+            job_id="job-1",
+            get_connection=lambda: self.conn,
+            log=messages.append,
+        )
+
+        result = _admin_cleanup_job_runner.__wrapped__(
+            context,
+            keyword="",
+            scope="all",
+            chat_id=None,
+            target_label="全部数据",
+            cleanup_mode="empty_media",
+        )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message, "清理完成：共删除 1 条数据")
+        self.assertIn("进度：已清理 1/1", messages)
 
     def test_cleanup_deletes_message_media_without_foreign_key_pragmas(self) -> None:
         self.conn.execute("PRAGMA foreign_keys=OFF")

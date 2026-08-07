@@ -380,6 +380,7 @@ def register_recovery_routes(
                 job_id,
                 chat_ids=chat_ids,
                 target_label=target_label,
+                cfg=services.cfg,
                 get_conn_fn=services.get_conn_fn,
                 admin_job_set_status_fn=services.admin_job_set_status_fn,
                 admin_job_append_log_fn=services.admin_job_append_log_fn,

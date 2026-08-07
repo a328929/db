@@ -27,6 +27,7 @@ class _Bundle:
 
 class RecoveryRoutesTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.cfg = object()
         self.started_harvests = []
         self.started_scans = []
         self.started_restores = []
@@ -50,7 +51,7 @@ class RecoveryRoutesTests(unittest.TestCase):
             self.app,
             logger=_LoggerStub(),
             get_conn_fn=lambda: _ConnStub(),
-            cfg=object(),
+            cfg=self.cfg,
             list_recovery_chat_candidates_fn=lambda _conn: [
                 {
                     "chat_id": 1,
@@ -237,6 +238,7 @@ class RecoveryRoutesTests(unittest.TestCase):
         _args, kwargs = self.started_restores[0]
         self.assertEqual(kwargs["chat_ids"], [1])
         self.assertEqual(kwargs["target_label"], "1 个恢复候选")
+        self.assertIs(kwargs["cfg"], self.cfg)
 
 
 if __name__ == "__main__":

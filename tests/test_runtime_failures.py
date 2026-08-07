@@ -44,9 +44,11 @@ from tg_harvest.admin_jobs.range_streaming import (
 )
 from tg_harvest.admin_jobs.runners import (
     _ACCOUNT_FLOOD_COOLDOWNS,
+    _admin_delete_job_runner,
     _admin_get_chat_message_count,
     _admin_harvest_job_runner,
     _admin_process_single_chat_update,
+    _admin_start_delete_job_thread,
     _admin_update_account_start_delay,
     _admin_update_all_chats,
     _admin_update_effective_concurrency,
@@ -3950,6 +3952,27 @@ class SearchableMediaCleanupTests(unittest.TestCase):
 
 
 class AdminRunnerHelperTests(unittest.TestCase):
+    def test_delete_job_thread_passes_business_arguments_as_keywords(self) -> None:
+        cfg = object()
+
+        with patch(
+            "tg_harvest.admin_jobs.runners.start_admin_job_thread"
+        ) as start_job_thread:
+            _admin_start_delete_job_thread(
+                "job-delete",
+                7,
+                "Chat 7",
+                cfg=cfg,
+            )
+
+        self.assertEqual(
+            start_job_thread.call_args.args,
+            (_admin_delete_job_runner, "job-delete"),
+        )
+        self.assertEqual(start_job_thread.call_args.kwargs["chat_id"], 7)
+        self.assertEqual(start_job_thread.call_args.kwargs["chat_title"], "Chat 7")
+        self.assertIs(start_job_thread.call_args.kwargs["cfg"], cfg)
+
     def test_job_is_marked_error_when_done_status_cannot_be_persisted(self) -> None:
         statuses = []
         logs = []

@@ -38,6 +38,12 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         def start_cleanup_empty(**kwargs):
             self.started_jobs.append(kwargs)
 
+        def start_cleanup(*args, **kwargs):
+            self.started_jobs.append({"args": args, **kwargs})
+
+        def start_delete(*args, **kwargs):
+            self.started_jobs.append({"args": args, **kwargs})
+
         def start_delete_empty_chats(*args, **kwargs):
             self.started_jobs.append({"args": args, **kwargs})
 
@@ -73,9 +79,9 @@ class AdminRoutesHandlerTests(unittest.TestCase):
             admin_job_append_log_fn=append_log,
             admin_start_harvest_job_thread_fn=start_harvest,
             admin_start_update_job_thread_fn=start_update,
-            admin_start_delete_job_thread_fn=lambda *_args, **_kwargs: None,
+            admin_start_delete_job_thread_fn=start_delete,
             admin_start_delete_empty_chats_job_thread_fn=start_delete_empty_chats,
-            admin_start_cleanup_job_thread_fn=lambda *_args, **_kwargs: None,
+            admin_start_cleanup_job_thread_fn=start_cleanup,
             admin_start_cleanup_empty_job_thread_fn=start_cleanup_empty,
             admin_make_job_log_handler_fn=lambda _job_id: None,
             admin_job_set_status_fn=lambda *_args, **_kwargs: True,
@@ -234,6 +240,7 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         )
         self.assertEqual(len(self.started_jobs), 1)
         self.assertEqual(self.started_jobs[0]["target_label"], "chat-42")
+        self.assertIs(self.started_jobs[0]["cfg"], self.handler.cfg)
         self.assertEqual(
             self.logs,
             [
@@ -272,6 +279,18 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(response.get_json()["error"], "confirm 参数不匹配")
 
+    def test_delete_success_starts_job_with_framework_config(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/delete",
+            method="POST",
+            json={"chat_id": 7, "confirm": "DELETE:7"},
+        ):
+            response = self.handler.api_admin_job_create_delete.__wrapped__(self.handler)
+
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(self.started_jobs[0]["args"], ("job-1", 7, "chat-7"))
+        self.assertIs(self.started_jobs[0]["cfg"], self.handler.cfg)
+
     def test_delete_empty_chats_requires_server_side_confirmation(self) -> None:
         with self.app.test_request_context(
             "/api/admin/jobs/delete-empty-chats",
@@ -305,6 +324,23 @@ class AdminRoutesHandlerTests(unittest.TestCase):
         )
         self.assertEqual(len(self.started_jobs), 1)
         self.assertEqual(self.started_jobs[0]["args"], ("job-1",))
+        self.assertIs(self.started_jobs[0]["cfg"], self.handler.cfg)
+
+    def test_cleanup_success_starts_job_with_framework_config(self) -> None:
+        with self.app.test_request_context(
+            "/api/admin/jobs/cleanup",
+            method="POST",
+            json={
+                "keyword": "spam",
+                "scope": "all",
+                "confirm": "CLEANUP:all:all:spam",
+            },
+        ):
+            response = self.handler.api_admin_job_create_cleanup.__wrapped__(self.handler)
+
+        self.assertTrue(response.get_json()["ok"])
+        self.assertEqual(self.started_jobs[0]["keyword"], "spam")
+        self.assertIs(self.started_jobs[0]["cfg"], self.handler.cfg)
 
     def test_active_job_returns_current_snapshot(self) -> None:
         self.handler.admin_get_active_job_fn = lambda: {

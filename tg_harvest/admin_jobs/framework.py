@@ -281,6 +281,17 @@ class AdminJobContext:
         return _admin_job_stop_requested(self.job_id)
 
 
+def legacy_admin_job_log_adapter(
+    ctx: AdminJobContext,
+) -> Callable[[str, str], Any]:
+    """Adapt a context logger for helpers that still require a job-id callback."""
+
+    def append_log(_job_id: str, message: str) -> Any:
+        return ctx.log(message)
+
+    return append_log
+
+
 def admin_job(
     *,
     name: str,
