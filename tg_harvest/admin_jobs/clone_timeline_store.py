@@ -12,6 +12,7 @@ from tg_harvest.storage.clone import (
     load_clone_message_mapping,
     record_clone_message_mapping,
 )
+from tg_harvest.storage.clone_state_mappings import clone_text_mapping_order_is_valid
 
 
 class CloneMappingPersistenceError(RuntimeError):
@@ -19,6 +20,17 @@ class CloneMappingPersistenceError(RuntimeError):
 
 
 CLONE_TIMELINE_BATCH_SIZE = 100
+
+
+def ensure_timeline_text_order(
+    *, get_conn_fn: Callable[[], Any], run_id: str,
+    source_chat_id: int, target_chat_id: int,
+) -> None:
+    if not call_with_conn(
+        get_conn_fn, clone_text_mapping_order_is_valid, run_id=run_id,
+        source_chat_id=source_chat_id, target_chat_id=target_chat_id,
+    ):
+        raise RuntimeError("已完成的文本映射存在错序或无效目标，已暂停迁移；请检查目标副本")
 
 
 def next_timeline_batch(

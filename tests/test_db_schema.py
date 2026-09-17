@@ -6,7 +6,11 @@ from unittest.mock import patch
 
 import tg_harvest.app.factory as app_factory
 from tg_harvest.search.result_mapper import _map_search_items
-from tg_harvest.storage.connection import detect_sqlite_features, ensure_configured_db
+from tg_harvest.storage.connection import (
+    connect_db,
+    detect_sqlite_features,
+    ensure_configured_db,
+)
 from tg_harvest.storage.indexes import _drop_redundant_indexes
 from tg_harvest.storage.schema import (
     _column_sql_has_dynamic_datetime_default,
@@ -1255,6 +1259,28 @@ class DbSchemaMigrationTests(unittest.TestCase):
             mmap_mb=256,
             set_journal_mode=False,
         )
+
+    def test_connect_db_closes_connection_when_setup_fails(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        with (
+            patch("tg_harvest.storage.connection._open_connection", return_value=conn),
+            patch("tg_harvest.storage.connection._apply_pragmas", side_effect=sqlite3.OperationalError("database is locked")),
+            self.assertRaisesRegex(sqlite3.OperationalError, "database is locked"),
+        ):
+            connect_db(":memory:")
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
+
+    def test_ensure_configured_db_closes_connection_when_schema_fails(self) -> None:
+        conn = sqlite3.connect(":memory:")
+        with (
+            patch("tg_harvest.storage.connection.connect_configured_db", return_value=(conn, object())),
+            patch("tg_harvest.storage.schema.create_schema", side_effect=sqlite3.OperationalError("schema failed")),
+            self.assertRaisesRegex(sqlite3.OperationalError, "schema failed"),
+        ):
+            ensure_configured_db(cfg=SimpleNamespace(db_name=":memory:"))
+        with self.assertRaises(sqlite3.ProgrammingError):
+            conn.execute("SELECT 1")
 
     @unittest.skip("SQLite search indexes were removed")
     def test_create_schema_skip_fts_auto_heal_keeps_incremental_triggers(self) -> None:

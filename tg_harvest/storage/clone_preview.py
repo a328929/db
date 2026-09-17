@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from typing import Any
 
@@ -1091,7 +1092,8 @@ def list_clone_timeline_replay_batch(
             text_done AS (
                 SELECT
                     source_message_id,
-                    COUNT(DISTINCT chunk_index) AS done_count
+                    COUNT(DISTINCT chunk_index) AS done_count,
+                    json_group_array(chunk_index) AS done_chunks_json
                 FROM admin_clone_message_map
                 WHERE run_id = ?
                   AND source_chat_id = ?
@@ -1166,6 +1168,7 @@ def list_clone_timeline_replay_batch(
                 "msg_date_ts": _optional_int(row["msg_date_ts"]),
                 "text": str(row["text"] or ""),
                 "item_count": _row_int(row, "item_count"),
+                "done_chunks": json.loads(row["done_chunks_json"] or "[]"),
             }
             for row in cur.fetchall()
         ]

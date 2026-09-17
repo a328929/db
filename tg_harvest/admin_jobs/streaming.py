@@ -70,6 +70,7 @@ def stream_entity_harvest_to_writer(
     enable_dedupe: bool = True,
     progress_total: int | None = None,
     progress_prefix: str = "正在采集",
+    edited_message_ids: tuple[int, ...] = (),
 ) -> StreamedEntityHarvestResult:
     """Harvest one entity while delegating all writes to the shared writer thread."""
 
@@ -134,6 +135,7 @@ def stream_entity_harvest_to_writer(
                 write_batch_fn=_submit_harvest_batch,
                 progress_total=progress_total,
                 progress_prefix=progress_prefix,
+                edited_message_ids=edited_message_ids,
             )
 
         finalize_submitted = True

@@ -41,12 +41,12 @@ from tg_harvest.admin_jobs.clone_timeline_state import (
 )
 from tg_harvest.admin_jobs.clone_timeline_store import (
     CloneMappingPersistenceError,
+    ensure_timeline_text_order,
     media_mapping_done,
     next_timeline_batch,
     prepare_text_mapping_delivery,
     record_text_mapping,
     source_message_from_timeline_item,
-    text_mapping_done,
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
@@ -349,6 +349,10 @@ def _admin_clone_timeline_migration_job_runner(
             raise RuntimeError("迁移计划缺少已核验的源消息快照，请重新执行在线深度预检")
         if not target_chat_id:
             raise RuntimeError("目标副本尚未创建，不能执行完整时间线迁移")
+        ensure_timeline_text_order(
+            get_conn_fn=get_conn_fn, run_id=run_id,
+            source_chat_id=source_chat_id, target_chat_id=target_chat_id,
+        )
 
         admin_job_append_log_fn(
             job_id,
@@ -672,28 +676,14 @@ def _admin_clone_timeline_migration_job_runner(
                         continue
                     chunk_count = len(chunks)
                     source_message_id = int(source_message["message_id"])
-                    if all(
-                        text_mapping_done(
-                            get_conn_fn=get_conn_fn,
-                            run_id=run_id,
-                            source_chat_id=source_chat_id,
-                            source_message_id=source_message_id,
-                            chunk_index=chunk_index,
-                        )
-                        for chunk_index in range(chunk_count)
-                    ):
+                    done_chunks = set(item.get("done_chunks") or [])
+                    if all(index in done_chunks for index in range(chunk_count)):
                         state.counters.processed += 1
                         state.counters.text_skipped += 1
                         continue
                     message_failed = False
                     for chunk_index, chunk in enumerate(chunks):
-                        if text_mapping_done(
-                            get_conn_fn=get_conn_fn,
-                            run_id=run_id,
-                            source_chat_id=source_chat_id,
-                            source_message_id=source_message_id,
-                            chunk_index=chunk_index,
-                        ):
+                        if chunk_index in done_chunks:
                             continue
                         delivery_random_id: int | None = None
                         target_message_id: int | None = None
@@ -890,7 +880,9 @@ def _admin_clone_timeline_migration_job_runner(
                     get_conn_fn=get_conn_fn,
                     phase="replaying_timeline",
                 )
-            if state.stopped or state.limit_reached:
+                if state.counters.has_failures:
+                    break
+            if state.stopped or state.limit_reached or state.counters.has_failures:
                 break
 
         if media_target_entity is not None:
@@ -924,6 +916,10 @@ def _admin_clone_timeline_migration_job_runner(
                     "以免将过期快照标记为完成"
                 )
 
+        ensure_timeline_text_order(
+            get_conn_fn=get_conn_fn, run_id=run_id,
+            source_chat_id=source_chat_id, target_chat_id=target_chat_id,
+        )
         _finalize_success(
             state=state,
             get_conn_fn=get_conn_fn,

@@ -577,6 +577,11 @@ def _create_sync_scheduler_indexes(cur: sqlite3.Cursor) -> None:
     )
     _ensure_index(
         cur,
+        "idx_sync_learning_chat_id",
+        "CREATE INDEX idx_sync_learning_chat_id ON sync_learning_events(chat_id, id DESC)",
+    )
+    _ensure_index(
+        cur,
         "idx_sync_learning_type_created",
         "CREATE INDEX idx_sync_learning_type_created "
         "ON sync_learning_events(event_type, created_at DESC)",

@@ -91,19 +91,10 @@ def test_templates_load_dom_utils_first():
             f"{template_name}: dom_utils.js must be loaded before {dependent_file}"
 
 
-def test_code_reduction():
-    """验证代码行数减少"""
+def test_shared_dom_helpers_remain_centralized():
+    """Page features may grow without duplicating the shared DOM helpers."""
     static_dir = Path(__file__).parent.parent / 'static'
-
-    channels_lines = len((static_dir / 'admin_channels.js').read_text().splitlines())
-    sync_lines = len((static_dir / 'admin_sync.js').read_text().splitlines())
-    recovery_lines = len((static_dir / 'admin_recovery.js').read_text().splitlines())
-
-    # admin_channels.js 应该少于 1196 行（原来）
-    assert channels_lines < 1196, f"admin_channels.js should be < 1196 lines, got {channels_lines}"
-
-    # admin_sync.js 应该少于 1473 行（原来）
-    assert sync_lines < 1473, f"admin_sync.js should be < 1473 lines, got {sync_lines}"
-
-    # admin_recovery.js 应该少于 823 行（原来）
-    assert recovery_lines < 823, f"admin_recovery.js should be < 823 lines, got {recovery_lines}"
+    for filename in ('admin_channels.js', 'admin_sync.js', 'admin_recovery.js'):
+        source = (static_dir / filename).read_text()
+        assert 'TgHarvestDomUtils' in source
+        assert not re.search(r'function\s+createTextElement\s*\(', source)

@@ -6,7 +6,7 @@ import os
 import socket
 import sqlite3
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -37,6 +37,7 @@ class SyncObservation:
     reason: str = "event"
     source_account: str = "primary"
     observed_at: str = ""
+    edited_message_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -68,6 +69,8 @@ class SyncPendingTask:
     in_flight_owner_instance_id: str = ""
     in_flight_owner_pid: int = 0
     in_flight_owner_host: str = ""
+    decision_event_id: int = 0
+    edited_message_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -85,6 +88,7 @@ class SyncUpdateResult:
     failure_type: str = ""
     failure_message: str = ""
     retry_after_seconds: int = 0
+    updated_message_count: int = 0
 
 
 def utc_now_text() -> str:
@@ -475,6 +479,14 @@ def build_heuristic_decision(
         "ai_shadow": ai_shadow_enabled(cfg),
     }
     source = "heuristic"
+    from tg_harvest.ml.sync_predictor import capture_decision_input
+
+    decision_input = capture_decision_input(
+        conn, chat_id=int(observation.chat_id), now_text=now,
+        observation_reason=reason, source_account=preferred_account,
+        heuristic_delay_seconds=quiet_delay, heuristic_priority_score=priority,
+        heuristic_context=prediction,
+    )
     if ai_enabled(cfg):
         prediction["heuristic"] = {
             "quiet_delay_seconds": quiet_delay,
@@ -494,6 +506,7 @@ def build_heuristic_decision(
                 heuristic_delay_seconds=quiet_delay,
                 heuristic_priority_score=priority,
                 heuristic_context=prediction,
+                decision_input=decision_input,
             )
             model_prediction = suggestion.to_prediction_dict()
             prediction["model"] = model_prediction
@@ -558,6 +571,7 @@ def build_heuristic_decision(
             prediction["ai_reason"] = "model_prediction_failed"
             prediction["model_error"] = logging_message
 
+    prediction["decision_input"] = decision_input
     return SyncDecision(
         due_at=due_at,
         quiet_delay_seconds=quiet_delay,
@@ -790,6 +804,7 @@ def enqueue_observation(
         reason=str(observation.reason or "event").strip() or "event",
         source_account=str(observation.source_account or "").strip() or "primary",
         observed_at=observed_at,
+        edited_message_id=max(0, int(observation.edited_message_id or 0)),
     )
     decision = build_heuristic_decision(conn, cfg, safe_observation, now_text=observed_at)
     cur = conn.cursor()
@@ -808,6 +823,15 @@ def enqueue_observation(
         generation = _row_int(existing, "generation") + 1
         event_count = _row_int(existing, "event_count") + 1
         first_event_at = _row_text(existing, "first_event_at") or observed_at
+        if _row_int(existing, "in_flight") and _row_int(existing, "dirty_generation") <= _row_int(existing, "in_flight_generation"):
+            first_event_at = observed_at
+            event_count = 1
+        max_wait = cfg_int(cfg, "sync_max_active_delay_seconds", 600, minimum=1)
+        deadline = add_seconds_to_utc_text(first_event_at, max_wait)
+        due_at = min(decision.due_at, deadline)
+        # New observations must not bypass an existing failure backoff.
+        due_at = max(due_at, _row_text(existing, "retry_after_at"))
+        decision = replace(decision, due_at=due_at)
         source_accounts = _join_csv(
             [
                 *_split_csv(_row_text(existing, "source_accounts")),
@@ -846,6 +870,7 @@ def enqueue_observation(
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = excluded.chat_title,
                 chat_username = excluded.chat_username,
+                first_event_at = excluded.first_event_at,
                 last_event_at = excluded.last_event_at,
                 event_count = excluded.event_count,
                 source_accounts = excluded.source_accounts,
@@ -960,11 +985,12 @@ def enqueue_observation(
                 membership_scope=str(decision.prediction.get("membership_scope") or ""),
                 status="pending",
                 features={
+                    "decision_input": decision.prediction.get("decision_input", {}),
                     "event_count": event_count,
                     "generation": generation,
                     "in_flight": bool(in_flight),
                 },
-                prediction=decision.prediction
+                prediction={key: value for key, value in decision.prediction.items() if key != "decision_input"}
                 | {
                     "due_at": decision.due_at,
                     "source": decision.source,
@@ -974,6 +1000,17 @@ def enqueue_observation(
                 created_at=observed_at,
             ),
         )
+        cur.execute(
+            "UPDATE sync_pending_updates SET decision_event_id = ? WHERE chat_id = ?",
+            (cur.lastrowid, safe_observation.chat_id),
+        )
+        if safe_observation.edited_message_id:
+            cur.execute(
+                """INSERT INTO sync_pending_message_edits(chat_id, message_id, generation)
+                VALUES (?, ?, ?) ON CONFLICT(chat_id, message_id)
+                DO UPDATE SET generation = excluded.generation""",
+                (safe_observation.chat_id, safe_observation.edited_message_id, generation),
+            )
         conn.commit()
         return decision
     except sqlite3.Error:
@@ -1104,6 +1141,14 @@ def claim_due_pending_updates(
                     in_flight_owner_instance_id=normalized_owner_instance_id,
                     in_flight_owner_pid=normalized_owner_pid,
                     in_flight_owner_host=normalized_owner_host,
+                    decision_event_id=_row_int(row, "decision_event_id"),
+                    edited_message_ids=tuple(
+                        int(edit[0]) for edit in cur.execute(
+                            "SELECT message_id FROM sync_pending_message_edits "
+                            "WHERE chat_id = ? ORDER BY message_id LIMIT 200",
+                            (chat_id,),
+                        ).fetchall()
+                    ),
                 )
             )
         conn.commit()
@@ -1313,6 +1358,15 @@ def complete_pending_update(
         )
         state_row = cur.fetchone()
         has_new_generation = _pending_has_new_generation(pending_row, task)
+        if task.edited_message_ids:
+            cur.executemany(
+                "DELETE FROM sync_pending_message_edits WHERE chat_id = ? AND message_id = ? AND generation <= ?",
+                [(task.chat_id, message_id, task.in_flight_generation) for message_id in task.edited_message_ids],
+            )
+        has_new_generation = has_new_generation or cur.execute(
+            "SELECT 1 FROM sync_pending_message_edits WHERE chat_id = ? LIMIT 1",
+            (task.chat_id,),
+        ).fetchone() is not None
         status = "pending" if has_new_generation else "idle"
         effective_local_last_id = max(0, int(result.local_last_id or 0))
         effective_remote_last_id = max(
@@ -1322,11 +1376,8 @@ def complete_pending_update(
         )
         if has_new_generation:
             due_at = _row_text(pending_row, "due_at")
-            if not due_at or due_at <= now:
-                due_at = add_seconds_to_utc_text(
-                    now,
-                    max(1, _row_int(pending_row, "quiet_delay_seconds", task.quiet_delay_seconds)),
-                )
+            if not due_at:
+                due_at = now
             cur.execute(
                 """
                 UPDATE sync_pending_updates
@@ -1338,6 +1389,7 @@ def complete_pending_update(
                     in_flight_owner_host = '',
                     dirty_generation = 0,
                     due_at = ?,
+                    retry_after_at = '',
                     updated_at = ?
                 WHERE chat_id = ?
                 """,
@@ -1359,7 +1411,7 @@ def complete_pending_update(
                 failure_count = 0,
                 local_last_id = MAX(local_last_id, ?),
                 remote_last_id = MAX(remote_last_id, ?),
-                next_update_at = CASE WHEN ? = 'pending' THEN next_update_at ELSE '' END,
+                next_update_at = ?,
                 last_source_account = ?,
                 updated_at = ?
             WHERE chat_id = ?
@@ -1370,7 +1422,7 @@ def complete_pending_update(
                 now,
                 effective_local_last_id,
                 effective_remote_last_id,
-                status,
+                due_at if has_new_generation else "",
                 str(result.source_account or ""),
                 now,
                 int(task.chat_id),
@@ -1386,6 +1438,7 @@ def complete_pending_update(
                 membership_scope=_row_text(state_row, "membership_scope", MembershipScope.UNKNOWN),
                 status="success",
                 features={
+                    "decision_event_id": task.decision_event_id,
                     "pending_snapshot": _row_to_dict(pending_row),
                     "state_snapshot": _row_to_dict(state_row),
                     "task_snapshot": {
@@ -1408,6 +1461,7 @@ def complete_pending_update(
                     },
                 },
                 outcome={
+                    "updated_message_count": int(result.updated_message_count or 0),
                     "scanned_message_count": int(result.scanned_message_count or 0),
                     "duration_seconds": float(result.duration_seconds or 0.0),
                     "event_count": int(task.event_count or 0),
@@ -1489,10 +1543,11 @@ def fail_pending_update(
                 in_flight_owner_host = '',
                 dirty_generation = 0,
                 due_at = ?,
+                retry_after_at = ?,
                 updated_at = ?
             WHERE chat_id = ?
             """,
-            (due_at, now, int(task.chat_id)),
+            (due_at, due_at, now, int(task.chat_id)),
         )
         cur.execute(
             """
@@ -1528,6 +1583,7 @@ def fail_pending_update(
                 membership_scope=_row_text(state_row, "membership_scope", MembershipScope.UNKNOWN),
                 status="failed",
                 features={
+                    "decision_event_id": task.decision_event_id,
                     "pending_snapshot": _row_to_dict(pending_row),
                     "state_snapshot": _row_to_dict(state_row),
                     "task_snapshot": {
@@ -2154,12 +2210,19 @@ def build_scheduler_summary(
             }
         else:
             model_state = _decode_json_dict(model_row["state_json"])
+            model_metrics = _decode_json_dict(model_row["metrics_json"])
+            from tg_harvest.ml.sync_predictor import MODEL_VERSION
+
             state_mode = str(model_state.get("mode") or "shadow")
             if payload["ai_enabled"]:
                 if payload["ai_shadow"]:
                     payload["effective_model_mode"] = "仅观察"
                     payload["model_can_take_over"] = False
-                elif state_mode == "active" and payload.get("ai_auto_promote_enabled"):
+                elif (
+                    state_mode == "active" and model_state.get("ready")
+                    and str(model_row["model_version"]) == MODEL_VERSION
+                    and payload.get("ai_auto_promote_enabled")
+                ):
                     payload["effective_model_mode"] = "已接管"
                     payload["model_can_take_over"] = True
                 else:
@@ -2171,10 +2234,10 @@ def build_scheduler_summary(
                 "backend": str(model_row["backend"] or ""),
                 "artifact_path": str(model_row["artifact_path"] or default_model_artifact_path()),
                 "trained_at": str(model_row["trained_at"] or ""),
-                "sample_count": outcome_sample_count,
+                "sample_count": int(model_metrics.get("sample_count", 0) or 0),
                 "learning_event_count": learning_event_count,
                 "outcome_sample_count": outcome_sample_count,
-                "metrics": _decode_json_dict(model_row["metrics_json"]),
+                "metrics": model_metrics,
                 "state": model_state,
                 "updated_at": str(model_row["updated_at"] or ""),
             }

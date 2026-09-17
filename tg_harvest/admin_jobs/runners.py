@@ -1587,6 +1587,7 @@ def _admin_process_single_chat_update(
     total: int,
     account_label: str = "主账号",
     enable_progress_probe: bool = True,
+    edited_message_ids: tuple[int, ...] = (),
 ) -> Any:
     chat_label = _chat_log_label(chat_id, chat_title)
     admin_job_append_log_fn(
@@ -1643,6 +1644,7 @@ def _admin_process_single_chat_update(
             enable_dedupe=False,
             progress_total=progress_total,
             progress_prefix=progress_prefix,
+            edited_message_ids=edited_message_ids,
         )
         counters = getattr(result, "counters", None)
         seen_count = int(getattr(counters, "seen", 0) or 0)

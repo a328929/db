@@ -241,7 +241,41 @@ def list_active_chat_access_risk_ids(conn: sqlite3.Connection) -> set[int]:
         cur.close()
 
 
-def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]:
+def _membership_filter(has_sync_state: bool, membership: str) -> tuple[str, list]:
+    if not membership or membership == "__all__":
+        return "1=1", []
+    if membership not in {"unknown", "none_joined", "both_joined", "single_joined_primary", "single_joined_secondary", "unobservable"}:
+        raise ValueError("调度状态筛选参数非法")
+    expression = "COALESCE(NULLIF(s.membership_scope, ''), 'unknown')" if has_sync_state else "'unknown'"
+    return f"{expression} = ?", [membership]
+
+
+def list_database_channel_page(
+    conn: sqlite3.Connection, *, sort: Any, limit: int = 100,
+    offset: int = 0, membership: str = "",
+) -> dict:
+    limit = max(1, min(200, int(limit)))
+    has_sync = _table_exists(conn, "sync_chat_state")
+    where, values = _membership_filter(has_sync, membership)
+    join = "LEFT JOIN sync_chat_state s ON s.chat_id = c.chat_id" if has_sync else ""
+    conn.execute("SAVEPOINT channel_page")
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*), COALESCE(SUM(CASE WHEN {where} THEN 1 ELSE 0 END), 0) FROM chats c {join}",
+            values,
+        ).fetchone()
+        all_count, total = int(row[0]), int(row[1])
+        offset = min(max(0, int(offset)), ((total - 1) // limit) * limit if total else 0)
+        channels = list_database_channels(conn, sort=sort, limit=limit, offset=offset, membership=membership)
+        return {"channels": channels, "total": total, "all_count": all_count, "limit": limit, "offset": offset}
+    finally:
+        conn.execute("RELEASE SAVEPOINT channel_page")
+
+
+def list_database_channels(
+    conn: sqlite3.Connection, *, sort: Any, limit: int | None = None,
+    offset: int = 0, membership: str = "",
+) -> list[dict]:
     normalized_sort = normalize_channel_sort(sort)
     order_sql = CHANNEL_SORT_OPTIONS[normalized_sort]
     has_sync_state = _table_exists(conn, "sync_chat_state")
@@ -275,10 +309,22 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
         if has_sync_state
         else ""
     )
+    where_sql, values = _membership_filter(has_sync_state, membership)
+    prefix, from_chats, limit_sql = "", "chats c", ""
+    if limit is not None:
+        limit_sql = "LIMIT ? OFFSET ?"
+        values.extend([max(1, min(200, int(limit))), max(0, int(offset))])
+        if normalized_sort.startswith("message_count_"):
+            prefix = f"""WITH page_chats AS (
+                SELECT c.* FROM chats c {sync_join_sql} WHERE {where_sql}
+                ORDER BY {order_sql} {limit_sql}
+            )"""
+            from_chats, where_sql, limit_sql = "page_chats c", "1=1", ""
     cur = conn.cursor()
     try:
         cur.execute(
             f"""
+            {prefix}
             SELECT
                 c.chat_id,
                 c.chat_title,
@@ -289,7 +335,7 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
 {sync_select_sql}
                 lm.msg_date_text AS last_message_at,
                 lm.msg_date_ts AS last_message_ts
-            FROM chats c
+            FROM {from_chats}
             LEFT JOIN messages lm
               ON lm.chat_id = c.chat_id
              AND lm.message_id = (
@@ -300,8 +346,11 @@ def list_database_channels(conn: sqlite3.Connection, *, sort: Any) -> list[dict]
                         LIMIT 1
                     )
             {sync_join_sql}
+            WHERE {where_sql}
             ORDER BY {order_sql}
-            """
+            {limit_sql}
+            """,
+            values,
         )
         channels = []
         for row in cur.fetchall():

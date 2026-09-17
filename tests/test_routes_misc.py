@@ -580,7 +580,7 @@ class SearchRoutesValidationTests(unittest.TestCase):
         with search_routes_module._rate_lock:
             search_routes_module._search_rate_tracker["search:old"] = deque([1.0])
 
-        with patch("tg_harvest.web.routes.search.time.time", return_value=10_000.0):
+        with patch("tg_harvest.web.routes.search.time.monotonic", return_value=10_000.0):
             limited = search_routes_module._is_rate_limited("fresh")
 
         self.assertFalse(limited)

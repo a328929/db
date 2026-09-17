@@ -958,3 +958,32 @@ def count_clone_message_mappings(
         """,
         params,
     )
+
+
+def clone_text_mapping_order_is_valid(
+    conn: sqlite3.Connection, *, run_id: str, source_chat_id: int,
+    target_chat_id: int,
+) -> bool:
+    cur = conn.execute(
+        """
+        WITH ordered AS (
+            SELECT target_message_id,
+                LAG(target_message_id) OVER (
+                    ORDER BY COALESCE(source_msg_date_ts, 0),
+                             source_message_id, chunk_index
+                ) AS previous_target_id
+            FROM admin_clone_message_map
+            WHERE run_id = ? AND source_chat_id = ? AND target_chat_id = ?
+              AND mode = 'text_replay' AND status = 'done'
+        )
+        SELECT 1 FROM ordered
+        WHERE target_message_id IS NULL OR target_message_id <= 0
+           OR target_message_id <= previous_target_id
+        LIMIT 1
+        """,
+        (run_id, int(source_chat_id), int(target_chat_id)),
+    )
+    try:
+        return cur.fetchone() is None
+    finally:
+        cur.close()

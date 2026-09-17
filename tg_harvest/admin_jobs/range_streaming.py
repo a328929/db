@@ -29,6 +29,8 @@ class RangeHarvestAccount:
 def _merge_counters(target: HarvestCounters, source: HarvestCounters) -> None:
     target.seen += int(source.seen)
     target.written += int(source.written)
+    target.added += int(source.added)
+    target.updated += int(source.updated)
     target.parse_failures += int(source.parse_failures)
     target.parse_failure_samples.extend(source.parse_failure_samples)
     target.parse_failure_samples = target.parse_failure_samples[:5]

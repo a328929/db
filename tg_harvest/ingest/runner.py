@@ -16,6 +16,7 @@ from tg_harvest.domain.promo import build_single_promo_features
 from tg_harvest.ingest.flood_wait import (
     AccountFloodWaitError,
     bounded_retry_count,
+    call_with_bounded_retry,
     exponential_backoff_seconds,
     flood_sleep_threshold_kwargs,
     flood_wait_seconds,
@@ -249,6 +250,7 @@ def _harvest_messages_for_entity(
     write_batch_fn: Callable[[list[tuple], list[tuple]], Any] | None = None,
     progress_total: int | None = None,
     progress_prefix: str = "正在采集",
+    edited_message_ids: tuple[int, ...] = (),
 ) -> tuple[HarvestCounters, set[int], bool]:
     from telethon.errors import FloodWaitError, RPCError
 
@@ -268,6 +270,32 @@ def _harvest_messages_for_entity(
     counters = HarvestCounters()
     msg_rows, media_rows = [], []
     touched_groups = set()
+
+    edit_ids = sorted({int(value) for value in edited_message_ids if int(value) > 0})
+    for start in range(0, len(edit_ids), 100):
+        edited_messages = call_with_bounded_retry(
+            client.get_messages, entity, ids=edit_ids[start : start + 100],
+            flood_wait_threshold_seconds=CFG.flood_wait_switch_threshold,
+            scope=f"chat:{chat_id}:edits",
+        )
+        edit_rows, edit_media = [], []
+        for message in edited_messages:
+            if message is None:
+                continue
+            counters.seen += 1
+            parsed = MessageParser.parse(message)
+            if parsed is None:
+                continue
+            row, media = _prepare_db_rows(entity, chat_id, parsed)
+            edit_rows.append(row)
+            if media:
+                edit_media.append(media)
+        if edit_rows:
+            result = _write_message_batch(conn, edit_rows, edit_media, write_batch_fn=write_batch_fn)
+            counters.written += result.persisted_change_count
+            counters.added += result.new_message_count
+            counters.updated += max(0, result.persisted_change_count - result.new_message_count)
+            touched_groups.update(result.affected_grouped_ids)
 
     logging.info(
         f"开始抓取 chat_id={chat_id}，{'全量' if first_sync else '增量'}同步，中止 ID <= {scan_from_id}"
@@ -330,6 +358,8 @@ def _harvest_messages_for_entity(
                     )
                     touched_groups.update(batch_result.affected_grouped_ids)
                     counters.written += batch_result.persisted_change_count
+                    counters.added += batch_result.new_message_count
+                    counters.updated += max(0, batch_result.persisted_change_count - batch_result.new_message_count)
                     resume_from_id = max(resume_from_id, _last_message_id_in_rows(msg_rows))
                     msg_rows, media_rows = [], []
                     logging.info(f"批量写入完成：已写入={counters.written}")
@@ -459,6 +489,8 @@ def _harvest_messages_for_entity(
         )
         touched_groups.update(batch_result.affected_grouped_ids)
         counters.written += batch_result.persisted_change_count
+        counters.added += batch_result.new_message_count
+        counters.updated += max(0, batch_result.persisted_change_count - batch_result.new_message_count)
         resume_from_id = max(resume_from_id, _last_message_id_in_rows(msg_rows))
 
     _log_harvest_progress(

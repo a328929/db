@@ -343,6 +343,32 @@ class SearchRateLimitTests(unittest.TestCase):
         self.assertFalse(is_internal_ip("1.1.1.1"))
         self.assertFalse(is_internal_ip("2001:4860:4860::8888"))
 
+    def test_search_rate_window_reclaims_capacity_without_resetting_active_clients(self):
+        tracker = search_routes_module._search_rate_tracker
+        tracker.clear()
+        try:
+            with (
+                patch.object(search_routes_module, "SEARCH_RATE_LIMIT", 2),
+                patch.object(search_routes_module, "SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS", 2),
+                patch.object(search_routes_module.time, "monotonic") as clock,
+            ):
+                clock.return_value = 0.0
+                self.assertFalse(search_routes_module._is_rate_limited("a"))
+                clock.return_value = 10.0
+                self.assertFalse(search_routes_module._is_rate_limited("b"))
+                clock.return_value = 20.0
+                self.assertFalse(search_routes_module._is_rate_limited("a"))
+                clock.return_value = 61.0
+                self.assertTrue(search_routes_module._is_rate_limited("c"))
+                self.assertFalse(search_routes_module._is_rate_limited("a"))
+                self.assertTrue(search_routes_module._is_rate_limited("a"))
+                clock.return_value = 71.0
+                self.assertFalse(search_routes_module._is_rate_limited("c"))
+                self.assertNotIn("search:b", tracker)
+                self.assertTrue(search_routes_module._is_rate_limited("a"))
+        finally:
+            tracker.clear()
+
     def test_is_valid_ip_format(self):
         """测试IP格式验证"""
         from tg_harvest.web.ip_utils import is_valid_ip_format
@@ -550,11 +576,11 @@ class SearchExpressionEdgeCaseTests(unittest.TestCase):
         result = parse_query(query_100)
         self.assertEqual(result.kind, "TERM")
 
-        # 200层嵌套也应该成功
+        # Reject excessive nesting before Python's recursion limit is reached.
         query_200 = "(" * 200 + "test" + ")" * 200
         self.assertEqual(len(query_200), 404)
-        result = parse_query(query_200)
-        self.assertEqual(result.kind, "TERM")
+        with self.assertRaisesRegex(ValueError, "嵌套过深"):
+            parse_query(query_200)
 
         # 超过1000字符的深度嵌套应该被长度限制拒绝
         query_over_limit = "(" * 500 + "test" + ")" * 500

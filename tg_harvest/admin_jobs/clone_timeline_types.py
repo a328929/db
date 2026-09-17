@@ -13,6 +13,10 @@ class TimelineCounters:
     media_group_sent: int = 0
     media_group_skipped: int = 0
     media_group_failed: int = 0
+
+    @property
+    def has_failures(self) -> bool:
+        return bool(self.text_failed or self.media_failed or self.media_group_failed)
     processed: int = 0
 
     def as_update_fields(self) -> dict[str, int]:

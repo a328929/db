@@ -909,6 +909,50 @@ def _create_ready_clone_state(path):
         conn.close()
 
 
+def test_timeline_pauses_at_send_failure_and_resumes_in_original_order(tmp_path):
+    db_path = tmp_path / "ordered-retry.db"
+    _create_job_db(db_path)
+    _create_ready_clone_state(db_path)
+    conn = _connect(db_path)
+    with conn:
+        conn.execute("UPDATE messages SET content='first',content_norm='first' WHERE chat_id=100")
+        conn.execute("INSERT INTO messages(chat_id,message_id,msg_date_text,msg_date_ts,content,content_norm,msg_type,has_media) VALUES (100,2,'date',2,'second','second','TEXT',0)")
+    conn.close()
+    client = _TimelineMigrationClient()
+    fail_once = True
+
+    def send(_client, target, text, **kwargs):
+        nonlocal fail_once
+        if text == "first" and fail_once:
+            fail_once = False
+            raise TimeoutError("temporary failure")
+        return client.send_message(target, text).id
+
+    module = "tg_harvest.admin_jobs.clone_timeline_migration."
+    for attempt in (1, 2, 3):
+        job_id = f"ordered-{attempt}"
+        conn = _connect(db_path)
+        if attempt == 3:
+            conn.execute("UPDATE admin_clone_message_map SET target_message_id = CASE WHEN source_message_id=1 THEN 9500 ELSE 9400 END WHERE run_id='job-clone'")
+            conn.commit()
+        create_clone_migration(conn, migration_id=job_id, run_id="job-clone", plan_id="plan-text", job_id=job_id, mode="timeline_replay", target_chat_id=777, target_title="Backup", target_write_account="text:primary", plan={"plan_id":"plan-text"})
+        conn.close()
+        with ExitStack() as stack:
+            for name in ("finish_job_heartbeat", "_admin_job_update_progress", "_disconnect_worker_client", "_cleanup_isolated_worker_session", "confirm_clone_target_messages"):
+                stack.enter_context(patch(module + name))
+            stack.enter_context(patch(module + "_start_job_heartbeat", return_value=_heartbeat_pair()))
+            stack.enter_context(patch(module + "_admin_job_stop_requested", return_value=False))
+            stack.enter_context(patch(module + "_ensure_base_session_valid", return_value=True))
+            stack.enter_context(patch(module + "_create_isolated_worker_client", return_value=client))
+            stack.enter_context(patch(module + "send_clone_text_chunk", side_effect=send))
+            _admin_clone_timeline_migration_job_runner(job_id, run_id="job-clone", plan_id="plan-text", migration_id=job_id, cfg=_runner_cfg(), get_conn_fn=lambda:_connect(db_path), admin_job_set_status_fn=lambda *args:True, admin_job_append_log_fn=lambda *args:None)
+        conn = _connect(db_path)
+        migration = load_latest_clone_migration(conn, "job-clone")
+        conn.close()
+        assert migration["status"] == ("done" if attempt == 2 else "error")
+        assert client.sent_messages == ([] if attempt == 1 else ["first", "second"])
+
+
 class _MediaMigrationClient:
     def __init__(self):
         self.forward_calls = []

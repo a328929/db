@@ -49,6 +49,7 @@ class ChannelRouteServices:
     admin_job_set_status_fn: Any
     admin_start_missing_chats_scan_job_thread_fn: Any
     admin_start_restricted_chats_scan_job_thread_fn: Any
+    list_database_channel_page_fn: Any = None
 
 
 @dataclass(frozen=True)

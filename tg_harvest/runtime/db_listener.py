@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from queue import Empty, Queue
 from typing import Any
@@ -39,6 +39,7 @@ from tg_harvest.domain.coerce import clean_username, enabled_int, optional_int
 from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.ingest.range_harvest import read_latest_message_id
 from tg_harvest.ingest.store import get_last_message_id
+from tg_harvest.ingest.telemetry import TelegramRequestCounts, count_telegram_requests
 from tg_harvest.storage import sync_scheduler
 from tg_harvest.storage.sync_scheduler import (
     SyncObservation,
@@ -185,6 +186,7 @@ class _QueuedChatUpdate:
     chat_username: str | None
     reason: str
     source_account: str
+    edited_message_ids: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -344,6 +346,7 @@ class DatabaseChatListenerRuntime:
         self._queue: Queue[_QueuedChatUpdate] = Queue(maxsize=_DEFAULT_QUEUE_MAXSIZE)
         self._queued_chat_ids_lock = threading.Lock()
         self._queued_chat_ids: set[int] = set()
+        self._queued_message_edits: dict[int, set[int]] = {}
         self._db_chat_rows_lock = threading.Lock()
         self._db_chat_rows_by_id: dict[int, dict[str, Any]] = {}
         self._joined_chat_ids_lock = threading.Lock()
@@ -1143,13 +1146,14 @@ class DatabaseChatListenerRuntime:
         chat_username: str | None,
         reason: str,
         source_account: str,
+        edited_message_id: int = 0,
     ) -> None:
         safe_chat_id = int(chat_id)
         if safe_chat_id <= 0:
             return
         if not self._is_database_chat(safe_chat_id):
             return
-        if self._is_chat_temporarily_suppressed(safe_chat_id):
+        if self._is_chat_temporarily_suppressed(safe_chat_id) and not edited_message_id:
             return
         if self._sync_scheduler_enabled():
             conn = None
@@ -1165,6 +1169,7 @@ class DatabaseChatListenerRuntime:
                         chat_username=clean_username(chat_username) or None,
                         reason=str(reason or "").strip() or "event",
                         source_account=str(source_account or "").strip() or "primary",
+                        edited_message_id=edited_message_id,
                     ),
                 )
             except Exception:
@@ -1175,6 +1180,8 @@ class DatabaseChatListenerRuntime:
                         conn.close()
             return
         with self._queued_chat_ids_lock:
+            if edited_message_id > 0:
+                self._queued_message_edits.setdefault(safe_chat_id, set()).add(edited_message_id)
             if safe_chat_id in self._queued_chat_ids:
                 return
             self._queued_chat_ids.add(safe_chat_id)
@@ -1348,6 +1355,7 @@ class DatabaseChatListenerRuntime:
                 chat_username=chat_username or row.get("chat_username"),
                 reason=reason,
                 source_account=account_key,
+                edited_message_id=int(getattr(message, "id", 0) or 0) if reason == "message_edited" else 0,
             )
         except Exception:
             logging.exception(
@@ -1380,10 +1388,19 @@ class DatabaseChatListenerRuntime:
             except Empty:
                 continue
             try:
+                with self._queued_chat_ids_lock:
+                    item = replace(item, edited_message_ids=tuple(sorted(self._queued_message_edits.pop(item.chat_id, set()))))
                 self._process_queued_chat_update(item)
             finally:
                 with self._queued_chat_ids_lock:
                     self._queued_chat_ids.discard(int(item.chat_id))
+                    has_pending_edits = bool(self._queued_message_edits.get(item.chat_id))
+                if has_pending_edits:
+                    self._enqueue_chat_update(
+                        chat_id=item.chat_id, chat_title=item.chat_title,
+                        chat_username=item.chat_username, reason="message_edited",
+                        source_account=item.source_account,
+                    )
 
     def _claim_due_scheduler_tasks(
         self,
@@ -1429,6 +1446,7 @@ class DatabaseChatListenerRuntime:
             chat_username=clean_username(task.chat_username) or None,
             reason=str(task.reason or "").strip() or "event",
             source_account=preferred_account,
+            edited_message_ids=task.edited_message_ids,
         )
 
     def _finish_scheduler_task(
@@ -1436,7 +1454,7 @@ class DatabaseChatListenerRuntime:
         *,
         task: SyncPendingTask,
         result: SyncUpdateResult | None,
-    ) -> None:
+    ) -> bool:
         conn = None
         try:
             conn = self._get_conn_fn()
@@ -1453,7 +1471,7 @@ class DatabaseChatListenerRuntime:
                     int(task.chat_id),
                     task=task,
                 )
-                return
+                return True
             if effective_result.failure_type:
                 sync_scheduler.fail_pending_update(
                     conn,
@@ -1467,9 +1485,10 @@ class DatabaseChatListenerRuntime:
                     task=task,
                     result=effective_result,
                 )
+            return True
         except sqlite3.Error:
-            # The storage transaction rolls back. Do not synthesize a success
-            # or release this lease; startup recovery can safely reclaim it.
+            # Keep the completed result in the worker until its acknowledgement
+            # is durable; retrying the write must not rerun Telegram harvesting.
             logging.exception(
                 "写入同步调度任务结果失败，任务保持 in-flight: chat_id=%s",
                 task.chat_id,
@@ -1483,11 +1502,22 @@ class DatabaseChatListenerRuntime:
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
+        return False
 
     def _scheduler_worker_loop(self) -> None:
         concurrency = self._account_runtime.scheduler_concurrency()
         active_futures = {}
+        completed_results = {}
         while not self._worker_stop.is_set():
+            now = time.monotonic()
+            for future, (result, retry_at) in list(completed_results.items()):
+                if now < retry_at:
+                    continue
+                if self._finish_scheduler_task(task=active_futures[future], result=result):
+                    completed_results.pop(future)
+                    active_futures.pop(future)
+                else:
+                    completed_results[future] = (result, now + 5.0)
             while len(active_futures) < concurrency and not self._worker_stop.is_set():
                 active_accounts = {
                     self._scheduler_task_to_queue_item(task).source_account
@@ -1518,16 +1548,17 @@ class DatabaseChatListenerRuntime:
                         task,
                     )
                     active_futures[future] = task
-            if not active_futures:
+            waiting_futures = [future for future in active_futures if future not in completed_results]
+            if not waiting_futures:
                 self._worker_stop.wait(_DEFAULT_EVENT_IDLE_SLEEP_SECONDS)
                 continue
             done_futures, _pending = wait(
-                active_futures.keys(),
+                waiting_futures,
                 timeout=_DEFAULT_EVENT_IDLE_SLEEP_SECONDS,
                 return_when=FIRST_COMPLETED,
             )
             for future in done_futures:
-                task = active_futures.pop(future)
+                task = active_futures[future]
                 try:
                     result = future.result()
                 except Exception as exc:
@@ -1539,7 +1570,10 @@ class DatabaseChatListenerRuntime:
                         failure_type="failed",
                         failure_message=admin_error_message(exc),
                     )
-                self._finish_scheduler_task(task=task, result=result)
+                if self._finish_scheduler_task(task=task, result=result):
+                    active_futures.pop(future)
+                else:
+                    completed_results[future] = (result, time.monotonic() + 5.0)
         for future, task in list(active_futures.items()):
             try:
                 result = future.result()
@@ -1629,26 +1663,29 @@ class DatabaseChatListenerRuntime:
         account_lock = self._account_runtime.account_lock(account.key)
         with account_lock:
             started_at = time.perf_counter()
+            requests = TelegramRequestCounts()
             self._account_runtime.mark_update_start(account)
             try:
                 client = _create_isolated_worker_client(account.cfg, worker_id)
-                harvest_result = _admin_process_single_chat_update(
-                    job_id=self._job_id,
-                    client=client,
-                    cfg=account.cfg,
-                    get_conn_fn=self._get_conn_fn,
-                    admin_job_append_log_fn=_listener_log,
-                    chat_id=item.chat_id,
-                    chat_title=item.chat_title,
-                    chat_username=item.chat_username,
-                    idx=1,
-                    total=1,
-                    account_label=account.label,
-                    enable_progress_probe=False,
-                )
+                with count_telegram_requests(client) as requests:
+                    harvest_result = _admin_process_single_chat_update(
+                        job_id=self._job_id,
+                        client=client,
+                        cfg=account.cfg,
+                        get_conn_fn=self._get_conn_fn,
+                        admin_job_append_log_fn=_listener_log,
+                        chat_id=item.chat_id,
+                        chat_title=item.chat_title,
+                        chat_username=item.chat_username,
+                        idx=1,
+                        total=1,
+                        account_label=account.label,
+                        enable_progress_probe=False,
+                        edited_message_ids=item.edited_message_ids,
+                    )
                 counters = getattr(harvest_result, "counters", None)
                 scanned_count = int(getattr(counters, "seen", 0) or 0)
-                added_count = int(getattr(counters, "written", 0) or 0)
+                added_count = int(getattr(counters, "added", getattr(counters, "written", 0)) or 0)
                 remote_last_id = 0
                 local_last_id = self._load_local_last_message_id(item.chat_id)
                 duration_seconds = max(0.0, time.perf_counter() - started_at)
@@ -1664,13 +1701,16 @@ class DatabaseChatListenerRuntime:
                     chat_username=item.chat_username,
                     source_account=account.key,
                     added_message_count=added_count,
+                    updated_message_count=int(getattr(counters, "updated", 0) or 0),
                     scanned_message_count=scanned_count,
                     local_last_id=local_last_id,
                     remote_last_id=remote_last_id,
                     duration_seconds=duration_seconds,
-                    api_cost=max(1.0, float(scanned_count or added_count or 1)),
+                    api_cost=float(requests.requests),
                 )
             except Exception as exc:
+                with suppress(AttributeError, TypeError):
+                    exc.sync_api_cost = float(requests.requests)
                 self._account_runtime.mark_update_finish(
                     account,
                     success=False,
@@ -1698,6 +1738,7 @@ class DatabaseChatListenerRuntime:
             )
         accounts = self._account_priority_for_item(item)
         last_exc: Exception | None = None
+        api_cost = 0.0
         tried_any = False
         for account in accounts:
             if _account_cooldown_remaining(account) > 0:
@@ -1706,9 +1747,11 @@ class DatabaseChatListenerRuntime:
                 continue
             tried_any = True
             try:
-                return self._attempt_single_chat_update(account=account, item=item)
+                result = self._attempt_single_chat_update(account=account, item=item)
+                return replace(result, api_cost=result.api_cost + api_cost)
             except Exception as exc:
                 last_exc = exc
+                api_cost += float(getattr(exc, "sync_api_cost", 0.0))
                 if isinstance(exc, AccountFloodWaitError):
                     _remember_account_cooldown(account, exc)
                     self._account_runtime.mark_cooldown(account, int(exc.seconds))
@@ -1733,6 +1776,7 @@ class DatabaseChatListenerRuntime:
                 chat_username=item.chat_username,
                 source_account=item.source_account,
                 failure_type="flood_wait",
+                api_cost=api_cost,
                 failure_message=f"FloodWait {int(last_exc.seconds)}s",
                 retry_after_seconds=max(60, int(last_exc.seconds)),
             )
@@ -1775,6 +1819,7 @@ class DatabaseChatListenerRuntime:
                 chat_username=item.chat_username,
                 source_account=item.source_account,
                 failure_type=failure_type,
+                api_cost=api_cost,
                 failure_message=message,
                 retry_after_seconds=int(_DEFAULT_MISSED_CHAT_COOLDOWN_SECONDS)
                 if failure_type == "unavailable"

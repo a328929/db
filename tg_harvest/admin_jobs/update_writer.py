@@ -60,6 +60,7 @@ class ChatUpdateWriteCoordinator:
                 "error": None,
                 "touched_groups": set(),
                 "persisted_change_count": 0,
+                "new_message_count": 0,
                 "exact_change_tracking": True,
             }
 
@@ -224,12 +225,14 @@ class ChatUpdateWriteCoordinator:
                                 state["persisted_change_count"] += int(
                                     persisted_change_count
                                 )
+                                state["new_message_count"] += int(getattr(result, "new_message_count", 0))
                                 if touched_groups:
                                     state["touched_groups"].update(touched_groups)
                     elif kind == "finalize":
                         touched_groups = set(item["touched_groups"])
                         exact_change_tracking = False
                         persisted_change_count = None
+                        new_message_count = 0
                         with self._states_lock:
                             state = self._states.get(chat_id)
                             if state is not None:
@@ -240,8 +243,11 @@ class ChatUpdateWriteCoordinator:
                                 persisted_change_count = int(
                                     state.get("persisted_change_count", 0)
                                 )
+                                new_message_count = int(state.get("new_message_count", 0))
                         if exact_change_tracking and persisted_change_count is not None:
                             item["counters"].written = persisted_change_count
+                            item["counters"].added = new_message_count
+                            item["counters"].updated = max(0, persisted_change_count - item["counters"].added)
                         _finalize_entity_processing(
                             conn,
                             chat_id=chat_id,

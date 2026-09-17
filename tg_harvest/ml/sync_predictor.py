@@ -17,7 +17,7 @@ from tg_harvest.runtime.paths import runtime_dir
 from tg_harvest.storage.connection import synchronized_write
 
 MODEL_KEY = "temporal_batch_predictor"
-MODEL_VERSION = "temporal-batch-predictor-v3-lite"
+MODEL_VERSION = "temporal-batch-predictor-v4-causal"
 UTC_TEXT_FORMAT = "%Y-%m-%d %H:%M:%S"
 SEQUENCE_LENGTH = 32
 DELAY_BUCKET_SECONDS = (15, 30, 45, 60, 120, 180, 300, 600, 1200, 1800, 3600, 7200)
@@ -495,7 +495,7 @@ def _recent_learning_rows(
 ) -> list[Any]:
     cur = conn.cursor()
     try:
-        if cutoff_event_id is not None and cutoff_event_id > 0:
+        if cutoff_event_id is not None:
             cur.execute(
                 """
                 SELECT *
@@ -755,17 +755,67 @@ def _encoded_input_for_chat(
     }
 
 
+def capture_decision_input(
+    conn: sqlite3.Connection, *, chat_id: int, now_text: str,
+    observation_reason: str, source_account: str,
+    heuristic_delay_seconds: int, heuristic_priority_score: float,
+    heuristic_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = dict(heuristic_context or {})
+    state = _state_row(conn, chat_id)
+    context["state_snapshot"] = dict(state) if state is not None else {}
+    cutoff = conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM sync_learning_events WHERE chat_id = ?",
+        (chat_id,),
+    ).fetchone()[0]
+    return {
+        "history_event_id": int(cutoff),
+        "observed_at": now_text,
+        "context": context,
+        "event": {
+            "event_type": "observation", "reason": observation_reason,
+            "source_account": source_account, "status": "pending",
+            "quiet_delay_seconds": heuristic_delay_seconds,
+            "priority_score": heuristic_priority_score,
+            "created_at": now_text,
+            "features": dict(heuristic_context or {}),
+        },
+    }
+
+
+def _encode_decision_input(conn: sqlite3.Connection, chat_id: int, snapshot: dict) -> dict:
+    return _encoded_input_for_chat(
+        conn, chat_id=chat_id, now_text=snapshot["observed_at"],
+        cutoff_event_id=int(snapshot["history_event_id"]),
+        synthetic_event=snapshot["event"], heuristic_context=snapshot["context"],
+        use_current_state=False,
+    )
+
+
 def _sample_from_outcome_row(conn: sqlite3.Connection, row: Any) -> EncodedSample | None:
     chat_id = _row_int(row, "chat_id")
     if chat_id <= 0:
         return None
     features = _decode_json_dict(_row_text(row, "features_json", "{}"))
-    outcome = _decode_json_dict(_row_text(row, "outcome_json", "{}"))
+    decision_id = int(optional_int(features.get("decision_event_id")) or 0)
+    if decision_id <= 0 or decision_id >= _row_int(row, "id"):
+        return None
+    decision_row = conn.execute(
+        "SELECT features_json FROM sync_learning_events WHERE id = ? AND chat_id = ? AND event_type = 'observation'",
+        (decision_id, chat_id),
+    ).fetchone()
+    if decision_row is None:
+        return None
+    snapshot = _decode_json_dict(decision_row[0]).get("decision_input")
+    if not isinstance(snapshot, dict) or not {"history_event_id", "observed_at", "event", "context"} <= snapshot.keys():
+        return None
     wait_seconds = _row_int(row, "wait_seconds")
     recorded_delay = _row_int(row, "quiet_delay_seconds")
     added_count = max(0, _row_int(row, "added_message_count"))
     api_cost = max(1.0, _row_float(row, "api_cost", 1.0))
-    efficiency = _clamp(float(added_count) / api_cost, 0.0, 10.0) / 10.0
+    outcome = _decode_json_dict(_row_text(row, "outcome_json", "{}"))
+    updated_count = max(0, int(optional_int(outcome.get("updated_message_count")) or 0))
+    efficiency = _clamp(float(added_count + updated_count) / api_cost, 0.0, 10.0) / 10.0
     failed = bool(_row_text(row, "failure_type"))
     risk = 1.0 if failed else 0.0
     quiet_delay = wait_seconds if wait_seconds > 0 else recorded_delay
@@ -777,15 +827,7 @@ def _sample_from_outcome_row(conn: sqlite3.Connection, row: Any) -> EncodedSampl
         quiet_delay = min(7200, max(quiet_delay, recorded_delay, wait_seconds))
     elif added_count >= 5 and wait_seconds > 0:
         quiet_delay = max(15, min(quiet_delay, recorded_delay or wait_seconds))
-    features.setdefault("outcome_snapshot", outcome)
-    encoded = _encoded_input_for_chat(
-        conn,
-        chat_id=chat_id,
-        now_text=_row_text(row, "created_at"),
-        cutoff_event_id=_row_int(row, "id"),
-        heuristic_context=features,
-        use_current_state=False,
-    )
+    encoded = _encode_decision_input(conn, chat_id, snapshot)
     return EncodedSample(
         seq_numeric=encoded["seq_numeric"],
         seq_event_type_ids=encoded["seq_event_type_ids"],
@@ -1045,14 +1087,21 @@ def _build_readiness_state(
         3,
         minimum=1,
     )
+    def metric(name: str, fallback: float) -> float:
+        try:
+            value = float(metrics[name])
+        except (KeyError, TypeError, ValueError):
+            return fallback
+        return value if math.isfinite(value) else fallback
+
     ready = (
         sample_count >= min_samples
         and validation_count >= min_eval_samples
-        and float(metrics.get("validation_delay_accuracy") or 0.0)
+        and metric("validation_delay_accuracy", 0.0)
         >= accuracy_threshold
-        and float(metrics.get("validation_delay_mae_buckets") or 99.0)
+        and metric("validation_delay_mae_buckets", math.inf)
         <= max_mae_buckets
-        and float(metrics.get("validation_added_mae_log") or 99.0)
+        and metric("validation_added_mae_log", math.inf)
         <= max_added_mae_log
     )
     prior_consecutive = int(previous_state.get("consecutive_ready_count") or 0)
@@ -1060,10 +1109,10 @@ def _build_readiness_state(
     auto_promote = _cfg_enabled(cfg, "sync_ai_auto_promote_enabled", 0)
     shadow_enabled = _cfg_enabled(cfg, "sync_ai_shadow", 1)
     previous_mode = str(previous_state.get("mode") or "shadow")
-    mode = "active" if previous_mode == "active" else "shadow"
-    if shadow_enabled:
-        mode = "shadow"
-    elif auto_promote and consecutive_ready_count >= required_runs:
+    mode = "shadow"
+    if ready and not shadow_enabled and auto_promote and (
+        previous_mode == "active" or consecutive_ready_count >= required_runs
+    ):
         mode = "active"
     return {
         "mode": mode,
@@ -1101,6 +1150,8 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
     min_samples = _cfg_int(cfg, "sync_model_min_samples", 200, minimum=1)
     previous = _model_state_from_db(conn)
     previous_state = previous.get("state") or {}
+    if previous.get("model_version") != MODEL_VERSION:
+        previous_state = {}
     artifact_path = str(previous.get("artifact_path") or default_artifact_path())
 
     torch, nn, import_error = _load_torch()
@@ -1130,7 +1181,7 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
 
     if total_outcomes < min_samples:
         state = {
-            "mode": str(previous_state.get("mode") or "shadow"),
+            "mode": "shadow",
             "ready": False,
             "sample_count": total_outcomes,
             "last_trained_outcome_count": int(previous_state.get("last_trained_outcome_count") or 0),
@@ -1154,7 +1205,15 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
 
     last_trained_outcomes = int(previous_state.get("last_trained_outcome_count") or 0)
     min_new_outcomes = _min_new_outcomes_for_training(cfg, min_samples)
-    if last_trained_outcomes > 0 and total_outcomes - last_trained_outcomes < min_new_outcomes:
+    last_outcome_id = int(previous_state.get("last_trained_outcome_id") or 0)
+    latest_outcome_id = int(conn.execute(
+        "SELECT COALESCE(MAX(id), 0) FROM sync_learning_events WHERE event_type = 'update_outcome'"
+    ).fetchone()[0])
+    new_outcomes = int(conn.execute(
+        "SELECT COUNT(*) FROM (SELECT 1 FROM sync_learning_events WHERE id > ? AND event_type = 'update_outcome' LIMIT ?)",
+        (last_outcome_id, min_new_outcomes),
+    ).fetchone()[0])
+    if last_outcome_id > 0 and new_outcomes < min_new_outcomes:
         state = dict(previous_state)
         state.update(
             {
@@ -1187,6 +1246,12 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
     max_samples = _cfg_int(cfg, "sync_model_max_train_samples", 4096, minimum=min_samples)
     samples = _load_training_samples(conn, max_samples=max_samples)
     if len(samples) < min_samples:
+        _write_model_state(
+            conn, backend="waiting_for_usable_samples",
+            metrics={"sample_count": len(samples)},
+            state={"mode": "shadow", "ready": False, "reason": "waiting_for_usable_samples"},
+            artifact_path=artifact_path,
+        )
         return {
             "ok": True,
             "trained": False,
@@ -1203,7 +1268,7 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
         if previous_artifact.exists():
             with suppress(Exception):
                 checkpoint = _safe_torch_load(torch, previous_artifact)
-                if isinstance(checkpoint, dict) and checkpoint.get("model_state"):
+                if isinstance(checkpoint, dict) and checkpoint.get("model_version") == MODEL_VERSION and checkpoint.get("model_state"):
                     _load_compatible_model_state(model, checkpoint["model_state"])
 
         split_at = max(1, int(len(samples) * 0.8))
@@ -1271,7 +1336,7 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
             validation_count=len(validation_samples),
             metrics=metrics,
         )
-        trained_at = _utc_now_text()
+        trained_at = datetime.now(UTC).isoformat(timespec="microseconds")
         artifact = {
             "model_key": MODEL_KEY,
             "model_version": MODEL_VERSION,
@@ -1308,6 +1373,7 @@ def train_sync_model(conn: sqlite3.Connection, cfg: Any) -> dict[str, Any]:
         | {
             "trained_sample_count": len(samples),
             "last_trained_outcome_count": total_outcomes,
+            "last_trained_outcome_id": latest_outcome_id,
             "min_new_outcomes": min_new_outcomes,
             "model_kind": _model_kind(cfg),
         },
@@ -1342,18 +1408,12 @@ def _load_checkpoint_model(conn: sqlite3.Connection) -> tuple[Any, Any, dict[str
     cache_key = (
         str(path),
         mtime_ns,
-        str(model_row.get("model_version") or MODEL_VERSION),
+        str(model_row.get("model_version") or MODEL_VERSION) + ":" + str(model_row.get("trained_at") or ""),
     )
     with _MODEL_CACHE_LOCK:
         cached = _MODEL_CACHE.get(cache_key)
         if cached is not None:
             return cached[0], cached[1], model_row, ""
-
-    with _MODEL_LOCK:
-        with _MODEL_CACHE_LOCK:
-            cached = _MODEL_CACHE.get(cache_key)
-            if cached is not None:
-                return cached[0], cached[1], model_row, ""
         try:
             checkpoint = _safe_torch_load(torch, path)
         except Exception as exc:
@@ -1367,6 +1427,8 @@ def _load_checkpoint_model(conn: sqlite3.Connection) -> tuple[Any, Any, dict[str
             return None, None, model_row, "invalid_artifact"
         if str(checkpoint.get("model_version") or "") != MODEL_VERSION:
             return None, None, model_row, "incompatible_artifact_version"
+        if checkpoint.get("trained_at") != model_row.get("trained_at"):
+            return None, None, model_row, "artifact_publication_pending"
         if str(checkpoint.get("model_kind") or "torch_lite") != "torch_lite":
             return None, None, model_row, "incompatible_model_kind"
         model_cls = _make_model_class(torch, nn)
@@ -1374,11 +1436,10 @@ def _load_checkpoint_model(conn: sqlite3.Connection) -> tuple[Any, Any, dict[str
         if not _load_compatible_model_state(model, checkpoint["model_state"]):
             return None, None, model_row, "incompatible_artifact_shape"
         model.eval()
-        with _MODEL_CACHE_LOCK:
-            stale_keys = [key for key in _MODEL_CACHE if key[0] == str(path)]
-            for key in stale_keys:
-                _MODEL_CACHE.pop(key, None)
-            _MODEL_CACHE[cache_key] = (torch, model)
+        stale_keys = [key for key in _MODEL_CACHE if key[0] == str(path)]
+        for key in stale_keys:
+            _MODEL_CACHE.pop(key, None)
+        _MODEL_CACHE[cache_key] = (torch, model)
         return torch, model, model_row, ""
 
 
@@ -1393,6 +1454,7 @@ def predict_sync_decision(
     heuristic_delay_seconds: int,
     heuristic_priority_score: float,
     heuristic_context: dict[str, Any] | None = None,
+    decision_input: dict[str, Any] | None = None,
 ) -> ModelSuggestion:
     if not _cfg_enabled(cfg, "sync_ai_enabled", 0):
         return ModelSuggestion(
@@ -1431,29 +1493,14 @@ def predict_sync_decision(
             reason=unavailable_reason,
         )
 
-    synthetic_event = {
-        "event_type": "observation",
-        "reason": str(observation_reason or "event"),
-        "source_account": str(source_account or ""),
-        "status": "pending",
-        "quiet_delay_seconds": int(heuristic_delay_seconds or 0),
-        "priority_score": float(heuristic_priority_score or 0.0),
-        "added_message_count": 0,
-        "wait_seconds": 0,
-        "api_cost": 0.0,
-        "failure_type": "",
-        "created_at": now_text,
-        "features": heuristic_context or {},
-        "prediction": heuristic_context or {},
-        "outcome": {},
-    }
-    encoded = _encoded_input_for_chat(
-        conn,
-        chat_id=int(chat_id),
-        now_text=now_text,
-        synthetic_event=synthetic_event,
+    snapshot = decision_input or capture_decision_input(
+        conn, chat_id=chat_id, now_text=now_text,
+        observation_reason=observation_reason, source_account=source_account,
+        heuristic_delay_seconds=heuristic_delay_seconds,
+        heuristic_priority_score=heuristic_priority_score,
         heuristic_context=heuristic_context,
     )
+    encoded = _encode_decision_input(conn, chat_id, snapshot)
     with torch.no_grad():
         outputs = model(
             torch.tensor([encoded["seq_numeric"]], dtype=torch.float32),
@@ -1491,6 +1538,8 @@ def predict_sync_decision(
         reason = "shadow_forced"
     elif mode != "active":
         reason = "model_not_active"
+    elif not state.get("ready"):
+        reason = "model_not_ready"
     elif not auto_promote_enabled:
         reason = "auto_promote_disabled"
     elif confidence < min_confidence:

@@ -360,6 +360,8 @@ class HarvestCounters:
     parse_failures: int = 0
     parse_failure_samples: list[str] = field(default_factory=list)
     parse_failures_by_type: dict[str, int] = field(default_factory=dict)
+    added: int = 0
+    updated: int = 0
 
     def note_parse_failure(self, err: Exception, message: Any = None) -> None:
         self.parse_failures += 1

@@ -149,6 +149,7 @@ class BatchUpsertResult:
 
     affected_grouped_ids: frozenset[int] = frozenset()
     persisted_change_count: int = 0
+    new_message_count: int = 0
 
     # ``batch_upsert`` historically returned a grouped-id set. Keep the small
     # read-only set protocol so older internal integrations can migrate to the
@@ -167,6 +168,7 @@ class BatchUpsertResult:
             return (
                 self.affected_grouped_ids == other.affected_grouped_ids
                 and self.persisted_change_count == other.persisted_change_count
+                and self.new_message_count == other.new_message_count
             )
         if isinstance(other, (set, frozenset)):
             return self.affected_grouped_ids == frozenset(other)
@@ -601,6 +603,7 @@ def batch_upsert(
             )
             _increment_chat_message_summaries(cur, new_counts_by_chat)
             result = BatchUpsertResult(
+                new_message_count=sum(new_counts_by_chat.values()),
                 affected_grouped_ids=frozenset(
                     message_grouped_ids | media_grouped_ids | stale_grouped_ids
                 ),

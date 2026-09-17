@@ -734,6 +734,31 @@ def test_decorator_client_cleanup_on_error():
         mock_cleanup.assert_called_once()
 
 
+def test_decorator_cleans_isolated_session_when_client_creation_fails():
+    @admin_job(name="Client Setup Error", requires_client=True, heartbeat=False)
+    def client_setup_error_job(ctx: AdminJobContext) -> AdminJobResult:
+        return AdminJobResult(success=True)
+
+    with (
+        patch(
+            "tg_harvest.admin_jobs.framework._create_isolated_worker_client",
+            side_effect=RuntimeError("connection failed"),
+        ),
+        patch(
+            "tg_harvest.admin_jobs.framework._cleanup_isolated_worker_session"
+        ) as cleanup,
+    ):
+        client_setup_error_job(
+            "job_client_setup_error",
+            cfg=Mock(),
+            get_conn_fn=Mock(),
+            admin_job_set_status_fn=Mock(return_value=True),
+            admin_job_append_log_fn=Mock(),
+        )
+
+    cleanup.assert_called_once()
+
+
 def test_decorator_progress_tracking():
     """Test progress tracking integration."""
     @admin_job(name="Progress Job", requires_client=False, heartbeat=False)

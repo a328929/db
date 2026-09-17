@@ -40,7 +40,7 @@
 
   var channelState = {
     items: [],
-    membershipFilter: '__all__'
+    membershipFilter: '__all__', offset: 0, displayedOffset: 0, limit: 100, total: 0, allCount: 0, loading: false
   };
 
   var jobPollState = {
@@ -78,6 +78,9 @@
       channelListToggleBtn: document.getElementById('admin-channel-list-toggle-btn'),
       channelCount: document.getElementById('admin-channel-count'),
       channelList: document.getElementById('admin-channel-list'),
+      prevPage: document.getElementById('admin-channel-prev'),
+      nextPage: document.getElementById('admin-channel-next'),
+      pageStatus: document.getElementById('admin-channel-page'),
       scanMissingBtn: document.getElementById('admin-scan-missing-btn'),
       refreshMissingBtn: document.getElementById('admin-refresh-missing-btn'),
       missingListToggleBtn: document.getElementById('admin-missing-list-toggle-btn'),
@@ -151,11 +154,21 @@
       }
     });
     elements.sortSelect.addEventListener('change', function () {
+      channelState.offset = 0;
       loadChannels(elements);
     });
     elements.membershipFilterSelect.addEventListener('change', function () {
       channelState.membershipFilter = elements.membershipFilterSelect.value || '__all__';
-      renderChannels(elements, channelState.items);
+      channelState.offset = 0;
+      loadChannels(elements);
+    });
+    elements.prevPage.addEventListener('click', function () {
+      channelState.offset = Math.max(0, channelState.offset - channelState.limit);
+      loadChannels(elements);
+    });
+    elements.nextPage.addEventListener('click', function () {
+      channelState.offset += channelState.limit;
+      loadChannels(elements);
     });
     elements.refreshChannelsBtn.addEventListener('click', function () {
       loadChannels(elements);
@@ -368,7 +381,7 @@
     var filterValue = channelState.membershipFilter || '__all__';
     if (filterValue === '__all__') return channels;
     return channels.filter(function (channel) {
-      return String(channel && channel.sync_membership_scope || '') === filterValue;
+      return String(channel && channel.sync_membership_scope || 'unknown') === filterValue;
     });
   }
 
@@ -483,9 +496,9 @@
     if (!allChannels.length) {
       var empty = document.createElement('div');
       empty.className = 'empty-box';
-      empty.textContent = '暂无已入库群组或频道。';
+      empty.textContent = channelState.allCount ? '当前筛选下没有匹配结果。' : '暂无已入库群组或频道。';
       elements.channelList.appendChild(empty);
-      elements.channelCount.textContent = '共 0 个群组/频道。';
+      elements.channelCount.textContent = '匹配 0 个，共 ' + channelState.allCount + ' 个群组/频道。';
       return;
     }
     if (!visibleChannels.length) {
@@ -506,10 +519,7 @@
         return '正在显示 ' + visible + '/' + total + ' 个群组/频道...';
       },
       doneText: function (total) {
-        if ((channelState.membershipFilter || '__all__') === '__all__') {
-          return '共 ' + total + ' 个群组/频道。';
-        }
-        return '当前筛选 ' + total + ' 个，共 ' + allChannels.length + ' 个群组/频道。';
+        return '本页 ' + total + ' 个，匹配 ' + channelState.total + ' 个，共 ' + channelState.allCount + ' 个群组/频道。';
       },
       createItem: function (channel) {
         var parts = [];
@@ -547,21 +557,44 @@
 
   async function loadChannels(elements) {
     var requestToken = nextListRequestToken('channels');
+    channelState.loading = true;
+    syncChannelPaging(elements);
     stopListRendering('channels', elements.channelList);
+    setListRenderBusy(elements.channelList, true);
     elements.channelCount.textContent = '正在读取列表...';
     try {
       var data = await fetchJSON(
-        '/api/admin/channels?sort=' + encodeURIComponent(elements.sortSelect.value)
+        '/api/admin/channels?' + new URLSearchParams({
+          sort: elements.sortSelect.value, limit: String(channelState.limit),
+          offset: String(channelState.offset), membership: channelState.membershipFilter
+        }).toString()
       );
       if (!isListRequestCurrent('channels', requestToken)) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       channelState.items = Array.isArray(data.channels) ? data.channels : [];
+      channelState.total = Number(data.total || 0);
+      channelState.allCount = Number(data.all_count || 0);
+      channelState.offset = Number(data.offset || 0);
+      channelState.displayedOffset = channelState.offset;
       renderChannels(elements, channelState.items);
     } catch (error) {
       if (!isListRequestCurrent('channels', requestToken)) return;
+      channelState.offset = channelState.displayedOffset;
       stopListRendering('channels', elements.channelList);
       elements.channelCount.textContent = '读取列表失败：' + error.message;
+    } finally {
+      if (isListRequestCurrent('channels', requestToken)) {
+        channelState.loading = false;
+        syncChannelPaging(elements);
+      }
     }
+  }
+
+  function syncChannelPaging(elements) {
+    var busy = channelState.loading || jobPollState.isPolling;
+    setElementDisabled(elements.prevPage, busy || channelState.offset <= 0);
+    setElementDisabled(elements.nextPage, busy || channelState.offset + channelState.limit >= channelState.total);
+    if (elements.pageStatus) elements.pageStatus.textContent = (channelState.total ? Math.floor(channelState.displayedOffset / channelState.limit) + 1 : 0) + ' / ' + Math.ceil(channelState.total / channelState.limit);
   }
 
   function renderMissingChannels(elements, items) {
@@ -1105,6 +1138,8 @@
 
   function setBusy(elements, isBusy) {
     var disabled = !!isBusy;
+    setElementDisabled(elements.prevPage, disabled || channelState.loading || channelState.offset <= 0);
+    setElementDisabled(elements.nextPage, disabled || channelState.loading || channelState.offset + channelState.limit >= channelState.total);
     setElementDisabled(elements.sortSelect, disabled);
     setElementDisabled(elements.membershipFilterSelect, disabled);
     setElementDisabled(elements.refreshChannelsBtn, disabled);

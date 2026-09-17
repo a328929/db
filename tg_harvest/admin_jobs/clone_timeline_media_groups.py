@@ -220,6 +220,7 @@ def handle_media_group_item(
                     f"source_message_id={source_message_id}"
                     f"{media_kind_suffix}，{message}",
                 )
+                break
         return sent, skipped, failed
 
     def copy_album_chunk(
@@ -301,6 +302,8 @@ def handle_media_group_item(
                 sent += chunk_sent
                 skipped += chunk_skipped
                 failed += chunk_failed
+                if chunk_failed:
+                    break
             state.counters.media_sent += sent
             state.counters.media_skipped += skipped
             state.counters.media_failed += failed
@@ -311,7 +314,7 @@ def handle_media_group_item(
                 state.copied_api_group_keys.add(resolved_group_key)
             else:
                 state.counters.media_group_skipped += 1
-            state.counters.processed += len(resolved_message_ids)
+            state.counters.processed += sent + skipped + failed
             if sent and len(album_chunks) > 1:
                 admin_job_append_log_fn(
                     state.job_id,
@@ -333,7 +336,7 @@ def handle_media_group_item(
             state.copied_api_group_keys.add(resolved_group_key)
         else:
             state.counters.media_group_skipped += 1
-        state.counters.processed += len(resolved_message_ids)
+        state.counters.processed += sent + skipped + failed
         if sent and copy_strategy == "sequential":
             admin_job_append_log_fn(
                 state.job_id,

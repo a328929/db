@@ -168,14 +168,22 @@ class ManticoreClient:
 
     def sample_documents(self, document_ids: list[int]) -> dict[int, dict[str, Any]]:
         """Return stored attributes for a bounded consistency sample."""
-        ids = sorted({int(document_id) for document_id in document_ids if int(document_id) > 0})
-        if not ids:
+        ids: set[int] = set()
+        for raw_id in document_ids:
+            try:
+                document_id = int(raw_id)
+            except (TypeError, ValueError):
+                continue
+            if document_id > 0:
+                ids.add(document_id)
+        normalized_ids = sorted(ids)
+        if not normalized_ids:
             return {}
-        id_list = ",".join(str(document_id) for document_id in ids)
+        id_list = ",".join(str(document_id) for document_id in normalized_ids)
         stored_fields = ", ".join(MANTICORE_STORED_DOCUMENT_FIELDS)
         payload = self.execute_select(
             f"SELECT id, {stored_fields} FROM {self.table} "
-            f"WHERE id IN ({id_list}) LIMIT {len(ids)}"
+            f"WHERE id IN ({id_list}) LIMIT {len(normalized_ids)}"
         )
         hits = payload.get("hits")
         raw_hits = hits.get("hits") if isinstance(hits, dict) else None

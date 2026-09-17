@@ -936,7 +936,7 @@
       '模型模式：' + (scheduler.effectiveModelMode || (scheduler.aiEnabled ? '仅观察' : '已关闭'))
         + ' / ' + (scheduler.model.backend || 'none')
         + (scheduler.model.state.mode ? ' / ' + String(scheduler.model.state.mode) : '')
-        + '，训练样本 ' + formatNumber(scheduler.outcomeSampleCount || scheduler.model.sampleCount)
+        + '，训练样本 ' + formatNumber(scheduler.model.sampleCount)
         + '，学习事件 ' + formatNumber(scheduler.learningEventCount)
         + (scheduler.model.trainedAt ? '，训练 ' + formatDateTime(scheduler.model.trainedAt) : '')
     ];
@@ -1052,10 +1052,11 @@
       if (elements.chatStatusSelect.value) {
         params.set('status', elements.chatStatusSelect.value);
       }
-      syncState.chatItems = normalizeSchedulerChatsPayload(
+      var chatItems = normalizeSchedulerChatsPayload(
         await fetchJSON('/api/admin/sync/chats?' + params.toString(), { timeoutMs: SYNC_STATS_TIMEOUT_MS })
       );
       if (requestSeq !== syncState.chatRequestSeq) return;
+      syncState.chatItems = chatItems;
       renderSchedulerChats(elements);
     } catch (error) {
       if (requestSeq !== syncState.chatRequestSeq) return;

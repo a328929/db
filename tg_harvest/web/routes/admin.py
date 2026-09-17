@@ -46,14 +46,12 @@ class AdminRoutesHandler:
         self.admin_job_get_logs_fn = services.admin_job_get_logs_fn
         self.admin_get_active_job_fn = services.admin_get_active_job_fn
         self.admin_request_job_stop_fn = services.admin_request_job_stop_fn
-        # self.admin_has_any_active_job_fn = services.admin_has_any_active_job_fn  # TODO: 未使用，考虑移除
         self.admin_try_create_exclusive_job_fn = (
             services.admin_try_create_exclusive_job_fn
         )
         self.admin_create_chat_job_if_absent_fn = (
             services.admin_create_chat_job_if_absent_fn
         )
-        # self.admin_job_create_fn = services.admin_job_create_fn  # TODO: 未使用，考虑移除
         self.admin_job_append_log_fn = services.admin_job_append_log_fn
         self.admin_start_harvest_job_thread_fn = (
             services.admin_start_harvest_job_thread_fn

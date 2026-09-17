@@ -583,9 +583,21 @@ def _create_sync_scheduler_tables(cur: sqlite3.Cursor, strict_suffix: str) -> No
         in_flight_owner_pid      INTEGER NOT NULL DEFAULT 0,
         in_flight_owner_host     TEXT NOT NULL DEFAULT '',
         dirty_generation         INTEGER NOT NULL DEFAULT 0,
+        decision_event_id        INTEGER NOT NULL DEFAULT 0,
+        retry_after_at           TEXT NOT NULL DEFAULT '',
         created_at               TEXT NOT NULL DEFAULT (datetime('now')),
         updated_at               TEXT NOT NULL DEFAULT (datetime('now')),
         FOREIGN KEY(chat_id) REFERENCES chats(chat_id) ON DELETE CASCADE
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS sync_pending_message_edits (
+        chat_id INTEGER NOT NULL,
+        message_id INTEGER NOT NULL,
+        generation INTEGER NOT NULL,
+        PRIMARY KEY(chat_id, message_id),
+        FOREIGN KEY(chat_id) REFERENCES sync_pending_updates(chat_id) ON DELETE CASCADE
     ){strict_suffix}
     """)
 
@@ -1265,6 +1277,8 @@ def _ensure_sync_scheduler_schema(cur: sqlite3.Cursor) -> None:
                 "in_flight_owner_host TEXT NOT NULL DEFAULT ''",
             ),
             ("dirty_generation", "dirty_generation INTEGER NOT NULL DEFAULT 0"),
+            ("decision_event_id", "decision_event_id INTEGER NOT NULL DEFAULT 0"),
+            ("retry_after_at", "retry_after_at TEXT NOT NULL DEFAULT ''"),
             ("created_at", "created_at TEXT NOT NULL DEFAULT (datetime('now'))"),
             ("updated_at", "updated_at TEXT NOT NULL DEFAULT (datetime('now'))"),
         ],

@@ -63,6 +63,7 @@ def _scan_joined_restricted_chats(
     accounts: list[_ScanAccount],
     job_id: str,
     admin_job_append_log_fn: Callable[[str, str], Any],
+    active_clients: list | None = None,
 ) -> tuple[dict[tuple[str, int], RestrictedChatInventoryRow], set[tuple[str, int]], list[tuple[_ScanAccount, Any, str]]]:
     """Phase 1: Scan joined chats for restriction reasons and risk flags.
 
@@ -82,7 +83,8 @@ def _scan_joined_restricted_chats(
     """
     merged_rows: dict[tuple[str, int], RestrictedChatInventoryRow] = {}
     joined_identities: set[tuple[str, int]] = set()
-    active_clients: list[tuple[_ScanAccount, Any, str]] = []
+    if active_clients is None:
+        active_clients = []
 
     for account in accounts:
         admin_job_append_log_fn(
@@ -91,6 +93,7 @@ def _scan_joined_restricted_chats(
         )
         worker_id = f"{job_id}_restricted_chats_{account.key}"
         client = _create_isolated_worker_client(account.cfg, worker_id)
+        active_clients.append((account, client, worker_id))
         if not client.is_user_authorized():
             admin_job_append_log_fn(
                 job_id,
@@ -107,8 +110,8 @@ def _scan_joined_restricted_chats(
                 )
             finally:
                 _cleanup_isolated_worker_session(account.cfg, worker_id)
+            active_clients.pop()
             continue
-        active_clients.append((account, client, worker_id))
         with bind_client_event_loop(client):
             dialogs = list(
                 client.iter_dialogs(
@@ -660,7 +663,8 @@ def _scan_missing_chat_rows(
 
     merged_rows: dict[tuple[str, int], ChatInventoryRow] = {}
     scanned_account_count = 0
-    for account in _scan_accounts(cfg):
+    accounts = _scan_accounts(cfg)
+    for account in accounts:
         account_rows = _scan_account_rows(
             account,
             job_id=job_id,
@@ -690,6 +694,8 @@ def _scan_missing_chat_rows(
 
     if scanned_account_count <= 0:
         raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
+    if scanned_account_count != len(accounts):
+        raise RuntimeError("部分账号未完成扫描，已保留上次完整扫描结果；请恢复账号登录后重试")
 
     rows = list(merged_rows.values())
     rows.sort(
@@ -764,11 +770,15 @@ def _scan_restricted_chat_rows(
 
     try:
         # Phase 1: Scan joined chats
+        accounts = _scan_accounts(cfg)
         merged_rows, joined_identities, active_clients = _scan_joined_restricted_chats(
-            accounts=_scan_accounts(cfg),
+            accounts=accounts,
             job_id=job_id,
             admin_job_append_log_fn=admin_job_append_log_fn,
+            active_clients=active_clients,
         )
+        if len(active_clients) != len(accounts):
+            raise RuntimeError("部分账号未完成扫描，已保留上次完整扫描结果；请恢复账号登录后重试")
 
         # Phase 2: Batch refresh cached public entities
         public_rows = [

@@ -5,9 +5,11 @@ from typing import Any
 from flask import jsonify, render_template
 
 from tg_harvest.app.services import ChannelRouteServices
+from tg_harvest.storage.channel_management import list_database_channel_page
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
     create_started_exclusive_job_response,
+    json_error,
     logged_json_error,
 )
 from tg_harvest.web.routes.chat_links import with_chat_links
@@ -114,6 +116,22 @@ def register_channel_routes(
             from flask import request
 
             sort = request.args.get("sort", "")
+            if "limit" in request.args:
+                try:
+                    limit = int(request.args["limit"])
+                    offset = int(request.args.get("offset", "0"))
+                    if not 1 <= limit <= 200 or offset < 0:
+                        raise ValueError("分页参数非法")
+                    with closing(services.get_conn_fn()) as conn:
+                        page_fn = services.list_database_channel_page_fn or list_database_channel_page
+                        payload = page_fn(
+                            conn, sort=sort, limit=limit, offset=offset,
+                            membership=request.args.get("membership", ""),
+                        )
+                    payload["channels"] = with_chat_links(payload["channels"], services.build_telegram_chat_link_bundle_fn)
+                    return jsonify({"ok": True, **payload})
+                except (ValueError, TypeError):
+                    return json_error("分页或筛选参数非法", 400)
             channels = _load_linked_channel_items(
                 services.get_conn_fn,
                 services.list_database_channels_fn,

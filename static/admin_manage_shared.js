@@ -1159,6 +1159,9 @@
     try {
       response = await fetch(url, fetchOptions);
     } catch (networkError) {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
       if (
         didTimeout
         || (networkError && String(networkError.name || '') === 'AbortError')
@@ -1166,13 +1169,12 @@
         throw new Error('请求超时，请稍后重试');
       }
       throw new Error('网络请求失败');
-    } finally {
-      if (timeoutId) {
-        window.clearTimeout(timeoutId);
-      }
     }
 
     if (!response.ok) {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
       if (response.status === 401) {
         if (typeof onUnauthorized === 'function') {
           onUnauthorized();
@@ -1199,6 +1201,10 @@
       return payload;
     } catch (_parseError) {
       throw new Error('响应 JSON 解析失败');
+    } finally {
+      if (timeoutId) {
+        window.clearTimeout(timeoutId);
+      }
     }
   }
 

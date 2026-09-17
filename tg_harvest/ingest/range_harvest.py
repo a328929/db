@@ -200,6 +200,8 @@ def _flush_range_batch(
         fallback_change_count=unique_message_key_count(msg_rows),
     )
     counters.written += result.persisted_change_count
+    counters.added += result.new_message_count
+    counters.updated += max(0, result.persisted_change_count - result.new_message_count)
     return result
 
 

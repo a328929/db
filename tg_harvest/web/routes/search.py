@@ -2,7 +2,7 @@ import gzip
 import sqlite3
 import threading
 import time
-from collections import deque
+from collections import OrderedDict, deque
 from contextlib import closing
 
 from flask import jsonify, request
@@ -18,7 +18,7 @@ SEARCH_RATE_LIMIT = 20
 SEARCH_COUNT_ONLY_RATE_LIMIT = 60
 SEARCH_WINDOW_SEC = 60
 SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS = 10_000
-_search_rate_tracker: dict[str, deque] = {}
+_search_rate_tracker: OrderedDict[str, deque] = OrderedDict()
 _rate_lock = threading.Lock()
 _SEARCH_GZIP_MIN_BYTES = 1024
 _SEARCH_INDEX_RETRY_AFTER_SECONDS = 60
@@ -63,18 +63,17 @@ def _compress_search_response(response):
 
 
 def _prune_expired_rate_limit_keys_locked(now: float) -> None:
-    expired_keys = []
-    for tracker_key, history in _search_rate_tracker.items():
-        while history and history[0] < now - SEARCH_WINDOW_SEC:
-            history.popleft()
-        if not history:
-            expired_keys.append(tracker_key)
-    for tracker_key in expired_keys:
-        _search_rate_tracker.pop(tracker_key, None)
+    cutoff = now - SEARCH_WINDOW_SEC
+    # Buckets are ordered by their last accepted request, so live buckets
+    # after the first live entry cannot expire yet.
+    while _search_rate_tracker:
+        history = next(iter(_search_rate_tracker.values()))
+        if history and history[-1] >= cutoff:
+            break
+        _search_rate_tracker.popitem(last=False)
 
 
 def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
-    now = time.time()
     limit = (
         SEARCH_COUNT_ONLY_RATE_LIMIT
         if bucket == "count_only"
@@ -82,6 +81,7 @@ def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
     )
     tracker_key = f"{bucket}:{ip}"
     with _rate_lock:
+        now = time.monotonic()
         _prune_expired_rate_limit_keys_locked(now)
         if tracker_key not in _search_rate_tracker:
             if len(_search_rate_tracker) >= SEARCH_RATE_LIMIT_MAX_TRACKED_KEYS:
@@ -92,10 +92,13 @@ def _is_rate_limited(ip: str, *, bucket: str = "search") -> bool:
             _search_rate_tracker[tracker_key] = deque()
 
         history = _search_rate_tracker[tracker_key]
+        while history and history[0] < now - SEARCH_WINDOW_SEC:
+            history.popleft()
         if len(history) >= limit:
             return True
 
         history.append(now)
+        _search_rate_tracker.move_to_end(tracker_key)
         return False
 
 

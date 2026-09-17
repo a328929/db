@@ -4,6 +4,7 @@ import threading
 from collections.abc import Callable
 from contextlib import suppress
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ def synchronized_write(func: Callable) -> Callable:
     增加了获取锁的超时机制（15秒），防止 Web 线程被后台长任务永久阻塞导致服务死锁。
     """
 
+    @wraps(func)
     def wrapper(*args, **kwargs) -> Any:
         acquired = DB_WRITE_LOCK.acquire(timeout=15)
         if not acquired:
@@ -127,13 +129,17 @@ def connect_db(
     set_journal_mode: bool = True,
 ) -> tuple[sqlite3.Connection, SqliteFeatures]:
     conn = _open_connection(db_name)
-    _runtime_paths.secure_sqlite_artifacts(db_name)
-    _apply_pragmas(
-        conn, cache_mb=cache_mb, mmap_mb=mmap_mb, set_journal_mode=set_journal_mode
-    )
-    _runtime_paths.secure_sqlite_artifacts(db_name)
-    feats = _load_sqlite_features(conn)
-    return conn, feats
+    try:
+        _runtime_paths.secure_sqlite_artifacts(db_name)
+        _apply_pragmas(
+            conn, cache_mb=cache_mb, mmap_mb=mmap_mb, set_journal_mode=set_journal_mode
+        )
+        _runtime_paths.secure_sqlite_artifacts(db_name)
+        feats = _load_sqlite_features(conn)
+        return conn, feats
+    except BaseException:
+        conn.close()
+        raise
 
 
 def _resolve_runtime_cfg(cfg: Any | None = None) -> Any:
@@ -161,6 +167,10 @@ def ensure_configured_db(
     conn, feats = connect_configured_db(cfg=runtime_cfg)
     from .schema import create_schema
 
-    create_schema(conn, feats)
-    _runtime_paths.secure_sqlite_artifacts(str(runtime_cfg.db_name))
-    return conn, feats
+    try:
+        create_schema(conn, feats)
+        _runtime_paths.secure_sqlite_artifacts(str(runtime_cfg.db_name))
+        return conn, feats
+    except BaseException:
+        conn.close()
+        raise

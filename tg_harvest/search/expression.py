@@ -34,6 +34,7 @@ _START_TOKENS = {TOKEN_TERM, TOKEN_PHRASE, TOKEN_NOT, TOKEN_LPAREN}
 MAX_SEARCH_EXPR_NODES = 128
 MAX_SEARCH_EXPR_OR_BRANCHES = 32
 MAX_SEARCH_EXPR_WILDCARDS = 8
+MAX_SEARCH_EXPR_DEPTH = 128
 
 
 @dataclass(frozen=True)
@@ -165,6 +166,14 @@ class _SearchExprParser:
     def __init__(self, tokens: Sequence[ExprToken]) -> None:
         self.tokens = list(tokens)
         self.index = 0
+        self.depth = 0
+        self.node_count = 0
+
+    def _node(self, kind: str, **kwargs: Any) -> SearchExprNode:
+        self.node_count += 1
+        if self.node_count > MAX_SEARCH_EXPR_NODES:
+            raise ValueError("搜索表达式结构过于复杂")
+        return SearchExprNode(kind, **kwargs)
 
     def parse(self) -> SearchExprNode:
         if not self.tokens:
@@ -185,21 +194,27 @@ class _SearchExprParser:
             elif next_token.kind not in _START_TOKENS:
                 raise ValueError("搜索表达式存在非法连接符")
             right = self._parse_or_expr()
-            node = SearchExprNode("AND", left=node, right=right)
+            node = self._node("AND", left=node, right=right)
         return node
 
     def _parse_or_expr(self) -> SearchExprNode:
         node = self._parse_unary_expr()
         while self._match(TOKEN_OR):
             right = self._parse_unary_expr()
-            node = SearchExprNode("OR", left=node, right=right)
+            node = self._node("OR", left=node, right=right)
         return node
 
     def _parse_unary_expr(self) -> SearchExprNode:
-        if self._match(TOKEN_NOT):
-            child = self._parse_unary_expr()
-            return SearchExprNode("NOT", left=child)
-        return self._parse_primary()
+        self.depth += 1
+        try:
+            if self.depth > MAX_SEARCH_EXPR_DEPTH:
+                raise ValueError("搜索表达式嵌套过深")
+            if self._match(TOKEN_NOT):
+                child = self._parse_unary_expr()
+                return self._node("NOT", left=child)
+            return self._parse_primary()
+        finally:
+            self.depth -= 1
 
     def _parse_primary(self) -> SearchExprNode:
         token = self._peek()
@@ -213,10 +228,10 @@ class _SearchExprParser:
             return expr
         if token.kind == TOKEN_TERM:
             self.index += 1
-            return SearchExprNode("TERM", value=token.value)
+            return self._node("TERM", value=token.value)
         if token.kind == TOKEN_PHRASE:
             self.index += 1
-            return SearchExprNode("PHRASE", value=token.value)
+            return self._node("PHRASE", value=token.value)
         if token.kind == TOKEN_RPAREN:
             raise ValueError("存在多余的右括号")
         raise ValueError("搜索表达式存在非法位置的操作符")

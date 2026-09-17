@@ -427,6 +427,9 @@ def admin_job(
                     except Exception:
                         logging.exception("Failed to disconnect client: job_id=%s", job_id)
 
+                # Client creation can fail after creating the isolated session;
+                # always remove that session for client-backed jobs.
+                if requires_client:
                     try:
                         _cleanup_isolated_worker_session(cfg, worker_id)
                     except Exception:

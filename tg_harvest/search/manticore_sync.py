@@ -276,6 +276,11 @@ def validate_manticore_state(
     try:
         client.ensure_table()
         with closing(get_conn_fn()) as conn:
+            version = (conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes)
+            # Pending writes are normal replication lag, not evidence of a
+            # corrupt index. Keep the last validated status until they drain.
+            if conn.execute(f"SELECT 1 FROM {OUTBOX_TABLE} LIMIT 1").fetchone():
+                return False
             sqlite_count = int(conn.execute("SELECT COUNT(*) FROM messages").fetchone()[0] or 0)
             outbox_pending = int(
                 conn.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}").fetchone()[0] or 0
@@ -294,6 +299,15 @@ def validate_manticore_state(
                 sample_consistent = source_sample_digest == manticore_sample_digest
                 if not sample_consistent:
                     validation_error = "Manticore consistency sample mismatch"
+            # Fence only the status write; never hold SQLite's writer lock
+            # while waiting for Manticore. Any intervening commit defers audit.
+            conn.execute("BEGIN IMMEDIATE")
+            current_version = (
+                conn.execute("PRAGMA data_version").fetchone()[0], conn.total_changes
+            )
+            if current_version != version:
+                conn.rollback()
+                return manticore_index_is_ready(conn, client.table)
             ready = (
                 sqlite_count == manticore_count
                 and outbox_pending == 0

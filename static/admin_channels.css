@@ -53,6 +53,26 @@
   display: none;
 }
 
+.channel-pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 14px;
+  font-variant-numeric: tabular-nums;
+}
+
+.channel-pagination .btn {
+  width: 44px;
+  height: 42px;
+  padding: 0;
+}
+
+.channel-pagination span {
+  min-width: 64px;
+  text-align: center;
+}
+
 .channel-list-item {
   border: 1px solid var(--border);
   border-radius: 12px;
