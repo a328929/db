@@ -963,6 +963,20 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertNotIn("alert(", source)
         self.assertNotIn("window.location.reload", source)
 
+    def test_clone_message_delete_traps_all_modal_dialogs(self) -> None:
+        source = (ROOT / "static" / "admin_clone_message_delete.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("shared.setDialogOpenState", source)
+        self.assertIn("shared.setPageInteractionState", source)
+        self.assertIn("shared.trapFocusWithin", source)
+        self.assertIn("document.addEventListener('keydown'", source)
+        self.assertIn("trapFocusWithin(elements.loginDialog, event);", source)
+        self.assertIn("trapFocusWithin(elements.rangeDialog, event);", source)
+        self.assertIn("trapFocusWithin(elements.resetDialog, event);", source)
+        self.assertIn("setPageInteractionState(elements.page, false);", source)
+        self.assertIn("setPageInteractionState(elements.page, true);", source)
+
     def test_admin_recovery_ready_filter_requires_empty_database_chat(self) -> None:
         source = (ROOT / "static" / "admin_recovery.js").read_text(encoding="utf-8")
         self.assertIn(

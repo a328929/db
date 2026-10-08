@@ -490,6 +490,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(row["chat_id"], 2)
         self.assertEqual(row["in_database"], 1)
         self.assertEqual(row["message_count"], 20)
+        self.assertEqual(row["last_message_id"], 201)
         self.assertEqual(row["last_message_at"], "2026-03-10 00:00:00")
 
     def test_list_restricted_chat_scan_results_maps_to_signed_database_id(self) -> None:
@@ -523,6 +524,7 @@ class ChannelManagementStorageTests(unittest.TestCase):
         self.assertEqual(-10044, row["chat_id"])
         self.assertEqual(row["in_database"], 1)
         self.assertEqual(row["message_count"], 7)
+        self.assertEqual(row["last_message_id"], 1)
         self.assertEqual(row["last_message_at"], "2026-04-07 01:00:00")
 
     def test_list_restricted_chat_scan_results_prefers_exact_id_and_blocks_ambiguous_alias(

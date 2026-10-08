@@ -69,6 +69,9 @@ def list_clone_source_chats(
     conn: sqlite3.Connection,
     *,
     sort: Any = CLONE_SOURCE_CHAT_SORT_DEFAULT,
+    limit: int | None = None,
+    offset: int = 0,
+    q: Any = "",
 ) -> list[dict]:
     normalized_sort = str(sort or CLONE_SOURCE_CHAT_SORT_DEFAULT).strip().lower()
     order_by_sort = {
@@ -91,6 +94,28 @@ def list_clone_source_chats(
     if normalized_sort not in order_by_sort:
         normalized_sort = CLONE_SOURCE_CHAT_SORT_DEFAULT
     order_sql = order_by_sort[normalized_sort]
+    normalized_query = str(q or "").strip()
+    normalized_offset = max(0, int(offset or 0))
+    normalized_limit = None if limit in (None, "") else max(1, min(int(limit), 1000))
+    where_sql = ""
+    query_params: list[Any] = []
+    if normalized_query:
+        where_sql = """
+            WHERE CAST(c.chat_id AS TEXT) LIKE ?
+               OR c.chat_title LIKE ? COLLATE NOCASE
+               OR c.chat_username LIKE ? COLLATE NOCASE
+               OR c.chat_type LIKE ? COLLATE NOCASE
+        """
+        like_query = f"%{normalized_query}%"
+        query_params.extend([like_query] * 4)
+    # The display-name order uses the project's pinyin-aware Python sort key.
+    # Fetch that page from SQL only for the other orders; slicing before the
+    # Python sort would make page boundaries depend on chat IDs.
+    paginate_in_sql = normalized_limit is not None and normalized_sort != "title_asc"
+    pagination_sql = ""
+    if paginate_in_sql:
+        pagination_sql = " LIMIT ? OFFSET ?"
+        query_params.extend([normalized_limit, normalized_offset])
     cur = conn.cursor()
     try:
         cur.execute(
@@ -114,8 +139,11 @@ def list_clone_source_chats(
                     ORDER BY m.msg_date_ts DESC, m.message_id DESC
                     LIMIT 1
                 )
+            {where_sql}
             ORDER BY {order_sql}
-            """
+            {pagination_sql}
+            """,
+            query_params,
         )
         items: list[dict] = []
         for row in cur.fetchall():
@@ -139,6 +167,8 @@ def list_clone_source_chats(
                     int(item.get("chat_id") or 0),
                 )
             )
+            if normalized_limit is not None:
+                items = items[normalized_offset : normalized_offset + normalized_limit]
         return items
     finally:
         cur.close()
@@ -306,7 +336,7 @@ def _account_assessment(cfg: Any) -> dict[str, Any]:
         "secondary_session_distinct": secondary_distinct,
         "target_owner_account": "secondary" if secondary_distinct else "",
         "network_access_checked": False,
-        "network_access_note": "第一版预检只评估本地数据库和配置；源群读取/转发能力将在后续媒体迁移阶段检测。",
+        "network_access_note": "结构创建阶段只评估本地数据库和配置；源群在线读取与转发能力会在深度预检和内容迁移前核验。",
     }
 
 
@@ -339,14 +369,14 @@ def _build_capabilities(
             "label": "媒体恢复",
             "status": "requires_source",
             "detail": (
-                f"数据库中有媒体消息约 {media_messages} 条；第一版不迁移媒体，后续必须依赖源群转发或本地媒体保险库。"
+                f"数据库中有媒体消息约 {media_messages} 条；内容迁移必须依赖源群在线访问或可用的媒体保险库。"
             ),
         },
         {
             "key": "history_clone",
             "label": "历史内容克隆",
             "status": "deferred" if total_messages > 0 else "empty",
-            "detail": "第一版仅执行结构克隆，历史迁移将在文本/媒体迁移阶段启用。",
+            "detail": "结构创建阶段不迁移内容；在线预检通过后可单独执行文本与媒体时间线迁移。",
         },
     ]
 
@@ -363,7 +393,7 @@ def _build_warnings(
     if not secondary_ready:
         warnings.append("未配置独立第二账号，无法由第二账号创建克隆副本。")
     if message_metrics["total_messages"] <= 0:
-        warnings.append("该群组数据库中没有消息，第一版只能创建空结构副本。")
+        warnings.append("该群组数据库中没有消息，只能创建空结构副本。")
     if media_metrics["media_metadata_rows"] < message_metrics["media_messages"]:
         warnings.append("部分媒体消息缺少 message_media 元信息，后续媒体迁移会降级。")
     if group_metrics["suspect_media_group_count"] > 0:
@@ -372,7 +402,7 @@ def _build_warnings(
         )
     if not str(chat.get("chat_username") or "").strip():
         warnings.append("源群组没有公开 username，后续源群访问更依赖账号本地实体缓存。")
-    warnings.append("第一版不复制历史消息、成员、原发布时间、反应、阅读数、评论和媒体文件本体。")
+    warnings.append("结构创建阶段不复制历史消息；当前内容迁移仍不复制成员、原发布时间、反应、阅读数、评论和媒体文件本体。")
     return warnings
 
 

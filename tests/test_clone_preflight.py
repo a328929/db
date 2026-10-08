@@ -375,7 +375,7 @@ def test_clone_preflight_flags_media_group_gaps_and_second_account_blocker():
     warnings_text = "\n".join(report["warnings"])
     assert "未配置独立第二账号" in warnings_text
     assert "疑似残缺媒体组" in warnings_text
-    assert "第一版不复制历史消息" in warnings_text
+    assert "结构创建阶段不复制历史消息" in warnings_text
 
 
 def test_clone_preflight_allows_structure_clone_with_distinct_second_account():
@@ -475,6 +475,34 @@ def test_list_clone_source_chats_sorts_message_count_descending():
         conn.close()
 
     assert [item["message_count"] for item in items] == [20, 10, 5, 2]
+
+
+def test_list_clone_source_chats_supports_search_and_pagination():
+    conn = _new_conn()
+    try:
+        conn.executemany(
+            """
+            INSERT INTO chats(
+                chat_id, chat_title, chat_username, chat_type, message_count,
+                first_seen_at, last_seen_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            [
+                (200, "Alpha News", "alpha_news", "Channel", 2, "", ""),
+                (201, "Beta News", "beta_news", "Channel", 2, "", ""),
+            ],
+        )
+        items = list_clone_source_chats(
+            conn,
+            q="alpha",
+            limit=1,
+            offset=0,
+        )
+    finally:
+        conn.close()
+
+    assert [item["chat_title"] for item in items] == ["Alpha News"]
 
 
 def test_clone_run_create_update_and_list_roundtrip():

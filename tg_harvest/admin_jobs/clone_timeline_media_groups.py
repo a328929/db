@@ -33,14 +33,17 @@ def handle_media_group_item(
     source_entity: Any,
     copy_media_to_target,
     sleep_after_send,
-) -> None:
+    remaining_message_limit: int = 0,
+) -> bool:
     grouped_id = item.get("grouped_id")
     if grouped_id in (None, ""):
         source_count = max(1, int(item.get("item_count") or 1))
+        if remaining_message_limit > 0 and source_count > remaining_message_limit:
+            return True
         state.counters.processed += source_count
         state.counters.media_skipped += source_count
         state.counters.media_group_skipped += 1
-        return
+        return False
 
     messages = load_group_messages(
         get_conn_fn=get_conn_fn,
@@ -50,11 +53,21 @@ def handle_media_group_item(
     )
     if not messages:
         source_count = max(1, int(item.get("item_count") or 1))
+        if remaining_message_limit > 0 and source_count > remaining_message_limit:
+            return True
         state.counters.processed += source_count
         state.counters.media_skipped += source_count
         state.counters.media_group_skipped += 1
-        return
+        return False
     db_messages_by_id = {int(message["message_id"]): message for message in messages}
+    if remaining_message_limit > 0 and len(messages) > remaining_message_limit:
+        admin_job_append_log_fn(
+            state.job_id,
+            "时间线媒体组数据库成员数已超过剩余消息额度，已延后整组处理："
+            f"grouped_id={grouped_id}，items={len(messages)}，"
+            f"remaining={remaining_message_limit}",
+        )
+        return True
 
     try:
         if source_client is None or source_entity is None:
@@ -76,6 +89,8 @@ def handle_media_group_item(
             raise RuntimeError("API 未解析出可复制媒体组成员")
     except Exception as exc:
         message = admin_error_message(exc)
+        if remaining_message_limit > 0 and len(messages) > remaining_message_limit:
+            return True
         state.counters.media_failed += len(messages)
         state.counters.media_group_failed += 1
         state.counters.processed += len(messages)
@@ -96,7 +111,7 @@ def handle_media_group_item(
             state.job_id,
             f"时间线媒体组 API 解析失败：grouped_id={grouped_id}，{message}",
         )
-        return
+        return False
 
     resolved_group_key = resolved_clone_group_key(resolved_group, resolved_message_ids)
     resolved_message_id_set = set(resolved_message_ids)
@@ -110,6 +125,17 @@ def handle_media_group_item(
         for media_item in resolved_items
         if int(media_item.get("message_id") or 0)
     }
+    if (
+        remaining_message_limit > 0
+        and len(resolved_message_ids) > remaining_message_limit
+    ):
+        admin_job_append_log_fn(
+            state.job_id,
+            "时间线媒体组成员数超过剩余消息额度，已延后整组处理："
+            f"grouped_id={grouped_id}，items={len(resolved_message_ids)}，"
+            f"remaining={remaining_message_limit}",
+        )
+        return True
     copy_strategy = _clean_text(resolved_group.get("copy_strategy")).lower()
     copy_as_group = copy_strategy == "album" and len(resolved_message_ids) > 1
     album_chunks = (
@@ -119,7 +145,7 @@ def handle_media_group_item(
         state.counters.media_skipped += len(resolved_message_ids)
         state.counters.media_group_skipped += 1
         state.counters.processed += len(resolved_message_ids)
-        return
+        return False
 
     done_by_message_id = {
         int(message_id): media_mapping_done(
@@ -136,7 +162,7 @@ def handle_media_group_item(
         state.counters.media_group_skipped += 1
         state.copied_api_group_keys.add(resolved_group_key)
         state.counters.processed += len(resolved_message_ids)
-        return
+        return False
 
     def record_group_item_error(source_message_id: int, message: str) -> None:
         source_message = clone_source_message_for_api_id(
@@ -323,7 +349,7 @@ def handle_media_group_item(
                     f"items={len(resolved_message_ids)}，"
                     f"chunks={len(album_chunks)}",
                 )
-            return
+            return False
 
         sent, skipped, failed = copy_group_sequentially(tuple(resolved_message_ids))
         state.counters.media_sent += sent
@@ -376,3 +402,4 @@ def handle_media_group_item(
             state.job_id,
             f"时间线媒体组复制失败：grouped_id={grouped_id}，{message}",
         )
+    return False

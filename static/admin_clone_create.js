@@ -5,6 +5,9 @@
   var DATABASE_READ_TIMEOUT_MS = 20000;
   var state = {
     sourceChats: [],
+    sourceOffset: 0,
+    sourceLimit: 100,
+    sourceHasMore: false,
     report: null,
     busy: false
   };
@@ -24,6 +27,11 @@
       createStage: document.getElementById('admin-clone-create-stage'),
       sourceStatus: document.getElementById('admin-clone-source-status'),
       sortSelect: document.getElementById('admin-clone-sort-select'),
+      searchInput: document.getElementById('admin-clone-source-search'),
+      searchBtn: document.getElementById('admin-clone-source-search-btn'),
+      prevBtn: document.getElementById('admin-clone-source-prev-btn'),
+      nextBtn: document.getElementById('admin-clone-source-next-btn'),
+      pageStatus: document.getElementById('admin-clone-source-page-status'),
       refreshBtn: document.getElementById('admin-clone-refresh-btn'),
       sourceSelect: document.getElementById('admin-clone-source-select'),
       preflightBtn: document.getElementById('admin-clone-preflight-btn'),
@@ -67,9 +75,29 @@
       sessionController.handleLogin(elements);
     });
     elements.sortSelect.addEventListener('change', function () {
+      state.sourceOffset = 0;
       loadSourceChats(elements);
     });
     elements.refreshBtn.addEventListener('click', function () {
+      loadSourceChats(elements);
+    });
+    elements.searchBtn.addEventListener('click', function () {
+      state.sourceOffset = 0;
+      loadSourceChats(elements);
+    });
+    elements.searchInput.addEventListener('keydown', function (event) {
+      if (event.key !== 'Enter') return;
+      event.preventDefault();
+      state.sourceOffset = 0;
+      loadSourceChats(elements);
+    });
+    elements.prevBtn.addEventListener('click', function () {
+      state.sourceOffset = Math.max(0, state.sourceOffset - state.sourceLimit);
+      loadSourceChats(elements);
+    });
+    elements.nextBtn.addEventListener('click', function () {
+      if (!state.sourceHasMore) return;
+      state.sourceOffset += state.sourceLimit;
       loadSourceChats(elements);
     });
     elements.sourceSelect.addEventListener('change', function () {
@@ -100,17 +128,27 @@
     elements.sourceStatus.textContent = '正在读取可克隆源群组...';
     try {
       var payload = await fetchJSON(
-        '/api/admin/clone/chats?sort=' + encodeURIComponent(String(elements.sortSelect.value || ''))
+        '/api/admin/clone/chats?sort='
+          + encodeURIComponent(String(elements.sortSelect.value || ''))
+          + '&q=' + encodeURIComponent(String(elements.searchInput.value || '').trim())
+          + '&limit=' + encodeURIComponent(String(state.sourceLimit))
+          + '&offset=' + encodeURIComponent(String(state.sourceOffset))
       );
       state.sourceChats = Array.isArray(payload.items) ? payload.items : [];
+      state.sourceHasMore = !!payload.has_more;
       renderSourceOptions(elements, previousValue);
-      elements.sourceStatus.textContent = '共 ' + shared.formatNumber(state.sourceChats.length) + ' 个可选源群组。';
+      var page = Math.floor(state.sourceOffset / state.sourceLimit) + 1;
+      elements.sourceStatus.textContent = '当前页显示 '
+        + shared.formatNumber(state.sourceChats.length) + ' 个可选源群组。';
+      elements.pageStatus.textContent = '第 ' + shared.formatNumber(page) + ' 页';
       handleSourceChange(elements);
     } catch (error) {
       state.sourceChats = [];
+      state.sourceHasMore = false;
       renderSourceOptions(elements, '');
       handleSourceChange(elements);
       elements.sourceStatus.textContent = '读取源群组失败：' + error.message;
+      elements.pageStatus.textContent = '';
     } finally {
       setBusy(elements, false);
     }
@@ -376,6 +414,10 @@
     state.busy = !!busy;
     var selected = getSelectedSourceChat(elements);
     shared.setElementDisabled(elements.sortSelect, state.busy);
+    shared.setElementDisabled(elements.searchInput, state.busy);
+    shared.setElementDisabled(elements.searchBtn, state.busy);
+    shared.setElementDisabled(elements.prevBtn, state.busy || state.sourceOffset <= 0);
+    shared.setElementDisabled(elements.nextBtn, state.busy || !state.sourceHasMore);
     shared.setElementDisabled(elements.refreshBtn, state.busy);
     shared.setElementDisabled(elements.sourceSelect, state.busy);
     shared.setElementDisabled(elements.preflightBtn, state.busy || !selected);

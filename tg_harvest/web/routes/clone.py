@@ -461,6 +461,7 @@ def _timeline_migration_readiness(
             "plan_not_done": "迁移计划尚未完成，不能执行完整时间线迁移",
             "plan_blocked": "迁移计划存在阻断项，不能执行完整时间线迁移",
             "target_inaccessible": "目标副本不可访问，不能执行完整时间线迁移",
+            "source_snapshot_missing": "迁移计划缺少已核验的源消息快照，请重新执行在线深度预检",
             "text_strategy_blocked": "迁移计划不允许数据库文本重放",
             "missing_target_write_account": "迁移计划缺少可写目标账号，请重新执行在线深度预检",
             "source_inaccessible": "源群不可访问，不能执行媒体时间线复制",
@@ -470,7 +471,9 @@ def _timeline_migration_readiness(
             "no_timeline_remaining": "没有剩余可迁移时间线消息",
         }
         for reason_code in shared["reason_codes"]:
-            message = reason_messages.get(str(reason_code))
+            message = reason_messages.get(str(reason_code)) or (
+                "迁移计划存在未识别的阻断项，请重新执行在线深度预检"
+            )
             if message and message not in reasons:
                 reasons.append(message)
 
@@ -480,7 +483,7 @@ def _timeline_migration_readiness(
     if media_execution_account:
         execution_parts.append(f"media:{media_execution_account}")
     return {
-        "can_migrate_timeline": not reasons,
+        "can_migrate_timeline": bool(shared["can_migrate_timeline"]) and not reasons,
         "readiness_reasons": reasons,
         "target_write_account": target_write_account,
         "migration_account": migration_account,
@@ -900,8 +903,26 @@ def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:
     def api_admin_clone_chats():
         try:
             sort = request.args.get("sort", "")
+            limit, error_response = _parse_optional_limit(
+                request.args.get("limit"),
+                default=100,
+            )
+            if error_response is not None:
+                return error_response
+            offset, error_response = _parse_optional_offset(request.args.get("offset"))
+            if error_response is not None:
+                return error_response
+            query = str(request.args.get("q", "") or "").strip()
             with closing(deps.get_conn_fn()) as conn:
-                rows = deps.list_clone_source_chats_fn(conn, sort=sort)
+                rows = deps.list_clone_source_chats_fn(
+                    conn,
+                    sort=sort,
+                    limit=limit + 1,
+                    offset=offset,
+                    q=query,
+                )
+            has_more = len(rows) > limit
+            rows = rows[:limit]
             return jsonify(
                 {
                     "ok": True,
@@ -910,6 +931,9 @@ def _register_clone_list_routes(app, deps: _CloneRouteDeps) -> None:
                         deps.build_telegram_chat_link_bundle_fn,
                     ),
                     "count": len(rows),
+                    "limit": limit,
+                    "offset": offset,
+                    "has_more": has_more,
                 }
             )
         except sqlite3.Error:
@@ -1072,6 +1096,8 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 detail["run"],
                 detail.get("plan"),
             )
+            mapping_summary = detail.get("mapping_summary") or {}
+            recent_mappings = detail.get("recent_mappings") or []
             return jsonify(
                 {
                     "ok": True,
@@ -1083,8 +1109,10 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                         detail.get("migration")
                     ),
                     "group_progress": group_progress,
-                    "mapping_summary": detail.get("mapping_summary"),
-                    "recent_mappings": detail.get("recent_mappings") or [],
+                    "mapping_summary": mapping_summary,
+                    "recent_mappings": recent_mappings,
+                    "mapping_page": recent_mappings[:25],
+                    "mapping_page_total": int(mapping_summary.get("total") or 0),
                     "failure_items": detail.get("failure_items") or [],
                     "delete_confirm": _clone_run_delete_confirm_text(run),
                 }
@@ -1190,9 +1218,13 @@ def _register_clone_run_routes(app, deps: _CloneRouteDeps) -> None:
                 "读取克隆目标消息数量失败",
                 "读取克隆目标消息数量失败",
             )
-        except Exception as exc:
+        except Exception:
             deps.logger.exception("读取克隆目标消息数量失败")
-            return json_error(str(exc) or "读取克隆目标消息数量失败", 502)
+            return json_error(
+                "读取克隆目标消息数量失败，请稍后重试",
+                502,
+                error_code="clone_target_message_count_failed",
+            )
 
     @app.delete("/api/admin/clone/runs/<run_id>")
     @admin_login_required

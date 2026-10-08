@@ -2,6 +2,9 @@
   'use strict';
 
   var shared = window.AdminManageShared;
+  var setDialogOpenState = shared.setDialogOpenState;
+  var setPageInteractionState = shared.setPageInteractionState;
+  var trapFocusWithin = shared.trapFocusWithin;
   var DATABASE_READ_TIMEOUT_MS = 20000;
   var MAX_DELETE_COUNT = 100000;
   var MAX_MESSAGE_ID = 2147483647;
@@ -154,6 +157,29 @@
     });
     elements.resetConfirmBtn.addEventListener('click', function () {
       submitResetJob(elements);
+    });
+    document.addEventListener('keydown', function (event) {
+      if (!elements.loginDialog.hidden) {
+        if (event.key === 'Tab') trapFocusWithin(elements.loginDialog, event);
+        return;
+      }
+      if (!elements.rangeDialog.hidden) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeRangeDialog(elements);
+          return;
+        }
+        if (event.key === 'Tab') trapFocusWithin(elements.rangeDialog, event);
+        return;
+      }
+      if (!elements.resetDialog.hidden) {
+        if (event.key === 'Escape') {
+          event.preventDefault();
+          closeResetDialog(elements);
+          return;
+        }
+        if (event.key === 'Tab') trapFocusWithin(elements.resetDialog, event);
+      }
     });
   }
 
@@ -453,14 +479,19 @@
     elements.rangeDialogStatus.textContent = '';
     elements.rangeConfirmInput.value = '';
     elements.rangeConfirmHint.textContent = '请输入永久删除确认码：' + rangeConfirmText(selection);
-    elements.rangeDialog.hidden = false;
+    setDialogOpenState(elements.rangeDialog, true, {
+      focusElement: elements.rangeConfirmInput
+    });
+    setPageInteractionState(elements.page, false);
     syncRangeConfirmButton(elements);
-    elements.rangeConfirmInput.focus();
   }
 
   function closeRangeDialog(elements, options) {
     var opts = options || {};
-    elements.rangeDialog.hidden = true;
+    setDialogOpenState(elements.rangeDialog, false, {
+      skipFocusRestore: true
+    });
+    setPageInteractionState(elements.page, true);
     elements.rangeDialogStatus.textContent = '';
     elements.rangeConfirmInput.value = '';
     state.pendingRangeSelection = null;
@@ -486,14 +517,19 @@
     elements.resetDialogStatus.textContent = '';
     elements.resetConfirmInput.value = '';
     elements.resetConfirmHint.textContent = '请输入确认码：' + resetConfirmText();
-    elements.resetDialog.hidden = false;
+    setDialogOpenState(elements.resetDialog, true, {
+      focusElement: elements.resetConfirmInput
+    });
+    setPageInteractionState(elements.page, false);
     syncResetConfirmButton(elements);
-    elements.resetConfirmInput.focus();
   }
 
   function closeResetDialog(elements, options) {
     var opts = options || {};
-    elements.resetDialog.hidden = true;
+    setDialogOpenState(elements.resetDialog, false, {
+      skipFocusRestore: true
+    });
+    setPageInteractionState(elements.page, true);
     elements.resetDialogStatus.textContent = '';
     elements.resetConfirmInput.value = '';
     syncResetConfirmButton(elements);

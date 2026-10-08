@@ -14,6 +14,29 @@ from tg_harvest.admin_jobs.sessions import (
 from tg_harvest.ingest.flood_wait import call_with_bounded_retry
 
 
+def _target_owner_account(cfg: Any, target_owner_session: Any) -> str:
+    """Resolve the account that created the target clone.
+
+    Older runs did not persist an owner session, so they retain the historical
+    secondary-account fallback. A present but unknown owner must fail closed;
+    silently querying another account can produce a misleading remote count.
+    """
+
+    owner_session = str(target_owner_session or "").strip()
+    if not owner_session:
+        return "secondary"
+
+    primary_session = str(getattr(cfg, "session_name", "") or "").strip()
+    secondary_session = str(
+        getattr(cfg, "secondary_session_name", "") or ""
+    ).strip()
+    if owner_session in {"primary", primary_session} and primary_session:
+        return "primary"
+    if owner_session in {"secondary", secondary_session} and secondary_session:
+        return "secondary"
+    raise RuntimeError("未找到目标副本对应的已配置创建账号")
+
+
 def load_clone_target_message_count(clone_run: dict, *, cfg: Any) -> int:
     try:
         target_chat_id = int(clone_run.get("target_chat_id") or 0)
@@ -22,7 +45,8 @@ def load_clone_target_message_count(clone_run: dict, *, cfg: Any) -> int:
     if target_chat_id <= 0:
         raise ValueError("目标副本尚未创建，不能读取消息数量")
 
-    secondary_cfg = clone_cfg_for_account(cfg, "secondary")
+    owner_account = _target_owner_account(cfg, clone_run.get("target_owner_session"))
+    owner_cfg = clone_cfg_for_account(cfg, owner_account)
     worker_id = f"clone_target_metrics_{uuid4().hex}"
     client = None
     session_messages: list[str] = []
@@ -32,17 +56,17 @@ def load_clone_target_message_count(clone_run: dict, *, cfg: Any) -> int:
 
     try:
         if not _ensure_base_session_valid(
-            secondary_cfg,
+            owner_cfg,
             "clone-target-message-count",
             append_session_message,
         ):
-            detail = session_messages[-1] if session_messages else "第二账号会话不可用"
+            detail = session_messages[-1] if session_messages else "目标副本创建账号会话不可用"
             raise RuntimeError(detail)
 
-        client = _create_isolated_worker_client(secondary_cfg, worker_id)
+        client = _create_isolated_worker_client(owner_cfg, worker_id)
         target_channel = clone_run_target_input_channel(client, clone_run)
         if target_channel is None:
-            raise RuntimeError("无法解析目标副本实体，请先用第二账号打开一次目标群后重试")
+            raise RuntimeError("无法解析目标副本实体，请先用创建账号打开一次目标群后重试")
 
         with bind_client_event_loop(client):
             messages = call_with_bounded_retry(
@@ -50,11 +74,11 @@ def load_clone_target_message_count(clone_run: dict, *, cfg: Any) -> int:
                 target_channel,
                 limit=0,
                 flood_wait_threshold_seconds=getattr(
-                    secondary_cfg,
+                    owner_cfg,
                     "flood_wait_switch_threshold",
                     30,
                 ),
-                account_label="secondary",
+                account_label=owner_account,
                 scope="clone-target-message-count",
             )
         try:
@@ -69,4 +93,4 @@ def load_clone_target_message_count(clone_run: dict, *, cfg: Any) -> int:
             with suppress(Exception):
                 _disconnect_worker_client(client)
         with suppress(Exception):
-            _cleanup_isolated_worker_session(secondary_cfg, worker_id)
+            _cleanup_isolated_worker_session(owner_cfg, worker_id)

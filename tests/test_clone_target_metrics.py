@@ -66,3 +66,49 @@ def test_clone_target_message_count_rejects_run_without_target():
         assert "尚未创建" in str(exc)
     else:
         raise AssertionError("expected invalid target to be rejected")
+
+
+def test_clone_target_message_count_uses_persisted_primary_owner():
+    run = {
+        "target_chat_id": 777,
+        "target_access_hash": "123",
+        "target_owner_session": "primary",
+    }
+
+    class Client:
+        def get_messages(self, _target, *, limit):
+            assert limit == 0
+            return SimpleNamespace(total=99)
+
+    client = Client()
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_target_metrics._ensure_base_session_valid",
+            return_value=True,
+        ) as ensure_session,
+        patch(
+            "tg_harvest.admin_jobs.clone_target_metrics._create_isolated_worker_client",
+            return_value=client,
+        ) as create_client,
+        patch("tg_harvest.admin_jobs.clone_target_metrics._disconnect_worker_client"),
+        patch("tg_harvest.admin_jobs.clone_target_metrics._cleanup_isolated_worker_session"),
+    ):
+        assert load_clone_target_message_count(run, cfg=_cfg()) == 99
+
+    assert create_client.call_args.args[0].session_name == "primary"
+    assert ensure_session.call_args.args[0].session_name == "primary"
+
+
+def test_clone_target_message_count_rejects_unknown_persisted_owner():
+    run = {
+        "target_chat_id": 777,
+        "target_access_hash": "123",
+        "target_owner_session": "retired-session",
+    }
+
+    try:
+        load_clone_target_message_count(run, cfg=_cfg())
+    except RuntimeError as exc:
+        assert "对应的已配置创建账号" in str(exc)
+    else:
+        raise AssertionError("expected unknown target owner to be rejected")

@@ -6,7 +6,10 @@ from flask import Flask
 
 import tg_harvest.web.auth as auth_module
 from tg_harvest.web.auth import register_auth_routes
-from tg_harvest.web.routes.clone import register_clone_routes
+from tg_harvest.web.routes.clone import (
+    _timeline_migration_readiness,
+    register_clone_routes,
+)
 
 
 class _LoggerStub:
@@ -94,7 +97,7 @@ class CloneRoutesTests(unittest.TestCase):
             logger=_LoggerStub(),
             get_conn_fn=lambda: _ConnStub(),
             cfg=SimpleNamespace(session_name="main", secondary_session_name="clone"),
-            list_clone_source_chats_fn=lambda _conn, sort: [
+            list_clone_source_chats_fn=lambda _conn, sort, **_kwargs: [
                 {
                     "chat_id": 100,
                     "chat_title": "Source",
@@ -429,8 +432,14 @@ class CloneRoutesTests(unittest.TestCase):
             "avatar_strategy": "skip_not_implemented",
             "blocking_issues": [],
             "warnings": [],
-            "capabilities": {"target_write_account": "primary"},
-            "plan": {"target_write_account": "primary"},
+            "capabilities": {
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 10},
+            },
+            "plan": {
+                "target_write_account": "primary",
+                "source_snapshot": {"message_id": 10},
+            },
             "error_message": "",
             "created_at": "2026-06-18T00:00:00+00:00",
             "updated_at": "2026-06-18T00:00:00+00:00",
@@ -469,10 +478,12 @@ class CloneRoutesTests(unittest.TestCase):
             "warnings": [],
             "capabilities": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 10},
                 "media_relay": media_relay,
             },
             "plan": {
                 "target_write_account": "secondary",
+                "source_snapshot": {"message_id": 10},
                 "media_relay": media_relay,
             },
             "error_message": "",
@@ -826,6 +837,17 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(item["telegram_app_link"], "tg://resolve?domain=source")
         self.assertEqual(item["telegram_web_link"], "https://t.me/source")
         self.assertTrue(item["has_public_link"])
+        self.assertEqual(payload["limit"], 100)
+        self.assertEqual(payload["offset"], 0)
+        self.assertFalse(payload["has_more"])
+
+    def test_clone_chats_api_validates_pagination(self) -> None:
+        with self._auth_config_patch():
+            self._login_admin()
+            response = self.client.get("/api/admin/clone/chats?limit=0")
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("limit 参数非法", response.get_json()["error"])
 
     def test_clone_runs_api_includes_source_and_target_links(self) -> None:
         with self._auth_config_patch():
@@ -925,6 +947,8 @@ class CloneRoutesTests(unittest.TestCase):
         self.assertEqual(payload["delete_confirm"], "DELETE-CLONE-RUN:run-existing")
         self.assertEqual(payload["mapping_summary"]["total"], 1)
         self.assertEqual(len(payload["recent_mappings"]), 1)
+        self.assertEqual(payload["mapping_page_total"], 1)
+        self.assertEqual(len(payload["mapping_page"]), 1)
 
     def test_clone_run_messages_api_filters_errors(self) -> None:
         self.clone_message_mappings.extend(
@@ -1243,6 +1267,61 @@ class CloneRoutesTests(unittest.TestCase):
         load_count.assert_called_once()
         clone_run = load_count.call_args.args[0]
         self.assertEqual(clone_run["target_chat_id"], 777)
+
+    def test_clone_run_target_message_count_hides_backend_exception(self) -> None:
+        with (
+            self._auth_config_patch(),
+            patch(
+                "tg_harvest.web.routes.clone.load_clone_target_message_count",
+                side_effect=RuntimeError("Telethon session secret leaked"),
+            ),
+        ):
+            self._login_admin()
+            response = self.client.get(
+                "/api/admin/clone/runs/run-existing/target-message-count"
+            )
+
+        self.assertEqual(response.status_code, 502)
+        payload = response.get_json()
+        self.assertEqual(payload["error"], "读取克隆目标消息数量失败，请稍后重试")
+        self.assertEqual(payload["error_code"], "clone_target_message_count_failed")
+        self.assertNotIn("Telethon", payload["error"])
+
+    def test_clone_timeline_migration_blocks_missing_source_snapshot(self) -> None:
+        plan = self._create_done_plan()
+        plan["capabilities"].pop("source_snapshot", None)
+        plan["plan"].pop("source_snapshot", None)
+        with self._auth_config_patch():
+            csrf_token = self._login_admin()
+            response = self.client.post(
+                "/api/admin/clone/runs/run-existing/migrate-timeline",
+                json={},
+                headers={auth_module.ADMIN_CSRF_HEADER: csrf_token},
+            )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("缺少已核验的源消息快照", response.get_json()["error"])
+        self.assertEqual(self.started_timeline_migration_jobs, [])
+
+    def test_clone_timeline_readiness_blocks_unknown_reason_codes(self) -> None:
+        shared = {
+            "can_migrate_timeline": True,
+            "reason_codes": ["future_blocker"],
+            "target_write_account": "primary",
+            "migration_account": "primary",
+            "media_execution_account": "primary",
+        }
+        with patch(
+            "tg_harvest.web.routes.clone.clone_plan_timeline_readiness",
+            return_value=shared,
+        ):
+            readiness = _timeline_migration_readiness(
+                self.clone_runs[0],
+                {"plan_id": "plan-future", "status": "done"},
+            )
+
+        self.assertFalse(readiness["can_migrate_timeline"])
+        self.assertIn("未识别的阻断项", readiness["readiness_reasons"][0])
 
     def test_clone_run_plan_returns_null_when_absent(self) -> None:
         with self._auth_config_patch():

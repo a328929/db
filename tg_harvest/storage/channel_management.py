@@ -412,6 +412,7 @@ def _load_database_chat_summaries(
             c.chat_id,
             c.chat_type,
             c.message_count,
+            lm.message_id AS last_message_id,
             lm.msg_date_text AS last_message_at,
             lm.msg_date_ts AS last_message_ts
         FROM chats c
@@ -433,6 +434,7 @@ def _load_database_chat_summaries(
             "chat_id": int(row["chat_id"]),
             "chat_type": str(row["chat_type"] or ""),
             "message_count": _row_int(row, "message_count"),
+            "last_message_id": _row_int(row, "last_message_id"),
             "last_message_at": str(row["last_message_at"] or ""),
             "last_message_ts": _optional_int(row["last_message_ts"]),
         }
@@ -821,6 +823,11 @@ def _merge_active_access_risks(
                 if database_summary is not None
                 else 0
             ),
+            "last_message_id": (
+                int(database_summary["last_message_id"] or 0)
+                if database_summary is not None
+                else 0
+            ),
             "last_message_at": (
                 str(database_summary["last_message_at"] or "")
                 if database_summary is not None
@@ -944,6 +951,11 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "in_database": int(in_database),
                     "database_match_ambiguous": int(database_match_ambiguous),
                     "message_count": database_message_count if in_database else 0,
+                    "last_message_id": (
+                        int(database_summary["last_message_id"] or 0)
+                        if database_summary is not None
+                        else 0
+                    ),
                     "last_message_at": last_message_at,
                     "last_message_ts": last_message_ts,
                     "scan_job_id": str(row["scan_job_id"] or ""),

@@ -444,7 +444,35 @@
       actions.appendChild(appLink);
     }
 
-    if (item.telegram_web_link) {
+    if (actionOptions.replaceWebWithContext) {
+      var latestMessageId = Number(item && item.last_message_id);
+      var hasLocalContext = Number(item && item.in_database || 0) === 1
+        && Number.isSafeInteger(latestMessageId)
+        && latestMessageId > 0;
+      if (hasLocalContext) {
+        var contextLink = document.createElement('a');
+        contextLink.href = '/chat/' + encodeURIComponent(String(item.chat_id))
+          + '?msg_id=' + encodeURIComponent(String(latestMessageId));
+        contextLink.target = '_blank';
+        contextLink.rel = 'noopener noreferrer';
+        contextLink.textContent = '数据库上下文';
+        contextLink.setAttribute(
+          'aria-label',
+          '在新标签页打开 ' + channelLabel + ' 的数据库聊天上下文（最新消息）'
+        );
+        actions.appendChild(contextLink);
+      } else {
+        var unavailableContext = document.createElement('button');
+        unavailableContext.type = 'button';
+        unavailableContext.disabled = true;
+        unavailableContext.textContent = '无数据库记录';
+        unavailableContext.setAttribute(
+          'aria-label',
+          channelLabel + ' 暂无可访问的数据库聊天记录上下文'
+        );
+        actions.appendChild(unavailableContext);
+      }
+    } else if (item.telegram_web_link) {
       var webLink = document.createElement('a');
       webLink.href = item.telegram_web_link;
       webLink.target = '_blank';
@@ -955,10 +983,15 @@
           subtitle: metaParts.join(' | '),
           metrics: [
             { label: 'chat_id', value: String(item.chat_id) },
+            {
+              label: '数据库消息',
+              value: Number(item.in_database || 0) === 1
+                ? formatNumber(item.message_count)
+                : '未入库'
+            },
             { label: '最后消息', value: formatDateTime(itemLastMessageAt(item)) }
           ],
           meta: [
-            { label: 'chat_id', value: String(item.chat_id) },
             { label: '用户名', value: item.chat_username ? '@' + item.chat_username : '' },
             { label: '类型', value: item.chat_type || '' },
             { label: '平台', value: item.restriction_platforms || '' },
@@ -970,8 +1003,11 @@
             { label: '失败次数', value: Number(item.access_failure_count || 0) > 0 ? String(item.access_failure_count) : '' },
             { label: '最近失败', value: formatDateTime(item.access_last_failed_at) },
             { label: '扫描', value: formatDateTime(item.scanned_at) },
-          ],
+          ].filter(function (entry) {
+            return String(entry.value || '').trim() !== '';
+          }),
           actions: createChannelActions(item, elements, {
+            replaceWebWithContext: true,
             allowDelete: Number(item.in_database || 0) === 1,
             allowProbe: Number(item.in_database || 0) === 1
           }),

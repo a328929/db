@@ -242,7 +242,9 @@
       state.detail = payload || null;
       state.deleteConfirm = String((payload && payload.delete_confirm) || '');
       renderDetail(elements, state.detail);
-      await loadMappings(elements, { resetOffset: false });
+      if (!applyInitialMappingPage(elements, state.detail)) {
+        await loadMappings(elements, { resetOffset: false });
+      }
       await resumeOperationJobIfNeeded(elements);
     } catch (error) {
       state.detail = null;
@@ -254,6 +256,27 @@
     } finally {
       setBusy(elements, false);
     }
+  }
+
+  function applyInitialMappingPage(elements, payload) {
+    if (
+      state.mappingOffset !== 0
+      || String(elements.mappingStatusFilter.value || '').trim()
+      || !payload
+      || !Array.isArray(payload.mapping_page)
+    ) {
+      return false;
+    }
+    state.mappingItems = payload.mapping_page;
+    state.mappingTotal = Number(
+      payload.mapping_page_total
+      ?? (payload.mapping_summary && payload.mapping_summary.total)
+      ?? state.mappingItems.length
+    ) || 0;
+    renderMappingList(elements.mappingList, state.mappingItems);
+    updateMappingStatus(elements);
+    syncMappingControls(elements);
+    return true;
   }
 
   async function loadMappings(elements, options) {

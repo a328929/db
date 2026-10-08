@@ -654,6 +654,7 @@ def _admin_clone_timeline_migration_job_runner(
                     break
                 if (
                     normalized_message_limit > 0
+                    and _clean_text(item.get("item_type")) != "media_group"
                     and state.counters.processed + source_count
                     > normalized_message_limit
                 ):
@@ -862,7 +863,7 @@ def _admin_clone_timeline_migration_job_runner(
                         _sleep_after_send(normalized_send_delay_ms)
 
                 elif item_type == "media_group":
-                    handle_media_group_item(
+                    group_limit_reached = handle_media_group_item(
                         state=state,
                         item=item,
                         get_conn_fn=get_conn_fn,
@@ -871,7 +872,14 @@ def _admin_clone_timeline_migration_job_runner(
                         source_entity=source_entity,
                         copy_media_to_target=copy_media_to_target,
                         sleep_after_send=_sleep_after_send,
+                        remaining_message_limit=(
+                            max(0, normalized_message_limit - state.counters.processed)
+                            if normalized_message_limit > 0
+                            else 0
+                        ),
                     )
+                    if group_limit_reached:
+                        state.limit_reached = True
                 else:
                     state.counters.processed += source_count
 

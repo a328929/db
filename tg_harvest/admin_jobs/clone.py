@@ -75,7 +75,7 @@ def _clone_about(source_chat: dict[str, Any]) -> str:
     parts = [
         "由 tg_harvest 克隆系统创建。",
         f"源 chat_id={int(source_chat['chat_id'])}。",
-        "第一版仅创建结构副本，未迁移历史消息或媒体。",
+        "结构创建阶段未迁移历史消息或媒体；内容迁移需在在线预检通过后单独执行。",
     ]
     about = " ".join(parts)
     if len(about) > CLONE_TARGET_ABOUT_MAX_LEN:
@@ -212,7 +212,7 @@ def _report_clone_completion(
 
     for message in (
         f"目标结构创建完成：{_created_chat_label(created_chat)}",
-        "第一版已停止在结构克隆阶段：未迁移历史消息、媒体、成员、评论、反应或原始时间。",
+        "结构创建阶段已完成：未迁移历史消息、媒体、成员、评论、反应或原始时间；内容迁移需单独执行。",
     ):
         try:
             append_log_fn(job_id, message)

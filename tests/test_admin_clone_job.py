@@ -10,6 +10,7 @@ from tg_harvest.admin_jobs.clone import (
     normalize_clone_target_title,
 )
 from tg_harvest.admin_jobs.clone_preflight import _admin_clone_deep_preflight_job_runner
+from tg_harvest.admin_jobs.clone_timeline_media_groups import handle_media_group_item
 from tg_harvest.admin_jobs.clone_timeline_migration import (
     _admin_clone_timeline_migration_job_runner,
 )
@@ -17,6 +18,7 @@ from tg_harvest.admin_jobs.clone_timeline_store import (
     CloneMappingPersistenceError,
     record_text_mapping,
 )
+from tg_harvest.admin_jobs.clone_timeline_types import TimelineExecutionState
 from tg_harvest.storage.clone import (
     build_clone_source_snapshot,
     build_clone_timeline_replay_preview,
@@ -1417,6 +1419,78 @@ def test_clone_timeline_migration_limit_applies_to_remaining_items(tmp_path):
     assert existing_mapping is not None and existing_mapping["target_message_id"] == 9001
     assert next_mapping is not None and next_mapping["target_message_id"] == 9301
     assert later_mapping is None
+
+
+def test_clone_media_group_api_expansion_respects_remaining_message_limit():
+    state = TimelineExecutionState(
+        job_id="job",
+        run_id="run",
+        plan_id="plan",
+        migration_id="migration",
+        source_chat_id=100,
+        source_snapshot_message_id=1000,
+        target_chat_id=777,
+        target_title="Target",
+        source_title="Source",
+        preview={},
+        plan={},
+        run={},
+        accounts={},
+        using_relay=False,
+        normalized_message_limit=2,
+        normalized_send_delay_ms=0,
+        text_total=0,
+        media_total=4,
+        media_group_total=1,
+        progress_total=2,
+    )
+    messages = [
+        {"chat_id": 100, "message_id": message_id, "msg_date_ts": message_id}
+        for message_id in (1, 2)
+    ]
+    resolved_items = [
+        {"message_id": message_id, "media_kind": "photo"}
+        for message_id in (1, 2, 3, 4)
+    ]
+    with (
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_media_groups.load_group_messages",
+            return_value=messages,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_media_groups.clone_api_resolve_media_group",
+            return_value={
+                "ok": True,
+                "message_ids": [1, 2, 3, 4],
+                "items": resolved_items,
+                "copy_strategy": "sequential",
+            },
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_media_groups.media_mapping_done",
+            return_value=False,
+        ),
+        patch(
+            "tg_harvest.admin_jobs.clone_timeline_media_groups.record_clone_media_mapping"
+        ) as record_mapping,
+    ):
+        copied = []
+        limit_reached = handle_media_group_item(
+            state=state,
+            item={"grouped_id": 55, "item_count": 2},
+            get_conn_fn=lambda: None,
+            admin_job_append_log_fn=lambda *_args: None,
+            source_client=object(),
+            source_entity=object(),
+            copy_media_to_target=lambda message_id: copied.append(message_id),
+            sleep_after_send=lambda *_args: None,
+            remaining_message_limit=2,
+        )
+
+    assert limit_reached is True
+    assert copied == []
+    assert state.counters.processed == 0
+    record_mapping.assert_not_called()
 
 
 def test_clone_timeline_worker_rejects_incomplete_message_reset(tmp_path):
