@@ -138,15 +138,6 @@ def classify_chat_access_failure_text(value: Any) -> str:
     return ""
 
 
-def load_known_chat_ids(conn: Any) -> set[int]:
-    cur = conn.cursor()
-    try:
-        cur.execute("SELECT chat_id FROM chats")
-        return {_chat_id_identity(row["chat_id"]) for row in cur.fetchall()}
-    finally:
-        cur.close()
-
-
 def load_known_chat_identities(conn: Any) -> set[ChatIdentity]:
     cur = conn.cursor()
     try:
@@ -616,57 +607,6 @@ def find_missing_joined_chats(
         known_chat_ids,
         include_unavailable=include_unavailable,
     )
-
-
-def _generic_row_value(row: Any, key: str, default: Any = "") -> Any:
-    if isinstance(row, Mapping):
-        return _mapping_value(row, key, default)
-    try:
-        value = row[key]
-    except Exception:
-        value = getattr(row, key, default)
-    return default if value is None else value
-
-
-def filter_database_chats_to_joined(
-    database_rows: Iterable[Any], joined_rows: Iterable[ChatInventoryRow]
-) -> list[Any]:
-    joined_identities: set[ChatIdentity] = set()
-    for row in joined_rows:
-        if str(row.unavailable_reason or "").strip():
-            continue
-        joined_identities.update(chat_identity_candidates(row.chat_id, row.chat_type))
-    rows: list[Any] = []
-    seen_chat_identities: set[tuple[int, str]] = set()
-
-    for row in database_rows:
-        try:
-            chat_id = int(_generic_row_value(row, "chat_id", 0) or 0)
-        except (TypeError, ValueError):
-            continue
-        if chat_id == 0:
-            continue
-        dedupe_key = (
-            _chat_id_identity(chat_id),
-            normalize_chat_type_category(_generic_row_value(row, "chat_type", "")),
-        )
-        identity_candidates = chat_identity_candidates(
-            chat_id,
-            _generic_row_value(row, "chat_type", ""),
-        )
-        if dedupe_key in seen_chat_identities:
-            continue
-        seen_chat_identities.add(dedupe_key)
-        if joined_identities.isdisjoint(identity_candidates):
-            continue
-        rows.append(row)
-
-    return rows
-
-
-def _mapping_value(row: Mapping[str, Any], key: str, default: Any = "") -> Any:
-    value = row.get(key, default)
-    return default if value is None else value
 
 
 def discover_session_files(base_session_name: str | Path) -> list[Path]:

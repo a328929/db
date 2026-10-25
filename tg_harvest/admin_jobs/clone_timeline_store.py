@@ -70,26 +70,6 @@ def load_group_messages(
     )
 
 
-def text_mapping_done(
-    *,
-    get_conn_fn: Callable[[], Any],
-    run_id: str,
-    source_chat_id: int,
-    source_message_id: int,
-    chunk_index: int,
-) -> bool:
-    mapping = call_with_conn(
-        get_conn_fn,
-        load_clone_message_mapping,
-        run_id=run_id,
-        source_chat_id=source_chat_id,
-        source_message_id=source_message_id,
-        chunk_index=chunk_index,
-        mode="text_replay",
-    )
-    return mapping is not None and mapping.get("status") == "done"
-
-
 def prepare_text_mapping_delivery(
     *,
     get_conn_fn: Callable[[], Any],

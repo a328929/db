@@ -510,42 +510,6 @@ def _increment_chat_message_summaries(
         )
 
 
-def load_grouped_ids_for_messages(
-    conn: sqlite3.Connection, message_keys: list[tuple[int, int]]
-) -> set[int]:
-    if not message_keys:
-        return set()
-    unique_keys = sorted({(int(chat_id), int(message_id)) for chat_id, message_id in message_keys})
-    cur = conn.cursor()
-    try:
-        grouped_ids: set[int] = set()
-        for start in range(0, len(unique_keys), 400):
-            part = unique_keys[start : start + 400]
-            placeholders = ",".join(["(?, ?)"] * len(part))
-            params: list[int] = []
-            for chat_id, message_id in part:
-                params.extend([chat_id, message_id])
-            cur.execute(
-                f"""
-                WITH target_messages(chat_id, message_id) AS (
-                    VALUES {placeholders}
-                )
-                SELECT DISTINCT m.grouped_id
-                FROM messages m
-                JOIN target_messages t
-                  ON t.chat_id = m.chat_id
-                 AND t.message_id = m.message_id
-                WHERE m.grouped_id IS NOT NULL
-                """,
-                params,
-            )
-            for row in cur.fetchall():
-                grouped_ids.add(int(row["grouped_id"]))
-        return grouped_ids
-    finally:
-        cur.close()
-
-
 @synchronized_write
 def batch_upsert(
     conn: sqlite3.Connection, msg_rows: list[tuple], media_rows: list[tuple]

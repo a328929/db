@@ -4,7 +4,6 @@ from unittest.mock import patch
 
 from tg_harvest.ops_bot.client import (
     is_notify_enabled,
-    mask_bot_token,
     send_message_sync,
     trim_message,
 )
@@ -28,10 +27,6 @@ class OpsBotClientTests(unittest.TestCase):
         self.assertTrue(is_notify_enabled(cfg))
         cfg.ops_bot_token = ""
         self.assertFalse(is_notify_enabled(cfg))
-
-    def test_token_mask_keeps_only_edges(self) -> None:
-        self.assertEqual(mask_bot_token("1234567890wxyz"), "1234...wxyz")
-        self.assertEqual(mask_bot_token("short"), "***")
 
     def test_long_messages_are_trimmed_to_telegram_limit(self) -> None:
         message = trim_message("x" * 5000)

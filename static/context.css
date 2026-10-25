@@ -36,11 +36,6 @@
   box-shadow: 0 4px 12px rgba(212, 181, 90, 0.14);
 }
 
-.msg-header {
-  font-weight: 600;
-  letter-spacing: 0.01em;
-}
-
 .context-link {
   margin-left: 0;
 }

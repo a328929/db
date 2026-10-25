@@ -19,22 +19,18 @@ from tg_harvest.admin_jobs.common import (
     start_admin_job_heartbeat,
     update_admin_job_progress,
 )
-from tg_harvest.admin_jobs.core import _admin_job_update_progress
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
     _create_isolated_worker_client,
     _disconnect_worker_client,
     _ensure_base_session_valid,
-    _start_job_heartbeat,
 )
 from tg_harvest.domain.coerce import optional_int
 from tg_harvest.storage.clone import load_clone_source_chat, update_clone_run
 
 CLONE_TARGET_TITLE_MAX_LEN = 128
 CLONE_TARGET_ABOUT_MAX_LEN = 255
-
-_COMPAT_PATCH_EXPORTS = (_admin_job_update_progress, _start_job_heartbeat)
 
 
 def normalize_clone_target_kind(raw_kind: Any, *, source_chat_type: Any = "") -> str:

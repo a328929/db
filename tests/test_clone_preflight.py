@@ -5,18 +5,15 @@ from tg_harvest.storage.clone import (
     build_clone_media_copy_preview,
     build_clone_preflight_report,
     build_clone_text_replay_preview,
-    count_clone_media_replay_skips,
     count_clone_runs,
-    count_clone_text_replay_candidates,
     create_clone_migration,
     create_clone_plan,
     create_clone_run,
     delete_clone_run,
     list_clone_message_mappings,
-    list_clone_plans,
     list_clone_runs,
     list_clone_source_chats,
-    list_clone_text_replay_batch,
+    list_clone_timeline_replay_batch,
     load_clone_message_mapping,
     load_clone_run,
     load_clone_run_progress,
@@ -721,7 +718,7 @@ def test_clone_run_error_status_does_not_create_target_identity():
         conn.close()
 
 
-def test_clone_plan_create_update_latest_and_list_roundtrip():
+def test_clone_plan_create_update_latest_roundtrip():
     conn = _new_conn()
     try:
         source = build_clone_preflight_report(
@@ -791,14 +788,11 @@ def test_clone_plan_create_update_latest_and_list_roundtrip():
         latest = load_latest_clone_plan(conn, "run-plan")
         assert latest is not None
         assert latest["plan_id"] == "plan-2"
-
-        plans = list_clone_plans(conn, run_id="run-plan")
-        assert [plan["plan_id"] for plan in plans] == ["plan-2", "plan-1"]
     finally:
         conn.close()
 
 
-def test_clone_migration_mapping_and_text_candidate_roundtrip():
+def test_clone_migration_mapping_and_timeline_candidate_roundtrip():
     conn = _new_conn()
     try:
         source = build_clone_preflight_report(
@@ -828,8 +822,6 @@ def test_clone_migration_mapping_and_text_candidate_roundtrip():
             plan={"target_write_account": "primary"},
         )
 
-        assert count_clone_text_replay_candidates(conn, 100) == 1
-        assert count_clone_media_replay_skips(conn, 100) == 4
         preview = build_clone_text_replay_preview(
             conn,
             run_id="run-migration",
@@ -841,9 +833,10 @@ def test_clone_migration_mapping_and_text_candidate_roundtrip():
         assert preview["grouped_skipped"] == 3
         assert preview["empty_text_skipped"] == 0
 
-        batch = list_clone_text_replay_batch(conn, chat_id=100)
-        assert [item["message_id"] for item in batch] == [1]
-        assert batch[0]["text"] == "hello"
+        batch = list_clone_timeline_replay_batch(conn, run_id="run-migration", chat_id=100)
+        text_items = [item for item in batch if item["item_type"] == "text"]
+        assert [item["source_message_id"] for item in text_items] == [1]
+        assert text_items[0]["text"] == "hello"
 
         created = create_clone_migration(
             conn,
@@ -978,7 +971,7 @@ def test_clone_run_progress_separates_verified_group_totals_from_mappings():
         conn.close()
 
 
-def test_clone_text_replay_batch_paginates_null_timestamp_messages():
+def test_clone_timeline_replay_batch_paginates_null_timestamp_messages():
     conn = _new_conn()
     try:
         conn.executemany(
@@ -994,15 +987,16 @@ def test_clone_text_replay_batch_paginates_null_timestamp_messages():
                 (100, 7, "", None, "legacy b", "legacy b", "TEXT", None, 0),
             ],
         )
-        first_batch = list_clone_text_replay_batch(conn, chat_id=100, limit=1)
-        assert [item["message_id"] for item in first_batch] == [6]
-        second_batch = list_clone_text_replay_batch(
+        first_batch = list_clone_timeline_replay_batch(conn, run_id="", chat_id=100, limit=1)
+        assert [item["source_message_id"] for item in first_batch] == [6]
+        second_batch = list_clone_timeline_replay_batch(
             conn,
+            run_id="",
             chat_id=100,
             after_ts=first_batch[-1]["sort_ts"],
-            after_message_id=first_batch[-1]["message_id"],
+            after_message_id=first_batch[-1]["sort_message_id"],
             limit=1,
         )
-        assert [item["message_id"] for item in second_batch] == [7]
+        assert [item["source_message_id"] for item in second_batch] == [7]
     finally:
         conn.close()

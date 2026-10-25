@@ -175,10 +175,6 @@ def _load_database_chat_rows(conn: Any) -> list[dict[str, Any]]:
             close()
 
 
-def _load_database_chat_ids(conn: Any) -> set[int]:
-    return {int(row["chat_id"]) for row in _load_database_chat_rows(conn)}
-
-
 @dataclass(frozen=True)
 class _QueuedChatUpdate:
     chat_id: int
@@ -1051,15 +1047,6 @@ class DatabaseChatListenerRuntime:
                 for account_key, chat_ids in self._joined_chat_ids_by_account.items()
             }
 
-    def _set_joined_chat_ids_for_account(
-        self, account_key: str, joined_chat_ids: set[int]
-    ) -> None:
-        with self._joined_chat_ids_lock:
-            self._joined_chat_ids_by_account[str(account_key)] = {
-                int(chat_id) for chat_id in joined_chat_ids if int(chat_id) > 0
-            }
-            self._joined_chat_snapshot_updated_at = time.time()
-
     def _is_database_chat(self, chat_id: int) -> bool:
         if chat_id <= 0:
             return False
@@ -1426,10 +1413,6 @@ class DatabaseChatListenerRuntime:
             if conn is not None:
                 with suppress(Exception):
                     conn.close()
-
-    def _claim_due_scheduler_task(self) -> SyncPendingTask | None:
-        tasks = self._claim_due_scheduler_tasks(limit=1)
-        return tasks[0] if tasks else None
 
     def _scheduler_task_to_queue_item(self, task: SyncPendingTask) -> _QueuedChatUpdate:
         preferred_account = str(task.preferred_source_account or "").strip()

@@ -44,15 +44,6 @@ def bot_timeout_seconds(cfg: Any) -> float:
         return DEFAULT_TIMEOUT_SECONDS
 
 
-def mask_bot_token(token: str) -> str:
-    token = clean_text(token)
-    if not token:
-        return ""
-    if len(token) <= 10:
-        return "***"
-    return f"{token[:4]}...{token[-4:]}"
-
-
 def trim_message(text: str) -> str:
     message = clean_text(text)
     if len(message) <= MAX_TELEGRAM_MESSAGE_LEN:

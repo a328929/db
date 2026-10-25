@@ -81,21 +81,3 @@ def is_valid_ip_format(ip: str) -> bool:
         return True
     except ValueError:
         return False
-
-
-def is_internal_ip(ip: str) -> bool:
-    """
-    判断是否为内部IP地址
-
-    Args:
-        ip: IP地址字符串
-
-    Returns:
-        是否为内部IP（私有地址、回环地址或链路本地地址）
-    """
-    try:
-        addr = ipaddress.ip_address(ip)
-        # 检查是否为私有地址或回环地址
-        return addr.is_private or addr.is_loopback or addr.is_link_local
-    except ValueError:
-        return False

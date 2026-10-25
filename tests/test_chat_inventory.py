@@ -9,10 +9,8 @@ from tg_harvest.admin_jobs.channel_inventory import (
 )
 from tg_harvest.admin_jobs.framework import legacy_admin_job_log_adapter
 from tg_harvest.domain.chat_inventory import (
-    ChatInventoryRow,
     RestrictedChatInventoryRow,
     entity_has_all_platform_terms_restriction,
-    filter_database_chats_to_joined,
     find_missing_joined_chats,
     find_restricted_joined_chats,
     load_joined_chat_inventory,
@@ -217,28 +215,6 @@ def test_joined_chat_inventory_extracts_dialog_last_message_time():
 
     assert rows[0].last_message_at == "2026-04-01 10:00:00"
     assert rows[0].last_message_ts == 1775037600
-
-
-def test_filter_database_chats_to_joined_keeps_only_accessible_dialogs():
-    database_rows = [
-        {"chat_id": 1, "chat_title": "Joined"},
-        {"chat_id": 2, "chat_title": "Recovered But Not Joined"},
-        {"chat_id": -1003, "chat_title": "Stored As Entity Id"},
-        {"chat_id": 4, "chat_title": "Forbidden"},
-    ]
-    joined_rows = [
-        ChatInventoryRow(chat_id=1, chat_title="Joined"),
-        ChatInventoryRow(chat_id=3, chat_title="Stored As Positive Id"),
-        ChatInventoryRow(
-            chat_id=4,
-            chat_title="Forbidden",
-            unavailable_reason="Telegram 返回该会话不可访问",
-        ),
-    ]
-
-    rows = filter_database_chats_to_joined(database_rows, joined_rows)
-
-    assert [row["chat_id"] for row in rows] == [1, -1003]
 
 
 def test_restricted_joined_chats_still_count_as_joined():

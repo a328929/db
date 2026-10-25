@@ -93,17 +93,6 @@ def manticore_index_is_ready(conn: sqlite3.Connection, table: str) -> bool:
         return False
 
 
-def set_manticore_meta(conn: sqlite3.Connection, key: str, value: object) -> None:
-    conn.execute(
-        f"""
-        INSERT INTO {META_TABLE}(key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-        """,
-        (str(key), str(value if value is not None else "")),
-    )
-    conn.commit()
-
-
 def get_manticore_meta(conn: sqlite3.Connection, key: str) -> str:
     row = conn.execute(f"SELECT value FROM {META_TABLE} WHERE key = ?", (str(key),)).fetchone()
     return str(row[0] or "") if row is not None else ""
@@ -243,30 +232,3 @@ def configure_manticore_outbox_triggers(
         {_queue_upsert_sql("(SELECT pk FROM messages WHERE chat_id = old.chat_id AND message_id = old.message_id)", 'upsert')}
     END
     """)
-
-
-def enqueue_all_messages(conn: sqlite3.Connection) -> int:
-    cur = conn.cursor()
-    try:
-        cur.execute(f"""
-            INSERT INTO {OUTBOX_TABLE}(
-                pk, operation, revision, attempts, last_error, queued_at
-            )
-            SELECT pk, 'upsert', 1, 0, '', datetime('now')
-            FROM messages
-            WHERE 1
-            ON CONFLICT(pk) DO UPDATE SET
-                operation = 'upsert',
-                revision = {OUTBOX_TABLE}.revision + 1,
-                attempts = 0,
-                last_error = '',
-                queued_at = excluded.queued_at
-        """)
-        changed = max(0, int(cur.rowcount or 0))
-        conn.commit()
-        return changed
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        cur.close()

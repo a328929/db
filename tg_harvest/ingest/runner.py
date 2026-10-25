@@ -184,9 +184,7 @@ def collect_target_entities(
     return entities
 
 
-def _prepare_db_rows(
-    entity: Any, chat_id: int, p: ParsedMessage
-) -> tuple[tuple, tuple | None]:
+def _prepare_db_rows(chat_id: int, p: ParsedMessage) -> tuple[tuple, tuple | None]:
     """构建存库所需的元组"""
     features = build_single_promo_features(
         p.content, msg_type=p.msg_type, has_media=p.has_media, cfg=CFG
@@ -286,7 +284,7 @@ def _harvest_messages_for_entity(
             parsed = MessageParser.parse(message)
             if parsed is None:
                 continue
-            row, media = _prepare_db_rows(entity, chat_id, parsed)
+            row, media = _prepare_db_rows(chat_id, parsed)
             edit_rows.append(row)
             if media:
                 edit_media.append(media)
@@ -344,7 +342,7 @@ def _harvest_messages_for_entity(
                 if not p:
                     continue
 
-                m_row, med_row = _prepare_db_rows(entity, chat_id, p)
+                m_row, med_row = _prepare_db_rows(chat_id, p)
                 msg_rows.append(m_row)
                 if med_row:
                     media_rows.append(med_row)

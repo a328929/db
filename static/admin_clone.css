@@ -323,10 +323,6 @@
   min-width: 128px;
 }
 
-.clone-filter-row {
-  margin-bottom: 16px;
-}
-
 .clone-summary-grid {
   margin: 14px 0 0;
   display: grid;
@@ -672,12 +668,6 @@
   font-weight: 600;
 }
 
-.clone-run-actions .clone-run-select.is-selected {
-  color: #236049;
-  background: #e9f8f1;
-  border-color: #c7ead9;
-}
-
 .clone-message-delete-form {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(180px, 0.38fr);
@@ -717,13 +707,6 @@
   border-color: var(--border-strong);
 }
 
-.clone-run-note {
-  align-self: center;
-  color: var(--muted);
-  font-size: 0.82rem;
-  line-height: 1.45;
-}
-
 .clone-run-error {
   margin: 10px 0 0;
   color: #a33b30;
@@ -741,33 +724,8 @@
   font-size: 0.9rem;
 }
 
-.clone-selected-run {
-  margin: 0 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(250, 252, 255, 0.9);
-  color: #243657;
-  padding: 9px 10px;
-  font-size: 0.9rem;
-  font-weight: 700;
-  line-height: 1.35;
-  word-break: break-word;
-}
-
-.clone-plan-summary {
-  margin-bottom: 14px;
-}
-
 .clone-migration-options {
   margin-top: 12px;
-}
-
-.clone-migration-summary {
-  margin-top: 14px;
-}
-
-.clone-plan-grid {
-  margin-top: 0;
 }
 
 .clone-blocking-list {

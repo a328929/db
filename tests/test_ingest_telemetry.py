@@ -56,11 +56,11 @@ def test_ingest_distinguishes_inserts_updates_and_unchanged_tail_rescans():
             has_media=False,
             grouped_id=None,
         )
-        row, _ = _prepare_db_rows(SimpleNamespace(id=1), 1, parsed)
+        row, _ = _prepare_db_rows(1, parsed)
         first = batch_upsert(conn, [row], [])
         unchanged = batch_upsert(conn, [row], [])
         parsed.content = "edited"
-        row, _ = _prepare_db_rows(SimpleNamespace(id=1), 1, parsed)
+        row, _ = _prepare_db_rows(1, parsed)
         updated = batch_upsert(conn, [row], [])
         assert (first.persisted_change_count, first.new_message_count) == (1, 1)
         assert (unchanged.persisted_change_count, unchanged.new_message_count) == (0, 0)

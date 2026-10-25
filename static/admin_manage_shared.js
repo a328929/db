@@ -10,10 +10,6 @@
     adminCsrfToken = typeof token === 'string' ? token : '';
   }
 
-  function getAdminCsrfToken() {
-    return adminCsrfToken;
-  }
-
   function isAdminWriteRequest(url, method) {
     var normalizedMethod = String(method || 'GET').toUpperCase();
     if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(normalizedMethod)) {
@@ -837,13 +833,6 @@
     element.disabled = !!disabled;
   }
 
-  function setElementHidden(element, hidden) {
-    if (!element) {
-      return;
-    }
-    element.hidden = hidden;
-  }
-
   function getLogList(container) {
     if (!container) {
       return null;
@@ -1123,16 +1112,6 @@
     };
   }
 
-  function buildResponseErrorMessage(response, payload) {
-    var serverMessage = payload && typeof payload.error === 'string'
-      ? payload.error.trim()
-      : '';
-    if (serverMessage) {
-      return serverMessage;
-    }
-    return buildResponseErrorDetails(response, payload).message;
-  }
-
   async function fetchJSON(url, options) {
     var requestOptions = options || {};
     var onUnauthorized = requestOptions.onUnauthorized;
@@ -1237,7 +1216,6 @@
     formatNumber: formatNumber,
     createAdminSessionController: createAdminSessionController,
     createAdminJobPollController: createAdminJobPollController,
-    getAdminCsrfToken: getAdminCsrfToken,
     getConfirmationTarget: getConfirmationTarget,
     getCreatedJobId: getCreatedJobId,
     getFocusableElements: getFocusableElements,
@@ -1259,7 +1237,6 @@
     renderChatOptions: renderChatOptions,
     setDialogOpenState: setDialogOpenState,
     setElementDisabled: setElementDisabled,
-    setElementHidden: setElementHidden,
     setLoginStatus: setLoginStatus,
     setStatsLineText: setStatsLineText,
     setPageInteractionState: setPageInteractionState,

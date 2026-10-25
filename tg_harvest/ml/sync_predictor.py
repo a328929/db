@@ -1573,12 +1573,3 @@ def predict_sync_decision(
         priority_score=priority,
         reason=reason,
     )
-
-
-def reset_artifact(path: str | None = None) -> bool:
-    artifact = Path(path or default_artifact_path())
-    with suppress(FileNotFoundError):
-        artifact.unlink()
-        invalidate_model_cache(str(artifact))
-        return True
-    return False

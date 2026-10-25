@@ -886,8 +886,8 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("function handleDeleteEmptyChatsClick", source)
         self.assertIn("/api/admin/jobs/delete-empty-chats", source)
         self.assertIn("function getTargetScopeLabel", source)
-        self.assertIn("function buildSnapshotProgressMessage", source)
-        self.assertIn("shared.buildSnapshotProgressMessage", source)
+        self.assertIn("shared.createAdminJobPollController", source)
+        self.assertIn("function buildSnapshotProgressMessage", shared_source)
         self.assertIn("shared.getCreatedJobId", source)
         self.assertIn("shared.getTargetScopeLabel", source)
         self.assertIn("shared.getSelectedOptionLabel", source)
@@ -915,7 +915,8 @@ class FrontendSafetyTests(unittest.TestCase):
         shared_source = (ROOT / "static" / "admin_manage_shared.js").read_text(
             encoding="utf-8"
         )
-        self.assertIn("shared.buildSnapshotProgressMessage", source)
+        self.assertIn("shared.createAdminJobPollController", source)
+        self.assertIn("buildSnapshotProgressMessage(snapshot)", shared_source)
         self.assertIn("任务失败", shared_source)
         self.assertIn("正在整理结果", shared_source)
         self.assertNotIn("message: '[进度] ' + stage + ' ' + current + '/' + total", source)
@@ -933,10 +934,14 @@ class FrontendSafetyTests(unittest.TestCase):
         channels_source = (ROOT / "static" / "admin_channels.js").read_text(
             encoding="utf-8"
         )
+        shared_source = (ROOT / "static" / "admin_manage_shared.js").read_text(
+            encoding="utf-8"
+        )
         self.assertIn('id="admin-login-status"', manage_template)
         self.assertIn('id="admin-login-status"', channels_template)
-        self.assertIn("function setLoginStatus(elements, message)", manage_source)
-        self.assertIn("function setLoginStatus(elements, message)", channels_source)
+        self.assertIn("shared.createAdminSessionController", manage_source)
+        self.assertIn("shared.createAdminSessionController", channels_source)
+        self.assertIn("elements.loginStatus.textContent = String(message || '');", shared_source)
         self.assertNotIn("alert(", manage_source)
         self.assertNotIn("alert(", channels_source)
         self.assertNotIn("window.location.reload", manage_source)
@@ -1076,14 +1081,6 @@ class FrontendSafetyTests(unittest.TestCase):
         self.assertIn("headers['X-CSRF-Token'] = adminCsrfToken;", source)
         self.assertIn("setAdminCsrfToken(payload.csrf_token);", source)
         self.assertIn("return normalizedUrl !== '/api/admin/auth/login';", source)
-
-    def test_admin_shared_fetch_prefers_server_error_message(self) -> None:
-        source = (ROOT / "static" / "admin_manage_shared.js").read_text(
-            encoding="utf-8"
-        )
-        self.assertIn("function buildResponseErrorMessage(response, payload)", source)
-        self.assertIn("return serverMessage;", source)
-        self.assertNotIn("数据库忙或系统异常", source)
 
     def test_admin_login_overlay_hides_background_from_focus_and_assistive_tech(self) -> None:
         source = (ROOT / "static" / "admin_manage_shared.js").read_text(

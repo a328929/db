@@ -47,20 +47,3 @@ def clone_target_send_permission(entity: Any) -> str:
     # keeps ordinary legacy group chats writable when Telegram returns one,
     # while broadcast channels always take the strict branch above.
     return "ok"
-
-
-def clone_target_write_was_rejected(error: Any) -> bool:
-    """Whether Telegram conclusively rejected a target-side write request."""
-
-    text = f"{type(error).__name__}: {error}".lower()
-    markers = (
-        "chatadminrequired",
-        "chat admin privileges are required",
-        "chatwriteforbidden",
-        "chatrestricted",
-        "userbanned",
-        "not enough rights",
-        "缺少目标频道发布消息",
-        "目标群管理权限",
-    )
-    return any(marker in text for marker in markers)

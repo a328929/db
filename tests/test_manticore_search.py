@@ -326,23 +326,6 @@ class SearchRateLimitTests(unittest.TestCase):
             with search_routes_module._rate_lock:
                 search_routes_module._search_rate_tracker.clear()
 
-    def test_is_internal_ip_detection(self):
-        """测试内部IP检测逻辑"""
-        from tg_harvest.web.ip_utils import is_internal_ip
-
-        # 内部IP
-        self.assertTrue(is_internal_ip("10.0.0.1"))
-        self.assertTrue(is_internal_ip("192.168.1.1"))
-        self.assertTrue(is_internal_ip("172.16.0.1"))
-        self.assertTrue(is_internal_ip("127.0.0.1"))
-        self.assertTrue(is_internal_ip("::1"))
-        self.assertTrue(is_internal_ip("fe80::1"))
-
-        # 公网IP
-        self.assertFalse(is_internal_ip("8.8.8.8"))
-        self.assertFalse(is_internal_ip("1.1.1.1"))
-        self.assertFalse(is_internal_ip("2001:4860:4860::8888"))
-
     def test_search_rate_window_reclaims_capacity_without_resetting_active_clients(self):
         tracker = search_routes_module._search_rate_tracker
         tracker.clear()

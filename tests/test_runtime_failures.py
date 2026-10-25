@@ -53,6 +53,7 @@ from tg_harvest.admin_jobs.runners import (
     _admin_update_all_chats,
     _admin_update_effective_concurrency,
     _admin_update_effective_start_gap_seconds,
+    _admin_update_job_runner,
     _admin_update_primary_soft_cap,
     _admin_update_secondary_public_resolve_reserve,
     _admin_update_secondary_target_count,
@@ -63,9 +64,8 @@ from tg_harvest.admin_jobs.runners import (
     _delete_chat_data,
     _delete_empty_chats_data,
     _load_admin_update_rows,
-    _resolve_harvest_target_entities,
+    _resolve_harvest_targets,
     _resolve_target_entities_for_account,
-    _run_simple_admin_job_with_conn,
     _try_stream_new_chat_multi_account_ranges,
 )
 from tg_harvest.admin_jobs.sessions import _disconnect_worker_client
@@ -82,7 +82,6 @@ from tg_harvest.ingest.runner import (
 from tg_harvest.ingest.store import (
     BatchUpsertResult,
     batch_upsert,
-    load_grouped_ids_for_messages,
 )
 from tg_harvest.storage.clone import (
     create_clone_migration,
@@ -3658,7 +3657,7 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 [],
             ],
         ):
-            entities = _resolve_harvest_target_entities(
+            resolution = _resolve_harvest_targets(
                 job_id="job-resolve",
                 target="public-title",
                 cfg=SimpleNamespace(
@@ -3670,8 +3669,12 @@ class AdminUpdateRunnerTests(unittest.TestCase):
                 primary_client=_PrimaryClient(),
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
             )
+            try:
+                self.assertEqual([target.entity for target in resolution.targets], [primary_entity])
+                self.assertEqual(resolution.targets[0].account_key, "primary")
+            finally:
+                resolution.close()
 
-        self.assertEqual(entities, [primary_entity])
         self.assertTrue(any("第二账号解析并在主账号确认" in line for line in logs))
 
 
@@ -3733,24 +3736,6 @@ class SearchableMediaCleanupTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.conn.close()
-
-    def test_load_grouped_ids_for_messages_reads_existing_album_ids(self) -> None:
-        cur = self.conn.cursor()
-        cur.executemany(
-            """
-            INSERT INTO messages(chat_id, message_id, grouped_id, msg_type, content, content_norm, has_media)
-            VALUES (1, ?, ?, 'PHOTO', '', '', 1)
-            """,
-            [(105, 7001), (106, None), (107, 7002)],
-        )
-        self.conn.commit()
-
-        grouped_ids = load_grouped_ids_for_messages(
-            self.conn,
-            [(1, 105), (1, 106), (1, 107), (1, 999)],
-        )
-
-        self.assertEqual(grouped_ids, {7001, 7002})
 
     def test_unsearchable_cleanup_targets_media_with_only_identity_metadata(self) -> None:
         cur = self.conn.cursor()
@@ -3977,13 +3962,6 @@ class AdminRunnerHelperTests(unittest.TestCase):
         statuses = []
         logs = []
 
-        class _Conn:
-            def rollback(self):
-                return None
-
-            def close(self):
-                return None
-
         class _HeartbeatStop:
             def set(self):
                 return None
@@ -3996,17 +3974,24 @@ class AdminRunnerHelperTests(unittest.TestCase):
             statuses.append(status)
             return status != "done"
 
-        with patch(
-            "tg_harvest.admin_jobs.runners.start_admin_job_heartbeat",
-            return_value=(_HeartbeatStop(), _HeartbeatThread()),
+        with (
+            patch(
+                "tg_harvest.admin_jobs.runners._start_job_heartbeat",
+                return_value=(_HeartbeatStop(), _HeartbeatThread()),
+            ),
+            patch("tg_harvest.admin_jobs.runners._ensure_base_session_valid", return_value=True),
+            patch("tg_harvest.admin_jobs.runners._admin_update_all_chats", return_value=True),
+            patch("tg_harvest.admin_jobs.runners._cleanup_worker_client"),
         ):
-            _run_simple_admin_job_with_conn(
+            _admin_update_job_runner(
                 "job-status-write",
-                get_conn_fn=_Conn,
+                chat_id="all",
+                chat_title="",
+                cfg=SimpleNamespace(),
+                get_conn_fn=lambda: None,
+                admin_make_job_log_handler_fn=lambda _job_id: logging.NullHandler(),
                 admin_job_set_status_fn=set_status,
                 admin_job_append_log_fn=lambda _job_id, message: logs.append(str(message)),
-                run_fn=lambda _conn: None,
-                error_prefix="执行失败：",
             )
 
         self.assertEqual(statuses, ["running", "done", "error"])

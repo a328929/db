@@ -11,6 +11,7 @@
 .claude/
 __pycache__/
 .pytest_cache/
+.scannerwork/
 .coverage
 .coverage.*
 coverage.xml

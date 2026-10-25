@@ -95,14 +95,6 @@ def utc_now_text() -> str:
     return datetime.now(UTC).replace(microsecond=0).strftime(UTC_TEXT_FORMAT)
 
 
-def utc_text_from_seconds(seconds: float) -> str:
-    return (
-        datetime.fromtimestamp(float(seconds), tz=UTC)
-        .replace(microsecond=0)
-        .strftime(UTC_TEXT_FORMAT)
-    )
-
-
 def parse_utc_text(value: Any) -> datetime | None:
     text = str(value or "").strip()
     if not text:

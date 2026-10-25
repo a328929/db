@@ -16,9 +16,6 @@ from telethon.tl.types import InputPeerChannel, InputPeerChat
 from tg_harvest.admin_jobs.cleanup import (
     _admin_cleanup_job_runner,
     _admin_start_cleanup_job_thread,  # noqa: F401
-    _build_cleanup_like_patterns,  # noqa: F401
-    _build_cleanup_targets_table,  # noqa: F401
-    _execute_cleanup_deletion_batches,  # noqa: F401
 )
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
@@ -29,7 +26,6 @@ from tg_harvest.admin_jobs.common import (
     is_entity_lookup_miss_error,
     read_chat_username,
     resolve_chat_entity,
-    start_admin_job_heartbeat,
     start_admin_job_thread,
 )
 from tg_harvest.admin_jobs.core import (
@@ -118,24 +114,6 @@ def _mark_admin_job_error_best_effort(
         logging.exception("持久化任务失败状态时发生未知错误: job_id=%s", job_id)
 
 
-def _start_simple_admin_job(
-    job_id: str,
-    *,
-    admin_job_set_status_fn: Callable[[str, str], bool],
-) -> tuple[Any, Any]:
-    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
-    try:
-        _persist_admin_job_status(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-            status="running",
-        )
-    except Exception:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        raise
-    return heartbeat_stop, heartbeat_thread
-
-
 def _cleanup_worker_client(worker_cfg: Any, worker_id: str, worker_client: Any) -> None:
     if worker_client:
         try:
@@ -145,58 +123,6 @@ def _cleanup_worker_client(worker_cfg: Any, worker_id: str, worker_client: Any) 
             # connections must be attributable to a concrete worker.
             logging.exception("关闭 worker Telegram 客户端失败: worker_id=%s", worker_id)
     _cleanup_isolated_worker_session(worker_cfg, worker_id)
-
-
-def _run_simple_admin_job_with_conn(
-    job_id: str,
-    *,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-    run_fn: Callable[[Any], None],
-    error_prefix: str,
-    log_exception_fn: Callable[[], None] | None = None,
-) -> None:
-    try:
-        heartbeat_stop, heartbeat_thread = _start_simple_admin_job(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-    except Exception:
-        logging.exception("启动后台任务失败: job_id=%s", job_id)
-        _mark_admin_job_error_best_effort(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-        return
-    conn = None
-    try:
-        conn = get_conn_fn()
-        run_fn(conn)
-        _persist_admin_job_status(
-            job_id,
-            status="done",
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-    except Exception as exc:
-        if conn:
-            try:
-                conn.rollback()
-            except (sqlite3.Error, AttributeError):
-                logging.exception("后台任务回滚失败: job_id=%s", job_id)
-        if log_exception_fn is not None:
-            log_exception_fn()
-        else:
-            logging.exception("后台任务执行失败: job_id=%s", job_id)
-        admin_job_append_log_fn(job_id, f"{error_prefix}{exc}")
-        _mark_admin_job_error_best_effort(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-    finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-        if conn:
-            conn.close()
 
 
 def _silent_progress(
@@ -2260,27 +2186,6 @@ def _resolve_harvest_targets(
     finally:
         if secondary_client and not keep_secondary_client:
             _cleanup_worker_client(secondary_cfg, secondary_worker_id, secondary_client)
-
-
-def _resolve_harvest_target_entities(
-    *,
-    job_id: str,
-    target: str,
-    cfg: Any,
-    primary_client: Any,
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> list[Any]:
-    target_resolution = _resolve_harvest_targets(
-        job_id=job_id,
-        target=target,
-        cfg=cfg,
-        primary_client=primary_client,
-        admin_job_append_log_fn=admin_job_append_log_fn,
-    )
-    try:
-        return [target.entity for target in target_resolution.targets]
-    finally:
-        target_resolution.close()
 
 
 def _read_existing_last_message_id(get_conn_fn: Callable[[], Any], chat_id: int) -> int:

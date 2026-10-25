@@ -582,19 +582,3 @@ def build_group_promo_features(
         "pure_hash": pure_hash,
         "dedupe_hash": dedupe_hash,
     }
-
-
-def contains_hard_promo_markers(text: str) -> bool:
-    return _has_hard_signals(text)
-
-
-def is_generic_media_caption(
-    text: str,
-    msg_type: str,
-    has_media: bool,
-    promo_stats: dict[str, int] | None = None,
-    guard_len: int = 58,
-) -> bool:
-    # 保持稳定的公共接口
-    hits = promo_stats if promo_stats else _get_hit_stats(text)
-    return _is_protected_caption(text, msg_type, has_media, hits, guard_len)

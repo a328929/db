@@ -65,10 +65,6 @@ def detect_sqlite_features(conn: sqlite3.Connection) -> SqliteFeatures:
         cur.close()
 
 
-def resolve_db_path(raw_name: str) -> str:
-    return _runtime_paths.resolve_db_path(raw_name)
-
-
 def _open_connection(db_name: str) -> sqlite3.Connection:
     Path(db_name).parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(db_name, timeout=300)

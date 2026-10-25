@@ -155,9 +155,9 @@ def test_clone_structure_job_persists_created_target(tmp_path):
             )
 
     with (
-        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
         patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=Client()),
         patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
@@ -201,9 +201,9 @@ def test_clone_structure_job_failure_does_not_persist_target_identity(tmp_path):
             raise RuntimeError("boom")
 
     with (
-        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
         patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=FailingClient()),
         patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
@@ -250,9 +250,9 @@ def test_clone_structure_keeps_done_state_when_completion_reporting_fails(tmp_pa
             raise RuntimeError("log backend unavailable")
 
     with (
-        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
         patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=Client()),
         patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
@@ -293,9 +293,9 @@ def test_clone_structure_failure_reporting_cannot_leave_job_running(tmp_path):
             raise RuntimeError("creation failed")
 
     with (
-        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
         patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=FailingClient()),
         patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
@@ -344,9 +344,9 @@ def test_clone_structure_keeps_target_identity_when_final_db_write_fails(tmp_pat
         return real_update_clone_run(conn, **kwargs)
 
     with (
-        patch("tg_harvest.admin_jobs.clone._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone._ensure_base_session_valid", return_value=True),
         patch("tg_harvest.admin_jobs.clone._create_isolated_worker_client", return_value=Client()),
         patch("tg_harvest.admin_jobs.clone._disconnect_worker_client"),
@@ -482,9 +482,9 @@ def test_clone_deep_preflight_job_persists_online_plan(tmp_path):
     logs = []
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -538,9 +538,9 @@ def test_clone_deep_preflight_reads_latest_source_via_bounded_retry(tmp_path):
     _create_deep_plan(db_path, with_target=True)
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -579,9 +579,9 @@ def test_clone_deep_preflight_blocks_when_local_snapshot_lags_source(tmp_path):
     _create_deep_plan(db_path, with_target=True)
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -621,9 +621,9 @@ def test_clone_deep_preflight_job_blocks_when_target_missing(tmp_path):
     _create_deep_plan(db_path, with_target=False)
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid") as session_mock,
         patch("tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client") as client_mock,
     ):
@@ -658,9 +658,9 @@ def test_clone_deep_preflight_job_allows_text_when_source_is_missing(tmp_path):
     _create_deep_plan(db_path, with_target=True)
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -707,9 +707,9 @@ def test_clone_deep_preflight_job_enables_relay_when_accounts_split_access(tmp_p
     cfg.clone_relay_chat_username = ""
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -771,9 +771,9 @@ def test_clone_deep_preflight_blocks_public_relay_channel(tmp_path):
     cfg.clone_relay_chat_id = 999
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",
@@ -815,9 +815,9 @@ def test_clone_deep_preflight_explains_incomplete_relay_access(tmp_path):
     cfg.clone_relay_chat_username = ""
 
     with (
-        patch("tg_harvest.admin_jobs.clone_preflight._start_job_heartbeat", return_value=_heartbeat_pair()),
+        patch("tg_harvest.admin_jobs.clone_preflight.start_admin_job_heartbeat", return_value=_heartbeat_pair()),
         patch("tg_harvest.admin_jobs.clone_preflight.finish_job_heartbeat"),
-        patch("tg_harvest.admin_jobs.clone_preflight._admin_job_update_progress"),
+        patch("tg_harvest.admin_jobs.clone_preflight.update_admin_job_progress"),
         patch("tg_harvest.admin_jobs.clone_preflight._ensure_base_session_valid", return_value=True),
         patch(
             "tg_harvest.admin_jobs.clone_preflight._create_isolated_worker_client",

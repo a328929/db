@@ -4,7 +4,6 @@ from typing import Any
 from tg_harvest.storage.clone_common import (
     _clean_text,
     _json_text,
-    _normalize_bounded_int,
     _now_iso,
 )
 from tg_harvest.storage.clone_state_common import (
@@ -12,7 +11,6 @@ from tg_harvest.storage.clone_state_common import (
     _clone_plan_from_row,
     _commit_and_load_required,
     _execute_update_and_reload,
-    _query_all,
     _query_one,
 )
 
@@ -224,39 +222,5 @@ def load_latest_clone_plan(conn: sqlite3.Connection, run_id: str) -> dict | None
         LIMIT 1
         """,
         (_clean_text(run_id),),
-        _clone_plan_from_row,
-    )
-
-
-def list_clone_plans(
-    conn: sqlite3.Connection,
-    *,
-    run_id: Any = None,
-    limit: Any = 20,
-) -> list[dict]:
-    normalized_limit = _normalize_bounded_int(
-        limit,
-        default=20,
-        minimum=1,
-        maximum=100,
-    )
-
-    params: list[Any] = []
-    where_sql = ""
-    if run_id not in (None, ""):
-        where_sql = "WHERE run_id = ?"
-        params.append(_clean_text(run_id))
-    params.append(normalized_limit)
-
-    return _query_all(
-        conn,
-        f"""
-        SELECT *
-        FROM admin_clone_plans
-        {where_sql}
-        ORDER BY updated_at DESC, created_at DESC, plan_id DESC
-        LIMIT ?
-        """,
-        params,
         _clone_plan_from_row,
     )

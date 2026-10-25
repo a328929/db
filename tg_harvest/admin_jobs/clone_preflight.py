@@ -23,14 +23,12 @@ from tg_harvest.admin_jobs.common import (
     start_admin_job_heartbeat,
     update_admin_job_progress,
 )
-from tg_harvest.admin_jobs.core import _admin_job_update_progress
 from tg_harvest.admin_jobs.runtime import _admin_now_iso
 from tg_harvest.admin_jobs.sessions import (
     _cleanup_isolated_worker_session,
     _create_isolated_worker_client,
     _disconnect_worker_client,
     _ensure_base_session_valid,
-    _start_job_heartbeat,
     bind_client_event_loop,
 )
 from tg_harvest.domain.chat_ids import stored_chat_id_from_entity_id
@@ -51,8 +49,6 @@ from tg_harvest.storage.clone import (
 )
 
 CLONE_DEEP_PREFLIGHT_TOTAL_STEPS = 5
-
-_COMPAT_PATCH_EXPORTS = (_admin_job_update_progress, _start_job_heartbeat)
 
 
 def _access_error_state(exc: Exception) -> str:

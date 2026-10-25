@@ -12,7 +12,7 @@ from tg_harvest.ingest.flood_wait import AccountFloodWaitError
 from tg_harvest.runtime.db_listener import (
     DatabaseChatListenerRuntime,
     _ListenerAccount,
-    _load_database_chat_ids,
+    _load_database_chat_rows,
     _PublicProbeOutcome,
     _QueuedChatUpdate,
     ensure_database_chat_listener_runtime,
@@ -43,7 +43,7 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
     def setUp(self) -> None:
         db_listener._LISTENER_SINGLETON = None
 
-    def test_load_database_chat_ids_reads_only_positive_chat_ids(self) -> None:
+    def test_load_database_chat_rows_reads_only_positive_chat_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "listener.db"
             conn = _connect(path)
@@ -57,14 +57,15 @@ class DatabaseChatListenerRuntimeTests(unittest.TestCase):
                     [
                         (1, "one", "one_name", "2026-01-01 00:00:00"),
                         (2, "two", None, "2026-01-01 00:00:00"),
+                        (-3, "ignored", None, "2026-01-01 00:00:00"),
                     ],
                 )
                 conn.commit()
-                chat_ids = _load_database_chat_ids(conn)
+                rows = _load_database_chat_rows(conn)
             finally:
                 conn.close()
 
-        self.assertEqual(chat_ids, {1, 2})
+        self.assertEqual({row["chat_id"] for row in rows}, {1, 2})
 
     def test_enqueue_chat_update_ignores_non_database_chat(self) -> None:
         runtime = DatabaseChatListenerRuntime(

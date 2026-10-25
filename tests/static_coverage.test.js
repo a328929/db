@@ -225,10 +225,10 @@ test('admin fetch errors preserve backend code and retry metadata', async () => 
     ok: false,
     status: 500,
     headers: { get() { return null; } },
-    async json() { return { ok: false, error: '系统异常' }; }
+    async json() { return { ok: false, error: '后端返回的具体错误' }; }
   });
   await assert.rejects(fetchJSON('/api/admin/sync'), (error) => {
-    assert.equal(error.message, '系统异常');
+    assert.equal(error.message, '后端返回的具体错误');
     assert.equal(error.code, '');
     assert.equal(error.retryable, false);
     assert.equal(error.retryAfterSeconds, 0);

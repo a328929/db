@@ -16,11 +16,7 @@ from tg_harvest.admin_jobs.common import (
     call_with_conn,
     cfg_with_session_name,
     classify_chat_access_failure,
-    finish_job_heartbeat,
-    mark_admin_job_running,
-    start_admin_job_heartbeat,
     start_admin_job_thread,
-    update_admin_job_progress,
 )
 from tg_harvest.admin_jobs.framework import (
     AdminJobContext,
@@ -630,15 +626,6 @@ _TOKEN_SEPARATOR_RE = re.compile(r"[、,，;；|/]+")
 
 
 @dataclass(frozen=True)
-class _ChannelInventoryScanSpec:
-    worker_suffix: str
-    logger_message: str
-    scan_rows_fn: Any
-    replace_results_fn: Any
-    build_success_message_fn: Callable[[int], str]
-
-
-@dataclass(frozen=True)
 class _ScanAccount:
     key: str
     label: str
@@ -1006,84 +993,6 @@ def _scan_restricted_chat_rows(
                 )
             finally:
                 _cleanup_isolated_worker_session(account.cfg, worker_id)
-
-
-def _run_channel_inventory_scan_job(
-    job_id: str,
-    *,
-    cfg: Any,
-    get_conn_fn: Callable[[], Any],
-    admin_job_set_status_fn: Callable[[str, str], bool],
-    admin_job_append_log_fn: Callable[[str, str], Any],
-    spec: _ChannelInventoryScanSpec,
-) -> None:
-    heartbeat_stop, heartbeat_thread = start_admin_job_heartbeat(job_id)
-    try:
-        mark_admin_job_running(
-            job_id,
-            admin_job_set_status_fn=admin_job_set_status_fn,
-        )
-        update_admin_job_progress(
-            job_id,
-            0,
-            total=None,
-            stage="running",
-        )
-        rows = spec.scan_rows_fn(
-            cfg=cfg,
-            get_conn_fn=get_conn_fn,
-            admin_job_append_log_fn=admin_job_append_log_fn,
-            job_id=job_id,
-        )
-        scanned_at = _admin_now_iso()
-
-        admin_job_append_log_fn(job_id, "正在保存扫描结果...")
-        saved_count = call_with_conn(
-            get_conn_fn,
-            spec.replace_results_fn,
-            rows,
-            scan_job_id=job_id,
-            scanned_at=scanned_at,
-        )
-
-        update_admin_job_progress(
-            job_id,
-            saved_count,
-            total=saved_count,
-            stage="done",
-        )
-        admin_job_append_log_fn(job_id, spec.build_success_message_fn(saved_count))
-        admin_job_set_status_fn(job_id, "done")
-    except Exception as exc:
-        logging.exception(spec.logger_message, job_id)
-        admin_job_append_log_fn(job_id, f"扫描失败：{admin_error_message(exc)}")
-        admin_job_set_status_fn(job_id, "error")
-    finally:
-        finish_job_heartbeat(heartbeat_stop, heartbeat_thread)
-
-
-_MISSING_CHATS_SCAN_SPEC = _ChannelInventoryScanSpec(
-    worker_suffix="missing_chats",
-    logger_message="扫描未入库群组失败: job_id=%s",
-    scan_rows_fn=_scan_missing_chat_rows,
-    replace_results_fn=replace_missing_chat_scan_results,
-    build_success_message_fn=(
-        lambda saved_count: f"扫描完成：发现 {saved_count} 个已加入但未入库的群组/频道"
-    ),
-)
-
-
-_RESTRICTED_CHATS_SCAN_SPEC = _ChannelInventoryScanSpec(
-    worker_suffix="restricted_chats",
-    logger_message="扫描内容限制群组失败: job_id=%s",
-    scan_rows_fn=_scan_restricted_chat_rows,
-    replace_results_fn=replace_restricted_chat_scan_results,
-    build_success_message_fn=(
-        lambda saved_count: (
-            f"扫描完成：发现 {saved_count} 个带 Telegram 内容限制/风险标记的群组/频道"
-        )
-    ),
-)
 
 
 @admin_job(name="扫描未入库群组", requires_client=False)

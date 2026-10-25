@@ -161,5 +161,3 @@ SQLite PRAGMA、少量元数据和已缓存或统计的计数；它不会在 Web
 和搜索服务。进行 `compact_sqlite_db.py` 前，应安排低峰维护窗口并预留至少两份
 当前主库与 sidecar 文件的空间，再加 64 MiB 构建余量。紧凑构建工具会做其自身的
 离线校验，完成后再按部署流程切换数据库文件。
-
-较大改动的拆分、评审和提交顺序见 `docs/change_management.md`。

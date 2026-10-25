@@ -7,9 +7,7 @@
   var ensurePlaceholder = shared.ensurePlaceholder;
   var sharedFetchJSON = shared.fetchJSON;
   var getCreatedJobId = shared.getCreatedJobId;
-  var setDialogOpenState = shared.setDialogOpenState;
   var setElementDisabled = shared.setElementDisabled;
-  var setPageInteractionState = shared.setPageInteractionState;
   var syncClearLogsButtonVisibility = shared.syncClearLogsButtonVisibility;
   var trapFocusWithin = shared.trapFocusWithin;
   var formatDateTime = shared.formatDateTime;
@@ -20,9 +18,6 @@
   var createTextElement = domUtils ? domUtils.createTextElement : null;
   var createInfoPill = domUtils ? domUtils.createChannelInfoPill : null;
 
-  var JOB_POLL_INTERVAL_MS = 3000;
-  var JOB_POLL_RETRY_MAX_COUNT = 20;
-  var JOB_POLL_RETRY_BASE_MS = 3000;
   var LIST_INITIAL_RENDER_BATCH_SIZE = 40;
   var LIST_RENDER_BATCH_SIZE = 40;
   var LIST_RENDER_STATUS_INTERVAL_MS = 250;
@@ -133,10 +128,6 @@
       return null;
     }
     return elements;
-  }
-
-  function setLoginStatus(elements, message) {
-    shared.setLoginStatus(elements, message);
   }
 
   function initializeUI(elements) {
@@ -1212,10 +1203,6 @@
 
   function startJobPolling(elements, jobId, options) {
     jobPollController.start(jobPollState, jobId, options);
-  }
-
-  function stopJobPolling(expectedToken, _elements) {
-    jobPollController.stop(jobPollState, expectedToken);
   }
 
   function setBusy(elements, isBusy) {

@@ -205,7 +205,7 @@ def _flush_range_batch(
     return result
 
 
-def _parse_range_message(entity: Any, chat_id: int, message: Any) -> tuple[tuple, tuple | None]:
+def _parse_range_message(chat_id: int, message: Any) -> tuple[tuple, tuple | None]:
     try:
         parsed = MessageParser.parse(message)
     except MessageParseError as exc:
@@ -224,7 +224,7 @@ def _parse_range_message(entity: Any, chat_id: int, message: Any) -> tuple[tuple
         raise RuntimeError(
             f"消息解析为空，已中止当前区间采集 (chat_id={chat_id}, message_id={getattr(message, 'id', '?')})"
         )
-    return _prepare_db_rows(entity, chat_id, parsed)
+    return _prepare_db_rows(chat_id, parsed)
 
 
 def harvest_message_id_range(
@@ -265,7 +265,7 @@ def harvest_message_id_range(
 
                 last_processed_id = min(last_processed_id, current_id)
                 counters.seen += 1
-                msg_row, media_row = _parse_range_message(entity, chat_id, message)
+                msg_row, media_row = _parse_range_message(chat_id, message)
                 msg_rows.append(msg_row)
                 if media_row:
                     media_rows.append(media_row)

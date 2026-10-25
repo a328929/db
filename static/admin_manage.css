@@ -100,22 +100,6 @@
   align-items: end;
 }
 
-.admin-check {
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  color: #47597a;
-  min-height: 42px;
-  font-size: 0.93rem;
-  font-weight: 600;
-}
-
-.admin-check input {
-  width: 16px;
-  height: 16px;
-  accent-color: var(--primary);
-}
-
 .admin-actions {
   margin-top: 12px;
   display: flex;
