@@ -284,11 +284,36 @@ def _create_admin_restricted_chats_table(cur: sqlite3.Cursor, strict_suffix: str
         restriction_reasons      TEXT,
         restriction_text         TEXT,
         risk_flags               TEXT,
+        restriction_details      TEXT NOT NULL DEFAULT '[]',
+        scan_source_account      TEXT NOT NULL DEFAULT '',
+        access_source_account    TEXT NOT NULL DEFAULT '',
+        scan_status              TEXT NOT NULL DEFAULT 'checked',
         membership_scope         TEXT NOT NULL DEFAULT 'joined',
         last_message_at          TEXT,
         last_message_ts          INTEGER,
         scan_job_id              TEXT,
         scanned_at               TEXT NOT NULL
+    ){strict_suffix}
+    """)
+
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_chat_risk_scan_state (
+        chat_id INTEGER NOT NULL,
+        chat_type TEXT NOT NULL,
+        source_account TEXT NOT NULL,
+        last_attempt_at TEXT NOT NULL DEFAULT '',
+        last_checked_at TEXT NOT NULL DEFAULT '',
+        next_retry_at TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'not_checked',
+        risk_json TEXT NOT NULL DEFAULT 'null',
+        error_json TEXT NOT NULL DEFAULT 'null',
+        PRIMARY KEY(chat_id, chat_type, source_account)
+    ){strict_suffix}
+    """)
+    cur.execute(f"""
+    CREATE TABLE IF NOT EXISTS admin_chat_risk_scan_summary (
+        singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+        summary_json TEXT NOT NULL
     ){strict_suffix}
     """)
 
@@ -919,6 +944,10 @@ def _ensure_admin_restricted_chats_schema(cur: sqlite3.Cursor) -> None:
             ("restriction_reasons", "restriction_reasons TEXT"),
             ("restriction_text", "restriction_text TEXT"),
             ("risk_flags", "risk_flags TEXT"),
+            ("restriction_details", "restriction_details TEXT NOT NULL DEFAULT '[]'"),
+            ("scan_source_account", "scan_source_account TEXT NOT NULL DEFAULT ''"),
+            ("access_source_account", "access_source_account TEXT NOT NULL DEFAULT ''"),
+            ("scan_status", "scan_status TEXT NOT NULL DEFAULT 'checked'"),
             (
                 "membership_scope",
                 "membership_scope TEXT NOT NULL DEFAULT 'joined'",

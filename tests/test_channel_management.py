@@ -16,6 +16,10 @@ from tg_harvest.storage.channel_management import (
     replace_restricted_chat_scan_results,
     resolve_chat_access_risk,
 )
+from tg_harvest.storage.schema import (
+    _create_admin_restricted_chats_table,
+    _ensure_admin_restricted_chats_schema,
+)
 
 
 class ChannelManagementStorageTests(unittest.TestCase):
@@ -103,6 +107,8 @@ class ChannelManagementStorageTests(unittest.TestCase):
             )
             """
         )
+        _create_admin_restricted_chats_table(cur, "")
+        _ensure_admin_restricted_chats_schema(cur)
         cur.executemany(
             """
             INSERT INTO chats(

@@ -54,6 +54,19 @@ class RestrictedChatInventoryRow:
     last_message_ts: int | None = None
     scan_job_id: str = ""
     scanned_at: str = ""
+    restriction_details: tuple[dict[str, str], ...] = ()
+    scan_source_account: str = ""
+    access_source_account: str = ""
+    scan_status: str = "checked"
+
+
+class RestrictedChatScanRows(list[RestrictedChatInventoryRow]):
+    """Risk snapshot and scan progress committed in the same transaction."""
+
+    def __init__(self, rows, *, scan_states=(), summary=None):
+        super().__init__(rows)
+        self.scan_states = list(scan_states)
+        self.summary = dict(summary or {})
 
 
 @dataclass(frozen=True)
@@ -95,6 +108,11 @@ def classify_chat_access_failure_text(value: Any) -> str:
         return ""
     if "userbanned" in error_text or "账号已被该群组/频道封禁" in error_text:
         return "account_banned"
+    if any(token in error_text for token in (
+        "usernamenotoccupied", "username_not_occupied", "usernameinvalid",
+        "username_invalid", "no user has", "cannot find any entity corresponding",
+    )):
+        return "username_unavailable"
     if any(
         token in error_text
         for token in (
@@ -109,6 +127,8 @@ def classify_chat_access_failure_text(value: Any) -> str:
         token in error_text
         for token in (
             "could not find the input entity",
+            "channelinvalid",
+            "channel_invalid",
             "not exist",
             "该群组/频道已解散或不存在",
             "本地实体缓存未命中",
@@ -319,25 +339,31 @@ def _dedupe_nonempty(values: Iterable[Any]) -> list[str]:
     return items
 
 
-def _restriction_reason_parts(entity: Any) -> tuple[str, str, str]:
+def restriction_details_from_entity(entity: Any) -> tuple[dict[str, str], ...]:
     raw_reasons = getattr(entity, "restriction_reason", None) or []
     if not isinstance(raw_reasons, (list, tuple)):
         raw_reasons = [raw_reasons]
 
-    platforms = []
-    reasons = []
-    texts = []
+    details = []
     for raw_reason in raw_reasons:
         if raw_reason is None:
             continue
-        platforms.append(getattr(raw_reason, "platform", ""))
-        reasons.append(getattr(raw_reason, "reason", ""))
-        texts.append(getattr(raw_reason, "text", ""))
+        item = {
+            key: str(getattr(raw_reason, key, "") or "").strip()
+            for key in ("platform", "reason", "text")
+        }
+        if any(item.values()) and item not in details:
+            details.append(item)
+    return tuple(details)
+
+
+def _restriction_reason_parts(entity: Any) -> tuple[str, str, str]:
+    details = restriction_details_from_entity(entity)
 
     return (
-        "、".join(_dedupe_nonempty(platforms)),
-        "、".join(_dedupe_nonempty(reasons)),
-        "；".join(_dedupe_nonempty(texts)),
+        "、".join(_dedupe_nonempty(item["platform"] for item in details)),
+        "、".join(_dedupe_nonempty(item["reason"] for item in details)),
+        "；".join(_dedupe_nonempty(item["text"] for item in details)),
     )
 
 
@@ -353,12 +379,10 @@ def _split_restriction_tokens(value: Any) -> list[str]:
 
 
 def entity_has_all_platform_terms_restriction(entity: Any) -> bool:
-    platforms, reasons, _reason_text = _restriction_reason_parts(entity)
-    platform_tokens = _split_restriction_tokens(platforms)
-    reason_tokens = _split_restriction_tokens(reasons)
-    return (
-        UNAVAILABLE_RESTRICTION_PLATFORM in platform_tokens
-        and any(reason in UNAVAILABLE_RESTRICTION_REASONS for reason in reason_tokens)
+    return any(
+        UNAVAILABLE_RESTRICTION_PLATFORM in _split_restriction_tokens(item["platform"])
+        and item["reason"].lower() in UNAVAILABLE_RESTRICTION_REASONS
+        for item in restriction_details_from_entity(entity)
     )
 
 
@@ -382,6 +406,7 @@ def restricted_chat_row_from_entity(
     last_message_at: str = "",
     last_message_ts: int | None = None,
     membership_scope: str = "public_unjoined",
+    source_account: str = "",
 ) -> RestrictedChatInventoryRow | None:
     entity_type = entity.__class__.__name__
     entity_id = _safe_int(getattr(entity, "id", None))
@@ -389,14 +414,25 @@ def restricted_chat_row_from_entity(
     if entity_id <= 0 or stored_id == 0:
         return None
 
+    if entity_type.lower().lstrip("_") in {"channelforbidden", "chatforbidden"}:
+        return unavailable_chat_risk_row(
+            chat_id=stored_id,
+            chat_title=str(getattr(entity, "title", "") or chat_title),
+            chat_username=chat_username,
+            chat_type=entity_type,
+            risk_message="Telegram 返回该会话不可访问；这是当前账号的访问状态",
+            membership_scope=membership_scope,
+            last_message_at=last_message_at,
+            last_message_ts=last_message_ts,
+            source_account=source_account,
+        )
+
     platforms, reasons, reason_text = _restriction_reason_parts(entity)
     risk_flags = _entity_risk_flags(entity)
     if not any((platforms, reasons, reason_text, risk_flags)):
         return None
 
-    username = _clean_username(getattr(entity, "username", None)) or _clean_username(
-        chat_username
-    )
+    username = _clean_username(getattr(entity, "username", chat_username))
     title = str(getattr(entity, "title", None) or chat_title or "").strip()
     return RestrictedChatInventoryRow(
         chat_id=stored_id,
@@ -416,6 +452,11 @@ def restricted_chat_row_from_entity(
         membership_scope=str(membership_scope or "public_unjoined"),
         last_message_at=str(last_message_at or ""),
         last_message_ts=last_message_ts,
+        restriction_details=tuple(
+            {**item, "source_account": source_account}
+            for item in restriction_details_from_entity(entity)
+        ),
+        scan_source_account=source_account,
     )
 
 
@@ -430,6 +471,7 @@ def unavailable_chat_risk_row(
     membership_scope: str = "joined",
     last_message_at: str = "",
     last_message_ts: int | None = None,
+    source_account: str = "",
 ) -> RestrictedChatInventoryRow:
     username = _clean_username(chat_username)
     return RestrictedChatInventoryRow(
@@ -443,6 +485,8 @@ def unavailable_chat_risk_row(
         membership_scope=str(membership_scope or "joined"),
         last_message_at=str(last_message_at or ""),
         last_message_ts=last_message_ts,
+        scan_source_account=source_account,
+        access_source_account=source_account,
     )
 
 
@@ -486,6 +530,7 @@ def find_restricted_joined_chats(dialogs: Iterable[Any], source_account: str = "
                 membership_scope="joined",
                 last_message_at=base_row.last_message_at,
                 last_message_ts=base_row.last_message_ts,
+                source_account=source_account,
             )
         else:
             entity = getattr(dialog, "entity", None)
@@ -497,6 +542,7 @@ def find_restricted_joined_chats(dialogs: Iterable[Any], source_account: str = "
                 last_message_at=base_row.last_message_at,
                 last_message_ts=base_row.last_message_ts,
                 membership_scope="joined",
+                source_account=source_account,
             )
         if restricted_row is None:
             continue

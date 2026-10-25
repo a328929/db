@@ -391,7 +391,7 @@ def test_restricted_scan_combines_joined_and_cached_public_unjoined_results():
         del args, kwargs
         if fn.__name__ == "list_database_channels":
             return database_rows
-        if fn.__name__ == "list_restricted_chat_scan_results":
+        if fn.__name__ in {"list_stored_restricted_chat_scan_results", "list_chat_risk_scan_states"}:
             return []
         raise AssertionError(fn.__name__)
 
@@ -453,7 +453,7 @@ def test_restricted_scan_records_public_entity_lookup_failure_as_access_risk():
         del args, kwargs
         if fn.__name__ == "list_database_channels":
             return database_rows
-        if fn.__name__ == "list_restricted_chat_scan_results":
+        if fn.__name__ in {"list_stored_restricted_chat_scan_results", "list_chat_risk_scan_states"}:
             return []
         raise AssertionError(fn.__name__)
 
@@ -488,7 +488,8 @@ def test_restricted_scan_records_public_entity_lookup_failure_as_access_risk():
     assert rows[0].chat_id == 9
     assert rows[0].risk_flags == "entity_unavailable"
     assert rows[0].membership_scope == "public_unjoined"
-    assert any("确认不可访问 1 个" in message for message in logs)
+    assert rows[0].scan_status == "unverified"
+    assert any("未能核实 1 个" in message for message in logs)
 
 
 def test_all_platform_terms_restriction_marks_entity_unavailable():

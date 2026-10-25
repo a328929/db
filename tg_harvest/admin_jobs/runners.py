@@ -3250,6 +3250,7 @@ def _delete_chat_data(conn: Any, chat_id: int) -> int:
         deleted_messages = _count_chat_messages_for_delete(cur, chat_id)
         _delete_from_optional_chat_table(cur, "admin_missing_chats", chat_id)
         _delete_from_optional_chat_table(cur, "admin_restricted_chats", chat_id)
+        _delete_from_optional_chat_table(cur, "admin_chat_risk_scan_state", chat_id)
         _delete_from_optional_chat_table(cur, "admin_chat_access_risks", chat_id)
         _delete_from_optional_chat_table(cur, "admin_recovery_chats", chat_id)
         _clear_sync_scheduler_state_for_chat(cur, chat_id)
@@ -3325,6 +3326,9 @@ def _delete_empty_chats_data(conn: Any) -> dict[str, int]:
         )
         _delete_from_optional_chat_targets_table(
             cur, "admin_restricted_chats", "temp_delete_empty_chats"
+        )
+        _delete_from_optional_chat_targets_table(
+            cur, "admin_chat_risk_scan_state", "temp_delete_empty_chats"
         )
         _delete_from_optional_chat_targets_table(
             cur, "admin_chat_access_risks", "temp_delete_empty_chats"

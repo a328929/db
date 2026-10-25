@@ -1,3 +1,4 @@
+import sqlite3
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -11,11 +12,6 @@ from tg_harvest.web.routes.channels import register_channel_routes
 
 class _LoggerStub:
     def exception(self, _message):
-        return None
-
-
-class _ConnStub:
-    def close(self):
         return None
 
 
@@ -41,7 +37,7 @@ class ChannelRoutesTests(unittest.TestCase):
         register_channel_routes(
             self.app,
             logger=_LoggerStub(),
-            get_conn_fn=lambda: _ConnStub(),
+            get_conn_fn=lambda: sqlite3.connect(":memory:"),
             cfg=object(),
             list_database_channels_fn=lambda _conn, sort: [
                 {

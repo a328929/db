@@ -13,6 +13,13 @@ _UNUSED_INDEXES = (
     "idx_messages_sender",
     "idx_media_kind",
     "idx_media_mime",
+    # These partial indexes require predicates absent from current queries.
+    # Hash/fingerprint values are read through message or media primary keys;
+    # promotional dedupe uses the dedicated message/group hash indexes below.
+    "idx_messages_pure_hash",
+    "idx_media_unique_id",
+    "idx_media_fingerprint",
+    "idx_mg_dedupe_hash",
 )
 
 
@@ -106,13 +113,7 @@ def _create_message_indexes(cur: sqlite3.Cursor) -> None:
         "ON messages(chat_id, grouped_id, message_id) WHERE grouped_id IS NOT NULL"
     )
 
-    # 去重与内容标识索引
-    _ensure_index(
-        cur,
-        "idx_messages_pure_hash",
-        "CREATE INDEX idx_messages_pure_hash "
-        "ON messages(chat_id, pure_hash) WHERE pure_hash <> ''"
-    )
+    # 去重索引
     _ensure_index(
         cur,
         "idx_messages_dedupe_hash",
@@ -203,24 +204,6 @@ def _create_chat_indexes(cur: sqlite3.Cursor) -> None:
 
 
 def _create_media_indexes(cur: sqlite3.Cursor) -> None:
-    # 文件唯一性索引
-    _ensure_index(
-        cur,
-        "idx_media_unique_id",
-        "CREATE INDEX idx_media_unique_id "
-        "ON message_media(chat_id, file_unique_id) "
-        "WHERE file_unique_id IS NOT NULL AND file_unique_id <> ''"
-    )
-
-    # 核心性能索引：文件指纹（用于跨频道去重检测）
-    _ensure_index(
-        cur,
-        "idx_media_fingerprint",
-        "CREATE INDEX idx_media_fingerprint "
-        "ON message_media(chat_id, media_fingerprint) "
-        "WHERE media_fingerprint IS NOT NULL AND media_fingerprint <> ''"
-    )
-
     # 核心排序索引：按文件大小排序
     _ensure_index(
         cur,
@@ -283,12 +266,6 @@ def _create_media_group_indexes(cur: sqlite3.Cursor) -> None:
         "CREATE INDEX idx_mg_media_sig_promo "
         "ON media_groups(chat_id, is_promo, dedupe_eligible, media_sig_hash, item_count, first_message_id, grouped_id) "
         "WHERE media_sig_hash <> ''"
-    )
-    _ensure_index(
-        cur,
-        "idx_mg_dedupe_hash",
-        "CREATE INDEX idx_mg_dedupe_hash "
-        "ON media_groups(chat_id, dedupe_hash) WHERE dedupe_hash <> ''"
     )
     _ensure_index(
         cur,

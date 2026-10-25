@@ -5,7 +5,10 @@ from typing import Any
 from flask import jsonify, render_template
 
 from tg_harvest.app.services import ChannelRouteServices
-from tg_harvest.storage.channel_management import list_database_channel_page
+from tg_harvest.storage.channel_management import (
+    get_chat_risk_scan_summary,
+    list_database_channel_page,
+)
 from tg_harvest.web.auth import admin_login_required, admin_page_login_required
 from tg_harvest.web.responses import (
     create_started_exclusive_job_response,
@@ -172,10 +175,14 @@ def register_channel_routes(
     @app.get("/api/admin/channels/restricted")
     @admin_login_required
     def api_admin_restricted_channels() -> Any:
-        return _scan_result_response(
-            services.list_restricted_chat_scan_results_fn,
-            "读取内容限制群组扫描结果失败",
-        )
+        try:
+            with closing(services.get_conn_fn()) as conn:
+                items = services.list_restricted_chat_scan_results_fn(conn)
+                summary = get_chat_risk_scan_summary(conn)
+            items = with_chat_links(items, services.build_telegram_chat_link_bundle_fn)
+            return jsonify({**_channel_items_payload(items), "scan_summary": summary})
+        except Exception:
+            return logged_json_error(services.logger, "读取内容限制群组扫描结果失败", "读取内容限制群组扫描结果失败")
 
     def _create_scan_job_response(
         job_type,

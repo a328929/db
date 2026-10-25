@@ -68,6 +68,50 @@ function loadScript(relativePath, sandbox, hookSource = '') {
   vm.runInNewContext(source, sandbox, { filename });
 }
 
+test('risk filters preserve Telegram restriction tuples and compound platforms', () => {
+  const sandbox = createSandbox();
+  sandbox.AdminManageShared = {
+    createAdminSessionController() { return {}; },
+    createAdminJobPollController() { return {}; }
+  };
+  loadScript('static/admin_channels.js', sandbox,
+    'window.__riskHooks = { pairs: getRestrictionFilterPairs, note: buildRestrictedNote };');
+  const pairs = sandbox.__riskHooks.pairs({
+    restriction_platforms: 'all、android-ios',
+    restriction_reasons: 'porno、terms',
+    restriction_details: [
+      { platform: 'all', reason: 'porno', text: 'Sensitive' },
+      { platform: 'android-ios', reason: 'terms', text: 'Restricted on mobile' }
+    ],
+    risk_flags: 'scam、username_unavailable',
+    access_failure_type: 'username_unavailable'
+  });
+  const keys = Array.from(pairs, pair => pair.key);
+  assert.ok(keys.includes('all\u0001porno'));
+  assert.ok(keys.includes('ios\u0001terms'));
+  assert.ok(keys.includes('android\u0001terms'));
+  assert.ok(keys.includes('标记\u0001scam'));
+  assert.ok(!keys.includes('all\u0001terms'));
+  assert.ok(!keys.includes('ios\u0001porno'));
+  assert.equal(keys.filter(key => key === 'access\u0001username_unavailable').length, 1);
+  const note = sandbox.__riskHooks.note({ scan_status: 'stale', access_source_account: 'secondary' });
+  assert.match(note, /历史观察/);
+  assert.match(note, /secondary/);
+});
+
+test('legacy risk filters do not invent platform and reason relationships', () => {
+  const sandbox = createSandbox();
+  sandbox.AdminManageShared = {
+    createAdminSessionController() { return {}; },
+    createAdminJobPollController() { return {}; }
+  };
+  loadScript('static/admin_channels.js', sandbox,
+    'window.__riskPairs = getRestrictionFilterPairs;');
+  const pairs = sandbox.__riskPairs({ restriction_platforms: 'all、ios', restriction_reasons: 'porn、terms' });
+  assert.equal(pairs.length, 1);
+  assert.equal(pairs[0].key, '\u0001legacy');
+});
+
 test('search errors preserve backend semantics and explicit retry policy', async () => {
   const sandbox = createSandbox();
   const responses = [];

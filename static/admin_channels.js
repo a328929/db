@@ -58,6 +58,7 @@
 
   var restrictedState = {
     items: [],
+    summary: null,
     filterValue: '__all__'
   };
 
@@ -91,6 +92,7 @@
       restrictedFilterSelect: document.getElementById('admin-restricted-filter-select'),
       restrictedListToggleBtn: document.getElementById('admin-restricted-list-toggle-btn'),
       restrictedStatus: document.getElementById('admin-restricted-status'),
+      restrictedCoverage: document.getElementById('admin-restricted-coverage'),
       restrictedList: document.getElementById('admin-restricted-list'),
       logContainer: document.getElementById('admin-channel-log-container'),
       clearLogsBtn: document.getElementById('admin-clear-channel-logs-btn'),
@@ -723,6 +725,10 @@
     if (item.restriction_platforms) parts.push('平台：' + item.restriction_platforms);
     if (item.restriction_reasons) parts.push('原因：' + item.restriction_reasons);
     if (item.risk_flags) parts.push('标记：' + item.risk_flags);
+    if (item.scan_status === 'stale') parts.push('含历史观察，本轮未能完整复核');
+    if (item.scan_status === 'unverified') parts.push('原群组状态尚未核实，请检查用户名或账号权限');
+    if (item.scan_source_account) parts.push('观察账号：' + item.scan_source_account);
+    if (item.access_source_account) parts.push('访问异常账号：' + item.access_source_account);
     if (item.access_failure_message) parts.push('访问异常：' + item.access_failure_message);
     if (Number(item.access_failure_count || 0) > 0) {
       parts.push('累计失败：' + Number(item.access_failure_count) + ' 次');
@@ -828,13 +834,18 @@
     var raw = String(reason || '').trim();
     var normalized = raw.toLowerCase();
     if (!normalized) return '未标明原因';
-    if (normalized === 'porn') return '色情';
+    if (normalized === 'porn' || normalized === 'porno') return '色情';
     if (normalized === 'terms' || normalized === 'tos') return '违反条款';
     if (normalized === 'copyright') return '版权';
     if (normalized === 'access_unavailable') return '会话不可访问';
     if (normalized === 'access_denied') return '账号无访问权限';
     if (normalized === 'account_banned') return '账号被封禁';
-    if (normalized === 'entity_unavailable') return '实体无法解析或不存在';
+    if (normalized === 'entity_unavailable') return '实体无法解析，状态未确认';
+    if (normalized === 'username_unavailable') return '用户名无效或已失效';
+    if (normalized === 'identity_mismatch') return '用户名或缓存指向其他实体';
+    if (normalized === 'scam') return '诈骗标记';
+    if (normalized === 'fake') return '假冒标记';
+    if (normalized === 'legacy') return '历史限制，平台与原因对应关系待复核';
     return raw;
   }
 
@@ -843,16 +854,40 @@
   }
 
   function getRestrictionFilterPairs(item) {
-    var platforms = splitRestrictionTokens(item && item.restriction_platforms);
-    var reasons = splitRestrictionTokens(item && item.restriction_reasons);
     var pairs = [];
-    platforms.forEach(function (platform) {
-      reasons.forEach(function (reason) {
-        pairs.push({
-          key: buildRestrictionFilterKey(platform, reason),
-          label: buildRestrictionFilterLabel(platform, reason)
+    var details = item && item.restriction_details;
+    if (Array.isArray(details) && details.length) {
+      details.forEach(function (entry) {
+        String(entry.platform || '').split('-').forEach(function (platform) {
+          pairs.push({
+            key: buildRestrictionFilterKey(platform, entry.reason),
+            label: buildRestrictionFilterLabel(platform, entry.reason)
+          });
         });
       });
+    } else {
+      var platforms = splitRestrictionTokens(item && item.restriction_platforms);
+      var reasons = splitRestrictionTokens(item && item.restriction_reasons);
+      // Legacy flattened data cannot establish multiple platform/reason pairs.
+      if (platforms.length === 1 && reasons.length === 1 && (platforms[0] || reasons[0])) {
+        pairs.push({
+          key: buildRestrictionFilterKey(platforms[0], reasons[0]),
+          label: buildRestrictionFilterLabel(platforms[0], reasons[0])
+        });
+      } else if (platforms.some(Boolean) || reasons.some(Boolean)) {
+        pairs.push({
+          key: buildRestrictionFilterKey('', 'legacy'),
+          label: displayRestrictionReason('legacy')
+        });
+      }
+    }
+    splitRestrictionTokens(item && item.risk_flags).forEach(function (flag) {
+      if (flag === 'scam' || flag === 'fake' || flag === 'restricted') {
+        pairs.push({ key: buildRestrictionFilterKey('标记', flag), label: displayRestrictionReason(flag) });
+      }
+      if (['access_unavailable', 'access_denied', 'account_banned', 'entity_unavailable', 'username_unavailable', 'identity_mismatch'].indexOf(flag) >= 0) {
+        pairs.push({ key: buildRestrictionFilterKey('access', flag), label: buildRestrictionFilterLabel('access', flag) });
+      }
     });
     if (item && item.access_failure_type) {
       if (
@@ -867,7 +902,9 @@
       });
     }
     return pairs.length > 0
-      ? pairs
+      ? pairs.filter(function (pair, index) {
+        return pairs.findIndex(function (other) { return other.key === pair.key; }) === index;
+      })
       : [{ key: buildRestrictionFilterKey('', ''), label: buildRestrictionFilterLabel('', '') }];
   }
 
@@ -1026,6 +1063,15 @@
       if (!isListRequestCurrent('restricted', requestToken)) return;
       if (!data.ok) throw new Error(data.error || '读取失败');
       restrictedState.items = Array.isArray(data.items) ? data.items : [];
+      restrictedState.summary = data.scan_summary || null;
+      if (elements.restrictedCoverage) {
+        var summary = restrictedState.summary;
+        elements.restrictedCoverage.textContent = summary
+          ? '最近扫描 ' + formatDateTime(summary.scanned_at) + '：共 ' + summary.total
+            + ' 个，完整核实 ' + summary.checked + ' 个，部分账号核实 ' + summary.partial
+            + ' 个，未能核实 ' + summary.failed + ' 个，未检查 ' + summary.not_checked + ' 个。'
+          : '尚无扫描覆盖记录，暂无结果不代表全部群组均已检查。';
+      }
       updateRestrictedFilterOptions(elements);
       renderRestrictedChannels(elements);
     } catch (error) {
@@ -1059,7 +1105,7 @@
   }
 
   async function handleScanRestrictedClick(elements) {
-    if (!window.confirm('确认扫描账号已加入及数据库公开群组/频道的风险标记和访问状态？')) {
+    if (!window.confirm('确认扫描已加入会话、数据库群组/频道及历史风险目标？无法核实的目标将保留历史观察。')) {
       appendLog(elements, '已取消扫描');
       return;
     }

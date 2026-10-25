@@ -109,7 +109,7 @@
           <select id="admin-restricted-filter-select" aria-label="按风险类型、平台和原因筛选群组结果">
             <option value="__all__">全部类型</option>
           </select>
-          <button id="admin-scan-restricted-btn" class="btn primary" type="button" aria-label="扫描已加入及数据库公开群组中的内容限制、风险标记和访问异常">
+          <button id="admin-scan-restricted-btn" class="btn primary" type="button" aria-label="扫描已加入会话、数据库群组及历史风险目标中的内容限制、风险标记和访问异常">
             扫描风险状态
           </button>
           <button id="admin-refresh-restricted-btn" class="btn" type="button" aria-label="刷新风险与访问异常结果">
@@ -128,6 +128,8 @@
         </div>
       </div>
 
+      <p id="admin-restricted-coverage" class="channel-subline" role="status" aria-live="polite">尚无扫描覆盖记录，暂无结果不代表全部群组均已检查。</p>
+      <p class="channel-subline">限制标记可能因平台、地区和账号设置而异；账号访问异常不代表群组被全局封禁。未核实的结果保留历史观察。</p>
       <div id="admin-restricted-list" class="channel-list" aria-label="内容限制或风险标记的群组或频道列表" hidden></div>
     </section>
 

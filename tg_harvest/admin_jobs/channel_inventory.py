@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import json
 import logging
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, fields, replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from telethon.tl.types import InputPeerChat, PeerChannel, PeerChat
 
 from tg_harvest.admin_jobs.common import (
     admin_error_message,
@@ -40,6 +44,7 @@ from tg_harvest.admin_jobs.sessions import (
 from tg_harvest.domain.chat_inventory import (
     ChatInventoryRow,
     RestrictedChatInventoryRow,
+    RestrictedChatScanRows,
     chat_identity_candidates,
     chat_identity_key,
     find_missing_joined_chats,
@@ -49,10 +54,16 @@ from tg_harvest.domain.chat_inventory import (
     restricted_chat_row_from_entity,
     unavailable_chat_risk_row,
 )
-from tg_harvest.ingest.flood_wait import call_with_bounded_retry, is_flood_wait_error
+from tg_harvest.ingest.flood_wait import (
+    call_with_bounded_retry,
+    flood_wait_seconds,
+    is_flood_wait_error,
+    is_transient_telegram_error,
+)
 from tg_harvest.storage.channel_management import (
+    list_chat_risk_scan_states,
     list_database_channels,
-    list_restricted_chat_scan_results,
+    list_stored_restricted_chat_scan_results,
     replace_missing_chat_scan_results,
     replace_restricted_chat_scan_results,
 )
@@ -64,7 +75,12 @@ def _scan_joined_restricted_chats(
     job_id: str,
     admin_job_append_log_fn: Callable[[str, str], Any],
     active_clients: list | None = None,
-) -> tuple[dict[tuple[str, int], RestrictedChatInventoryRow], set[tuple[str, int]], list[tuple[_ScanAccount, Any, str]]]:
+    scan: _RiskScan | None = None,
+) -> tuple[
+    dict[tuple[str, int], RestrictedChatInventoryRow],
+    set[tuple[str, int]],
+    list[tuple[_ScanAccount, Any, str]],
+]:
     """Phase 1: Scan joined chats for restriction reasons and risk flags.
 
     Args:
@@ -112,14 +128,36 @@ def _scan_joined_restricted_chats(
                 _cleanup_isolated_worker_session(account.cfg, worker_id)
             active_clients.pop()
             continue
-        with bind_client_event_loop(client):
-            dialogs = list(
-                client.iter_dialogs(
-                    limit=None,
-                    archived=None,
-                    ignore_migrated=True,
-                )
+        if scan is not None and scan.is_cooling_down(account.key):
+            admin_job_append_log_fn(
+                job_id, f"{account.label}仍在 Telegram 冷却期，保留该账号历史观察"
             )
+            continue
+        try:
+            with bind_client_event_loop(client):
+                dialogs = list(
+                    client.iter_dialogs(
+                        limit=None,
+                        archived=None,
+                        ignore_migrated=True,
+                    )
+                )
+        except Exception as exc:
+            if scan is None or not (
+                is_flood_wait_error(exc) or is_transient_telegram_error(exc)
+            ):
+                raise
+            scan.defer_account(account.key, exc)
+            admin_job_append_log_fn(
+                job_id,
+                f"{account.label}会话枚举暂未完成，保留历史观察：{admin_error_message(exc)}",
+            )
+            continue
+        if scan is not None:
+            for dialog in dialogs:
+                inventory = load_joined_chat_inventory([dialog], account.key)
+                if inventory:
+                    scan.observe(inventory[0], account.key, dialog.entity, joined=True)
         for joined_row in load_joined_chat_inventory(dialogs, account.key):
             joined_identities.update(
                 chat_identity_candidates(joined_row.chat_id, joined_row.chat_type)
@@ -131,9 +169,7 @@ def _scan_joined_restricted_chats(
         )
         for row in account_rows:
             key = chat_identity_key(row.chat_id, row.chat_type)
-            merged_rows[key] = _merge_restricted_chat_row(
-                merged_rows.get(key), row
-            )
+            merged_rows[key] = _merge_restricted_chat_row(merged_rows.get(key), row)
 
     if not active_clients:
         raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
@@ -141,227 +177,453 @@ def _scan_joined_restricted_chats(
     return merged_rows, joined_identities, active_clients
 
 
-def _batch_refresh_cached_public_entities(
-    *,
-    public_rows: list[dict],
-    active_clients: list[tuple[_ScanAccount, Any, str]],
-    merged_rows: dict[tuple[str, int], RestrictedChatInventoryRow],
-    job_id: str,
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> set[int]:
-    """Phase 2: Batch refresh cached public entities.
+class _RiskScan:
+    """Keep account observations separate until all probes have finished."""
 
-    Args:
-        public_rows: Database rows for public channels not joined by any account.
-        active_clients: List of (account, client, worker_id) tuples from Phase 1.
-        merged_rows: Dict to accumulate restricted chat results (modified in-place).
-        job_id: Unique job identifier.
-        admin_job_append_log_fn: Callback to log progress messages.
-
-    Returns:
-        Set of chat IDs that were successfully probed (either refreshed or confirmed unavailable).
-
-    Notes:
-        - Uses session cache (get_input_entity) to identify which entities are already cached
-        - Batch fetches cached entities (PUBLIC_ENTITY_BATCH_SIZE per call)
-        - Stops processing an account if FloodWait error occurs
-        - Does not raise on individual entity failures (continues with next account)
-    """
-    probed_public_chat_ids: set[int] = set()
-    uncached_by_id = {int(row["chat_id"]): row for row in public_rows}
-
-    for account, client, _worker_id in active_clients:
-        cached_pairs: list[tuple[dict[str, Any], Any]] = []
-        for row in public_rows:
-            try:
-                input_peer = client.session.get_input_entity(row["chat_username"])
-            except ValueError:
-                continue
-            cached_pairs.append((row, input_peer))
-
-        for offset in range(0, len(cached_pairs), PUBLIC_ENTITY_BATCH_SIZE):
-            batch = cached_pairs[offset : offset + PUBLIC_ENTITY_BATCH_SIZE]
-            try:
-                resolved_pairs = _fetch_cached_entities(client, batch)
-            except Exception as exc:
-                if is_flood_wait_error(exc):
-                    admin_job_append_log_fn(
-                        job_id,
-                        f"{account.label}批量刷新公开频道缓存触发频控，已切换保守模式",
+    def __init__(self, cfg, database_rows, previous_rows, states, job_id):
+        self.cfg = cfg
+        self.job_id = job_id
+        self.started_at = _admin_now_iso()
+        self.targets = {}
+        for row in [*database_rows, *previous_rows]:
+            self.targets.setdefault(
+                chat_identity_key(row["chat_id"], row["chat_type"]), dict(row)
+            )
+        self.states = {
+            (
+                *chat_identity_key(state["chat_id"], state["chat_type"]),
+                state["source_account"],
+            ): dict(state)
+            for state in states
+        }
+        self.loaded_state_keys = set(self.states)
+        self.previous_rows = previous_rows
+        self.current = set()
+        self.verified = set()
+        self.joined = set()
+        self.cooldowns = {}
+        self.next_call_at = {}
+        for state in states:
+            if state["status"] == "flood_wait":
+                account = state["source_account"]
+                self.cooldowns[account] = max(
+                    self.cooldowns.get(account, ""), state["next_retry_at"]
+                )
+        for old in previous_rows:
+            identity, _target = self.target(old)
+            sources = set(
+                _TOKEN_SEPARATOR_RE.split(old.get("scan_source_account", ""))
+            ) - {""}
+            if not sources or not all(
+                (*identity, account) in self.loaded_state_keys for account in sources
+            ):
+                legacy = self.state(identity, "__legacy__")
+                if (*identity, "__legacy__") not in self.loaded_state_keys:
+                    legacy["risk_json"] = json.dumps(
+                        asdict(_restricted_row_from_stored(old)), ensure_ascii=False
                     )
-                    break
-                raise
-            for row, entity in resolved_pairs:
-                chat_id = int(row["chat_id"])
-                probed_public_chat_ids.add(chat_id)
-                uncached_by_id.pop(chat_id, None)
-                _merge_resolved_public_entity(
-                    merged_rows,
-                    row=row,
-                    entity=entity,
+
+    def target(self, row):
+        identity = (
+            chat_identity_key(row.chat_id, row.chat_type)
+            if isinstance(row, ChatInventoryRow)
+            else chat_identity_key(row["chat_id"], row["chat_type"])
+        )
+        if identity in self.targets:
+            return identity, self.targets[identity]
+        candidates = chat_identity_candidates(identity[1], identity[0])
+        matches = [
+            key
+            for key in self.targets
+            if not candidates.isdisjoint(chat_identity_candidates(key[1], key[0]))
+        ]
+        if len(matches) == 1:
+            return matches[0], self.targets[matches[0]]
+        item = asdict(row) if isinstance(row, ChatInventoryRow) else dict(row)
+        self.targets[identity] = item
+        return identity, item
+
+    def state(self, identity, account):
+        key = (*identity, account)
+        if key not in self.states:
+            row = self.targets[identity]
+            self.states[key] = dict(
+                chat_id=int(row["chat_id"]),
+                chat_type=identity[0],
+                source_account=account,
+                last_attempt_at="",
+                last_checked_at="",
+                next_retry_at="",
+                status="not_checked",
+                risk_json="null",
+                error_json="null",
+            )
+        self.states[key]["chat_id"] = int(self.targets[identity]["chat_id"])
+        return self.states[key]
+
+    def is_cooling_down(self, account):
+        return self.cooldowns.get(account, "") > _admin_now_iso()
+
+    def defer_account(self, account, exc):
+        seconds = flood_wait_seconds(exc) if is_flood_wait_error(exc) else 60
+        self.cooldowns[account] = (
+            datetime.now(UTC) + timedelta(seconds=seconds)
+        ).isoformat()
+        for identity in self.targets:
+            if (*identity, account) not in self.verified:
+                self.state(identity, account).update(
+                    status="flood_wait"
+                    if is_flood_wait_error(exc)
+                    else "transient_error",
+                    next_retry_at=self.cooldowns[account],
                 )
 
-    return probed_public_chat_ids
+    def due(self, identity, account):
+        state = self.state(identity, account)
+        return (
+            (*identity, account) not in self.current
+            and not self.is_cooling_down(account)
+            and state["next_retry_at"] <= _admin_now_iso()
+        )
 
+    def may_resolve(self, identity, account):
+        state = self.state(identity, account)
+        return self.due(identity, account) or (
+            (*identity, account) in self.current
+            and state["status"] == "lookup_failed"
+            and not self.is_cooling_down(account)
+        )
 
-def _resolve_uncached_public_entities(
-    *,
-    uncached_by_id: dict[int, dict],
-    active_clients: list[tuple[_ScanAccount, Any, str]],
-    merged_rows: dict[tuple[str, int], RestrictedChatInventoryRow],
-    cfg: Any,
-    job_id: str,
-    admin_job_append_log_fn: Callable[[str, str], Any],
-) -> tuple[set[int], int]:
-    """Phase 3: Incrementally resolve uncached public entities.
+    def scope(self, identity, row):
+        if identity in self.joined:
+            return "joined"
+        return "public_unjoined" if row.get("chat_username") else "access_unknown"
 
-    Args:
-        uncached_by_id: Dict of chat_id to database row for entities not in cache.
-        active_clients: List of (account, client, worker_id) tuples.
-        merged_rows: Dict to accumulate restricted chat results (modified in-place).
-        cfg: Configuration with resolve_limit, resolve_gap, flood_wait_threshold.
-        job_id: Unique job identifier.
-        admin_job_append_log_fn: Callback to log progress messages.
+    def observe(self, row, account, entity, *, joined=False):
+        identity, target = self.target(row)
+        entity_type = entity.__class__.__name__.lower().lstrip("_")
+        forbidden = entity_type in {"channelforbidden", "chatforbidden"}
+        if joined and not forbidden:
+            self.joined.add(identity)
+        risk = restricted_chat_row_from_entity(
+            entity,
+            chat_id=target["chat_id"],
+            chat_title=target.get("chat_title", ""),
+            chat_username=target.get("chat_username", ""),
+            last_message_at=getattr(row, "last_message_at", "")
+            or target.get("last_message_at", ""),
+            last_message_ts=getattr(row, "last_message_ts", None)
+            or target.get("last_message_ts"),
+            membership_scope=self.scope(identity, target),
+            source_account=account,
+        )
+        now = _admin_now_iso()
+        state = self.state(identity, account)
+        state.update(
+            last_attempt_at=now,
+            next_retry_at="",
+            status="access_error" if forbidden else "checked",
+        )
+        if risk is not None:
+            risk = replace(risk, scan_job_id=self.job_id, scanned_at=now)
+        if forbidden:
+            # Forbidden constructors carry no current content restriction fields.
+            state["error_json"] = json.dumps(asdict(risk), ensure_ascii=False)
+        else:
+            state.update(
+                last_checked_at=now,
+                risk_json=json.dumps(
+                    asdict(risk) if risk else None, ensure_ascii=False
+                ),
+                error_json="null",
+            )
+        self.current.add((*identity, account))
+        self.verified.add((*identity, account))
 
-    Returns:
-        Tuple of:
-        - probed_public_chat_ids: Set of successfully resolved chat IDs
-        - public_access_failure_count: Count of confirmed access failures
-
-    Notes:
-        - Limited by admin_restricted_public_resolve_limit (see constants for details)
-        - Rate-limited by admin_restricted_public_resolve_gap_seconds
-        - Round-robins between accounts to distribute load and avoid single-account limits
-        - Records access failures when all accounts fail consistently
-        - Transient failures (FloodWait, network errors) are not recorded as access failures
-    """
-    # Phase 3: Incremental resolution of uncached public entities
-    # ============================================================
-    # IMPORTANT: This phase has a configurable limit to prevent excessive API calls
-    # in a single scan cycle. The default limit (DEFAULT_PUBLIC_RESOLVE_LIMIT=40)
-    # means only the first 40 uncached entities will be actively resolved.
-    #
-    # IMPLICATIONS:
-    # - If the database has 1000+ public channels, most will NOT be resolved this scan
-    # - Unresolved channels retain their previous scan results (if any)
-    # - Risk flags for unresolved channels may become stale over time
-    # - Access failures (entity_unavailable) may not be detected until resolution
-    #
-    # RATIONALE:
-    # - Resolving thousands of entities would cause:
-    #   * Long scan duration (1+ seconds per entity with rate limiting)
-    #   * High risk of hitting Telegram flood control limits
-    #   * Potential account penalties for aggressive API usage
-    # - Most channels don't change restriction status frequently
-    # - Cached batch refresh (Phase 2) covers recently-accessed channels
-    #
-    # CONFIGURATION:
-    # - Set admin_restricted_public_resolve_limit=0 to skip active resolution entirely
-    # - Set a high value (e.g., 10000) for exhaustive scans, but monitor for:
-    #   * Scan duration (expect 1+ hours for 1000s of entities)
-    #   * FloodWait errors triggering account switches
-    #   * Telegram account rate limit warnings
-    # - Consider running exhaustive scans off-hours or with dedicated scan accounts
-    #
-    # FUTURE IMPROVEMENT:
-    # - Implement rotation strategy: resolve different subsets each scan
-    # - Prioritize by: last_message_ts DESC, message_count DESC
-    # - Track last_resolved_at per channel to ensure periodic coverage
-    resolve_limit = max(
-        0,
-        int(getattr(cfg, "admin_restricted_public_resolve_limit", DEFAULT_PUBLIC_RESOLVE_LIMIT) or DEFAULT_PUBLIC_RESOLVE_LIMIT),
-    )
-    resolve_gap = max(
-        0.0,
-        float(
-            getattr(cfg, "admin_restricted_public_resolve_gap_seconds", DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS)
-            or DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS
-        ),
-    )
-
-    probed_public_chat_ids: set[int] = set()
-    public_access_failure_count = 0
-    account_next_resolve_at: dict[str, float] = {}
-    unresolved_rows = list(uncached_by_id.values())[:resolve_limit]
-
-    for index, row in enumerate(unresolved_rows):
-        access_failures: list[tuple[str, Exception]] = []
-        had_transient_failure = False
-        resolved = False
-        for account_offset in range(len(active_clients)):
-            account, client, _worker_id = active_clients[
-                (index + account_offset) % len(active_clients)
-            ]
-            next_allowed = account_next_resolve_at.get(account.key, 0.0)
-            wait_seconds = max(0.0, next_allowed - time.monotonic())
-            if wait_seconds > 0:
-                time.sleep(wait_seconds)
-            account_next_resolve_at[account.key] = time.monotonic() + resolve_gap
-            try:
-                with bind_client_event_loop(client):
-                    entity = call_with_bounded_retry(
-                        client.get_entity,
-                        row["chat_username"],
-                        max_retries=2,
-                        flood_wait_threshold_seconds=int(
-                            getattr(account.cfg, "flood_wait_switch_threshold", DEFAULT_FLOOD_WAIT_THRESHOLD)
-                            or DEFAULT_FLOOD_WAIT_THRESHOLD
+    def failure(self, identity, account, exc, *, risk_type=None, attempted=True):
+        state = self.state(identity, account)
+        row = self.targets[identity]
+        now = _admin_now_iso()
+        if attempted:
+            self.current.add((*identity, account))
+        status, delay = "transient_error", 60
+        error = None
+        if is_flood_wait_error(exc):
+            self.defer_account(account, exc)
+            status, delay = "flood_wait", flood_wait_seconds(exc)
+        else:
+            kind = risk_type or classify_chat_access_failure(exc)
+            if kind:
+                status = (
+                    "access_error"
+                    if kind in {"access_denied", "account_banned"}
+                    else "lookup_failed"
+                )
+                delay = 300
+                error = unavailable_chat_risk_row(
+                    chat_id=row["chat_id"],
+                    chat_title=row.get("chat_title", ""),
+                    chat_username=row.get("chat_username", ""),
+                    chat_type=row.get("chat_type", ""),
+                    risk_type=kind,
+                    risk_message=admin_error_message(exc),
+                    membership_scope=self.scope(identity, row),
+                    source_account=account,
+                    last_message_at=row.get("last_message_at", ""),
+                    last_message_ts=row.get("last_message_ts"),
+                )
+                if kind in {"username_unavailable", "identity_mismatch"}:
+                    error = replace(
+                        error,
+                        restriction_text=(
+                            "账号无法解析该用户名，尚未确认原群组/频道是否存在或可访问"
+                            if kind == "username_unavailable"
+                            else "用户名或缓存指向其他实体，原群组状态尚未核实"
                         ),
-                        account_label=account.label,
-                        scope="restricted-public-username",
                     )
-            except Exception as exc:
-                if is_flood_wait_error(exc):
-                    had_transient_failure = True
-                    continue
-                risk_type = classify_chat_access_failure(exc)
-                if risk_type:
-                    access_failures.append((risk_type, exc))
-                else:
-                    had_transient_failure = True
-                logging.info(
-                    "公开频道风险补探测失败: chat_id=%s account=%s error=%s",
-                    row.get("chat_id"),
-                    account.key,
-                    admin_error_message(exc),
+                error = replace(
+                    error,
+                    scanned_at=now,
+                    scan_job_id=self.job_id,
+                    scan_status="checked" if status == "access_error" else "unverified",
                 )
+                if status == "access_error":
+                    self.verified.add((*identity, account))
+        state.update(
+            last_attempt_at=now,
+            next_retry_at=(datetime.now(UTC) + timedelta(seconds=delay)).isoformat(),
+            status=status,
+        )
+        # A transient failure must not erase the last explicit access/lookup error.
+        if error is not None:
+            state["error_json"] = json.dumps(asdict(error), ensure_ascii=False)
+
+    def accept(self, identity, account, entity):
+        row = self.targets[identity]
+        if not _resolved_entity_matches_database_row(entity, row):
+            self.failure(
+                identity,
+                account,
+                ValueError(
+                    f"用户名或缓存指向其他实体，原群组状态尚未核实：expected={row['chat_id']}, "
+                    f"actual={entity.__class__.__name__}:{getattr(entity, 'id', None)}"
+                ),
+                risk_type="identity_mismatch",
+            )
+            return False
+        self.observe(row, account, entity)
+        return True
+
+    def call(self, account, client, value):
+        gap_value = getattr(
+            self.cfg, "admin_restricted_public_resolve_gap_seconds", None
+        )
+        gap = max(
+            0.0,
+            float(
+                DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS if gap_value is None else gap_value
+            ),
+        )
+        wait = max(0.0, self.next_call_at.get(account.key, 0.0) - time.monotonic())
+        if wait:
+            time.sleep(wait)
+        self.next_call_at[account.key] = time.monotonic() + gap
+        with bind_client_event_loop(client):
+            return call_with_bounded_retry(
+                client.get_entity,
+                value,
+                max_retries=2,
+                flood_wait_threshold_seconds=int(
+                    getattr(
+                        account.cfg,
+                        "flood_wait_switch_threshold",
+                        DEFAULT_FLOOD_WAIT_THRESHOLD,
+                    )
+                    or DEFAULT_FLOOD_WAIT_THRESHOLD
+                ),
+                account_label=account.label,
+                scope="restricted-chat-probe",
+            )
+
+    def fetch_batch(self, account, client, pairs):
+        if not pairs or self.is_cooling_down(account.key):
+            return []
+        try:
+            entities = self.call(account, client, [peer for _identity, peer in pairs])
+            return [
+                (identity, entity, None)
+                for (identity, _peer), entity in zip(pairs, entities, strict=True)
+            ]
+        except Exception as exc:
+            if is_flood_wait_error(exc):
+                self.defer_account(account.key, exc)
+            if (
+                len(pairs) == 1
+                or is_flood_wait_error(exc)
+                or is_transient_telegram_error(exc)
+            ):
+                return [(identity, None, exc) for identity, _peer in pairs]
+            midpoint = len(pairs) // 2
+            return [
+                *self.fetch_batch(account, client, pairs[:midpoint]),
+                *self.fetch_batch(account, client, pairs[midpoint:]),
+            ]
+
+    def cached_peer(self, client, identity):
+        row = self.targets[identity]
+        kinds = [identity[0]] if identity[0] else ["channel", "chat"]
+        for kind in kinds:
+            peer = (
+                PeerChannel(identity[1]) if kind == "channel" else PeerChat(identity[1])
+            )
+            try:
+                return client.session.get_input_entity(peer)
+            except (ValueError, TypeError):
+                pass
+        if identity[0] == "chat":
+            return InputPeerChat(identity[1])
+        if row.get("chat_username"):
+            try:
+                return client.session.get_input_entity(row["chat_username"])
+            except (ValueError, TypeError):
+                pass
+        return None
+
+    def refresh_cached(self, active_clients):
+        for account, client, _worker_id in active_clients:
+            pairs = []
+            for identity in list(self.targets):
+                if not self.due(identity, account.key):
+                    continue
+                peer = self.cached_peer(client, identity)
+                if peer is not None:
+                    pairs.append((identity, peer))
+            for offset in range(0, len(pairs), PUBLIC_ENTITY_BATCH_SIZE):
+                for identity, entity, error in self.fetch_batch(
+                    account, client, pairs[offset : offset + PUBLIC_ENTITY_BATCH_SIZE]
+                ):
+                    if error is not None:
+                        self.failure(identity, account.key, error)
+                    else:
+                        self.accept(identity, account.key, entity)
+                if self.is_cooling_down(account.key):
+                    break
+
+    def resolve_uncached(self, active_clients):
+        limit_value = getattr(self.cfg, "admin_restricted_public_resolve_limit", None)
+        limit = max(
+            0, int(DEFAULT_PUBLIC_RESOLVE_LIMIT if limit_value is None else limit_value)
+        )
+        pending = []
+        for identity, row in self.targets.items():
+            accounts = [
+                account
+                for account, _client, _worker in active_clients
+                if self.may_resolve(identity, account.key)
+            ]
+            if accounts and row.get("chat_username"):
+                pending.append(
+                    (
+                        min(
+                            self.state(identity, account.key)["last_attempt_at"]
+                            for account in accounts
+                        ),
+                        identity,
+                    )
+                )
+        for index, (_last_attempt, identity) in enumerate(sorted(pending)[:limit]):
+            for offset in range(len(active_clients)):
+                account, client, _worker_id = active_clients[
+                    (index + offset) % len(active_clients)
+                ]
+                if not self.may_resolve(identity, account.key):
+                    continue
+                try:
+                    entity = self.call(
+                        account, client, self.targets[identity]["chat_username"]
+                    )
+                except Exception as exc:
+                    self.failure(identity, account.key, exc)
+                else:
+                    self.accept(identity, account.key, entity)
+
+    def results(self, accounts):
+        merged = {}
+        account_keys = {account.key for account in accounts}
+        for identity, target in self.targets.items():
+            for account in account_keys:
+                state = self.state(identity, account)
+                for field in ("risk_json", "error_json"):
+                    payload = json.loads(state[field])
+                    if payload is None:
+                        continue
+                    risk = _restricted_row_from_stored(payload)
+                    fresh = (*identity, account) in self.verified and (
+                        field == "error_json" or state["status"] == "checked"
+                    )
+                    status = risk.scan_status if fresh else "stale"
+                    if (
+                        field == "error_json"
+                        and (*identity, account) in self.current
+                        and state["status"] == "lookup_failed"
+                    ):
+                        status = "unverified"
+                    risk = replace(
+                        risk,
+                        chat_id=target["chat_id"],
+                        membership_scope=self.scope(identity, target),
+                        scan_status=status,
+                    )
+                    merged[identity] = _merge_restricted_chat_row(
+                        merged.get(identity), risk
+                    )
+        for identity, target in self.targets.items():
+            legacy = self.states.get((*identity, "__legacy__"))
+            if not legacy or legacy["risk_json"] == "null":
                 continue
-            chat_id = int(row["chat_id"])
-            probed_public_chat_ids.add(chat_id)
-            _merge_resolved_public_entity(
-                merged_rows,
-                row=row,
-                entity=entity,
+            old = json.loads(legacy["risk_json"])
+            # Old aggregate snapshots have no reliable account provenance.
+            # Keep them separately until every configured account has checked
+            # the content entity, even across repeated forbidden results.
+            if all(
+                self.state(identity, account)["last_checked_at"]
+                >= (old.get("scanned_at") or self.started_at)
+                for account in account_keys
+            ):
+                legacy["risk_json"] = "null"
+                continue
+            risk = replace(
+                _restricted_row_from_stored(old),
+                chat_id=target["chat_id"],
+                membership_scope=self.scope(identity, target),
+                scan_status="stale",
             )
-            resolved = True
-            break
-
-        if (
-            not resolved
-            and not had_transient_failure
-            and len(access_failures) == len(active_clients)
-        ):
-            risk_type, last_exc = access_failures[-1]
-            chat_id = int(row["chat_id"])
-            risk_row = unavailable_chat_risk_row(
-                chat_id=chat_id,
-                chat_title=str(row.get("chat_title") or ""),
-                chat_username=str(row.get("chat_username") or ""),
-                chat_type=str(row.get("chat_type") or ""),
-                risk_type=risk_type,
-                risk_message=admin_error_message(last_exc),
-                membership_scope="public_unjoined",
-                last_message_at=str(row.get("last_message_at") or ""),
-                last_message_ts=row.get("last_message_ts"),
+            merged[identity] = _merge_restricted_chat_row(merged.get(identity), risk)
+        rows = list(merged.values())
+        rows.sort(key=lambda row: (row.chat_title.casefold(), row.chat_id))
+        complete = partial = failed = 0
+        for identity in self.targets:
+            verified = sum(
+                (*identity, account) in self.verified for account in account_keys
             )
-            key = chat_identity_key(risk_row.chat_id, risk_row.chat_type)
-            merged_rows[key] = _merge_restricted_chat_row(
-                merged_rows.get(key), risk_row
-            )
-            probed_public_chat_ids.add(chat_id)
-            public_access_failure_count += 1
-
-    return probed_public_chat_ids, public_access_failure_count
+            if verified == len(account_keys):
+                complete += 1
+            elif verified:
+                partial += 1
+            elif any((*identity, account) in self.current for account in account_keys):
+                failed += 1
+        summary = dict(
+            total=len(self.targets),
+            checked=complete,
+            partial=partial,
+            failed=failed,
+            not_checked=len(self.targets) - complete - partial - failed,
+            scanned_at=self.started_at,
+            accounts=sorted(account_keys),
+        )
+        return RestrictedChatScanRows(
+            rows, scan_states=list(self.states.values()), summary=summary
+        )
 
 
 _TOKEN_SEPARATOR_RE = re.compile(r"[、,，;；|/]+")
@@ -445,7 +707,11 @@ def _merge_chat_inventory_row(
 ) -> ChatInventoryRow:
     if current is None:
         return incoming
-    preferred = current if _chat_row_priority(current) <= _chat_row_priority(incoming) else incoming
+    preferred = (
+        current
+        if _chat_row_priority(current) <= _chat_row_priority(incoming)
+        else incoming
+    )
     other = incoming if preferred is current else current
 
     # Merge unavailable reasons from both accounts
@@ -458,7 +724,9 @@ def _merge_chat_inventory_row(
         [preferred.scan_source_account, other.scan_source_account]
     )
 
-    if merged_reason == str(preferred.unavailable_reason or "") and merged_accounts == str(preferred.scan_source_account or ""):
+    if merged_reason == str(
+        preferred.unavailable_reason or ""
+    ) and merged_accounts == str(preferred.scan_source_account or ""):
         return preferred
     return replace(
         preferred,
@@ -501,9 +769,32 @@ def _merge_restricted_chat_row(
             [current.restriction_text, incoming.restriction_text]
         ),
         risk_flags=_merge_tokens([current.risk_flags, incoming.risk_flags]),
+        restriction_details=tuple(
+            item
+            for index, item in enumerate(
+                (*current.restriction_details, *incoming.restriction_details)
+            )
+            if item
+            not in (*current.restriction_details, *incoming.restriction_details)[:index]
+        ),
+        scan_source_account=_merge_tokens(
+            [current.scan_source_account, incoming.scan_source_account]
+        ),
+        access_source_account=_merge_tokens(
+            [current.access_source_account, incoming.access_source_account]
+        ),
+        scan_status=(
+            "stale"
+            if "stale" in {current.scan_status, incoming.scan_status}
+            else "unverified"
+            if "unverified" in {current.scan_status, incoming.scan_status}
+            else "checked"
+        ),
         membership_scope=(
             "joined"
             if "joined" in {current.membership_scope, incoming.membership_scope}
+            else "access_unknown"
+            if "access_unknown" in {current.membership_scope, incoming.membership_scope}
             else "public_unjoined"
         ),
         scanned_at=max(current.scanned_at, incoming.scanned_at),
@@ -511,22 +802,16 @@ def _merge_restricted_chat_row(
 
 
 def _restricted_row_from_stored(item: dict[str, Any]) -> RestrictedChatInventoryRow:
-    return RestrictedChatInventoryRow(
-        chat_id=int(item.get("chat_id") or 0),
-        chat_title=str(item.get("chat_title") or ""),
-        chat_username=str(item.get("chat_username") or ""),
-        chat_type=str(item.get("chat_type") or ""),
-        is_public=int(item.get("is_public") or 0),
-        restriction_platforms=str(item.get("restriction_platforms") or ""),
-        restriction_reasons=str(item.get("restriction_reasons") or ""),
-        restriction_text=str(item.get("restriction_text") or ""),
-        risk_flags=str(item.get("risk_flags") or ""),
-        membership_scope="public_unjoined",
-        last_message_at=str(item.get("last_message_at") or ""),
-        last_message_ts=item.get("last_message_ts"),
-        scan_job_id=str(item.get("scan_job_id") or ""),
-        scanned_at=str(item.get("scanned_at") or ""),
+    values = {
+        field.name: item[field.name]
+        for field in fields(RestrictedChatInventoryRow)
+        if field.name in item
+    }
+    details = values.get("restriction_details") or ()
+    values["restriction_details"] = tuple(
+        json.loads(details) if isinstance(details, str) else details
     )
+    return RestrictedChatInventoryRow(**values)
 
 
 def _resolved_entity_matches_database_row(entity: Any, row: dict[str, Any]) -> bool:
@@ -539,55 +824,6 @@ def _resolved_entity_matches_database_row(entity: Any, row: dict[str, Any]) -> b
     return not chat_identity_candidates(
         row.get("chat_id"), row.get("chat_type")
     ).isdisjoint(chat_identity_candidates(entity_id, entity_type))
-
-
-def _merge_resolved_public_entity(
-    merged_rows: dict[tuple[str, int], RestrictedChatInventoryRow],
-    *,
-    row: dict[str, Any],
-    entity: Any,
-) -> None:
-    if not _resolved_entity_matches_database_row(entity, row):
-        return
-    restricted_row = restricted_chat_row_from_entity(
-        entity,
-        chat_id=int(row.get("chat_id") or 0),
-        chat_title=str(row.get("chat_title") or ""),
-        chat_username=str(row.get("chat_username") or ""),
-        last_message_at=str(row.get("last_message_at") or ""),
-        last_message_ts=row.get("last_message_ts"),
-        membership_scope="public_unjoined",
-    )
-    if restricted_row is None:
-        return
-    key = chat_identity_key(restricted_row.chat_id, restricted_row.chat_type)
-    merged_rows[key] = _merge_restricted_chat_row(merged_rows.get(key), restricted_row)
-
-
-def _fetch_cached_entities(
-    client: Any,
-    pairs: list[tuple[dict[str, Any], Any]],
-) -> list[tuple[dict[str, Any], Any]]:
-    if not pairs:
-        return []
-    try:
-        with bind_client_event_loop(client):
-            entities = call_with_bounded_retry(
-                client.get_entity,
-                [input_peer for _row, input_peer in pairs],
-                scope="restricted-public-cache-batch",
-            )
-        return list(zip((row for row, _input_peer in pairs), entities, strict=True))
-    except Exception as exc:
-        if is_flood_wait_error(exc):
-            raise
-        if len(pairs) <= 1:
-            return []
-        midpoint = len(pairs) // 2
-        return [
-            *_fetch_cached_entities(client, pairs[:midpoint]),
-            *_fetch_cached_entities(client, pairs[midpoint:]),
-        ]
 
 
 def _scan_account_rows(
@@ -659,7 +895,9 @@ def _scan_missing_chat_rows(
     """
     admin_job_append_log_fn(job_id, "正在读取数据库已有群组清单...")
     known_chat_ids = call_with_conn(get_conn_fn, load_known_chat_identities)
-    admin_job_append_log_fn(job_id, f"数据库中已有 {len(known_chat_ids)} 个群组/频道身份")
+    admin_job_append_log_fn(
+        job_id, f"数据库中已有 {len(known_chat_ids)} 个群组/频道身份"
+    )
 
     merged_rows: dict[tuple[str, int], ChatInventoryRow] = {}
     scanned_account_count = 0
@@ -695,7 +933,9 @@ def _scan_missing_chat_rows(
     if scanned_account_count <= 0:
         raise RuntimeError("没有可用的 Telegram 会话可执行扫描")
     if scanned_account_count != len(accounts):
-        raise RuntimeError("部分账号未完成扫描，已保留上次完整扫描结果；请恢复账号登录后重试")
+        raise RuntimeError(
+            "部分账号未完成扫描，已保留上次完整扫描结果；请恢复账号登录后重试"
+        )
 
     rows = list(merged_rows.values())
     rows.sort(
@@ -714,146 +954,58 @@ def _scan_restricted_chat_rows(
     get_conn_fn: Callable[[], Any],
     admin_job_append_log_fn: Callable[[str, str], Any],
     job_id: str,
-) -> list[Any]:
-    """Scan for groups/channels with Telegram risk flags or access restrictions.
-
-    This function performs a comprehensive three-phase scan:
-
-    Phase 1: Scan joined chats for restriction reasons and risk flags
-    - Extracts restriction_reason, scam, fake flags from dialog entities
-    - Identifies forbidden/unavailable chats
-
-    Phase 2: Batch refresh cached public entities
-    - For public chats in the database that accounts haven't joined
-    - Uses session cache (get_input_entity) to avoid API calls when possible
-    - Batch fetches entities (50 per call) to minimize network overhead
-
-    Phase 3: Resolve uncached public entities
-    - Limited by admin_restricted_public_resolve_limit (default 40)
-    - Rate-limited by admin_restricted_public_resolve_gap_seconds (default 1.0)
-    - Round-robins between accounts to distribute load
-    - Records access failures (entity_unavailable, access_denied, etc.)
-
-    Args:
-        cfg: Configuration object with:
-            - session_name, secondary_session_name: Account credentials
-            - admin_restricted_public_resolve_limit: Max entities to resolve per scan
-            - admin_restricted_public_resolve_gap_seconds: Delay between resolutions
-            - flood_wait_switch_threshold: Seconds to wait before switching accounts
-        get_conn_fn: Callback returning a database connection.
-        admin_job_append_log_fn: Callback to log progress messages.
-        job_id: Unique identifier for this scan job.
-
-    Returns:
-        List of RestrictedChatInventoryRow with risk flags, restriction reasons,
-        and access failure information.
-        Sorted by: title (case-insensitive), chat_id.
-
-    Raises:
-        RuntimeError: If no authorized Telegram sessions are available.
-
-    Notes:
-        - Creates isolated worker clients that are cleaned up on completion
-        - Handles FloodWait errors by switching to conservative mode
-        - Merges results from multiple accounts to get comprehensive risk picture
-        - Public entities not resolved this scan retain previous scan results
-        - Access failures recorded with account-level context
-    """
-    # Load database context
+) -> RestrictedChatScanRows:
+    """Scan dialogs and database targets without equating unknown with healthy."""
     database_rows = call_with_conn(
-        get_conn_fn,
-        list_database_channels,
-        sort="message_count_desc",
+        get_conn_fn, list_database_channels, sort="message_count_desc"
     )
-    previous_rows = call_with_conn(get_conn_fn, list_restricted_chat_scan_results)
-    active_clients: list[tuple[_ScanAccount, Any, str]] = []
-
+    previous_rows = call_with_conn(
+        get_conn_fn, list_stored_restricted_chat_scan_results
+    )
+    states = call_with_conn(get_conn_fn, list_chat_risk_scan_states)
+    scan = _RiskScan(cfg, database_rows, previous_rows, states, job_id)
+    active_clients = []
     try:
-        # Phase 1: Scan joined chats
         accounts = _scan_accounts(cfg)
-        merged_rows, joined_identities, active_clients = _scan_joined_restricted_chats(
+        _merged, _joined, active_clients = _scan_joined_restricted_chats(
             accounts=accounts,
             job_id=job_id,
             admin_job_append_log_fn=admin_job_append_log_fn,
             active_clients=active_clients,
+            scan=scan,
         )
         if len(active_clients) != len(accounts):
-            raise RuntimeError("部分账号未完成扫描，已保留上次完整扫描结果；请恢复账号登录后重试")
-
-        # Phase 2: Batch refresh cached public entities
-        public_rows = [
-            row
-            for row in database_rows
-            if str(row.get("chat_username") or "").strip()
-            and joined_identities.isdisjoint(
-                chat_identity_candidates(row.get("chat_id"), row.get("chat_type"))
+            raise RuntimeError(
+                "部分账号未完成登录，已保留上次扫描结果；请恢复账号登录后重试"
             )
-        ]
         admin_job_append_log_fn(
             job_id,
-            f"正在补探测 {len(public_rows)} 个账号未加入的数据库公开群组/频道...",
+            f"正在按账号补查数据库及历史风险目标，共 {len(scan.targets)} 个群组/频道...",
         )
-
-        probed_public_chat_ids = _batch_refresh_cached_public_entities(
-            public_rows=public_rows,
-            active_clients=active_clients,
-            merged_rows=merged_rows,
-            job_id=job_id,
-            admin_job_append_log_fn=admin_job_append_log_fn,
-        )
-
-        # Phase 3: Resolve uncached public entities
-        uncached_by_id = {
-            int(row["chat_id"]): row
-            for row in public_rows
-            if int(row["chat_id"]) not in probed_public_chat_ids
-        }
-        additional_probed, public_access_failure_count = _resolve_uncached_public_entities(
-            uncached_by_id=uncached_by_id,
-            active_clients=active_clients,
-            merged_rows=merged_rows,
-            cfg=cfg,
-            job_id=job_id,
-            admin_job_append_log_fn=admin_job_append_log_fn,
-        )
-        probed_public_chat_ids.update(additional_probed)
-
-        # Phase 4: Preserve previous scan results for unprobed channels
-        candidate_ids = {int(row["chat_id"]) for row in public_rows}
-        for previous in previous_rows:
-            chat_id = int(previous.get("chat_id") or 0)
-            if chat_id not in candidate_ids or chat_id in probed_public_chat_ids:
-                continue
-            row = _restricted_row_from_stored(previous)
-            key = chat_identity_key(row.chat_id, row.chat_type)
-            merged_rows[key] = _merge_restricted_chat_row(
-                merged_rows.get(key), row
-            )
-
+        scan.refresh_cached(active_clients)
+        scan.resolve_uncached(active_clients)
+        rows = scan.results(accounts)
+        summary = rows.summary
         admin_job_append_log_fn(
             job_id,
-            "公开群组补探测完成："
-            f"成功刷新 {max(0, len(probed_public_chat_ids) - public_access_failure_count)} 个，"
-            f"确认不可访问 {public_access_failure_count} 个，"
-            f"本轮未主动解析 {max(0, len(uncached_by_id) - len(additional_probed))} 个",
+            f"本轮扫描覆盖：共 {summary['total']} 个，完整核实 {summary['checked']} 个，"
+            f"部分账号核实 {summary['partial']} 个，未能核实 {summary['failed']} 个，"
+            f"未检查 {summary['not_checked']} 个；未核实的历史观察已保留",
         )
+        return rows
     finally:
         for account, client, worker_id in reversed(active_clients):
             try:
                 _disconnect_worker_client(client)
             except Exception as exc:
                 logging.warning(
-                    "清理受限扫描会话时断开连接失败: account=%s worker_id=%s error=%s",
+                    "清理风险扫描会话时断开连接失败: account=%s worker_id=%s error=%s",
                     account.key,
                     worker_id,
                     admin_error_message(exc),
                 )
             finally:
                 _cleanup_isolated_worker_session(account.cfg, worker_id)
-
-    rows = list(merged_rows.values())
-    rows.sort(key=lambda item: (item.chat_title.casefold(), item.chat_id))
-    return rows
 
 
 def _run_channel_inventory_scan_job(
@@ -928,8 +1080,7 @@ _RESTRICTED_CHATS_SCAN_SPEC = _ChannelInventoryScanSpec(
     replace_results_fn=replace_restricted_chat_scan_results,
     build_success_message_fn=(
         lambda saved_count: (
-            "扫描完成：发现 "
-            f"{saved_count} 个带 Telegram 内容限制/风险标记的群组/频道"
+            f"扫描完成：发现 {saved_count} 个带 Telegram 内容限制/风险标记的群组/频道"
         )
     ),
 )

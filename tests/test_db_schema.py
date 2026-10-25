@@ -1004,15 +1004,56 @@ class DbSchemaMigrationTests(unittest.TestCase):
     def test_create_schema_removes_indexes_unused_by_project_queries(self) -> None:
         feats = detect_sqlite_features(self.conn)
         create_schema(self.conn, feats)
+        unused_indexes = {
+            "idx_messages_sender",
+            "idx_media_kind",
+            "idx_media_mime",
+            "idx_messages_pure_hash",
+            "idx_media_unique_id",
+            "idx_media_fingerprint",
+            "idx_mg_dedupe_hash",
+        }
+        fresh_indexes = {
+            str(row[0])
+            for row in self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).fetchall()
+        }
+        self.assertTrue(unused_indexes.isdisjoint(fresh_indexes))
         self.conn.executescript(
             """
             CREATE INDEX idx_messages_sender
             ON messages(chat_id, sender_id, msg_date_ts DESC, message_id DESC, pk DESC);
             CREATE INDEX idx_media_kind ON message_media(chat_id, media_kind);
             CREATE INDEX idx_media_mime ON message_media(chat_id, mime_type);
+            CREATE INDEX idx_messages_pure_hash
+            ON messages(chat_id, pure_hash) WHERE pure_hash <> '';
+            CREATE INDEX idx_media_unique_id
+            ON message_media(chat_id, file_unique_id)
+            WHERE file_unique_id IS NOT NULL AND file_unique_id <> '';
+            CREATE INDEX idx_media_fingerprint
+            ON message_media(chat_id, media_fingerprint)
+            WHERE media_fingerprint IS NOT NULL AND media_fingerprint <> '';
+            CREATE INDEX idx_mg_dedupe_hash
+            ON media_groups(chat_id, dedupe_hash) WHERE dedupe_hash <> '';
+            INSERT INTO chats(chat_id, chat_title) VALUES (1, 'Existing chat');
+            INSERT INTO messages(
+                chat_id, message_id, msg_date_text, msg_date_ts, msg_type,
+                pure_hash, dedupe_hash, grouped_id
+            ) VALUES (1, 10, 'date', 100, 'PHOTO', 'text-hash', 'dedupe-hash', 20);
+            INSERT INTO message_media(
+                chat_id, message_id, file_unique_id, media_fingerprint, grouped_id
+            ) VALUES (1, 10, 'file-id', 'fingerprint', 20);
+            INSERT INTO media_groups(chat_id, grouped_id, dedupe_hash)
+            VALUES (1, 20, 'group-hash');
             """
         )
+        existing_rows = {
+            table: self.conn.execute(f"SELECT * FROM {table}").fetchall()
+            for table in ("messages", "message_media", "media_groups")
+        }
 
+        create_schema(self.conn, feats)
         create_schema(self.conn, feats)
 
         index_names = {
@@ -1021,13 +1062,12 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type = 'index'"
             ).fetchall()
         }
-        self.assertTrue(
-            {
-                "idx_messages_sender",
-                "idx_media_kind",
-                "idx_media_mime",
-            }.isdisjoint(index_names)
-        )
+        self.assertTrue(unused_indexes.isdisjoint(index_names))
+        for table, rows in existing_rows.items():
+            with self.subTest(table=table):
+                self.assertEqual(
+                    self.conn.execute(f"SELECT * FROM {table}").fetchall(), rows
+                )
 
     def test_redundant_index_cleanup_requires_equivalent_unique_index(self) -> None:
         self.conn.execute(

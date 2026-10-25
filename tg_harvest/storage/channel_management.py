@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from collections.abc import Iterable
 from contextlib import suppress
@@ -21,6 +22,16 @@ from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.row_access import (
     row_int as _row_int,
 )
+
+
+def _restriction_details_json(value: Any) -> list[dict]:
+    try:
+        parsed = json.loads(str(value or "[]")) if isinstance(value, str) else value
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return []
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
 
 CHANNEL_SORT_DEFAULT = "message_count_desc"
 CHANNEL_SORT_OPTIONS = {
@@ -645,13 +656,17 @@ def replace_restricted_chat_scan_results(
                 restriction_reasons,
                 restriction_text,
                 risk_flags,
+                restriction_details,
+                scan_source_account,
+                access_source_account,
+                scan_status,
                 membership_scope,
                 last_message_at,
                 last_message_ts,
                 scan_job_id,
                 scanned_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(chat_id) DO UPDATE SET
                 chat_title = excluded.chat_title,
                 chat_username = excluded.chat_username,
@@ -661,6 +676,10 @@ def replace_restricted_chat_scan_results(
                 restriction_reasons = excluded.restriction_reasons,
                 restriction_text = excluded.restriction_text,
                 risk_flags = excluded.risk_flags,
+                restriction_details = excluded.restriction_details,
+                scan_source_account = excluded.scan_source_account,
+                access_source_account = excluded.access_source_account,
+                scan_status = excluded.scan_status,
                 membership_scope = excluded.membership_scope,
                 last_message_at = excluded.last_message_at,
                 last_message_ts = excluded.last_message_ts,
@@ -678,6 +697,10 @@ def replace_restricted_chat_scan_results(
                     str(getattr(row, "restriction_reasons", "") or "").strip(),
                     str(getattr(row, "restriction_text", "") or "").strip(),
                     str(getattr(row, "risk_flags", "") or "").strip(),
+                    json.dumps(getattr(row, "restriction_details", ()), ensure_ascii=False),
+                    str(getattr(row, "scan_source_account", "") or ""),
+                    str(getattr(row, "access_source_account", "") or ""),
+                    str(getattr(row, "scan_status", "checked") or "checked"),
                     str(getattr(row, "membership_scope", "") or "joined").strip()
                     or "joined",
                     str(getattr(row, "last_message_at", "") or ""),
@@ -688,6 +711,35 @@ def replace_restricted_chat_scan_results(
                 for row in normalized_rows
             ],
         )
+        scan_states = getattr(rows, "scan_states", ())
+        if scan_states:
+            cur.executemany(
+                """
+                INSERT INTO admin_chat_risk_scan_state(
+                    chat_id, chat_type, source_account, last_attempt_at,
+                    last_checked_at, next_retry_at, status, risk_json, error_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(chat_id, chat_type, source_account) DO UPDATE SET
+                    last_attempt_at = excluded.last_attempt_at,
+                    last_checked_at = excluded.last_checked_at,
+                    next_retry_at = excluded.next_retry_at,
+                    status = excluded.status,
+                    risk_json = excluded.risk_json,
+                    error_json = excluded.error_json
+                """,
+                [tuple(state[key] for key in (
+                    "chat_id", "chat_type", "source_account", "last_attempt_at",
+                    "last_checked_at", "next_retry_at", "status", "risk_json", "error_json",
+                )) for state in scan_states],
+            )
+        summary = getattr(rows, "summary", None)
+        if summary is not None:
+            cur.execute(
+                """INSERT INTO admin_chat_risk_scan_summary(singleton, summary_json)
+                   VALUES (1, ?) ON CONFLICT(singleton) DO UPDATE SET
+                   summary_json = excluded.summary_json""",
+                (json.dumps({**summary, "scan_job_id": scan_job_id}, ensure_ascii=False),),
+            )
         conn.commit()
         return len(normalized_rows)
     except Exception:
@@ -696,6 +748,24 @@ def replace_restricted_chat_scan_results(
         raise
     finally:
         cur.close()
+
+
+def list_stored_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
+    """Read only scan observations; access/scheduler records must never be copied."""
+    return [dict(row) for row in conn.execute("SELECT * FROM admin_restricted_chats")]
+
+
+def list_chat_risk_scan_states(conn: sqlite3.Connection) -> list[dict]:
+    return [dict(row) for row in conn.execute("SELECT * FROM admin_chat_risk_scan_state")]
+
+
+def get_chat_risk_scan_summary(conn: sqlite3.Connection) -> dict | None:
+    if not _table_exists(conn, "admin_chat_risk_scan_summary"):
+        return None
+    row = conn.execute(
+        "SELECT summary_json FROM admin_chat_risk_scan_summary WHERE singleton = 1"
+    ).fetchone()
+    return json.loads(row[0]) if row else None
 
 
 def _merge_active_access_risks(
@@ -801,6 +871,9 @@ def _merge_active_access_risks(
             if risk_source not in sources:
                 sources.append(risk_source)
             existing["risk_source"] = ",".join(sources)
+            access_fields["access_source_account"] = _append_token(
+                existing.get("access_source_account"), access_fields["access_source_account"]
+            )
             existing.update(access_fields)
             continue
 
@@ -879,7 +952,11 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                 a.last_message_at,
                 a.last_message_ts,
                 a.scan_job_id,
-                a.scanned_at
+                a.scanned_at,
+                a.restriction_details,
+                a.scan_source_account,
+                a.access_source_account,
+                a.scan_status
             FROM admin_restricted_chats a
             ORDER BY
                 CASE a.membership_scope
@@ -931,21 +1008,34 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                         "access_denied",
                         "account_banned",
                         "entity_unavailable",
+                        "username_unavailable",
+                        "identity_mismatch",
                     )
                     if risk_type in scan_risk_flags.split("、")
                 ),
                 "",
             )
+            scan_sources = []
+            if row["restriction_platforms"] or row["restriction_reasons"] or {"restricted", "scam", "fake"}.intersection(scan_risk_flags.split("、")):
+                scan_sources.append("telegram")
+            if access_failure_type:
+                scan_sources.append("scan_access")
+            unsafe_username = {"identity_mismatch", "username_unavailable"}.intersection(scan_risk_flags.split("、"))
             rows.append(
                 {
                     "chat_id": chat_id,
                     "chat_title": _chat_title_or_fallback(chat_id, row["chat_title"]),
-                    "chat_username": str(row["chat_username"] or ""),
+                    "chat_username": "" if unsafe_username else str(row["chat_username"] or ""),
                     "chat_type": str(row["chat_type"] or ""),
-                    "is_public": _row_int(row, "is_public"),
+                    "is_public": 0 if unsafe_username else _row_int(row, "is_public"),
                     "restriction_platforms": str(row["restriction_platforms"] or ""),
                     "restriction_reasons": str(row["restriction_reasons"] or ""),
                     "restriction_text": str(row["restriction_text"] or ""),
+                    "restriction_details": _restriction_details_json(
+                        row["restriction_details"]
+                    ),
+                    "scan_source_account": str(row["scan_source_account"] or ""),
+                    "scan_status": str(row["scan_status"] or "checked"),
                     "risk_flags": scan_risk_flags,
                     "membership_scope": str(row["membership_scope"] or "joined"),
                     "in_database": int(in_database),
@@ -960,7 +1050,7 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "last_message_ts": last_message_ts,
                     "scan_job_id": str(row["scan_job_id"] or ""),
                     "scanned_at": str(row["scanned_at"] or ""),
-                    "risk_source": "telegram",
+                    "risk_source": ",".join(scan_sources) or "telegram",
                     "access_failure_type": access_failure_type,
                     "access_failure_message": (
                         str(row["restriction_text"] or "")
@@ -971,7 +1061,7 @@ def list_restricted_chat_scan_results(conn: sqlite3.Connection) -> list[dict]:
                     "access_first_failed_at": "",
                     "access_last_failed_at": "",
                     "access_source_job_id": "",
-                    "access_source_account": "",
+                    "access_source_account": str(row["access_source_account"] or ""),
                 }
             )
         return _merge_active_access_risks(

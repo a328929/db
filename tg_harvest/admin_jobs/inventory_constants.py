@@ -18,33 +18,9 @@ rate limits. Telegram's API generally handles batches of 50-100 well.
 DEFAULT_PUBLIC_RESOLVE_LIMIT = 40
 """Default maximum number of uncached public entities to resolve per scan.
 
-This limit prevents excessive API calls during a single scan. Public channels
-not resolved in this scan will retain their previous scan results until a
-future scan cycle.
-
-WHY THIS LIMIT EXISTS:
-- Resolving thousands of entities would take hours (1+ sec per entity with rate limiting)
-- High risk of hitting Telegram flood control limits
-- Potential account penalties for aggressive API usage
-- Most channels don't change restriction status frequently
-
-IMPLICATIONS:
-- If the database has 1000+ public channels, most won't be checked each scan
-- Risk flags for unresolved channels may become stale
-- Access failures may not be detected until the channel is eventually resolved
-
-CONFIGURATION GUIDANCE:
-- Set to 0 to skip active resolution entirely (only use cached entities)
-- Set to a high value (e.g., 10000) for exhaustive scans, but expect:
-  * Long scan duration (potentially hours)
-  * Increased risk of FloodWait errors
-  * Higher API usage on your Telegram account
-- Default (40) provides a balance: some coverage without excessive API calls
-
-FUTURE IMPROVEMENTS:
-- Implement rotation: resolve different subsets each scan
-- Prioritize by activity: message_count DESC, last_message_ts DESC
-- Track last_resolved_at per channel for guaranteed periodic coverage
+Candidates rotate by persisted attempt time, including failed attempts.
+Unprobed account observations remain visible as historical results.
+Zero disables username resolution; cached ID probes remain enabled.
 """
 
 DEFAULT_PUBLIC_RESOLVE_GAP_SECONDS = 1.0
