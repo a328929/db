@@ -16,6 +16,12 @@ from tg_harvest.config import CFG
 from tg_harvest.domain.normalize import normalize_search_term
 from tg_harvest.ingest.media_groups import _refresh_media_groups_for_cursor
 from tg_harvest.search.manticore_sync import schedule_manticore_sync
+from tg_harvest.storage.cleanup import (
+    EMPTY_SEARCH_TEXT_SQL,
+    CleanupScanWindow,
+    load_cleanup_scan_window,
+    save_cleanup_scan_window,
+)
 from tg_harvest.storage.connection import synchronized_write
 from tg_harvest.storage.schema import (
     _refresh_chat_message_counts,
@@ -60,39 +66,46 @@ def _build_cleanup_targets_table(
     scope_filter_sql,
     scope_filter_params,
     like_pattern,
+    *,
+    scan_window: CleanupScanWindow | None = None,
 ) -> int:
     cur.execute("DROP TABLE IF EXISTS temp_cleanup_targets")
     cur.execute(
         """
         CREATE TEMP TABLE temp_cleanup_targets (
             chat_id INTEGER,
-            pk INTEGER,
+            pk INTEGER PRIMARY KEY,
             message_id INTEGER,
-            grouped_id INTEGER,
-            PRIMARY KEY (chat_id, pk)
+            grouped_id INTEGER
         )
         """
     )
     if mode == "empty_media":
-        # 搜索统一只看 messages.content_norm/content。执行任务前会先把
-        # message_media.file_name 回填到这两个字段，因此这里删除的就是
-        # 最终仍没有任何可搜索文本的消息。
+        # Use the same predicate as the partial index. File names are already
+        # promoted to message text when incoming media is parsed.
         cur.execute(
             f"""
             INSERT INTO temp_cleanup_targets
             SELECT m.chat_id, m.pk, m.message_id, m.grouped_id
             FROM messages AS m
-            WHERE NULLIF(
-                COALESCE(NULLIF(TRIM(m.content_norm), ''), TRIM(m.content), '')
-            , '') IS NULL
+            WHERE {EMPTY_SEARCH_TEXT_SQL}
               {scope_filter_sql}
             """,
             scope_filter_params,
         )
     else:
+        if scan_window is not None and scan_window.after_pk == scan_window.upper_pk:
+            return 0
         norm_like_pattern, raw_like_pattern = _coerce_cleanup_like_patterns(
             like_pattern
         )
+        window_sql = ""
+        window_params: list[int] = []
+        if scan_window is not None and scan_window.after_pk is not None:
+            window_sql = " AND m.pk <= ?"
+            window_params.append(scan_window.upper_pk)
+            window_sql += " AND m.pk > ?"
+            window_params.append(scan_window.after_pk)
         cur.execute(
             f"""
             INSERT INTO temp_cleanup_targets
@@ -103,12 +116,14 @@ def _build_cleanup_targets_table(
                 OR COALESCE(content, '') LIKE ? ESCAPE '{LIKE_ESCAPE_CHAR}'
             )
             {scope_filter_sql}
+            {window_sql}
             """,
-            (norm_like_pattern, raw_like_pattern, *scope_filter_params),
+            (
+                norm_like_pattern, raw_like_pattern,
+                *scope_filter_params, *window_params,
+            ),
         )
-    return int(
-        cur.execute("SELECT COUNT(*) FROM temp_cleanup_targets").fetchone()[0] or 0
-    )
+    return int(cur.rowcount)
 
 
 def _collect_cleanup_affected_state(cur) -> tuple[set[int], dict[int, set[int]]]:
@@ -121,10 +136,10 @@ def _collect_cleanup_affected_state(cur) -> tuple[set[int], dict[int, set[int]]]
     # message also removes any stale aggregate keyed by the media metadata.
     cur.execute(
         """
-        SELECT DISTINCT t.chat_id, t.grouped_id
+        SELECT t.chat_id, t.grouped_id
         FROM temp_cleanup_targets AS t
         UNION
-        SELECT DISTINCT t.chat_id, mm.grouped_id
+        SELECT t.chat_id, mm.grouped_id
         FROM temp_cleanup_targets AS t
         JOIN message_media AS mm
           ON mm.chat_id = t.chat_id
@@ -132,7 +147,7 @@ def _collect_cleanup_affected_state(cur) -> tuple[set[int], dict[int, set[int]]]
         WHERE mm.grouped_id IS NOT NULL
         """
     )
-    for row in cur.fetchall():
+    for row in cur:
         chat_id = int(row[0])
         affected_chats.add(chat_id)
         grouped_id = row[1]
@@ -325,19 +340,23 @@ def _delete_cleanup_batch(conn, cur, pks: list[int]) -> int:
         count = 0
         for part in _chunked(pks, CLEANUP_SQL_BATCH_SIZE):
             placeholders = ",".join("?" for _ in part)
+            # Delete parents first so media outbox triggers do not enqueue an
+            # upsert immediately before the same message's delete. Explicitly
+            # remove children too, for connections with foreign keys disabled.
             cur.execute(
-                f"""
-                DELETE FROM message_media
-                WHERE (chat_id, message_id) IN (
-                    SELECT chat_id, message_id
-                    FROM messages
-                    WHERE pk IN ({placeholders})
-                )
-                """,
+                f"DELETE FROM messages WHERE pk IN ({placeholders}) "
+                "RETURNING chat_id, message_id",
                 part,
             )
-            cur.execute(f"DELETE FROM messages WHERE pk IN ({placeholders})", part)
-            count += int(cur.rowcount or 0)
+            deleted_keys = cur.fetchall()
+            count += len(deleted_keys)
+            if deleted_keys:
+                key_placeholders = ",".join("(?, ?)" for _ in deleted_keys)
+                cur.execute(
+                    "DELETE FROM message_media WHERE (chat_id, message_id) IN "
+                    f"(VALUES {key_placeholders})",
+                    [value for row in deleted_keys for value in row],
+                )
             cur.execute(
                 f"DELETE FROM temp_cleanup_targets WHERE pk IN ({placeholders})",
                 part,
@@ -358,8 +377,8 @@ def _preserve_clone_media_group_anchors(conn, cur) -> int:
         cur.execute(
             """
             SELECT COUNT(*)
-            FROM messages AS m
-            JOIN temp_cleanup_targets AS t
+            FROM temp_cleanup_targets AS t
+            CROSS JOIN messages AS m
               ON t.chat_id = m.chat_id
              AND t.pk = m.pk
             WHERE m.grouped_id IS NOT NULL
@@ -382,8 +401,8 @@ def _preserve_clone_media_group_anchors(conn, cur) -> int:
                 'empty_media',
                 datetime('now'),
                 datetime('now')
-            FROM messages AS m
-            JOIN temp_cleanup_targets AS t
+            FROM temp_cleanup_targets AS t
+            CROSS JOIN messages AS m
               ON t.chat_id = m.chat_id
              AND t.pk = m.pk
             WHERE m.grouped_id IS NOT NULL
@@ -413,6 +432,8 @@ def _execute_cleanup_deletion_batches(
     cleanup_mode: str = "keyword",
 ) -> int:
     deleted = 0
+    last_log_at = 0.0
+    last_logged_deleted = -1
     affected_chats, affected_groups_by_chat = _collect_cleanup_affected_state(cur)
     deletion_error: Exception | None = None
     try:
@@ -432,22 +453,33 @@ def _execute_cleanup_deletion_batches(
                     )
         while True:
             cur.execute(
-                f"SELECT pk FROM temp_cleanup_targets LIMIT {CLEANUP_DELETE_BATCH_SIZE}"
+                "SELECT pk FROM temp_cleanup_targets ORDER BY pk "
+                f"LIMIT {CLEANUP_DELETE_BATCH_SIZE}"
             )
             rows = cur.fetchall()
             if not rows:
+                if last_logged_deleted != deleted:
+                    try:
+                        admin_job_append_log_fn(
+                            job_id, f"进度：已清理 {deleted}/{target_count}"
+                        )
+                    except Exception:
+                        logging.exception("记录清理任务进度失败: job_id=%s", job_id)
                 break
 
             pks = [r[0] for r in rows]
             count = _delete_cleanup_batch(conn, cur, pks)
             deleted += count
-            try:
-                admin_job_append_log_fn(
-                    job_id, f"进度：已清理 {deleted}/{target_count}"
-                )
-            except Exception:
-                logging.exception("记录清理任务进度失败: job_id=%s", job_id)
-            time.sleep(0.02)
+            now = time.perf_counter()
+            if now - last_log_at >= 1.0 or deleted >= target_count:
+                last_log_at = now
+                last_logged_deleted = deleted
+                try:
+                    admin_job_append_log_fn(
+                        job_id, f"进度：已清理 {deleted}/{target_count}"
+                    )
+                except Exception:
+                    logging.exception("记录清理任务进度失败: job_id=%s", job_id)
     except Exception as exc:
         deletion_error = exc
         raise
@@ -522,23 +554,39 @@ def _admin_cleanup_job_runner(
                 message="关键词不能为空，清理任务取消",
             )
 
-        # Build target table
+        scan_window = None
+        if cleanup_mode == "keyword":
+            scope_key = f"chat:{chat_id}" if scope_filter_params else "all"
+            scan_window = load_cleanup_scan_window(cur, scope_key, like_pattern)
+            scan_label = "新增消息" if scan_window.after_pk is not None else "全部消息"
+            ctx.log(f"正在检索{scan_label}中的清理关键词...")
+        else:
+            ctx.log("正在通过空文本索引检索不可搜索数据...")
+
+        started_at = time.perf_counter()
         target_count = _build_cleanup_targets_table(
             cur,
             cleanup_mode,
             scope_filter_sql,
             scope_filter_params,
             like_pattern,
+            scan_window=scan_window,
         )
         conn.commit()
 
         if target_count == 0:
+            if scan_window is not None:
+                save_cleanup_scan_window(conn, scan_window)
             return AdminJobResult(
                 success=True,
                 message="未发现符合条件的数据，任务结束",
             )
 
-        ctx.log(f"检索到待清理数据：{target_count} 条，开始执行物理删除...")
+        elapsed = time.perf_counter() - started_at
+        ctx.log(
+            f"检索到待清理数据：{target_count} 条，"
+            f"耗时 {elapsed:.2f}s，开始执行物理删除..."
+        )
 
         # Execute deletion in batches
         actual_deleted = _execute_cleanup_deletion_batches(
@@ -549,6 +597,8 @@ def _admin_cleanup_job_runner(
             legacy_admin_job_log_adapter(ctx),
             cleanup_mode=cleanup_mode,
         )
+        if scan_window is not None:
+            save_cleanup_scan_window(conn, scan_window)
 
         return AdminJobResult(
             success=True,

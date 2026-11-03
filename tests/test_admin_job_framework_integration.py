@@ -193,10 +193,17 @@ def test_cleanup_production_threads_forward_business_arguments(
     business_kwargs,
     expected_mode,
 ):
-    with patch(
-        "tg_harvest.admin_jobs.cleanup._build_cleanup_targets_table",
-        return_value=0,
-    ) as build_targets:
+    with (
+        patch(
+            "tg_harvest.admin_jobs.cleanup._build_cleanup_targets_table",
+            return_value=0,
+        ) as build_targets,
+        patch(
+            "tg_harvest.admin_jobs.cleanup.load_cleanup_scan_window",
+            return_value=Mock(after_pk=None),
+        ),
+        patch("tg_harvest.admin_jobs.cleanup.save_cleanup_scan_window"),
+    ):
         _run_production_job_thread(start_fn, **business_kwargs)
 
     assert build_targets.call_args.args[1] == expected_mode

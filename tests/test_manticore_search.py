@@ -876,6 +876,14 @@ class ManticoreValidationTests(unittest.TestCase):
         return conn
 
     def test_matching_counts_restore_ready_status(self):
+        conn = self._connect()
+        conn.execute(
+            "INSERT INTO manticore_search_meta(key, value) VALUES (?, ?)",
+            ("manticore:tg_messages:last_validation_error", "previous failure"),
+        )
+        conn.commit()
+        conn.close()
+
         self.assertTrue(validate_manticore_state(self._connect, self.Client(1)))
         conn = self._connect()
         try:
@@ -885,6 +893,12 @@ class ManticoreValidationTests(unittest.TestCase):
                     conn, "manticore:tg_messages:manticore_document_count"
                 ),
                 "1",
+            )
+            self.assertEqual(
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:last_validation_error"
+                ),
+                "",
             )
         finally:
             conn.close()
@@ -903,6 +917,12 @@ class ManticoreValidationTests(unittest.TestCase):
                     conn, "manticore:tg_messages:manticore_document_count"
                 ),
                 "0",
+            )
+            self.assertEqual(
+                get_manticore_meta(
+                    conn, "manticore:tg_messages:last_validation_error"
+                ),
+                "Manticore document count mismatch: SQLite=1, Manticore=0",
             )
         finally:
             conn.close()

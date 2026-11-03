@@ -109,7 +109,7 @@ class DbSchemaMigrationTests(unittest.TestCase):
                 """
                 EXPLAIN QUERY PLAN
                 SELECT pk FROM messages
-                ORDER BY msg_date_ts DESC, message_id DESC, pk DESC
+                ORDER BY msg_date_ts DESC, chat_id DESC, message_id DESC, pk DESC
                 LIMIT 10
                 """,
                 "idx_messages_date_global",
@@ -943,6 +943,91 @@ class DbSchemaMigrationTests(unittest.TestCase):
         index_sql = str(cur.fetchone()["sql"])
         self.assertIn("dedupe_eligible", index_sql)
         self.assertNotIn("item_count DESC", index_sql)
+
+    def test_create_schema_upgrades_legacy_global_timeline_index_once(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        self.conn.execute("DROP INDEX idx_messages_date_global")
+        self.conn.execute(
+            "CREATE INDEX idx_messages_date_global "
+            "ON messages(msg_date_ts DESC, message_id DESC, pk DESC)"
+        )
+        self.conn.executemany(
+            "INSERT INTO chats(chat_id, chat_title) VALUES (?, ?)",
+            [(1, "One"), (2, "Two")],
+        )
+        self.conn.executemany(
+            "INSERT INTO messages(chat_id, message_id, msg_date_ts, msg_date_text, msg_type) "
+            "VALUES (?, ?, ?, 'date', 'TEXT')",
+            [(1, 5, 100), (2, 1, 100), (1, 9, 200)],
+        )
+        self.conn.commit()
+        select_data = "SELECT pk, chat_id, message_id, msg_date_ts FROM messages ORDER BY pk"
+        original_rows = self.conn.execute(select_data).fetchall()
+
+        create_schema(self.conn, feats)
+
+        self.assertEqual(self.conn.execute(select_data).fetchall(), original_rows)
+        ordered_query = (
+            "SELECT chat_id, message_id FROM messages "
+            "ORDER BY msg_date_ts DESC, chat_id DESC, message_id DESC, pk DESC LIMIT 10"
+        )
+        self.assertEqual(
+            [tuple(row) for row in self.conn.execute(ordered_query)],
+            [(1, 9), (2, 1), (1, 5)],
+        )
+        plan = " ".join(
+            str(row[3]) for row in self.conn.execute("EXPLAIN QUERY PLAN " + ordered_query)
+        )
+        self.assertIn("idx_messages_date_global", plan)
+        self.assertNotIn("TEMP B-TREE", plan)
+
+        statements: list[str] = []
+        self.conn.set_trace_callback(statements.append)
+        try:
+            create_schema(self.conn, feats)
+        finally:
+            self.conn.set_trace_callback(None)
+
+        self.assertFalse(
+            any(
+                "DROP INDEX" in statement.upper()
+                and "idx_messages_date_global" in statement.lower()
+                for statement in statements
+            ),
+            statements,
+        )
+        self.assertEqual(self.conn.execute(select_data).fetchall(), original_rows)
+
+    def test_create_schema_restores_legacy_timeline_index_if_replacement_fails(self) -> None:
+        feats = detect_sqlite_features(self.conn)
+        create_schema(self.conn, feats)
+        self.conn.execute("DROP INDEX idx_messages_date_global")
+        legacy_sql = (
+            "CREATE INDEX idx_messages_date_global "
+            "ON messages(msg_date_ts DESC, message_id DESC, pk DESC)"
+        )
+        self.conn.execute(legacy_sql)
+        self.conn.commit()
+
+        def deny_replacement(action, name, *_args):
+            if action == sqlite3.SQLITE_CREATE_INDEX and name == "idx_messages_date_global":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+
+        self.conn.set_authorizer(deny_replacement)
+        try:
+            with self.assertRaisesRegex(sqlite3.DatabaseError, "not authorized"):
+                create_schema(self.conn, feats)
+        finally:
+            self.conn.set_authorizer(None)
+
+        row = self.conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'idx_messages_date_global'"
+        ).fetchone()
+        self.assertIsNotNone(row)
+        self.assertEqual(row["sql"], legacy_sql)
+        self.assertFalse(self.conn.in_transaction)
 
     def test_create_schema_removes_index_duplicating_unique_constraint(self) -> None:
         feats = detect_sqlite_features(self.conn)

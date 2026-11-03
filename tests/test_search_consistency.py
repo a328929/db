@@ -1,4 +1,6 @@
 import sqlite3
+from contextlib import closing
+from dataclasses import replace
 
 import pytest
 
@@ -50,6 +52,85 @@ def search_db(tmp_path):
 def test_parser_rejects_complex_input_without_recursion_error(query):
     with pytest.raises(ValueError):
         parse_query(query)
+
+
+@pytest.mark.parametrize("order", ["asc", "desc"])
+@pytest.mark.parametrize(
+    "filters,ascending,index_name",
+    [
+        pytest.param(
+            {},
+            [(10, 1), (10, 9), (20, 1), (30, 1), (30, 2), (10, 2), (20, 3), (30, 3)],
+            "idx_messages_date_global",
+            id="global",
+        ),
+        pytest.param(
+            {"start_ts": 100, "end_ts_exclusive": 201},
+            [(10, 9), (20, 1), (30, 1), (30, 2), (10, 2), (20, 3)],
+            "idx_messages_date_global",
+            id="global-date-range",
+        ),
+        pytest.param(
+            {"chat_id": 30},
+            [(30, 1), (30, 2), (30, 3)],
+            "idx_messages_chat_date",
+            id="single-channel",
+        ),
+    ],
+)
+def test_time_browse_preserves_ties_and_pagination_without_temp_sort(
+    order, filters, ascending, index_name
+):
+    with closing(sqlite3.connect(":memory:")) as conn:
+        conn.row_factory = sqlite3.Row
+        create_schema(conn, detect_sqlite_features(conn))
+        conn.executemany(
+            "INSERT INTO chats(chat_id, chat_title) VALUES (?, ?)",
+            [(10, "Ten"), (20, "Twenty"), (30, "Thirty")],
+        )
+        # Insert out of sort order, with timestamp and message ID ties across channels.
+        conn.executemany(
+            "INSERT INTO messages(chat_id, message_id, msg_date_ts, msg_date_text, msg_type) "
+            "VALUES (?, ?, ?, 'date', 'TEXT')",
+            [
+                (10, 9, 100), (30, 2, 100), (20, 1, 100), (10, 2, 200),
+                (30, 1, 100), (20, 3, 200), (30, 3, 300), (10, 1, 0),
+            ],
+        )
+        conn.execute(
+            "INSERT INTO message_media(chat_id, message_id, file_size) VALUES (30, 1, 42)"
+        )
+        conn.commit()
+        expected = ascending if order == "asc" else list(reversed(ascending))
+        statements: list[str] = []
+        conn.set_trace_callback(statements.append)
+        try:
+            # Include the first empty page to catch gaps or duplicate results.
+            page_count = (len(expected) + 2) // 3 + 1
+            for page in range(1, page_count + 1):
+                params = replace(
+                    _parse_search_params({"order": order, "page": page}), **filters
+                )
+                result = sqlite_browse_payload_service(
+                    conn, params, page_size=3, max_count=100,
+                    map_search_items_fn=lambda rows: list(rows),
+                )
+                assert result["total"] == len(expected)
+                assert [
+                    (row["chat_id"], row["message_id"]) for row in result["items"]
+                ] == expected[(page - 1) * 3 : page * 3]
+        finally:
+            conn.set_trace_callback(None)
+
+        # Explain the service's actual joined SELECT, including its bound filters.
+        queries = [sql for sql in statements if sql.lstrip().startswith("SELECT m.pk,")]
+        assert len(queries) == page_count
+        for sql in queries:
+            plan = " ".join(
+                str(row[3]) for row in conn.execute("EXPLAIN QUERY PLAN " + sql)
+            )
+            assert index_name in plan, plan
+            assert "TEMP B-TREE" not in plan, plan
 
 
 @pytest.mark.parametrize("sort", ["size", "duration"])

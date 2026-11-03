@@ -25,6 +25,7 @@ from tg_harvest.storage.manticore_outbox import (
     configure_manticore_outbox_triggers,
     create_manticore_outbox_table,
     get_manticore_index_status,
+    get_manticore_meta,
     set_manticore_index_status,
 )
 
@@ -147,12 +148,16 @@ def _status(client: ManticoreClient) -> None:
                 cur.execute(f"SELECT COUNT(*) FROM {OUTBOX_TABLE}").fetchone()[0]
             )
             index_status = get_manticore_index_status(conn, client.table)
+            validation_error = get_manticore_meta(
+                conn, f"manticore:{client.table}:last_validation_error"
+            )
         finally:
             cur.close()
     print(f"sqlite_searchable={sqlite_count}")
     print(f"manticore_documents={manticore_count}")
     print(f"outbox_pending={outbox_count}")
     print(f"index_status={index_status or 'not_built'}")
+    print(f"last_validation_error={validation_error}")
     print(f"manticore_disk_bytes={table_status.get('disk_bytes', '0')}")
     print(f"manticore_ram_bytes={table_status.get('ram_bytes', '0')}")
 

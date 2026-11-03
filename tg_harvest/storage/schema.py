@@ -5,6 +5,7 @@ from contextlib import suppress
 
 from tg_harvest.domain.coerce import optional_int, safe_int
 
+from . import cleanup as _cleanup
 from . import connection as _db_runtime
 from . import indexes as _indexes
 from . import manticore_outbox as _manticore_outbox
@@ -681,6 +682,7 @@ def _create_tables(cur: sqlite3.Cursor, strict_suffix: str) -> None:
     _create_admin_clone_media_transfers_table(cur, strict_suffix)
     _create_sync_scheduler_tables(cur, strict_suffix)
     _manticore_outbox.create_manticore_outbox_table(cur, strict_suffix)
+    _cleanup.create_cleanup_scan_tables(cur, strict_suffix)
 
 
 def _column_exists(cur: sqlite3.Cursor, table_name: str, column_name: str) -> bool:
@@ -1506,6 +1508,7 @@ def create_schema(
         _ensure_admin_clone_media_transfers_schema(cur)
         _ensure_sync_scheduler_schema(cur)
         _ensure_chat_summary_columns(cur)
+        _cleanup.configure_cleanup_scan_triggers(cur)
         _indexes._create_indexes(cur)
         _heal_chat_message_summaries_if_needed(cur)
         _remove_legacy_search_objects(cur)

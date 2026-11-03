@@ -313,6 +313,16 @@ def validate_manticore_state(
                 and outbox_pending == 0
                 and sample_consistent
             )
+            if sqlite_count != manticore_count:
+                count_error = (
+                    "Manticore document count mismatch: "
+                    f"SQLite={sqlite_count}, Manticore={manticore_count}"
+                )
+                validation_error = (
+                    f"{count_error}; {validation_error}"
+                    if validation_error
+                    else count_error
+                )
             record_manticore_validation(
                 conn,
                 table=client.table,

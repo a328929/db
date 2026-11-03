@@ -1,6 +1,8 @@
 import re
 import sqlite3
 
+from tg_harvest.storage.cleanup import EMPTY_SEARCH_TEXT_SQL
+
 _UNIQUE_CONSTRAINT_DUPLICATE_INDEXES = (
     (
         "idx_admin_clone_message_map_source",
@@ -97,6 +99,16 @@ def _ensure_index(cur: sqlite3.Cursor, index_name: str, expected_sql: str) -> No
 
 
 def _create_message_indexes(cur: sqlite3.Cursor) -> None:
+    # Only empty-text messages occupy this covering index. No body text or
+    # second full-text index is stored, and SQLite maintains it automatically.
+    _ensure_index(
+        cur,
+        "idx_messages_cleanup_empty",
+        "CREATE INDEX idx_messages_cleanup_empty "
+        "ON messages(chat_id, pk, message_id, grouped_id) "
+        f"WHERE {EMPTY_SEARCH_TEXT_SQL}",
+    )
+
     # 核心业务索引：按频道日期倒序排序（Web 列表主视图）
     _ensure_index(
         cur,
@@ -150,12 +162,12 @@ def _create_message_indexes(cur: sqlite3.Cursor) -> None:
         "ON messages(msg_type, msg_date_ts DESC, message_id DESC, pk DESC)"
     )
 
-    # 全局时间轴（用于跨频道搜索展示）
+    # 全局时间轴：与浏览查询的时间、频道、消息、主键排序一致，也支持反向扫描。
     _ensure_index(
         cur,
         "idx_messages_date_global",
         "CREATE INDEX idx_messages_date_global "
-        "ON messages(msg_date_ts DESC, message_id DESC, pk DESC)"
+        "ON messages(msg_date_ts DESC, chat_id DESC, message_id DESC, pk DESC)"
     )
     _ensure_index(
         cur,
